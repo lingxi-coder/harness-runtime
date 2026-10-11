@@ -199,7 +199,7 @@ async fn wait_for_file_active_polls_until_active() {
             Some("gemini-poll-key")
         );
         assert_eq!(request.body_json.as_json_source(), "null");
-        assert_eq!(request.body_bytes, None);
+        assert_eq!(request.body_bytes.as_deref(), Some([].as_slice()));
     }
 }
 

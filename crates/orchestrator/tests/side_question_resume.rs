@@ -73,7 +73,7 @@ async fn side_question_surfaces_api_errors_as_text() {
 
     assert!(matches!(
         orch.answer_side_question(&"What happened?".into()).await.unwrap(),
-        RecapOutcome::Text(text) if text.string_at("") == Some("(API error: invalid request: bad request)")
+        RecapOutcome::Text(text) if text.string_at("") == Some("(API error: bad request)")
     ));
 }
 
@@ -81,10 +81,23 @@ fn make_orch(
     client: Arc<dyn sidequery::SideQueryClient>,
     slot: Arc<sidequery::CacheSafeParamsSlot>,
 ) -> ConversationOrchestrator {
+    make_orch_with_context_rendering(
+        client,
+        slot,
+        lingxi_core::host::instructions::InstructionRendering::Announced,
+    )
+}
+
+fn make_orch_with_context_rendering(
+    client: Arc<dyn sidequery::SideQueryClient>,
+    slot: Arc<sidequery::CacheSafeParamsSlot>,
+    context_rendering: lingxi_core::host::instructions::InstructionRendering,
+) -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig {
             effort: Some("medium".into()),
             system_prompt_override: Some("Custom system prompt for resumed session".into()),
+            context_rendering,
             ..OrchestratorConfig::default()
         },
         Arc::new(MockApiClient::new(vec![])),
@@ -104,7 +117,11 @@ fn make_orch(
 async fn side_question_rebuilds_resumed_context_without_writing_slot_or_history() {
     let client = Arc::new(CaptureClient::default());
     let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
-    let orch = make_orch(client.clone(), slot.clone());
+    let orch = make_orch_with_context_rendering(
+        client.clone(),
+        slot.clone(),
+        lingxi_core::host::instructions::InstructionRendering::Inline,
+    );
     let sid = uuid::Uuid::new_v4();
     let messages = [
         (
@@ -253,9 +270,15 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
     );
     assert_eq!(requests[0].model, current_model);
     assert_eq!(requests[0].effort, Some(serde_json::json!("medium")));
-    let expected_tools: Vec<llm_runtime::ToolDeclaration> = serde_json::from_str(
-        r#"[{"name":"Read","description":"Read a file.","input_schema":{"type":"object"}}]"#,
-    )
+    let expected_tools = llm_runtime::convert::to_tool_declarations(vec![
+        lingxi_core::host::SourceToolWireDefinition {
+            name: "Read".into(),
+            description: Utf16JsonProjection::from("Read a file."),
+            input_schema: Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
+            strict: false,
+            defer_loading: false,
+        },
+    ])
     .unwrap();
     assert_eq!(
         requests[0].tools, expected_tools,

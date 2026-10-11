@@ -232,7 +232,7 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
 #[must_use]
 pub fn walk_with_user_config_dir(
     cwd: &Path,
-    home: &Path,
+    _home: &Path,
     user_config_dir: &Path,
     managed_dir: Option<&Path>,
 ) -> Hierarchy {

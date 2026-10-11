@@ -70,7 +70,6 @@ async fn streaming_upload_and_error_download_are_incremental_binary_streams() {
             body: body.map(|chunk| chunk.map(Into::into)).boxed(),
             content_length: 4,
             timeout: Some(Duration::from_secs(5)),
-            http1_header_layout: None,
         }),
     )
     .await
@@ -119,7 +118,6 @@ async fn streaming_upload_rejects_conflicting_framing_headers_without_polling() 
                 body: body.map(|chunk| chunk.map(Into::into)).boxed(),
                 content_length: 1,
                 timeout: None,
-                http1_header_layout: None,
             })
             .await;
         assert!(matches!(result, Err(LlmError::InvalidRequest { .. })));
@@ -144,7 +142,6 @@ async fn streaming_upload_errors_do_not_expose_url_credentials() {
                 content_length: 1,
                 body: stream::once(async { Ok(vec![255].into()) }).boxed(),
                 timeout: Some(Duration::from_secs(1)),
-                http1_header_layout: None,
             })
             .await
             .err()
@@ -180,7 +177,6 @@ async fn streaming_upload_surfaces_redirect_without_replaying_the_body() {
             body: stream::once(async { Ok(vec![255].into()) }).boxed(),
             content_length: 1,
             timeout: Some(Duration::from_secs(5)),
-            http1_header_layout: None,
         })
         .await
         .unwrap();
@@ -216,7 +212,6 @@ async fn sdk_raw_download_exposes_error_headers_before_the_body_finishes() {
             headers: vec![],
             body: Default::default(),
             timeout: None,
-            http1_header_layout: None,
         }),
     )
     .await

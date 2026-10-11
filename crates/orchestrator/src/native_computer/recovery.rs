@@ -496,7 +496,8 @@ async fn restore_marker(
     // This view is derived from execution facts and scoped by response identity.
     restore_message(
         orch,
-        ConversationMessage::User { api_message_override: None,
+        ConversationMessage::User {
+            api_message_override: None,
             id: recovery_message_id(session_id, kind, calls, origins)?,
             content,
             is_meta: true,
@@ -1208,12 +1209,12 @@ pub(super) async fn rehydrate(
                 "saved final output row has an invalid execution association",
             ));
         }
-        if record.stage == ToolExecutionStage::OutputPrepared {
-            if !publish_native_result(orch, &stored.message).await? {
-                return Err(internal(
-                    "unpublished native output has no restored binding",
-                ));
-            }
+        if record.stage == ToolExecutionStage::OutputPrepared
+            && !publish_native_result(orch, &stored.message).await?
+        {
+            return Err(internal(
+                "unpublished native output has no restored binding",
+            ));
         }
         restore_message(orch, stored.message).await;
     }

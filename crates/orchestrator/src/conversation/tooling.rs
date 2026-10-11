@@ -1239,11 +1239,7 @@ impl ConversationOrchestrator {
                 if wire.description.string_units("").is_some() {
                     fields.insert(1, ("description".to_owned(), wire.description));
                 }
-                let source = lingxi_core::types::utf16_json::Utf16JsonProjection::object(fields)
-                    .ok()?
-                    .to_json_string()
-                    .ok()?;
-                serde_json::from_str(&source).ok()
+                lingxi_core::types::utf16_json::Utf16JsonProjection::object(fields).ok()
             })
             .collect()
     }

@@ -324,18 +324,31 @@ mod tests {
         }};
     }
 
+    trait ModelFacingErrorText {
+        fn model_facing_text(&self) -> String;
+    }
+
+    impl ModelFacingErrorText for tool_api::tool_trait::ToolError {
+        fn model_facing_text(&self) -> String {
+            self.model_facing_message()
+                .string_at("")
+                .expect("tool errors carry a root-string model message")
+                .to_owned()
+        }
+    }
+
     #[test]
     fn coord_missing_is_required() {
         let e = require_coord(&input!({}), "coordinate").unwrap_err();
-        assert_eq!(e.to_string(), "invalid input: coordinate is required");
+        assert_eq!(e.model_facing_text(), "coordinate is required");
     }
 
     #[test]
     fn coord_wrong_length() {
         let e = require_coord(&input!({ "coordinate": [1] }), "coordinate").unwrap_err();
         assert_eq!(
-            e.to_string(),
-            "invalid input: coordinate must be an array of length 2"
+            e.model_facing_text(),
+            "coordinate must be an array of length 2"
         );
     }
 
@@ -343,22 +356,22 @@ mod tests {
     fn coord_non_numeric() {
         let e = require_coord(&input!({ "coordinate": ["a", "b"] }), "coordinate").unwrap_err();
         assert_eq!(
-            e.to_string(),
-            "invalid input: coordinate must be a tuple of non-negative numbers"
+            e.model_facing_text(),
+            "coordinate must be a tuple of non-negative numbers"
         );
     }
 
     #[test]
     fn text_required_and_type_checked() {
         assert_eq!(
-            require_text(&input!({})).unwrap_err().to_string(),
-            "invalid input: text is required"
+            require_text(&input!({})).unwrap_err().model_facing_text(),
+            "text is required"
         );
         assert_eq!(
             require_text(&input!({ "text": 5 }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: text must be a string"
+                .model_facing_text(),
+            "text must be a string"
         );
         assert_eq!(require_text(&input!({ "text": "hi" })).unwrap(), "hi");
     }
@@ -370,40 +383,40 @@ mod tests {
         assert_eq!(
             key_repeat(&input!({ "repeat": 0 }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: repeat must be a positive integer"
+                .model_facing_text(),
+            "repeat must be a positive integer"
         );
         assert_eq!(
             key_repeat(&input!({ "repeat": 101 }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: repeat exceeds maximum of 100"
+                .model_facing_text(),
+            "repeat exceeds maximum of 100"
         );
     }
 
     #[test]
     fn region_full_validation_chain() {
         assert_eq!(
-            require_region(&input!({})).unwrap_err().to_string(),
-            "invalid input: region must be an array of length 4: [x0, y0, x1, y1]"
+            require_region(&input!({})).unwrap_err().model_facing_text(),
+            "region must be an array of length 4: [x0, y0, x1, y1]"
         );
         assert_eq!(
             require_region(&input!({ "region": [1, 2, 3] }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: region must be an array of length 4: [x0, y0, x1, y1]"
+                .model_facing_text(),
+            "region must be an array of length 4: [x0, y0, x1, y1]"
         );
         assert_eq!(
             require_region(&input!({ "region": [0, 0, 0, 10] }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: region x1 must be greater than x0"
+                .model_facing_text(),
+            "region x1 must be greater than x0"
         );
         assert_eq!(
             require_region(&input!({ "region": [0, 0, 10, 0] }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: region y1 must be greater than y0"
+                .model_facing_text(),
+            "region y1 must be greater than y0"
         );
         assert_eq!(
             require_region(&input!({ "region": [1, 2, 11, 22] })).unwrap(),
@@ -419,28 +432,28 @@ mod tests {
         // a "valid" (x0=2, x1=1) pair that then underflows at the call site.
         let e = require_region(&input!({ "region": [2, 0, 4_294_967_297u64, 10] })).unwrap_err();
         assert_eq!(
-            e.to_string(),
-            "invalid input: region values must be non-negative numbers"
+            e.model_facing_text(),
+            "region values must be non-negative numbers"
         );
     }
 
     #[test]
     fn duration_full_validation_chain() {
         assert_eq!(
-            wait_duration(&input!({})).unwrap_err().to_string(),
-            "invalid input: duration must be a number"
+            wait_duration(&input!({})).unwrap_err().model_facing_text(),
+            "duration must be a number"
         );
         assert_eq!(
             wait_duration(&input!({ "duration": -1 }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: duration must be non-negative"
+                .model_facing_text(),
+            "duration must be non-negative"
         );
         assert_eq!(
             wait_duration(&input!({ "duration": 9999 }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: duration is too long. Duration is in seconds."
+                .model_facing_text(),
+            "duration is too long. Duration is in seconds."
         );
         assert!((wait_duration(&input!({ "duration": 2.5 })).unwrap() - 2.5).abs() < f64::EPSILON);
     }
@@ -459,8 +472,8 @@ mod tests {
         assert_eq!(
             scroll_direction(&input!({ "scroll_direction": "sideways" }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: scroll_direction must be 'up', 'down', 'left', or 'right'"
+                .model_facing_text(),
+            "scroll_direction must be 'up', 'down', 'left', or 'right'"
         );
     }
 
@@ -472,14 +485,14 @@ mod tests {
         assert_eq!(
             scroll_amount(&input!({ "scroll_amount": -1 }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: scroll_amount must be a non-negative int"
+                .model_facing_text(),
+            "scroll_amount must be a non-negative int"
         );
         assert_eq!(
             scroll_amount(&input!({ "scroll_amount": 101 }))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: scroll_amount exceeds maximum of 100"
+                .model_facing_text(),
+            "scroll_amount exceeds maximum of 100"
         );
     }
 

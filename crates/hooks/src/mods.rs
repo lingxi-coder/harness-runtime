@@ -23,12 +23,13 @@ use crate::mod_api_context::{
     native_tool_call_origin, ModApiCallerKey, ModApiOriginContexts, ResolvedModApiContext,
 };
 use base64::Engine as _;
-use branding::{ENV_PREFIX, MOD_BUN_EXECUTABLE_ENV};
+#[cfg(test)]
+use branding::ENV_PREFIX;
+use branding::MOD_BUN_EXECUTABLE_ENV;
 use fs2::FileExt as _;
 use futures_util::future::{AbortHandle, Abortable};
 use futures_util::stream::{BoxStream, FuturesUnordered, StreamExt};
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use std::any::Any;
@@ -2178,6 +2179,7 @@ fn mod_exact_json_at_pointer(
 
 /// Preserve absence separately from a present JSON null while extracting an
 /// exact JSON subtree from the flat Core carrier.
+#[cfg(test)]
 fn mod_optional_exact_json_at_pointer(
     projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     pointer: &str,
@@ -2763,28 +2765,6 @@ fn mod_store_file(root: &Path, plugin: &str) -> PathBuf {
     ))
 }
 
-fn js_object_keys(map: &serde_json::Map<String, Value>) -> Vec<String> {
-    let mut integer_keys = Vec::new();
-    let mut other_keys = Vec::new();
-    for key in map.keys() {
-        let index = key
-            .parse::<u32>()
-            .ok()
-            .filter(|index| *index != u32::MAX && index.to_string() == *key);
-        if let Some(index) = index {
-            integer_keys.push((index, key.clone()));
-        } else {
-            other_keys.push(key.clone());
-        }
-    }
-    integer_keys.sort_by_key(|(index, _)| *index);
-    integer_keys
-        .into_iter()
-        .map(|(_, key)| key)
-        .chain(other_keys)
-        .collect()
-}
-
 type Routes = Arc<StdMutex<HashMap<u64, mpsc::UnboundedSender<Utf16JsonProjection>>>>;
 
 /// Read a protocol selector only when its UTF-16 representation is valid Rust
@@ -2799,7 +2779,7 @@ fn projection_string(message: &Utf16JsonProjection, pointer: &str) -> Option<Str
 fn projection_u64(message: &Utf16JsonProjection, pointer: &str) -> Option<u64> {
     let value = message.number_at(pointer)?;
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-    (value.is_finite() && value >= 0.0 && value <= MAX_SAFE_INTEGER && value.fract() == 0.0)
+    (value.is_finite() && (0.0..=MAX_SAFE_INTEGER).contains(&value) && value.fract() == 0.0)
         .then_some(value as u64)
 }
 
@@ -3090,7 +3070,7 @@ struct ModWorkerEpoch {
     id: u64,
     child: Arc<Mutex<Child>>,
     input: Arc<Mutex<ChildStdin>>,
-    worker_bootstrap: Option<Arc<ModWorkerBootstrap>>,
+    _worker_bootstrap: Option<Arc<ModWorkerBootstrap>>,
     routes: Routes,
     generation_api_sessions: GenerationApiSessions,
     status: AtomicU8,
@@ -3118,7 +3098,7 @@ impl ModWorkerEpoch {
                 id,
                 child: Arc::new(Mutex::new(child)),
                 input: Arc::new(Mutex::new(input)),
-                worker_bootstrap,
+                _worker_bootstrap: worker_bootstrap,
                 routes,
                 generation_api_sessions: Arc::new(StdMutex::new(HashMap::new())),
                 status: AtomicU8::new(if recovering {
@@ -3564,14 +3544,12 @@ async fn background_api_loop(
                                 continue;
                             }
                         };
-                        let generation_context_lease = if let Some(ticket) = generation_ticket.as_ref() {
-                            Some(ReleaseGenerationApiSessionOnDrop {
+                        let generation_context_lease = generation_ticket.as_ref().map(|ticket| {
+                            ReleaseGenerationApiSessionOnDrop {
                                 sessions: source_epoch.generation_api_sessions.clone(),
                                 ticket: ticket.clone(),
-                            })
-                        } else {
-                            None
-                        };
+                            }
+                        });
                         let api_context = match worker.resolve_api_context(&message, None) {
                             Ok(context) => context,
                             Err(error) => {
@@ -3853,6 +3831,8 @@ pub struct ModPreparedModule {
     token: String,
     pub uses: Value,
     client_modules: Option<PreparedClientModules>,
+    requested_module: PathBuf,
+    source_entry: String,
 }
 
 /// The first `next(e)` has reached the core, or every hook answered without
@@ -5196,13 +5176,17 @@ impl ModHost {
                 .map_err(|error| {
                     ModError::Unavailable(format!("Plugin source preparation failed: {error}"))
                 })?;
+        let source_entry = prepared_sources.hooks.entry.clone();
         let source_graph = prepared_sources
             .hook_worker_graph()
             .map_err(|error| ModError::Protocol(error.to_string()))?;
         let mut request = self
-            .request_projection(generated_projection(
-                &json!({"kind":"prepare","root":root,"module":module,"sourceGraph":source_graph}),
-            )?)
+            .request_projection(generated_projection(&json!({
+                "kind": "prepare",
+                "root": root,
+                "module": source_entry.as_str(),
+                "sourceGraph": source_graph,
+            }))?)
             .await?;
         let reply = self.receive(&mut request).await?;
         match reply.string_at("/kind") {
@@ -5227,6 +5211,8 @@ impl ModHost {
                     token,
                     uses,
                     client_modules: prepared_sources.clients,
+                    requested_module: module.to_path_buf(),
+                    source_entry,
                 })
             }
             Some("error") => Err(ModError::Hook(
@@ -7490,6 +7476,11 @@ impl ModHost {
                                 | "model.complete"
                                 | "tool.call"
                                 | "agent.spawn"
+                                | "ui.selection"
+                                | "ui.copy"
+                                | "prompt.read"
+                                | "prompt.fill"
+                                | "prompt.suggest"
                         ) && depth < 16
                         {
                             let (abort, registration) = AbortHandle::new_pair();
@@ -7569,16 +7560,11 @@ impl ModHost {
                                                 depth + 1,
                                                 origin,
                                                 api_context_for_call,
-                                                message
-                                                    .string_at("/storageId")
-                                                    .unwrap_or("unknown")
-                                                    .to_owned(),
+                                                storage_id,
                                                 hook_id,
                                                 log_route_id,
                                                 tool_call_context.clone(),
-                                                message
-                                                    .string_at("/generationContextTicket")
-                                                    .map(str::to_owned),
+                                                generation_ticket,
                                             )
                                             .await;
                                         (result, tool_call_context)
@@ -7619,6 +7605,10 @@ impl ModHost {
                                 | "ui.notify"
                                 | "ui.status"
                                 | "ui.selection"
+                                | "ui.copy"
+                                | "prompt.read"
+                                | "prompt.fill"
+                                | "prompt.suggest"
                                 | "telemetry.log"
                                 | "telemetry.mark"
                                 | "tool.call"
@@ -7949,7 +7939,7 @@ impl ModHost {
             return Ok(HostApiValue::JsonProjection(result));
         }
 
-        let live_cwd = if cwd_is_pinned {
+        let _live_cwd = if cwd_is_pinned {
             cwd.to_path_buf()
         } else {
             session.map_or_else(|| cwd.to_path_buf(), ModSessionContext::cwd)
@@ -8512,7 +8502,14 @@ impl ModHost {
         } else {
             None
         };
-        let prepared = prepared.or(owned_prepared.as_ref());
+        let prepared = prepared
+            .or(owned_prepared.as_ref())
+            .ok_or_else(|| ModError::Protocol("prepared module is missing".into()))?;
+        if prepared.requested_module.as_path() != module {
+            return Err(ModError::Protocol(
+                "prepared module does not match the requested module path".into(),
+            ));
+        }
         // A reload must not inherit the old module's grants while the worker
         // evaluates the replacement and its new source scan is in flight.
         self.api_origin_contexts.unregister_storage(storage_id);
@@ -8522,16 +8519,16 @@ impl ModHost {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(storage_id);
-        let prepared_client_modules = prepared.and_then(|module| module.client_modules.clone());
+        let prepared_client_modules = prepared.client_modules.clone();
         let mut request_message = Utf16JsonProjection::from_serde_value(&json!({
             "kind":"load",
             "plugin":plugin,
             "storageId":storage_id,
             "root":root,
-            "module":module,
+            "module":prepared.source_entry.as_str(),
             "tier":tier,
             "tierOrder":tier_order,
-            "preparedToken":prepared.map(|prepared| prepared.token.as_str())
+            "preparedToken":prepared.token.as_str()
         }))
         .map_err(|error| ModError::Protocol(error.to_string()))?;
         request_message
@@ -9472,7 +9469,7 @@ impl ModHost {
         S: FnMut(String, Option<Utf16JsonProjection>) -> SFut,
         SFut: Future<Output = ()>,
     {
-        let mut core = core;
+        let core = core;
         self.dispatch_with_ui_at_context_and_api_origin_with_utf16_projection(
             event,
             input,
@@ -9750,6 +9747,11 @@ impl ModHost {
                             | "model.complete"
                             | "tool.call"
                             | "agent.spawn"
+                            | "ui.selection"
+                            | "ui.copy"
+                            | "prompt.read"
+                            | "prompt.fill"
+                            | "prompt.suggest"
                     ) {
                         if method == "tool.call" && api_input.is_none() {
                             self.send_generated(&json!({
@@ -9859,6 +9861,10 @@ impl ModHost {
                             | "ui.notify"
                             | "ui.status"
                             | "ui.selection"
+                            | "ui.copy"
+                            | "prompt.read"
+                            | "prompt.fill"
+                            | "prompt.suggest"
                             | "telemetry.log"
                             | "telemetry.mark"
                             | "tool.call"
@@ -10053,7 +10059,7 @@ impl ModHost {
                 }
                 Some("notify") => {
                     let plugin = message.string_at("/plugin").unwrap_or("engine");
-                    if let Some(text) = message.subprojection("/text").ok() {
+                    if let Ok(text) = message.subprojection("/text") {
                         if let Some(session) = session.as_ref() {
                             session.emit_mod_notify(plugin, text).await;
                         }
@@ -12886,6 +12892,306 @@ mod tests {
         })
         .await
         .expect("dropping the outer dispatch must signal the active tool core");
+    }
+
+    #[tokio::test]
+    async fn remote_ui_methods_roundtrip_through_direct_and_nested_api_dispatch() {
+        struct RemoteUiSession {
+            cwd: PathBuf,
+            operations: StdMutex<Vec<(String, String, String)>>,
+        }
+        #[async_trait::async_trait]
+        impl ModSessionContext for RemoteUiSession {
+            fn cwd(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+            fn root(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+            async fn model(&self) -> String {
+                "test".into()
+            }
+            async fn id(&self) -> String {
+                "remote-ui-test".into()
+            }
+            async fn turns(&self) -> u64 {
+                1
+            }
+            async fn settings_read(
+                &self,
+                _input: Utf16JsonProjection,
+            ) -> Result<Utf16JsonProjection, ModError> {
+                Ok(test_projection(json!({"source":"test"})))
+            }
+            async fn remote_ui_operation(
+                &self,
+                event: &str,
+                input: Utf16JsonProjection,
+                plugin: &str,
+            ) -> Result<Utf16JsonProjection, ModError> {
+                let input = input
+                    .to_json_string()
+                    .map_err(|error| ModError::Protocol(error.to_string()))?;
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push((event.to_owned(), input, plugin.to_owned()));
+                match event {
+                    "ui.selection" => Ok(test_projection(json!({"text":"selected"}))),
+                    "ui.copy" => Ok(test_projection(json!({"copied":true}))),
+                    "prompt.read" => Ok(test_projection(json!({"text":"current","cursor":7}))),
+                    "prompt.fill" => Ok(test_projection(json!({"isFilled":true}))),
+                    "prompt.suggest" => Ok(test_projection(json!({"isShown":true}))),
+                    _ => Err(ModError::Protocol(format!(
+                        "unexpected remote UI method: {event}"
+                    ))),
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("remote-ui.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('settings.read', async ($, event, next) => {
+                const prompt = await $.prompt.read();
+                if (JSON.stringify(prompt) !== JSON.stringify({ text: 'current', cursor: 7 })) {
+                  throw new Error('nested prompt.read result changed');
+                }
+                return next(event);
+              });
+              on('ui.render', async ($, event, next) => {
+                const settings = await $.settings.read({ source: 'test' });
+                const selection = await $.ui.selection();
+                const copied = await $.ui.copy({ text: 'copy', surface: 'mobile' });
+                const prompt = await $.prompt.read();
+                const filled = await $.prompt.fill({ text: 'replacement' });
+                const suggested = await $.prompt.suggest({ text: 'suggested' });
+                if (JSON.stringify(settings) !== JSON.stringify({ source: 'test' })
+                    || JSON.stringify(selection) !== JSON.stringify({ text: 'selected' })
+                    || JSON.stringify(copied) !== JSON.stringify({ copied: true })
+                    || JSON.stringify(prompt) !== JSON.stringify({ text: 'current', cursor: 7 })
+                    || JSON.stringify(filled) !== JSON.stringify({
+                      isFilled: true, text: 'current', cursor: 7,
+                    })
+                    || JSON.stringify(suggested) !== JSON.stringify({ isShown: true })) {
+                  throw new Error('remote UI API result changed');
+                }
+                return next(event);
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "remote-ui-test",
+            dir.path(),
+            &module,
+            test_mod_options(json!({})),
+        )
+        .await
+        .unwrap();
+        let session = RemoteUiSession {
+            cwd: dir.path().to_path_buf(),
+            operations: StdMutex::new(Vec::new()),
+        };
+        let result = host
+            .dispatch_with_ui_at_session(
+                "ui.render",
+                test_projection(json!({
+                    "surface":"mobile",
+                    "component":"Pane",
+                    "requestId":"pane",
+                    "props":{}
+                })),
+                &session,
+                |_| async {
+                    Ok(Some(test_projection(json!({
+                        "type":"engine",
+                        "ref":"mobile:Pane:pane"
+                    }))))
+                },
+                |_, _| async {},
+                |_, _, _| async {},
+                |_, _| async {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.string_at("/type"), Some("engine"));
+        let operations = session.operations.lock().unwrap();
+        let expected = [
+            ("prompt.read", "{}"), // settings.read's nested hook
+            ("ui.selection", "{}"),
+            ("ui.copy", r#"{"text":"copy","surface":"mobile"}"#),
+            ("prompt.read", "{}"),
+            ("prompt.fill", r#"{"text":"replacement"}"#),
+            ("prompt.read", "{}"), // prompt.fill reads the resulting prompt state
+            ("prompt.suggest", r#"{"text":"suggested"}"#),
+        ];
+        assert_eq!(
+            operations.len(),
+            expected.len(),
+            "operations={operations:?}"
+        );
+        for ((event, input, plugin), (expected_event, expected_input)) in
+            operations.iter().zip(expected)
+        {
+            assert_eq!(event, expected_event);
+            assert_eq!(input, expected_input);
+            assert_eq!(plugin, "remote-ui-test");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_cancel_drops_an_in_flight_remote_ui_operation_without_blocking_dispatch() {
+        struct BlockingRemoteUiSession {
+            cwd: PathBuf,
+            entered: Arc<tokio::sync::Notify>,
+            dropped: Arc<tokio::sync::Notify>,
+        }
+        struct NotifyOnDrop(Arc<tokio::sync::Notify>);
+        impl Drop for NotifyOnDrop {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        #[async_trait::async_trait]
+        impl ModSessionContext for BlockingRemoteUiSession {
+            fn cwd(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+            fn root(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+            async fn model(&self) -> String {
+                "test".into()
+            }
+            async fn id(&self) -> String {
+                "remote-ui-cancel-test".into()
+            }
+            async fn turns(&self) -> u64 {
+                1
+            }
+            async fn remote_ui_operation(
+                &self,
+                event: &str,
+                _input: Utf16JsonProjection,
+                _plugin: &str,
+            ) -> Result<Utf16JsonProjection, ModError> {
+                assert_eq!(event, "prompt.read");
+                let _drop = NotifyOnDrop(self.dropped.clone());
+                self.entered.notify_one();
+                std::future::pending::<Result<Utf16JsonProjection, ModError>>().await
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("remote-ui-cancel.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              on('ui.render', { surface: 'mobile', component: 'Pane' }, async ($, event, next) => {
+                await $.prompt.read();
+                return next(event);
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "remote-ui-cancel",
+            dir.path(),
+            &module,
+            test_mod_options(json!({})),
+        )
+        .await
+        .unwrap();
+        let session = Arc::new(BlockingRemoteUiSession {
+            cwd: dir.path().to_path_buf(),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            dropped: Arc::new(tokio::sync::Notify::new()),
+        });
+        let dispatch_host = host.clone();
+        let dispatch_session = session.clone();
+        let mut dispatch = tokio::spawn(async move {
+            dispatch_host
+                .dispatch_with_ui_at_session(
+                    "ui.render",
+                    test_projection(json!({
+                        "surface":"mobile",
+                        "component":"Pane",
+                        "requestId":"pane",
+                        "props":{}
+                    })),
+                    dispatch_session.as_ref(),
+                    |_| async {
+                        Ok(Some(test_projection(json!({
+                            "type":"engine",
+                            "ref":"mobile:Pane:pane"
+                        }))))
+                    },
+                    |_, _| async {},
+                    |_, _, _| async {},
+                    |_, _| async {},
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), session.entered.notified())
+            .await
+            .expect("prompt.read must reach the bound session");
+        let request_id = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(id) = host
+                    .active_request_epochs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .keys()
+                    .copied()
+                    .min()
+                {
+                    // The outer render request predates its nested prompt.read request.
+                    return id;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the outer render request remains active");
+        host.send_generated(&json!({"id":request_id,"kind":"cancel"}))
+            .await
+            .unwrap();
+        let api_was_cancelled =
+            tokio::time::timeout(Duration::from_secs(2), session.dropped.notified())
+                .await
+                .is_ok();
+        if !api_was_cancelled {
+            dispatch.abort();
+            let _ = (&mut dispatch).await;
+        }
+        assert!(
+            api_was_cancelled,
+            "the host must process the worker's api.cancel while remote UI is pending"
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(2), &mut dispatch)
+            .await
+            .expect("cancelled UI dispatch completes")
+            .expect("dispatch task joined");
+        assert!(
+            outcome.is_err(),
+            "cancelled render must not appear successful"
+        );
+        let next = host
+            .dispatch(
+                "tool.call",
+                test_projection(json!({"tool":"WorkerRemainsResponsive"})),
+                |_| async { Ok(Some(test_projection(json!({"result":"ok"})))) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(mod_test_value(&next), json!({"result":"ok"}));
     }
 
     #[tokio::test]
@@ -19940,9 +20246,7 @@ mod tests {
                 const { Box, Button, Text } = $.ui.resolve(e);
                 return Box({ flexDirection: 'column', children: [
                   Text({ children: ['presses: ' + presses] }),
-                  Button({ key: 'refresh', hotkey: '1', children: [
-                    'A', Text({ bold: true, children: ['B', 'C'] }),
-                  ],
+                  Button({ key: 'refresh', hotkey: '1', children: 'ABC',
                     onPress: () => { presses += 1; } }),
                   Button({ key: 'folded', children: 'Folded', onPress: () => {} }),
                 ] });
@@ -20047,16 +20351,7 @@ mod tests {
         assert_eq!(mod_test_value(&first)["children"][1]["press"]["handle"], 1);
         let first_value = mod_test_value(&first);
         assert_eq!(first_value["children"][1]["props"]["label"], "ABC");
-        assert_eq!(first_value["children"][1]["children"][0], "A");
-        assert_eq!(first_value["children"][1]["children"][1]["type"], "Text");
-        assert_eq!(
-            first_value["children"][1]["children"][1]["props"]["bold"],
-            true
-        );
-        assert_eq!(
-            first_value["children"][1]["children"][1]["children"],
-            json!(["B", "C"])
-        );
+        assert!(first_value["children"][1].get("children").is_none());
         assert_eq!(first_value["children"][2]["props"]["label"], "Folded");
         assert!(first_value["children"][2].get("children").is_none());
         let first_press = press_input(&first);

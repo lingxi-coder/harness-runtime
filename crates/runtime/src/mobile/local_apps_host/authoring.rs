@@ -1499,7 +1499,7 @@ impl LocalAppsHostBroker {
                 Some(other) => {
                     return Err(format!(
                         "qa_capture_invalid: unsupported Host image format {other}"
-                    ))
+                    ));
                 }
                 None => return Err("qa_capture_invalid: Host capture has no image format".into()),
             };

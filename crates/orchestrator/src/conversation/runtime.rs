@@ -424,6 +424,7 @@ impl TurnTimingCapture {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[cfg(test)]
     pub(crate) fn observe_first_stream_start(&self) {
         self.observe_first_stream_start_at(std::time::Instant::now());
     }
@@ -440,6 +441,7 @@ impl TurnTimingCapture {
         self.observe_first_at(TurnTimingField::StreamStart, observed_at);
     }
 
+    #[cfg(test)]
     pub(crate) fn observe_first_content_frame(&self) {
         self.observe_first(TurnTimingField::FirstContentFrame);
     }
@@ -2305,6 +2307,7 @@ mod api_error_metrics_tests {
         noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
         StaticMemoryProvider,
     };
+    use lingxi_core::types::ContentBlock;
 
     #[tokio::test]
     async fn final_api_assistant_marker_survives_without_jsonl_and_later_assistant_clears_it() {

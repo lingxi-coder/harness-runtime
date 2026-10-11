@@ -23,7 +23,7 @@ fn response_json(source: Utf16JsonProjection) -> serde_json::Value {
 }
 
 fn body(registry: &CommandRegistry) -> Option<String> {
-    let command = registry.resolve(visualization::skill::SKILL_NAME)?;
+    let command = registry.resolve(&visualization::skill::SKILL_NAME.into())?;
     let SlashCommandKind::Bundled {
         prompt_fn: Some(prompt),
         frontmatter,
@@ -62,7 +62,7 @@ fn skill_follows_the_tool_and_names_the_host_shell() {
         registry
             .list_all()
             .iter()
-            .filter(|command| command.name == visualization::skill::SKILL_NAME)
+            .filter(|command| command.name == visualization::skill::SKILL_NAME.into())
             .count(),
         1,
         "re-registration replaces instead of stacking"
@@ -149,6 +149,68 @@ async fn stores_are_shared_per_config_home_and_follow_ups_snapshot_state() {
         Some("x"),
         "a bare session uuid resolves too"
     );
+}
+
+#[tokio::test]
+async fn followup_context_splice_preserves_lone_surrogate_source_units() {
+    let home = tempfile::tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
+        home.path().to_path_buf(),
+    ));
+    let session = lingxi_core::types::SessionId::new();
+    let store = shared_store(fs.clone(), home.path());
+    let reference = store
+        .publish(
+            &visualization::Publisher {
+                root_session: session.as_uuid(),
+                agent_id: None,
+            },
+            None,
+            "Source check",
+            "CONFIRMED_MODEL_CONTENT",
+            0,
+        )
+        .await
+        .unwrap()
+        .reference;
+    store
+        .write_state(
+            session.as_uuid(),
+            &reference,
+            0,
+            r#"{"marker":"CONFIRMED_MODEL_CONTENT"}"#,
+            "null",
+        )
+        .await
+        .unwrap();
+    let context = client::protocol::message::VisualizationRefDto {
+        id: reference.id.as_str().to_string(),
+        revision: reference.revision,
+    };
+    let typed_units = "before:"
+        .encode_utf16()
+        .chain([0xd800])
+        .chain(":after".encode_utf16())
+        .collect::<Vec<_>>();
+    let typed = Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&typed_units),
+        typed_units.clone(),
+    )
+    .unwrap();
+
+    let followed =
+        followup_text(fs, home.path(), &session.to_string(), Some(&context), typed).await;
+
+    let followed_units = followed.string_units("").unwrap();
+    assert!(
+        followed_units.ends_with(&typed_units),
+        "follow-up splice must retain the typed suffix units exactly"
+    );
+    let prefix_units = &followed_units[..followed_units.len() - typed_units.len()];
+    let prefix = String::from_utf16(prefix_units).expect("only the typed suffix is malformed");
+    assert!(prefix.starts_with("<visualization-context "));
+    assert!(prefix.contains("CONFIRMED_MODEL_CONTENT"));
+    assert!(prefix.contains("Source check"));
 }
 
 #[tokio::test]

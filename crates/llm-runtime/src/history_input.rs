@@ -919,9 +919,10 @@ mod tests {
         use lingxi_core::types::utf16_json::Utf16JsonProjection;
         let output =
             Utf16JsonProjection::parse(r#"[{"type":"text","text":"\udfff","\ud800":1}]"#).unwrap();
+        let output_source = output.to_json_string().unwrap();
         let source = super::ContentBlock::ToolResult {
             tool_call_id: "toolu_exact".into(),
-            output: wire::JsonPayload::parse(output.as_json_source()).unwrap(),
+            output: wire::JsonPayload::parse(&output_source).unwrap(),
             is_error: Some(false),
             cache_control: None,
             cache_reference: Some("cache-result".into()),
@@ -938,7 +939,7 @@ mod tests {
         };
         assert_eq!(cache_reference.as_deref(), Some("cache-result"));
         assert!(content.is_root_string());
-        assert_eq!(blocks.unwrap().as_json_source(), output.as_json_source());
+        assert_eq!(blocks.unwrap().as_json_source(), output_source);
     }
     use super::*;
 
@@ -964,11 +965,12 @@ mod tests {
     fn strict_tool_schema_rebases_exact_keys_required_and_distinct_enum_values() {
         use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
         let schema = Projection::parse(r#"{"type":"object","properties":{"\ud800":{"type":"string","enum":["\ud801","\ud802"]}},"required":["\ud800"]}"#).unwrap();
+        let schema_source = schema.to_json_string().unwrap();
         let tool = ToolDeclaration {
             input_schema_projection: Some(schema.clone()),
             name: "Exact".into(),
             description: wire::JsonPayload::string("Exact schema"),
-            input_schema: wire::JsonPayload::parse(schema.as_json_source()).unwrap(),
+            input_schema: wire::JsonPayload::parse(&schema_source).unwrap(),
             tool_type: None,
             extra: serde_json::Map::new(),
             strict: true,
@@ -1288,10 +1290,23 @@ mod tests {
             }
             wire::ProtocolFamily::GeminiInteractions => {
                 assert_eq!(body["previous_interaction_id"], "current-response");
-                assert_eq!(body["input"].as_array().unwrap().len(), 1, "{body}");
-                assert_eq!(body["input"][0]["type"], "function_result");
-                assert_eq!(body["input"][0]["call_id"], "reused-call");
-                assert!(body["input"][0].get("_sdk_continuation").is_none());
+                let steps = body["input"]["steps"].as_array().unwrap();
+                assert_eq!(steps.len(), 1, "{body}");
+                assert_eq!(steps[0]["type"], "function_result");
+                assert_eq!(steps[0]["call_id"], "reused-call");
+                assert_eq!(
+                    steps[0]["result"],
+                    json!([
+                        {"type": "text", "text": "current observation"},
+                        {
+                            "type": "image",
+                            "data": current_image,
+                            "mime_type": "image/png"
+                        }
+                    ]),
+                    "{body}"
+                );
+                assert!(steps[0].get("_sdk_continuation").is_none());
             }
             _ => unreachable!(),
         }

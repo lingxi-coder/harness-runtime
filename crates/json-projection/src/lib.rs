@@ -13,6 +13,11 @@ use std::io::Write;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// A flat JSON value that retains exact JavaScript UTF-16 string and property-name units.
+///
+/// Rust-facing display strings remain valid UTF-8 and may use replacement characters for
+/// unpaired UTF-16 units. This represents JSON values; it does not retain the original JSON
+/// source bytes or lexical spelling.
 pub struct Utf16JsonProjection {
     root: usize,
     nodes: Vec<JsonNode>,
@@ -104,28 +109,41 @@ struct JsonProperty {
 }
 
 #[derive(Debug, Error)]
+/// An error while parsing, constructing, validating, or serializing a flat JSON projection.
 pub enum Utf16JsonProjectionError {
     #[error("invalid exact JSON at byte {offset}: {message}")]
+    /// The UTF-8 JSON input is invalid.
     InvalidJson {
+        /// Byte offset reported in the UTF-8 input.
         offset: usize,
+        /// Static description of the parse failure.
         message: &'static str,
     },
     #[error("invalid exact JSON at UTF-16 unit {offset}: {message}")]
+    /// The JSON document represented as UTF-16 units is invalid.
     InvalidUtf16Json {
+        /// UTF-16 code-unit offset reported in the input.
         offset: usize,
+        /// Static description of the parse failure.
         message: &'static str,
     },
     #[error("invalid flat JSON projection: {0}")]
+    /// The flat node arena violates a projection invariant; the payload describes the issue.
     InvalidProjection(&'static str),
     #[error("UTF-16 string projection does not identify its display string")]
+    /// A stored display string does not match the display-safe decoding of its UTF-16 units.
     InvalidStringPointer,
     #[error("UTF-16 key projection does not identify a safe object key")]
+    /// A stored display key does not match the safe representation of its UTF-16 key units.
     InvalidKeyPointer,
     #[error("JSON projection pointer is invalid")]
+    /// A JSON Pointer is malformed or does not resolve to the requested value.
     InvalidPointer,
     #[error("JSON projection operation requires an object")]
+    /// An operation requiring an object root received another JSON value kind.
     ExpectedObject,
     #[error(transparent)]
+    /// A serde_json error encountered while converting projection data to JSON.
     Serialize(#[from] serde_json::Error),
 }
 
@@ -930,6 +948,9 @@ impl<'a> JsonValueView<'a> {
         std::ptr::eq(self.nodes, other.nodes) && self.id == other.id
     }
 
+    /// Return this string's Rust-safe display form, or `None` for non-string values.
+    ///
+    /// Unpaired UTF-16 units are represented lossily; use [`Self::code_units`] for exact units.
     #[must_use]
     pub fn as_str(self) -> Option<&'a str> {
         match &self.nodes[self.id] {
@@ -938,6 +959,7 @@ impl<'a> JsonValueView<'a> {
         }
     }
 
+    /// Return this string's exact UTF-16 code units, or `None` for non-string values.
     #[must_use]
     pub fn code_units(self) -> Option<&'a [u16]> {
         match &self.nodes[self.id] {
@@ -946,6 +968,7 @@ impl<'a> JsonValueView<'a> {
         }
     }
 
+    /// Return this number as an `f64`, or `None` for non-number values.
     #[must_use]
     pub fn as_number(self) -> Option<f64> {
         match &self.nodes[self.id] {
@@ -954,6 +977,7 @@ impl<'a> JsonValueView<'a> {
         }
     }
 
+    /// Return this boolean value, or `None` for non-boolean values.
     #[must_use]
     pub fn as_bool(self) -> Option<bool> {
         match &self.nodes[self.id] {
@@ -962,11 +986,13 @@ impl<'a> JsonValueView<'a> {
         }
     }
 
+    /// Whether this node is the JSON `null` value.
     #[must_use]
     pub fn is_null(self) -> bool {
         matches!(&self.nodes[self.id], JsonNode::Null)
     }
 
+    /// Return the array's number of items, or `None` if this node is not an array.
     #[must_use]
     pub fn array_len(self) -> Option<usize> {
         match &self.nodes[self.id] {
@@ -975,6 +1001,7 @@ impl<'a> JsonValueView<'a> {
         }
     }
 
+    /// Return an in-range array item as a borrowed view.
     #[must_use]
     pub fn get_index(self, index: usize) -> Option<Self> {
         let JsonNode::Array(items) = &self.nodes[self.id] else {
@@ -987,11 +1014,15 @@ impl<'a> JsonValueView<'a> {
         })
     }
 
+    /// Look up an object member by a Rust string key, comparing its UTF-16 encoding exactly.
     #[must_use]
     pub fn get_property(self, key: &str) -> Option<Self> {
         self.get_property_units(&key.encode_utf16().collect::<Vec<_>>())
     }
 
+    /// Look up an object member by its exact UTF-16 key units.
+    ///
+    /// This form can address keys that cannot be represented by a Rust `str`.
     #[must_use]
     pub fn get_property_units(self, units: &[u16]) -> Option<Self> {
         let id = self.property_units(units)?;
@@ -1011,6 +1042,9 @@ impl<'a> JsonValueView<'a> {
             .map(|entry| entry.value)
     }
 
+    /// Return the object's members as borrowed views, or `None` for non-object values.
+    ///
+    /// Each view exposes a safe display key and the separate exact UTF-16 key units.
     pub fn object_entries(self) -> Option<Vec<JsonObjectEntryView<'a>>> {
         let JsonNode::Object(entries) = &self.nodes[self.id] else {
             return None;
@@ -1032,9 +1066,13 @@ impl<'a> JsonValueView<'a> {
     }
 }
 
+/// A borrowed object member with a safe key display and its exact key units.
 pub struct JsonObjectEntryView<'a> {
+    /// Rust-safe display spelling of the key; for an unpaired key this is a placeholder, not its identity.
     pub display_key: &'a str,
+    /// Exact JavaScript UTF-16 units used to identify the property name.
     pub code_units: &'a [u16],
+    /// Borrowed view of the property's value.
     pub value: JsonValueView<'a>,
     value_id: usize,
 }
@@ -1047,6 +1085,7 @@ pub struct Utf16JsonBuilder {
 }
 
 impl Utf16JsonBuilder {
+    /// Create an empty flat-node builder.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -1055,22 +1094,30 @@ impl Utf16JsonBuilder {
         }
     }
 
+    /// Append a JSON `null` node and return its builder-local node ID.
     pub fn push_null(&mut self) -> usize {
         self.push(JsonNode::Null)
     }
 
+    /// Append a boolean node and return its builder-local node ID.
     pub fn push_bool(&mut self, value: bool) -> usize {
         self.push(JsonNode::Bool(value))
     }
 
+    /// Append an `f64` number node and return its builder-local node ID.
     pub fn push_number(&mut self, value: f64) -> usize {
         self.push(JsonNode::Number(value.to_bits()))
     }
 
+    /// Encode Rust text as UTF-16, append it as a string node, and return its node ID.
     pub fn push_string(&mut self, value: &str) -> usize {
         self.push_string_units(value.encode_utf16().collect())
     }
 
+    /// Append a string node with these exact UTF-16 units and return its node ID.
+    ///
+    /// The node's Rust display form is derived lossily, so unpaired units remain available through
+    /// the exact-unit view.
     pub fn push_string_units(&mut self, code_units: Vec<u16>) -> usize {
         self.push(JsonNode::String {
             display: String::from_utf16_lossy(&code_units),
@@ -1078,11 +1125,17 @@ impl Utf16JsonBuilder {
         })
     }
 
+    /// Append an array whose items refer to earlier nodes in this builder.
+    ///
+    /// Returns an error if any item ID does not refer to an existing builder node.
     pub fn push_array(&mut self, items: Vec<usize>) -> Result<usize, Utf16JsonProjectionError> {
         self.validate_children(&items)?;
         Ok(self.push(JsonNode::Array(items)))
     }
 
+    /// Append an object from Rust string keys and earlier builder node IDs.
+    ///
+    /// Returns an error for invalid child IDs or a key/display collision.
     pub fn push_object(
         &mut self,
         fields: Vec<(String, usize)>,
@@ -1095,6 +1148,10 @@ impl Utf16JsonBuilder {
         )
     }
 
+    /// Append an object from exact UTF-16 keys and earlier builder node IDs.
+    ///
+    /// This form supports keys containing unpaired units. Returns an error for invalid child IDs
+    /// or a key/display collision.
     pub fn push_object_units(
         &mut self,
         fields: Vec<(Vec<u16>, usize)>,
@@ -1210,6 +1267,7 @@ impl Utf16JsonBuilder {
         Ok(root)
     }
 
+    /// Validate and compact the node graph rooted at `root` into a projection.
     pub fn finish(self, root: usize) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
         compact_nodes(&self.nodes, root)
     }

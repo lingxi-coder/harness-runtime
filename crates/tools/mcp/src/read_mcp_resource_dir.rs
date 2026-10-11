@@ -631,6 +631,19 @@ mod tests {
     use once_cell::sync::Lazy;
     use std::sync::{Mutex, MutexGuard};
 
+    fn model_facing_text(error: &ToolError) -> String {
+        let message = error.model_facing_message();
+        let display = message
+            .string_at("")
+            .expect("model-facing tool error is a root string")
+            .to_owned();
+        let units = message
+            .string_units("")
+            .expect("model-facing tool error retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        display
+    }
+
     fn source_value(value: &Value) -> UJP {
         UJP::parse(&value.to_string()).expect("test JSON is valid")
     }
@@ -875,7 +888,7 @@ mod tests {
         let err = resolve_server(&registry, "cached")
             .await
             .expect_err("scoped-only row must not satisfy shared lookup");
-        assert!(format!("{err}").contains("Server \"cached\" not found"));
+        assert!(model_facing_text(&err).contains("Server \"cached\" not found"));
     }
 
     #[tokio::test]
@@ -1022,7 +1035,7 @@ mod tests {
             )
             .await
             .expect_err("colliding normalized alias must fail closed");
-        let err_text = format!("{err}");
+        let err_text = model_facing_text(&err);
         assert!(err_text.contains("ambiguous"));
         assert!(err_text.contains("my.server"));
         assert!(err_text.contains("my_server"));

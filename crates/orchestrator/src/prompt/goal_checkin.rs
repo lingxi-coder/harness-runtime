@@ -56,6 +56,7 @@
 /// `SU` removes Unicode Cf/Co/Cn/default-ignorable characters, then `Nr`
 /// strips controls and collapses ECMAScript whitespace; `Vue` maps only
 /// bracket/slash lookalikes. It does not normalize or fold ordinary letters.
+#[cfg(test)]
 fn sanitize_checkin_text(text: &str) -> String {
     static INVISIBLE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let invisible = INVISIBLE.get_or_init(|| {

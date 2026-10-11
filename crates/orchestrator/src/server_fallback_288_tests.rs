@@ -304,6 +304,7 @@ fn server_notice_message(
     ConversationMessage::System {
         id: MessageId::new(),
         content: "native server fallback notice".into(),
+        api_system: None,
         subtype: Some("model_refusal_fallback".into()),
         compact_metadata: None,
         model_fallback: None,

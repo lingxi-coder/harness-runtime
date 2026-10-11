@@ -1,0 +1,54 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "binary_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "argv": [
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "plugin",
+    "test",
+    "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-session-append-295-20261010T120632Z/fixture-source"
+  ],
+  "isolated_home_and_config": true,
+  "environment_keys": [
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CONFIG_DIR",
+    "DISABLE_TELEMETRY",
+    "DO_NOT_TRACK",
+    "HOME",
+    "LANG",
+    "PATH",
+    "TERM",
+    "TMPDIR",
+    "TZ"
+  ],
+  "fixture_source_root": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-session-append-295-20261010T120632Z/fixture-source",
+  "source_files_sha256_before": {
+    "append.test.ts": "3b9a34e4714a7b297f3cb0e6407397fd05bb67d81b7372670df019e5cf8fe1a6",
+    "hooks/hooks.json": "448e29b17c4ce3ee767d3caf0ff9e35b5501b1cfb3b59952e7b7625744bbf070",
+    "hooks/register.js": "3304837a13c3232693e30ca2e9d5f71c3d86995d815df32d740c23a8d5c2ad84",
+    "plugin.json": "fa21195f23fab0268bfa509ffb0d80b2bf2d55a4046fa8603ba68608222e6a7e"
+  },
+  "source_files_sha256_after": {
+    "append.test.ts": "3b9a34e4714a7b297f3cb0e6407397fd05bb67d81b7372670df019e5cf8fe1a6",
+    "hooks/hooks.json": "448e29b17c4ce3ee767d3caf0ff9e35b5501b1cfb3b59952e7b7625744bbf070",
+    "hooks/register.js": "3304837a13c3232693e30ca2e9d5f71c3d86995d815df32d740c23a8d5c2ad84",
+    "plugin.json": "fa21195f23fab0268bfa509ffb0d80b2bf2d55a4046fa8603ba68608222e6a7e"
+  },
+  "source_copy_unchanged": true,
+  "network_scope": "Public plugin-test fixture only; no model request or external provider endpoint.",
+  "native_exit_code": 0,
+  "stdout_bytes": 372,
+  "stdout_sha256": "fca04ed5e69b3301225df7dfd78c715ec1f68bb9bdf22ff56bb8a9cf108e68f9",
+  "stdout_path": "native-session-append-295-20261010T120632Z/native.stdout.raw",
+  "stderr_bytes": 1127,
+  "stderr_sha256": "960876f38ce6d8fa905927f4bd7c5debb6f1f425124ec80d877136f966d7a1f3",
+  "stderr_path": "native-session-append-295-20261010T120632Z/native.stderr.raw",
+  "system_event_count": 1,
+  "system_event_path": "native-session-append-295-20261010T120632Z/system-result-event.raw.json",
+  "system_event_sha256": "0de9066c91d31694621a4ff3b524f6c532948a772164e43c082ef1535aac3d5c",
+  "raw_d800_input_and_rewrite_observed": true,
+  "system_type_and_exact_utf16_units_observed": true,
+  "native_session_jsonl_files": [],
+  "persistence_boundary": "No JSONL file was produced in the isolated plugin-test sandbox.",
+  "test_result": "passed"
+}

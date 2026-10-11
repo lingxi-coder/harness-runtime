@@ -6,6 +6,7 @@ use super::*;
 use lingxi_core::host::handback::*;
 use lingxi_core::host::permission_gate::*;
 use lingxi_core::host::task_registry::*;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 fn source_string(text: impl Into<String>) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     let text = text.into();
@@ -271,7 +272,7 @@ struct RejectInheritedPermissionPrompt;
 
 #[async_trait]
 impl PermissionGate for RejectInheritedPermissionPrompt {
-    async fn check(&self, _: &str, _: &serde_json::Value) -> PermissionDecision {
+    async fn check(&self, _: &str, _: &Utf16JsonProjection) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: "test permission prompt rejected".into(),
         }
@@ -288,9 +289,20 @@ impl tool_api::Tool for InheritedPermissionWriteProbe {
     fn name(&self) -> &str {
         "Write"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-        SCHEMA.get_or_init(|| serde_json::json!({"type":"object"}))
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: std::sync::OnceLock<Utf16JsonProjection> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({"type":"object"}))
+                .expect("test tool schema is valid")
+        })
+    }
+    fn input_repair_metadata(&self) -> tool_api::ToolInputRepairMetadata {
+        use tool_api::{ToolInputRepairSchema, ToolInputSchemaProvenance};
+        tool_api::ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
         true
@@ -298,15 +310,15 @@ impl tool_api::Tool for InheritedPermissionWriteProbe {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
     async fn check_permissions(
         &self,
-        _: &serde_json::Value,
+        _: &Utf16JsonProjection,
         context: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         self.observed_modes
@@ -322,20 +334,26 @@ impl tool_api::Tool for InheritedPermissionWriteProbe {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &tool_api::DescriptionOptions,
+    ) -> String {
         "Test write probe".into()
     }
-    async fn prompt(&self, _: &tool_api::PromptOptions) -> String {
+    async fn prompt(&self, _: &tool_api::PromptOptions) -> Utf16JsonProjection {
         "Test write probe".into()
     }
     async fn call(
         &self,
-        _: serde_json::Value,
+        _: Utf16JsonProjection,
         _: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
         self.body_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(tool_api::ToolCallResult::from_data(serde_json::Value::Null))
+        Ok(tool_api::ToolCallResult::from_data(
+            Utf16JsonProjection::parse("null").expect("null is valid JSON"),
+        ))
     }
 }
 
@@ -363,10 +381,10 @@ async fn handback_ineligible_runner_preserves_trusted_parent_permission_under_ro
             let invoker = tool_api::RegistryToolInvoker::new(Arc::new(tools)).with_gate(gate);
             let mut write = tool_use_response("Write", Some("tool_use"));
             if let llm_runtime::ContentBlock::ToolCall { input, .. } = &mut write.content[0] {
-                *input = serde_json::json!({
-                    "file_path": "/private/tmp/unused-inherited-permission-probe",
-                    "content": "test",
-                });
+                *input = llm_runtime::services::sdk::protocol::JsonPayload::parse(
+                    r#"{"file_path":"/private/tmp/unused-inherited-permission-probe","content":"test"}"#,
+                )
+                .expect("test SDK input is valid JSON");
             }
             let api = MockSubagentApiClient::new(vec![
                 Ok(write),

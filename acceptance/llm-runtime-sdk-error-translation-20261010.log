@@ -1,0 +1,238 @@
+   Compiling tokio v1.52.3
+warning: missing documentation for a struct
+  --> crates/json-projection/src/lib.rs:16:1
+   |
+16 | pub struct Utf16JsonProjection {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for an enum
+   --> crates/json-projection/src/lib.rs:107:1
+    |
+107 | pub enum Utf16JsonProjectionError {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/json-projection/src/lib.rs:109:5
+    |
+109 |     InvalidJson {
+    |     ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/json-projection/src/lib.rs:110:9
+    |
+110 |         offset: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/json-projection/src/lib.rs:111:9
+    |
+111 |         message: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/json-projection/src/lib.rs:114:5
+    |
+114 |     InvalidUtf16Json {
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/json-projection/src/lib.rs:115:9
+    |
+115 |         offset: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/json-projection/src/lib.rs:116:9
+    |
+116 |         message: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/json-projection/src/lib.rs:119:5
+    |
+119 |     InvalidProjection(&'static str),
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/json-projection/src/lib.rs:121:5
+    |
+121 |     InvalidStringPointer,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/json-projection/src/lib.rs:123:5
+    |
+123 |     InvalidKeyPointer,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/json-projection/src/lib.rs:125:5
+    |
+125 |     InvalidPointer,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/json-projection/src/lib.rs:127:5
+    |
+127 |     ExpectedObject,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/json-projection/src/lib.rs:129:5
+    |
+129 |     Serialize(#[from] serde_json::Error),
+    |     ^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/json-projection/src/lib.rs:934:5
+    |
+934 |     pub fn as_str(self) -> Option<&'a str> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/json-projection/src/lib.rs:942:5
+    |
+942 |     pub fn code_units(self) -> Option<&'a [u16]> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/json-projection/src/lib.rs:950:5
+    |
+950 |     pub fn as_number(self) -> Option<f64> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/json-projection/src/lib.rs:958:5
+    |
+958 |     pub fn as_bool(self) -> Option<bool> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/json-projection/src/lib.rs:966:5
+    |
+966 |     pub fn is_null(self) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/json-projection/src/lib.rs:971:5
+    |
+971 |     pub fn array_len(self) -> Option<usize> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/json-projection/src/lib.rs:979:5
+    |
+979 |     pub fn get_index(self, index: usize) -> Option<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/json-projection/src/lib.rs:991:5
+    |
+991 |     pub fn get_property(self, key: &str) -> Option<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/json-projection/src/lib.rs:996:5
+    |
+996 |     pub fn get_property_units(self, units: &[u16]) -> Option<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1014:5
+     |
+1014 |     pub fn object_entries(self) -> Option<Vec<JsonObjectEntryView<'a>>> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> crates/json-projection/src/lib.rs:1035:1
+     |
+1035 | pub struct JsonObjectEntryView<'a> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> crates/json-projection/src/lib.rs:1036:5
+     |
+1036 |     pub display_key: &'a str,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> crates/json-projection/src/lib.rs:1037:5
+     |
+1037 |     pub code_units: &'a [u16],
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> crates/json-projection/src/lib.rs:1038:5
+     |
+1038 |     pub value: JsonValueView<'a>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+    --> crates/json-projection/src/lib.rs:1051:5
+     |
+1051 |     pub fn new() -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1058:5
+     |
+1058 |     pub fn push_null(&mut self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1062:5
+     |
+1062 |     pub fn push_bool(&mut self, value: bool) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1066:5
+     |
+1066 |     pub fn push_number(&mut self, value: f64) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1070:5
+     |
+1070 |     pub fn push_string(&mut self, value: &str) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1074:5
+     |
+1074 |     pub fn push_string_units(&mut self, code_units: Vec<u16>) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1081:5
+     |
+1081 |     pub fn push_array(&mut self, items: Vec<usize>) -> Result<usize, Utf16JsonProjectionError> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1086:5
+     |
+1086 | /     pub fn push_object(
+1087 | |         &mut self,
+1088 | |         fields: Vec<(String, usize)>,
+1089 | |     ) -> Result<usize, Utf16JsonProjectionError> {
+     | |________________________________________________^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1098:5
+     |
+1098 | /     pub fn push_object_units(
+1099 | |         &mut self,
+1100 | |         fields: Vec<(Vec<u16>, usize)>,
+1101 | |     ) -> Result<usize, Utf16JsonProjectionError> {
+     | |________________________________________________^
+
+warning: missing documentation for a method
+    --> crates/json-projection/src/lib.rs:1213:5
+     |
+1213 |     pub fn finish(self, root: usize) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `json-projection` (lib) generated 38 warnings

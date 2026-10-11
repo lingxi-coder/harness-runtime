@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh",
+            "args": [
+              "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/error-text-hook/capture-hook.sh",
+              "PostToolUse",
+              "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/error-text-hook/run-output/native-mcp-error-text-hook-295-b6naezvh/post-tool-use-hook-input.raw.json"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh",
+            "args": [
+              "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/error-text-hook/capture-hook.sh",
+              "PostToolUseFailure",
+              "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/error-text-hook/run-output/native-mcp-error-text-hook-295-b6naezvh/post-tool-use-failure-hook-input.raw.json"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

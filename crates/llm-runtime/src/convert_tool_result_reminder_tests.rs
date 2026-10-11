@@ -27,6 +27,7 @@ fn tool_result_message(
         usage_limit_note: None,
         origin: None,
         turn_origin: None,
+        api_message_override: None,
     }
 }
 
@@ -96,7 +97,7 @@ fn exact_target_appends_utf16_suffix_and_only_removes_its_reminder_from_the_clon
 }
 
 #[test]
-fn structured_result_keeps_existing_content_and_appends_a_source_text_block() {
+fn structured_result_adds_a_line_separator_before_a_source_text_reminder_block() {
     let reminder_id = MessageId::new();
     let target_message_id = MessageId::new();
     let suffix_units = vec![b'r' as u16, 0xd800, b'!' as u16];
@@ -150,7 +151,8 @@ fn structured_result_keeps_existing_content_and_appends_a_source_text_block() {
             b'r' as u16,
             b'e' as u16,
             b' ' as u16,
-            0xd800
+            0xd800,
+            b'\n' as u16,
         ]),
     );
     assert_eq!(blocks.string_at("/1/type"), Some("text"));

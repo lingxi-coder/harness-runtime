@@ -9,12 +9,13 @@ use crate::rule::PermissionRule;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::RequestId;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::time::SystemTime;
 
 /// The decision returned by `PermissionPolicy::authorize`.
 ///
 /// Variants are tagged by `behavior` for JSON ergonomics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "behavior", rename_all = "snake_case")]
 pub enum PermissionResult {
     /// The tool call is permitted.
@@ -24,6 +25,7 @@ pub enum PermissionResult {
         /// Optional rewritten input the caller should use instead.
         #[serde(
             default,
+            skip_serializing_if = "Option::is_none",
             serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
             deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
         )]
@@ -59,6 +61,165 @@ pub enum PermissionResult {
         /// Audit metadata.
         metadata: PermissionMetadata,
     },
+}
+
+// Deserialize the public internally-tagged shape without asking Serde to buffer
+// its map into `Content`. That buffering loses the raw member source required by
+// `Utf16JsonProjection` fields (including escaped lone UTF-16 surrogates).
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PermissionResultWire {
+    Allow {
+        reason: PermissionDecisionReason,
+        #[serde(
+            default,
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+        )]
+        updated_input: Option<Utf16JsonProjection>,
+        update_destination: Option<PermissionUpdateDestination>,
+        metadata: PermissionMetadata,
+    },
+    Deny {
+        reason: PermissionDecisionReason,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+        )]
+        explanation: Option<Utf16JsonProjection>,
+        metadata: PermissionMetadata,
+    },
+    Ask {
+        reason: PermissionDecisionReason,
+        prompt: PermissionPrompt,
+        pending_classifier_check: Option<PendingClassifierCheck>,
+        metadata: PermissionMetadata,
+    },
+}
+
+impl From<PermissionResultWire> for PermissionResult {
+    fn from(wire: PermissionResultWire) -> Self {
+        match wire {
+            PermissionResultWire::Allow {
+                reason,
+                updated_input,
+                update_destination,
+                metadata,
+            } => Self::Allow {
+                reason,
+                updated_input,
+                update_destination,
+                metadata,
+            },
+            PermissionResultWire::Deny {
+                reason,
+                explanation,
+                metadata,
+            } => Self::Deny {
+                reason,
+                explanation,
+                metadata,
+            },
+            PermissionResultWire::Ask {
+                reason,
+                prompt,
+                pending_classifier_check,
+                metadata,
+            } => Self::Ask {
+                reason,
+                prompt,
+                pending_classifier_check,
+                metadata,
+            },
+        }
+    }
+}
+
+struct RawPermissionResultFields(Vec<(String, Box<RawValue>)>);
+
+impl<'de> Deserialize<'de> for RawPermissionResultFields {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RawObjectVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RawObjectVisitor {
+            type Value = RawPermissionResultFields;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a permission result object with raw member values")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut fields = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, Box<RawValue>>()? {
+                    fields.push((key, value));
+                }
+                Ok(RawPermissionResultFields(fields))
+            }
+        }
+
+        deserializer.deserialize_map(RawObjectVisitor)
+    }
+}
+
+fn permission_result_wire_json<E>(
+    behavior: &str,
+    fields: Vec<(String, Box<RawValue>)>,
+) -> Result<String, E>
+where
+    E: serde::de::Error,
+{
+    let mut json = String::from("{");
+    json.push_str(&serde_json::to_string(behavior).map_err(E::custom)?);
+    json.push_str(":{");
+    for (index, (key, value)) in fields.into_iter().enumerate() {
+        if index != 0 {
+            json.push(',');
+        }
+        json.push_str(&serde_json::to_string(&key).map_err(E::custom)?);
+        json.push(':');
+        json.push_str(value.get());
+    }
+    json.push_str("}}");
+    Ok(json)
+}
+
+impl<'de> Deserialize<'de> for PermissionResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let RawPermissionResultFields(fields) =
+            RawPermissionResultFields::deserialize(deserializer)?;
+        let mut behavior = None;
+        let mut payload = Vec::with_capacity(fields.len().saturating_sub(1));
+        for (key, value) in fields {
+            if key == "behavior" {
+                if behavior.is_some() {
+                    return Err(<D::Error as serde::de::Error>::duplicate_field("behavior"));
+                }
+                behavior = Some(
+                    serde_json::from_str::<String>(value.get())
+                        .map_err(<D::Error as serde::de::Error>::custom)?,
+                );
+            } else {
+                payload.push((key, value));
+            }
+        }
+        let behavior =
+            behavior.ok_or_else(|| <D::Error as serde::de::Error>::missing_field("behavior"))?;
+        let wire_json = permission_result_wire_json::<D::Error>(&behavior, payload)?;
+        let wire: PermissionResultWire =
+            serde_json::from_str(&wire_json).map_err(<D::Error as serde::de::Error>::custom)?;
+        Ok(wire.into())
+    }
 }
 
 /// claude-code `decisionReason.circuitBreaker` — the safety circuit that raised
@@ -253,7 +414,7 @@ pub struct PermissionPrompt {
 /// Raw JSON-array adapters for exact root-string text projections.
 mod raw_text_array {
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
 
     pub fn serialize<S>(values: &[Utf16JsonProjection], serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -293,7 +454,7 @@ mod raw_text_array {
 mod raw_subcommand_results {
     use super::PermissionResult;
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
 
     pub fn serialize<S>(
         reasons: &Vec<(Utf16JsonProjection, Box<PermissionResult>)>,
@@ -381,6 +542,74 @@ mod source_tests {
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
     #[test]
+    fn permission_result_raw_carrier_preserves_absence_null_and_public_tag_order() {
+        let absent: super::PermissionResult = serde_json::from_str(
+            r#"{"behavior":"allow","reason":{"Other":{"reason":"ordinary"}},"metadata":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &absent,
+            super::PermissionResult::Allow {
+                updated_input: None,
+                update_destination: None,
+                ..
+            }
+        ));
+        let absent_wire = serde_json::to_string(&absent).unwrap();
+        assert_eq!(
+            absent_wire,
+            r#"{"behavior":"allow","reason":{"Other":{"reason":"ordinary"}},"update_destination":null,"metadata":{"matched_rules":[]}}"#
+        );
+        let absent_round_trip: super::PermissionResult =
+            serde_json::from_str(&absent_wire).unwrap();
+        assert!(matches!(
+            absent_round_trip,
+            super::PermissionResult::Allow {
+                updated_input: None,
+                ..
+            }
+        ));
+
+        let explicit_null: super::PermissionResult = serde_json::from_str(
+            r#"{"behavior":"allow","reason":{"Other":{"reason":"ordinary"}},"updated_input":null,"metadata":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &explicit_null,
+            super::PermissionResult::Allow {
+                updated_input: Some(value),
+                ..
+            } if value.at_pointer("").is_some_and(|value| value.is_null())
+        ));
+        let explicit_null_wire = serde_json::to_string(&explicit_null).unwrap();
+        assert_eq!(
+            explicit_null_wire,
+            r#"{"behavior":"allow","reason":{"Other":{"reason":"ordinary"}},"updated_input":null,"update_destination":null,"metadata":{"matched_rules":[]}}"#
+        );
+        let explicit_null_round_trip: super::PermissionResult =
+            serde_json::from_str(&explicit_null_wire).unwrap();
+        assert!(matches!(
+            explicit_null_round_trip,
+            super::PermissionResult::Allow {
+                updated_input: Some(value),
+                ..
+            } if value.at_pointer("").is_some_and(|value| value.is_null())
+        ));
+    }
+
+    #[test]
+    fn permission_result_raw_carrier_does_not_overwrite_duplicate_fields() {
+        let error = serde_json::from_str::<super::PermissionResult>(
+            r#"{"behavior":"allow","reason":{"Other":{"reason":"ordinary"}},"metadata":{},"metadata":{}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate field `metadata`"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn permission_suggestions_serialize_as_the_original_json_tree() {
         let suggestions = Utf16JsonProjection::parse(r#"[{"kind":"ask","detail":"\ud800"}]"#)
             .expect("test source is valid JSON");
@@ -460,7 +689,10 @@ mod source_tests {
                     reason: super::PermissionDecisionReason::Other {
                         reason: "Allowed".into(),
                     },
-                    updated_input: None,
+                    updated_input: Some(
+                        Utf16JsonProjection::parse(r#"{"command":"\ud800"}"#)
+                            .expect("nested rewritten input preserves raw UTF-16 JSON"),
+                    ),
                     update_destination: None,
                     metadata: super::PermissionMetadata::default(),
                 }),
@@ -473,5 +705,13 @@ mod source_tests {
             panic!("subcommand reason retains its variant");
         };
         assert_eq!(reasons[0].0.string_units(""), key.string_units(""));
+        let super::PermissionResult::Allow {
+            updated_input: Some(input),
+            ..
+        } = reasons[0].1.as_ref()
+        else {
+            panic!("nested permission result keeps its raw rewritten input");
+        };
+        assert_eq!(input.string_units("/command"), Some(vec![0xd800]));
     }
 }

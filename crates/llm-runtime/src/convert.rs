@@ -150,9 +150,25 @@ fn append_text_block(target: &mut Utf16JsonProjection, text: &Utf16JsonProjectio
     let mut blocks = Vec::with_capacity(length.saturating_add(1));
     for index in 0..length {
         let pointer = format!("/{index}");
-        let Ok(block) = target.subprojection(&pointer) else {
+        let Ok(mut block) = target.subprojection(&pointer) else {
             return false;
         };
+        if index + 1 == length && target.string_at(&format!("{pointer}/type")) == Some("text") {
+            if let Some(mut units) = target
+                .subprojection(&format!("{pointer}/text"))
+                .ok()
+                .and_then(|text| text.string_units(""))
+            {
+                units.push(b'\n' as u16);
+                let display = String::from_utf16_lossy(&units);
+                let Ok(text) = Utf16JsonProjection::root_string(display, units) else {
+                    return false;
+                };
+                if block.set_field("text", text).is_err() {
+                    return false;
+                }
+            }
+        }
         blocks.push(block);
     }
     let Ok(reminder_block) = Utf16JsonProjection::object(vec![
@@ -766,8 +782,8 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                             is_meta: *is_meta,
                             is_compact_summary: *is_compact_summary,
                             is_visible_in_transcript_only: *is_visible_in_transcript_only,
-                            turn_companion: turn_companion.clone(),
-                            usage_limit_note: usage_limit_note.clone(),
+                            turn_companion: *turn_companion,
+                            usage_limit_note: *usage_limit_note,
                             origin: origin.clone(),
                             turn_origin: turn_origin.clone(),
                         });
@@ -937,8 +953,8 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                     is_meta: *is_meta,
                     is_compact_summary: *is_compact_summary,
                     is_visible_in_transcript_only: *is_visible_in_transcript_only,
-                    turn_companion: turn_companion.clone(),
-                    usage_limit_note: usage_limit_note.clone(),
+                    turn_companion: *turn_companion,
+                    usage_limit_note: *usage_limit_note,
                     origin: origin.clone(),
                     turn_origin: turn_origin.clone(),
                 });

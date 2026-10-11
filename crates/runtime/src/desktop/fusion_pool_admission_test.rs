@@ -1,3 +1,4 @@
+use crate::json_schema_validator::BunJsonSchemaValidator;
 use ::fusion as fusion_engine;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -5,14 +6,14 @@ use lingxi_core::host::panel_pool::PanelPoolDrain;
 use lingxi_core::host::subagent_spawn::SubagentInheritance;
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use lingxi_core::host::*;
-use serde_json::{json, Value};
+use serde_json::json;
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
     StrictStructuredQueryRequest, StrictStructuredQueryResponse,
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::Duration;
 
@@ -80,6 +81,19 @@ impl agent::SubagentApiClient for Api {
         >,
         llm_runtime::LlmError,
     > {
+        assert_eq!(
+            request.profile.as_deref(),
+            Some("anthropic"),
+            "Fusion panel calls retain their selected provider profile"
+        );
+        assert!(
+            matches!(
+                request.model.as_str(),
+                "claude-sonnet-5" | "claude-opus-4-7"
+            ),
+            "Fusion panel calls retain one of the explicitly selected models: {}",
+            request.model
+        );
         // Keep the actual attempt capability alive through stream opening,
         // including the barrier shared by the two admitted panels.
         let context = request.opts.model_attempt;
@@ -93,7 +107,7 @@ impl agent::SubagentApiClient for Api {
         let response = llm_runtime::HistoryResponse {
             id: "fake-panel".into(),
             model: "mock".into(),
-            content: vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            content: vec![llm_runtime::ContentBlock::ToolCall {
                 id: "report".into(),
                 name: "StructuredOutput".into(),
                 input: lingxi_llm_client::protocol::JsonPayload::parse(
@@ -218,6 +232,7 @@ struct AdmissionProbe {
     inner: Arc<agent::PoolSubagentSpawner>,
     queued: Arc<tokio::sync::Notify>,
     producer_gate: Option<Arc<Gate>>,
+    spawn_failures: Arc<Mutex<Vec<String>>>,
 }
 #[async_trait]
 impl SubagentSpawner for AdmissionProbe {
@@ -268,11 +283,26 @@ impl SubagentSpawner for AdmissionProbe {
         watchdog: WorkflowQueryWatchdog,
         permit: PanelPoolPermit,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        self.inner
+        let result = self
+            .inner
             .spawn_workflow_with_observer_admitted(
                 request, inherit, progress, observer, watchdog, permit,
             )
-            .await
+            .await;
+        let failure = match &result {
+            Err(error) => Some(format!("admitted panel spawn rejected: {error}")),
+            Ok(SubagentResult::Failed { reason, .. }) => {
+                Some(format!("admitted panel child failed: {reason}"))
+            }
+            Ok(SubagentResult::Completed { .. } | SubagentResult::Killed { .. }) => None,
+        };
+        if let Some(failure) = failure {
+            self.spawn_failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(failure);
+        }
+        result
     }
 }
 
@@ -283,6 +313,7 @@ struct Fixture {
     judge: Arc<Judge>,
     budget: Arc<Budget>,
     queued: Arc<tokio::sync::Notify>,
+    spawn_failures: Arc<Mutex<Vec<String>>>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -298,7 +329,61 @@ impl Fixture {
             both: tokio::sync::Barrier::new(2),
             registered: AtomicUsize::new(0),
         });
-        let spawner = Arc::new(agent::PoolSubagentSpawner::new(pool).with_api_client(api.clone()));
+        // Match the production composition root: Fusion's explicit panel
+        // (model, profile) pairs resolve through the current provider route,
+        // while non-AgentTool spawns still have the provider-qualified parent
+        // selection available as their inheritance anchor.
+        let route_provider: Arc<dyn agent::model_resolution::ModelResolutionContextProvider> =
+            Arc::new(|model: &str, profile: Option<&str>| {
+                if profile != Some("anthropic")
+                    || !matches!(model, "claude-sonnet-5" | "claude-opus-4-7")
+                {
+                    return Err(agent::model_resolution::ModelResolutionError::RouteUnavailable {
+                    model: model.to_owned(),
+                    profile: profile.map(str::to_owned),
+                    reason: "Fusion admission fixture only configures its two Anthropic panel models".into(),
+                });
+                }
+                let registered_model_ids = ["claude-sonnet-5", "claude-opus-4-7"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                Ok(agent::model_resolution::ModelResolutionContext {
+                    route: agent::model_resolution::ModelRouteFacts {
+                        model: model.to_owned(),
+                        profile: Some("anthropic".into()),
+                        provider: Some(agent::model_resolution::ModelProviderKind::FirstParty),
+                        ..Default::default()
+                    },
+                    family_defaults: agent::model_resolution::FamilyModelDefaults {
+                        opus: Some("claude-opus-4-7".into()),
+                        sonnet: Some("claude-sonnet-5".into()),
+                        haiku: Some("claude-sonnet-5".into()),
+                        fable: Some("claude-sonnet-5".into()),
+                    },
+                    registered_model_ids,
+                    ..Default::default()
+                })
+            });
+        let parent_context = route_provider
+            .context_for_route("claude-sonnet-5", Some("anthropic"))
+            .expect("fixture parent model route");
+        let parent_selection = agent::DefaultModelSelection {
+            model: "claude-sonnet-5".into(),
+            model_profile: Some("anthropic".into()),
+            model_resolution_context: parent_context,
+        };
+        let default_selection_provider = Arc::new(move || Ok(Some(parent_selection.clone())));
+        let spawner = Arc::new(
+            agent::PoolSubagentSpawner::new(pool)
+                .with_structured_output_validator(
+                    BunJsonSchemaValidator::new_from_host_environment(),
+                )
+                .with_api_client(api.clone())
+                .with_default_model("claude-sonnet-5")
+                .with_default_model_selection_provider(default_selection_provider)
+                .with_model_resolution_context_provider(route_provider),
+        );
         let judge = Arc::new(Judge::default());
         let catalog: Vec<_> = ["claude-sonnet-5", "claude-opus-4-7"]
             .into_iter()
@@ -320,10 +405,12 @@ impl Fixture {
             })
             .collect();
         let queued = Arc::new(tokio::sync::Notify::new());
+        let spawn_failures = Arc::new(Mutex::new(Vec::new()));
         let probe = Arc::new(AdmissionProbe {
             inner: spawner.clone(),
             queued: queued.clone(),
             producer_gate: gates.as_ref().map(|(producer, _)| producer.clone()),
+            spawn_failures: spawn_failures.clone(),
         });
         let mut orchestrator = fusion_engine::FusionOrchestrator::new(
             probe,
@@ -360,6 +447,7 @@ impl Fixture {
             judge,
             budget: Arc::new(Budget::default()),
             queued,
+            spawn_failures,
         }
     }
     fn prepare(&self, cancel: tokio_util::sync::CancellationToken) -> PreparedFusionRun {
@@ -423,8 +511,13 @@ async fn fusion_pool_admission_judge_waits_for_producer_then_receipt_contract_ga
     tokio::time::timeout(Duration::from_secs(5), producer.entered.notified())
         .await
         .unwrap();
-    assert_eq!(fixture.api.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(fixture.api.registered.load(Ordering::SeqCst), 2);
+    let calls_before_producer_release = fixture.api.calls.load(Ordering::SeqCst);
+    let registrations_before_producer_release = fixture.api.registered.load(Ordering::SeqCst);
+    let spawn_failures_before_producer_release = fixture
+        .spawn_failures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     assert!(receipt.closed.load(Ordering::Acquire));
     assert_eq!(fixture.judge.0.load(Ordering::SeqCst), 0);
     producer.release();
@@ -433,11 +526,31 @@ async fn fusion_pool_admission_judge_waits_for_producer_then_receipt_contract_ga
         .unwrap();
     assert_eq!(fixture.judge.0.load(Ordering::SeqCst), 0);
     receipt.gate.release();
-    let _outcome = tokio::time::timeout(Duration::from_secs(5), task)
+    let outcome = tokio::time::timeout(Duration::from_secs(5), task)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fixture.judge.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        calls_before_producer_release, 2,
+        "both panel API calls must be active before producer release; outcome: {:?}; spawn failures: {:?}",
+        outcome.result,
+        spawn_failures_before_producer_release
+    );
+    assert_eq!(
+        registrations_before_producer_release, 2,
+        "both panel attempt contexts must be registered before producer release; outcome: {:?}; spawn failures: {:?}",
+        outcome.result,
+        spawn_failures_before_producer_release
+    );
+    assert_eq!(
+        fixture.judge.0.load(Ordering::SeqCst),
+        1,
+        "both successful panel reports reach the judge; spawn failures: {:?}",
+        fixture
+            .spawn_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    );
 }
 
 #[tokio::test]
@@ -451,10 +564,23 @@ async fn fusion_pool_admission_real_spawner_consumes_whole_group_without_reacqui
     )
     .await
     .unwrap();
-    assert_eq!(fixture.api.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture.api.calls.load(Ordering::SeqCst),
+        2,
+        "both admitted panels must reach the API; outcome: {:?}; spawn failures: {:?}",
+        outcome.result,
+        fixture
+            .spawn_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    );
     assert!(
         fixture.judge.0.load(Ordering::SeqCst) > 0,
-        "two valid reports must reach analysis"
+        "two valid reports must reach analysis; spawn failures: {:?}",
+        fixture
+            .spawn_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     );
     assert_eq!(outcome.facts.allocated_panels, Some(2));
     assert!(fixture.budget.0.load(Ordering::SeqCst) > 0);

@@ -8,9 +8,7 @@ mod tests {
 
     #[test]
     fn main_native_rows_keep_identity_gaps_and_use_the_existing_replay_decoder() {
-        let raw = concat!(
-            "{\"type\":\"user\",\"uuid\":\"11111111-1111-4111-8111-111111111111\",\"sessionId\":\"22222222-2222-4222-8222-222222222222\",\"parentUuid\":null,\"timestamp\":\"2026-10-08T00:00:00Z\",\"cwd\":\"/workspace\",\"version\":\"2.1.293\",\"isSidechain\":false,\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n"
-        );
+        let raw = "{\"type\":\"user\",\"uuid\":\"11111111-1111-4111-8111-111111111111\",\"sessionId\":\"22222222-2222-4222-8222-222222222222\",\"parentUuid\":null,\"timestamp\":\"2026-10-08T00:00:00Z\",\"cwd\":\"/workspace\",\"version\":\"2.1.293\",\"isSidechain\":false,\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n";
         let messages = session::jsonl::reader::route_lines(raw).messages_in_order;
         let state = orchestrator::state_from_messages(uuid::Uuid::new_v4(), &messages);
         assert_eq!(state.history.len(), 1);
@@ -63,14 +61,52 @@ pub fn parse_main_session_agent_message_rows(
     )
     .into_iter()
     .map(|(id, message)| {
-        let message_uuid = id.as_uuid().to_string();
-        let message_index = *identities.by_uuid.get(&message_uuid).ok_or_else(|| {
-            format!("main transcript row lacks its stable identity index: {message_uuid}")
-        })?;
-        let original = replayed
+        let logical_uuid = id.as_uuid().to_string();
+        let direct_row = replayed
             .messages
             .iter()
-            .find(|row| row.uuid == message_uuid);
+            .find(|row| row.uuid == logical_uuid);
+        let (message_uuid, message_index, original) = if let Some(message_index) =
+            identities.by_uuid.get(&logical_uuid).copied()
+        {
+            (logical_uuid, message_index, direct_row)
+        } else {
+            // Native API-error rows have two identities: the assistant
+            // envelope UUID is the stable JSONL identity recorded by the
+            // sidecar, while replay reconstructs the conversation with
+            // the inner message.id. Bridge only that exact, marked row;
+            // all other missing identities remain a hard error.
+            let mut api_error_rows = replayed.messages.iter().filter(|row| {
+                row.message_type == "assistant"
+                    && row
+                        .extra
+                        .get_property("isApiErrorMessage")
+                        .and_then(|value| value.as_bool())
+                        == Some(true)
+                    && row.message.string_at("/id") == Some(logical_uuid.as_str())
+            });
+            let Some(api_error_row) = api_error_rows.next() else {
+                return Err(format!(
+                    "main transcript row lacks its stable identity index: {logical_uuid}"
+                ));
+            };
+            if api_error_rows.next().is_some() {
+                return Err(format!(
+                    "main transcript row has ambiguous API-error envelope identity: {logical_uuid}"
+                ));
+            }
+            let Some(message_index) = identities.by_uuid.get(&api_error_row.uuid).copied() else {
+                return Err(format!(
+                    "main transcript row lacks its stable identity index: {}",
+                    api_error_row.uuid
+                ));
+            };
+            (
+                api_error_row.uuid.clone(),
+                message_index,
+                Some(api_error_row),
+            )
+        };
         let api_error_json = match original {
             Some(row)
                 if row
@@ -119,12 +155,10 @@ pub async fn session_identity_snapshot_for_path(
     transcript_path: &std::path::Path,
 ) -> Result<session::jsonl::SessionMessageIdentitySnapshot, String> {
     match tokio::fs::symlink_metadata(transcript_path).await {
-        Ok(metadata) if !metadata.file_type().is_file() => {
-            return Err(format!(
-                "transcript is not a regular file: {}",
-                transcript_path.display()
-            ));
-        }
+        Ok(metadata) if !metadata.file_type().is_file() => Err(format!(
+            "transcript is not a regular file: {}",
+            transcript_path.display()
+        )),
         Ok(metadata) if metadata.len() > 0 => writer
             .bootstrap_session_message_identity_snapshot(transcript_path)
             .await

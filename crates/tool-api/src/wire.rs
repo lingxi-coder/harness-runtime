@@ -32,7 +32,6 @@
 use crate::defer::DeferralState;
 use crate::tool_trait::{PromptOptions, Tool};
 use lingxi_core::host::SourceToolWireDefinition;
-use serde_json::json;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -401,7 +400,7 @@ mod tests {
         let wire = tool_to_wire(&tool, &opts()).await;
         assert_eq!(wire.name, "Read");
         assert_eq!(
-            wire.description.string_at("").as_deref(),
+            wire.description.string_at(""),
             Some("Reads a file from disk.")
         );
         assert_eq!(wire.input_schema.string_at("/type"), Some("object"));

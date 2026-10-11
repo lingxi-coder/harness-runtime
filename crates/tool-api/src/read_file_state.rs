@@ -887,23 +887,15 @@ mod tests {
         set_with_requested_path(
             &map,
             rendered_memory.clone(),
-            ReadFileEntry { seeded_from_context: true, ..entry("memory") },
+            ReadFileEntry {
+                seeded_from_context: true,
+                ..entry("memory")
+            },
             false,
             Some(rendered_memory.clone()),
         );
-        set_with_model_context(
-            &map,
-            unrendered_memory.clone(),
-            entry("unrendered"),
-            false,
-        );
-        set_with_requested_path(
-            &map,
-            host.clone(),
-            entry("host"),
-            false,
-            Some(host.clone()),
-        );
+        set_with_model_context(&map, unrendered_memory.clone(), entry("unrendered"), false);
+        set_with_requested_path(&map, host.clone(), entry("host"), false, Some(host.clone()));
 
         let candidates = map.lock().unwrap().changed_file_candidate_keys();
         assert!(candidates.contains(&model));

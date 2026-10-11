@@ -1,0 +1,63 @@
+2026-10-09T02:25:05.992Z [DEBUG] MDM settings load completed in 0ms
+2026-10-09T02:25:05.998Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /Library/Application Support/ClaudeCode/managed-settings.json
+2026-10-09T02:25:05.999Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /private/tmp/native-mcp-tool-result-presence-295-cwd-xfj7d4u2/.claude/settings.json
+2026-10-09T02:25:05.999Z [DEBUG] CA certs: Config fallback - globalEnv keys: , settingsEnv keys: none
+2026-10-09T02:25:06.002Z [DEBUG] [init] configureGlobalMTLS starting
+2026-10-09T02:25:06.002Z [DEBUG] [init] configureGlobalMTLS complete
+2026-10-09T02:25:06.002Z [DEBUG] [init] configureGlobalAgents starting
+2026-10-09T02:25:06.002Z [DEBUG] CA certs: stores=bundled,system, extraCertsPath=undefined
+2026-10-09T02:25:06.002Z [DEBUG] CA certs: Loaded 121 bundled root certificates
+2026-10-09T02:25:06.022Z [DEBUG] CA certs: Loaded 2 system CA certificates
+2026-10-09T02:25:06.022Z [DEBUG] mTLS: Creating HTTPS agent with custom certificates
+2026-10-09T02:25:06.022Z [DEBUG] [init] configureGlobalAgents complete
+2026-10-09T02:25:06.025Z [DEBUG] Git remote URL: null
+2026-10-09T02:25:06.025Z [DEBUG] No git remote URL found
+2026-10-09T02:25:06.026Z [DEBUG] Error log sink initialized
+2026-10-09T02:25:06.026Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/settings.json
+2026-10-09T02:25:06.051Z [ERROR] Failed to save config with lock: Error: ENOENT: no such file or directory, lstat '/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json'
+2026-10-09T02:25:06.052Z [DEBUG] Setting permissions for new file: 600
+2026-10-09T02:25:06.052Z [DEBUG] Writing to temp file: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.f70d2b082f21
+2026-10-09T02:25:06.053Z [DEBUG] Temp file written successfully, size: 84 bytes
+2026-10-09T02:25:06.053Z [DEBUG] Renaming /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.f70d2b082f21 to /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json
+2026-10-09T02:25:06.053Z [DEBUG] File /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json written atomically
+2026-10-09T02:25:06.057Z [DEBUG] Preserving file permissions: 100600
+2026-10-09T02:25:06.057Z [DEBUG] Writing to temp file: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.0d4a2f8bc58a
+2026-10-09T02:25:06.058Z [DEBUG] Applied original permissions to temp file
+2026-10-09T02:25:06.058Z [DEBUG] Temp file written successfully, size: 167 bytes
+2026-10-09T02:25:06.058Z [DEBUG] Renaming /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.0d4a2f8bc58a to /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json
+2026-10-09T02:25:06.058Z [DEBUG] File /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json written atomically
+2026-10-09T02:25:06.060Z [DEBUG] Preserving file permissions: 100600
+2026-10-09T02:25:06.060Z [DEBUG] Writing to temp file: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.cc57d2145abb
+2026-10-09T02:25:06.060Z [DEBUG] Applied original permissions to temp file
+2026-10-09T02:25:06.060Z [DEBUG] Temp file written successfully, size: 203 bytes
+2026-10-09T02:25:06.060Z [DEBUG] Renaming /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.cc57d2145abb to /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json
+2026-10-09T02:25:06.061Z [DEBUG] File /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json written atomically
+2026-10-09T02:25:06.062Z [DEBUG] Preserving file permissions: 100600
+2026-10-09T02:25:06.063Z [DEBUG] Writing to temp file: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.905ab0ef0cc7
+2026-10-09T02:25:06.063Z [DEBUG] Applied original permissions to temp file
+2026-10-09T02:25:06.063Z [DEBUG] Temp file written successfully, size: 242 bytes
+2026-10-09T02:25:06.063Z [DEBUG] Renaming /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.905ab0ef0cc7 to /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json
+2026-10-09T02:25:06.064Z [DEBUG] File /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json written atomically
+2026-10-09T02:25:06.066Z [DEBUG] Preserving file permissions: 100600
+2026-10-09T02:25:06.066Z [DEBUG] Writing to temp file: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.6f95b615ba77
+2026-10-09T02:25:06.067Z [DEBUG] Applied original permissions to temp file
+2026-10-09T02:25:06.067Z [DEBUG] Temp file written successfully, size: 269 bytes
+2026-10-09T02:25:06.067Z [DEBUG] Renaming /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.6f95b615ba77 to /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json
+2026-10-09T02:25:06.067Z [DEBUG] File /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json written atomically
+2026-10-09T02:25:06.069Z [DEBUG] Preserving file permissions: 100600
+2026-10-09T02:25:06.069Z [DEBUG] Writing to temp file: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.3b1d1034f24a
+2026-10-09T02:25:06.069Z [DEBUG] Applied original permissions to temp file
+2026-10-09T02:25:06.069Z [DEBUG] Temp file written successfully, size: 317 bytes
+2026-10-09T02:25:06.069Z [DEBUG] Renaming /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.3b1d1034f24a to /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json
+2026-10-09T02:25:06.070Z [DEBUG] File /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json written atomically
+2026-10-09T02:25:06.071Z [DEBUG] Preserving file permissions: 100600
+2026-10-09T02:25:06.071Z [DEBUG] Writing to temp file: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.cd2b3e4a00cd
+2026-10-09T02:25:06.071Z [DEBUG] Applied original permissions to temp file
+2026-10-09T02:25:06.072Z [DEBUG] Temp file written successfully, size: 343 bytes
+2026-10-09T02:25:06.072Z [DEBUG] Renaming /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.cd2b3e4a00cd to /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json
+2026-10-09T02:25:06.072Z [DEBUG] File /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json written atomically
+2026-10-09T02:25:06.083Z [DEBUG] [Claude in Chrome] Disabled: OAuth token has no scope accepted by /api/oauth/validate (needs user:profile, user:office, or user:ccr_inference; env-var and setup-token sessions default to user:inference only)
+2026-10-09T02:25:06.086Z [DEBUG] [ToolSearch:optimistic] disabled: ANTHROPIC_BASE_URL=http://127.0.0.1:55007 is not a first-party Anthropic host. Set ENABLE_TOOL_SEARCH=true (or auto / auto:N) if your proxy forwards tool_reference blocks.
+2026-10-09T02:25:06.410Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /private/tmp/native-mcp-tool-result-presence-295-cwd-xfj7d4u2/.claude/settings.local.json
+2026-10-09T02:25:06.410Z [DEBUG] [STARTUP] Loading MCP configs...
+2026-10-09T02:25:06.412Z [DEBUG] [STARTUP] Running setup()...

@@ -5,6 +5,7 @@
 //! teammates.
 
 use crate::mailbox::{MailboxRouter, TeammateMailbox};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::AgentId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -110,6 +111,26 @@ pub(crate) struct ApprovedDepartureProgress {
     notified: bool,
 }
 
+/// Keep the mailbox's JSON-text frame shape while embedding the notification
+/// as its actual source string rather than the projection carrier object.
+fn teammate_terminated_content(
+    notification: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, String> {
+    // Keep the existing json! literal order while importing the exact source value.
+    let frame = Utf16JsonProjection::object(vec![
+        (
+            "type".to_owned(),
+            Utf16JsonProjection::from("teammate_terminated"),
+        ),
+        ("message".to_owned(), notification.clone()),
+    ])
+    .map_err(|error| format!("Build teammate departure frame: {error}"))?;
+    frame
+        .to_json_string()
+        .map(|json| Utf16JsonProjection::from(json))
+        .map_err(|error| format!("Serialize teammate departure frame: {error}"))
+}
+
 impl PendingApprovedDeparture {
     async fn complete(&self, router: &MailboxRouter) -> Result<(), String> {
         let mut progress = self.progress.lock().await;
@@ -165,12 +186,21 @@ impl PendingApprovedDeparture {
             task_store::TeammateEndReason::Shutdown,
             &progress.unassigned,
         );
-        router.route(&self.leader, crate::mailbox::TeammateMessage {
-            from: self.from.clone(), from_name: self.from_name.clone(),
-            content: serde_json::json!({"type":"teammate_terminated", "message":notification_message}).to_string().into(),
-            summary: None, message_id: tool_api::util::ids::ulid_or_uuid(), timestamp: SystemTime::now(),
-            request_id: Some(self.request_id.clone()),
-        }).await.map_err(|error| format!("Notify teammate departure: {error}"))?;
+        router
+            .route(
+                &self.leader,
+                crate::mailbox::TeammateMessage {
+                    from: self.from.clone(),
+                    from_name: self.from_name.clone(),
+                    content: teammate_terminated_content(&notification_message)?,
+                    summary: None,
+                    message_id: tool_api::util::ids::ulid_or_uuid(),
+                    timestamp: SystemTime::now(),
+                    request_id: Some(self.request_id.clone()),
+                },
+            )
+            .await
+            .map_err(|error| format!("Notify teammate departure: {error}"))?;
         progress.notified = true;
         Ok(())
     }
@@ -604,6 +634,38 @@ fn apply_handler_transition(current: &mut WorkerStatus, status: WorkerStatus) ->
 mod tests {
     use super::*;
 
+    #[test]
+    fn teammate_terminated_content_preserves_unpaired_notification_units() {
+        let subject_units = "kept "
+            .encode_utf16()
+            .chain([0xd800])
+            .chain(" end".encode_utf16())
+            .collect::<Vec<_>>();
+        let subject = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&subject_units),
+            subject_units,
+        )
+        .unwrap();
+        let notification = task_store::format_unassignment_notification(
+            "nova",
+            task_store::TeammateEndReason::Shutdown,
+            &[task_store::UnassignedTask {
+                id: "1".into(),
+                subject,
+            }],
+        );
+        let expected_units = notification.string_units("").unwrap();
+        assert!(expected_units.contains(&0xd800));
+
+        let content = teammate_terminated_content(&notification).unwrap();
+        let frame_units = content.string_units("").unwrap();
+        let frame_json = String::from_utf16(&frame_units).unwrap();
+        assert!(frame_json.starts_with("{\"type\":\"teammate_terminated\",\"message\":\""));
+        let frame = Utf16JsonProjection::parse_utf16_json(&frame_units).unwrap();
+        assert_eq!(frame.string_at("/type"), Some("teammate_terminated"));
+        assert_eq!(frame.string_units("/message"), Some(expected_units));
+    }
+
     #[tokio::test]
     async fn approved_departure_accumulates_committed_tasks_across_retries() {
         let home = tempfile::tempdir().unwrap();
@@ -682,10 +744,8 @@ mod tests {
                 },
             ],
         );
-        let value = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
-            &messages[0].content.to_json_string().unwrap(),
-        )
-        .unwrap();
+        let frame_units = messages[0].content.string_units("").unwrap();
+        let value = Utf16JsonProjection::parse_utf16_json(&frame_units).unwrap();
         assert_eq!(value.string_units("/message"), expected.string_units(""));
     }
 
@@ -786,13 +846,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].request_id.as_deref(), Some("approval-1"));
         assert_eq!(messages[0].from_name, "nova");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                &messages[0].content.to_json_string().unwrap(),
-            )
-            .unwrap(),
-            serde_json::json!({"type":"teammate_terminated", "message":"nova has shut down."})
-        );
+        let frame_units = messages[0].content.string_units("").unwrap();
+        let frame = Utf16JsonProjection::parse_utf16_json(&frame_units).unwrap();
+        assert_eq!(frame.string_at("/type"), Some("teammate_terminated"));
+        assert_eq!(frame.string_at("/message"), Some("nova has shut down."));
     }
 
     #[tokio::test]

@@ -1,0 +1,280 @@
+{
+  "native_version": "2.1.293",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "base_url_scope": "127.0.0.1 only, dummy key, no relay; telemetry disabled in fixture env",
+  "fixed_inputs": {
+    "cwd": "/private/tmp/commands-native-293-rerun-20261008/run-output/run/cwd",
+    "config_dir": "/private/tmp/commands-native-293-rerun-20261008/run-output/run/config",
+    "model": "claude-sonnet-4-5",
+    "locale": "C.UTF-8",
+    "timezone": "UTC",
+    "skills": [
+      "skill-🧪-probe",
+      "skill.alpha+beta"
+    ]
+  },
+  "cases": [
+    {
+      "id": "slash-only",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003001",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003001",
+        "/"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "slash-only.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "slash-only.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "slash-only",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 27649,
+          "sha256": "0c7a4d924e1f3abc49fa03749d65caed44eba6fb9827e7c1b6588acf25af5126",
+          "raw_file": "run-output/requests/slash-only.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-293-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003001.jsonl",
+        "capture_file": "run-output/sessions/slash-only.jsonl",
+        "bytes": 58295,
+        "sha256": "45d8a0bf3c9b2c38ed8d4701cf698b7c6cb577eb1bd9e7229e2295ba916259f8"
+      }
+    },
+    {
+      "id": "unknown-slash-command",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003002",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003002",
+        "/__native_unknown_293__ fixed-argument"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "unknown-slash-command.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "unknown-slash-command.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unknown-slash-command",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 29648,
+          "sha256": "425ef908d581cba6474a8c0557d849239f2b9ed7c48274a449c57092e6b8a085",
+          "raw_file": "run-output/requests/unknown-slash-command.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-293-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003002.jsonl",
+        "capture_file": "run-output/sessions/unknown-slash-command.jsonl",
+        "bytes": 63474,
+        "sha256": "42ca1636bac4471dedd420e0fd323b6879515187e947e601d182aa5d1200ab1c"
+      }
+    },
+    {
+      "id": "unicode-skill-name",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003003",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003003",
+        "/skill-🧪-probe"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "unicode-skill-name.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "unicode-skill-name.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unicode-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 29059,
+          "sha256": "fd69321c6ad42843b22fe3ce281e3d4c352c7ce2d3850436fe4f40dc6c2d67ba",
+          "raw_file": "run-output/requests/unicode-skill-name.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-293-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003003.jsonl",
+        "capture_file": "run-output/sessions/unicode-skill-name.jsonl",
+        "bytes": 62511,
+        "sha256": "553692f533808bda1700da8a5eeffa0b3499d5621de6def91111a73afc2332f2"
+      }
+    },
+    {
+      "id": "punctuation-skill-name",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003004",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003004",
+        "/skill.alpha+beta"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "punctuation-skill-name.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "punctuation-skill-name.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "punctuation-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 29059,
+          "sha256": "d6a1e2ae5e1e3860e1b5ac4c638e01f183c6ad313d7b10e6a6b9e59aa4981538",
+          "raw_file": "run-output/requests/punctuation-skill-name.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-293-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003004.jsonl",
+        "capture_file": "run-output/sessions/punctuation-skill-name.jsonl",
+        "bytes": 62511,
+        "sha256": "e7088cb55e3047c4032232432e5e3407f360a35540cbab4c433752edfc7d980e"
+      }
+    },
+    {
+      "id": "unpaired-surrogate-skill-name",
+      "kind": "stream-json",
+      "session_id": "00000000-0000-4000-8000-000000003005",
+      "prompt_code_units_hex": "2f0073006b0069006c006c005f0000d85f00700072006f0062006500",
+      "input_file": "inputs/unpaired-surrogate-skill-name.stdin.jsonl",
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003005",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "unpaired-surrogate-skill-name.stdout",
+      "stdout_bytes": 4379,
+      "stdout_sha256": "9b51686210fae9f2707e766598d6463c8927b186b01d4d1e4a20d84a5a2b79f7",
+      "stderr_file": "unpaired-surrogate-skill-name.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unpaired-surrogate-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 27664,
+          "sha256": "df53cc2c85df55c8f20604014ec4ca27b289d7ca146cd7183f993b284b61611c",
+          "raw_file": "run-output/requests/unpaired-surrogate-skill-name.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-293-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003005.jsonl",
+        "capture_file": "run-output/sessions/unpaired-surrogate-skill-name.jsonl",
+        "bytes": 58317,
+        "sha256": "65d03627ae3e46ff6dc075ccafc4dfcdb7acd897eff1943b1e80fb93e0440778"
+      }
+    }
+  ],
+  "all_requests_accepted_locally": true,
+  "no_upstream_relay": true,
+  "scope": "Native command parse/fallback, Unicode/punctuation/unpaired-surrogate Skill-name and session persistence fixtures; no Harness result implied"
+}

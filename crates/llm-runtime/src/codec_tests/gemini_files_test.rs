@@ -55,7 +55,10 @@ fn start_upload_request_pins_url_headers_and_body_for_v1beta_base() {
         super::json_payload_value(&request.body_json),
         serde_json::json!({"file": {"display_name": "my file"}})
     );
-    assert_eq!(request.body_bytes, None);
+    assert_eq!(
+        request.body_bytes.as_deref(),
+        Some(&br#"{"file":{"display_name":"my file"}}"#[..])
+    );
 }
 
 #[test]

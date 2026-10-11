@@ -78,7 +78,7 @@ async fn scheduled_turn_keeps_unpaired_utf16_prompt_units_in_history() {
         message_delta_stop("end_turn"),
         message_stop()
     ]]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         crate::OrchestratorConfig::default(),
         api,
         streaming.clone(),
@@ -88,7 +88,7 @@ async fn scheduled_turn_keeps_unpaired_utf16_prompt_units_in_history() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     let prompt =
         lingxi_core::types::utf16_json::Utf16JsonProjection::root_string("�".into(), vec![0xd800])
             .unwrap();

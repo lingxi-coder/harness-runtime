@@ -208,7 +208,8 @@ fn spawn_hook_profile_omission_preserves_and_null_clears() {
         assert!(
             apply_spawn_rewrite(&request, Some(&json!({"model_profile": value})))
                 .unwrap_err()
-                .contains("must be a string or null")
+                .string_at("")
+                .is_some_and(|message| message.contains("must be a string or null"))
         );
     }
 }
@@ -220,7 +221,9 @@ fn spawn_hook_profile_requires_child_model_and_clear_both_to_inherit() {
         ..request()
     };
     let error = apply_spawn_rewrite(&pinned, Some(&json!({"model": null}))).unwrap_err();
-    assert!(error.contains("requires an explicit model"));
+    assert!(error
+        .string_at("")
+        .is_some_and(|message| message.contains("requires an explicit model")));
     let cleared = apply_spawn_rewrite(
         &pinned,
         Some(&json!({"model": null, "model_profile": null})),
@@ -236,6 +239,7 @@ fn spawn_hook_profile_requires_child_model_and_clear_both_to_inherit() {
     assert!(
         apply_spawn_rewrite(&inherited, Some(&json!({"model_profile": "b"})))
             .unwrap_err()
-            .contains("requires an explicit model")
+            .string_at("")
+            .is_some_and(|message| message.contains("requires an explicit model"))
     );
 }

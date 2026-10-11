@@ -1,0 +1,18 @@
+{
+  "name": "session-6a4ca590",
+  "createdAt": 1791480245708,
+  "leadAgentId": "team-lead@session-6a4ca590",
+  "leadSessionId": "6a4ca590-8950-4704-a40b-305ab7b2bc4c",
+  "members": [
+    {
+      "agentId": "team-lead@session-6a4ca590",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "joinedAt": 1791480245708,
+      "tmuxPaneId": "leader",
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/commands/skill-description-width/run-output/valid-ascii/cwd",
+      "subscriptions": [],
+      "backendType": "in-process"
+    }
+  ]
+}

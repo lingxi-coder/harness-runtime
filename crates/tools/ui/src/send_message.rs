@@ -32,7 +32,9 @@ use lingxi_core::host::task_registry::TaskRegistryHandle;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
+#[cfg(test)]
+use serde_json::Value;
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{SEND_MESSAGE_COMPLETED, SEND_MESSAGE_FAILED, SEND_MESSAGE_STARTED};
@@ -41,10 +43,10 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    generated_builtin_result, generated_builtin_schema, source_text_projection,
-    source_text_projection_units, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
-    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
-    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
+    generated_builtin_result, source_text_projection, source_text_projection_units,
+    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
+    ValidationError,
 };
 use tool_api::BuiltinToolContext;
 
@@ -1416,6 +1418,7 @@ mod tests {
         TaskRegistryHandle, TaskUpdatePatch,
     };
     use mobile_linux_api::ProcessOutput;
+    use serde_json::Value;
     use std::sync::{Mutex, OnceLock};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
@@ -1651,6 +1654,13 @@ mod tests {
         let mut ctx = shell_test_ctx(dummy_out());
         ctx.mailbox_router = Some(router as Arc<dyn MailboxRouterHandle>);
         ctx
+    }
+
+    fn routed_json(router: &RecordingRouter, index: usize) -> Value {
+        let serialized = router.routed_source.lock().unwrap()[index]
+            .to_json_string()
+            .expect("recorded source projection is valid JSON");
+        serde_json::from_str(&serialized).expect("recorded structured message is JSON")
     }
 
     fn ctx_with_shutdown(
@@ -2514,7 +2524,7 @@ mod tests {
         // The structured payload was delivered to the named recipient.
         let routed = router.routed.lock().unwrap();
         assert_eq!(routed[0].1, "researcher");
-        let frame: Value = serde_json::from_str(&routed[0].2).unwrap();
+        let frame = routed_json(&router, 0);
         assert_eq!(frame["type"], "shutdown_request");
         assert_eq!(frame["from"], "team-lead");
         assert_eq!(frame["reason"], "done for the day");
@@ -2573,8 +2583,7 @@ mod tests {
         .await
         .expect("team lead may approve");
 
-        let routed = router.routed.lock().unwrap();
-        let frame: Value = serde_json::from_str(&routed[0].2).unwrap();
+        let frame = routed_json(&router, 0);
         assert_eq!(frame["type"], "plan_approval_response");
         assert_eq!(frame["permissionMode"], "acceptEdits");
         assert!(frame.get("from").is_none());
@@ -2605,7 +2614,7 @@ mod tests {
         .await
         .expect("team lead may approve");
 
-        let frame: Value = serde_json::from_str(&router.routed.lock().unwrap()[0].2).unwrap();
+        let frame = routed_json(&router, 0);
         assert_eq!(frame["permissionMode"], "default");
     }
 
@@ -2630,7 +2639,7 @@ mod tests {
         .await
         .expect("team lead may approve with feedback");
 
-        let frame: Value = serde_json::from_str(&router.routed.lock().unwrap()[0].2).unwrap();
+        let frame = routed_json(&router, 0);
         assert_eq!(frame["feedback"], "Proceed with the smaller diff");
         assert!(frame.get("from").is_none());
     }
@@ -2658,7 +2667,7 @@ mod tests {
             .await
             .expect("team lead may reject");
 
-        let frame: Value = serde_json::from_str(&router.routed.lock().unwrap()[0].2).unwrap();
+        let frame = routed_json(&router, 0);
         assert_eq!(frame["feedback"], "x".repeat(80));
         assert!(frame.get("from").is_none());
         assert_eq!(

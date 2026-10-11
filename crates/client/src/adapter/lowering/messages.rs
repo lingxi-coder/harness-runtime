@@ -324,7 +324,11 @@ pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
 #[must_use]
 pub fn lower_transcript_with_tool_results<S: std::hash::BuildHasher>(
     history: &[ConversationMessage],
-    tool_results: &std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection, S>,
+    tool_results: &std::collections::HashMap<
+        String,
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        S,
+    >,
 ) -> Vec<MessageDto> {
     lower_transcript_with_identities(history, tool_results)
         .into_iter()
@@ -337,7 +341,11 @@ pub fn lower_transcript_with_tool_results<S: std::hash::BuildHasher>(
 #[must_use]
 pub fn lower_transcript_with_identities<S: std::hash::BuildHasher>(
     history: &[ConversationMessage],
-    tool_results: &std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection, S>,
+    tool_results: &std::collections::HashMap<
+        String,
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        S,
+    >,
 ) -> Vec<(lingxi_core::types::MessageId, MessageDto)> {
     let mut transcript = lower_transcript_inner(history);
     // A post-pass rather than a hook inside `lower_content_block_with`: that
@@ -354,7 +362,10 @@ pub fn lower_transcript_with_identities<S: std::hash::BuildHasher>(
             } = block
             {
                 if let Some(data) = tool_results.get(id.as_str()) {
-                    *result_json = data.to_json_string().expect("persisted tool result is a valid source projection").into();
+                    *result_json = data
+                        .to_json_string()
+                        .expect("persisted tool result is a valid source projection")
+                        .into();
                 }
             }
         }

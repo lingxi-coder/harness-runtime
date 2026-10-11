@@ -626,8 +626,7 @@ mod tests {
         assert_eq!(
             sent.system_prompt
                 .as_ref()
-                .and_then(|source| source.string_at(""))
-                .as_deref(),
+                .and_then(|source| source.string_at("")),
             Some("PARENT SYSTEM PROMPT")
         );
         assert_eq!(sent.max_tokens, 512); // honored override
@@ -824,10 +823,7 @@ mod tests {
 
         assert_eq!(result.final_text.string_at(""), Some(""));
         assert_eq!(result.tool_calls.len(), 1);
-        assert_eq!(
-            result.tool_calls[0].string_at("/name").as_deref(),
-            Some("Read")
-        );
+        assert_eq!(result.tool_calls[0].string_at("/name"), Some("Read"));
     }
 
     #[tokio::test]

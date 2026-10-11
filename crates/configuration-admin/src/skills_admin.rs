@@ -1,4 +1,5 @@
 use client::protocol::commands::SkillAdminCommandDto;
+use client::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use plugin::plugin_source_sha256;
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,7 @@ pub struct SkillCatalogEnvelope {
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillCatalogEntry {
-    pub id: String,
+    pub id: ClientTextDto,
     pub name: String,
     pub source: String,
     pub root_dir: String,
@@ -49,7 +50,7 @@ pub struct SkillCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub trash_id: Option<String>,
+    pub trash_id: Option<ClientTextDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trashed_at: Option<String>,
 }
@@ -57,7 +58,7 @@ pub struct SkillCatalogEntry {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillDocumentEnvelope {
-    pub id: String,
+    pub id: ClientTextDto,
     pub name: String,
     pub source: String,
     pub directory: String,
@@ -129,7 +130,7 @@ pub fn handle(
         "get_document" => {
             let target = command
                 .target
-                .as_deref()
+                .as_ref()
                 .ok_or_else(|| "skill document target is required".to_string())?;
             Ok(SkillAdminOutcome::Document(document_json(target, ctx)?))
         }
@@ -148,7 +149,7 @@ pub fn handle(
             let document = save_document(
                 ctx,
                 scope,
-                command.target.as_deref(),
+                command.target.as_ref(),
                 command.revision.as_deref(),
                 payload,
             )?;
@@ -160,7 +161,7 @@ pub fn handle(
         "move_skill" => {
             let source = command
                 .target
-                .as_deref()
+                .as_ref()
                 .ok_or_else(|| "skill target is required".to_string())?;
             let scope = command
                 .scope
@@ -180,17 +181,20 @@ pub fn handle(
                 command.revision.as_deref(),
                 payload.name.as_deref(),
             )?;
-            let moved_name = payload.name.clone().unwrap_or_else(|| file_name(source));
+            let moved_name = payload
+                .name
+                .clone()
+                .unwrap_or_else(|| file_name(target_os_string(source)));
             let moved_path = destination_dir(&root_for_scope(ctx, scope)?, &moved_name)?;
             Ok(SkillAdminOutcome::Changed {
                 catalog_json: catalog_json(ctx)?,
-                document_json: Some(document_json(moved_path.to_string_lossy().as_ref(), ctx)?),
+                document_json: Some(document_json(&path_source_text(&moved_path), ctx)?),
             })
         }
         "trash_skill" => {
             let target = command
                 .target
-                .as_deref()
+                .as_ref()
                 .ok_or_else(|| "skill target is required".to_string())?;
             trash_skill(ctx, target, command.revision.as_deref())?;
             Ok(SkillAdminOutcome::Changed {
@@ -201,7 +205,7 @@ pub fn handle(
         "restore_skill" => {
             let trash_id = command
                 .target
-                .as_deref()
+                .as_ref()
                 .ok_or_else(|| "trash skill target is required".to_string())?;
             let scope = command
                 .scope
@@ -217,13 +221,13 @@ pub fn handle(
             let restored = restore_skill(ctx, trash_id, scope, payload.name.as_deref())?;
             Ok(SkillAdminOutcome::Changed {
                 catalog_json: catalog_json(ctx)?,
-                document_json: Some(document_json(restored.to_string_lossy().as_ref(), ctx)?),
+                document_json: Some(document_json(&path_source_text(&restored), ctx)?),
             })
         }
         "purge_trash_skill" => {
             let trash_id = command
                 .target
-                .as_deref()
+                .as_ref()
                 .ok_or_else(|| "trash skill target is required".to_string())?;
             let payload: PurgeSkillPayload = serde_json::from_str(
                 command
@@ -254,13 +258,22 @@ pub fn catalog_json(ctx: &SkillsAdminContext) -> Result<String, String> {
     .map_err(|error| format!("failed to serialize skill catalog: {error}"))
 }
 
-pub fn document_json(target: &str, ctx: &SkillsAdminContext) -> Result<String, String> {
-    let path = PathBuf::from(target);
-    let entry = entry_for_path(&path, ctx)?;
-    let inspection = if entry.source == "bundled" {
-        inspect_markdown(&bundled_markdown(&entry.name)?)
+pub fn document_json(target: &ClientTextDto, ctx: &SkillsAdminContext) -> Result<String, String> {
+    let target_units = target.code_units.as_slice();
+    let bundled_name = bundled_name_units(target_units);
+    let (entry, inspection) = if let Some(name_units) = bundled_name {
+        let entry = bundled_entries()?
+            .into_iter()
+            .find(|entry| entry.name.encode_utf16().eq(name_units.iter().copied()))
+            .ok_or_else(|| "unknown bundled skill identifier".to_string())?;
+        let name = String::from_utf16(name_units)
+            .map_err(|_| "unknown bundled skill identifier".to_string())?;
+        (entry, inspect_markdown(&bundled_markdown(&name)?))
     } else {
-        inspect_markdown(&read_text(&path.join(SKILL_FILE))?)
+        let path = PathBuf::from(target_os_string(target));
+        let entry = entry_for_path(&path, ctx)?;
+        let inspection = inspect_markdown(&read_text(&path.join(SKILL_FILE))?);
+        (entry, inspection)
     };
     serde_json::to_string(&SkillDocumentEnvelope {
         id: entry.id,
@@ -314,7 +327,7 @@ fn scan_root(root: &Path, source: &str, writable: bool) -> Result<Vec<SkillCatal
         }
         let inspection = inspect_markdown(&read_text(&path.join(SKILL_FILE)).unwrap_or_default());
         out.push(SkillCatalogEntry {
-            id: path.to_string_lossy().into_owned(),
+            id: path_source_text(&path),
             name: entry.file_name().to_string_lossy().into_owned(),
             source: source.to_string(),
             root_dir: root.to_string_lossy().into_owned(),
@@ -344,7 +357,7 @@ fn bundled_entries() -> Result<Vec<SkillCatalogEntry>, String> {
             let skill = registry.get(name).expect("bundled skill exists");
             let markdown = bundled_markdown(name).unwrap_or_default();
             SkillCatalogEntry {
-                id: format!("<bundled:{name}>"),
+                id: ClientTextDto::from(format!("<bundled:{name}>")),
                 name: name.to_string(),
                 source: "bundled".to_string(),
                 root_dir: "<bundled>".to_string(),
@@ -414,7 +427,7 @@ fn nearest_git_root(cwd: &Path) -> Option<PathBuf> {
 fn save_document(
     ctx: &SkillsAdminContext,
     scope: &str,
-    current_target: Option<&str>,
+    current_target: Option<&ClientTextDto>,
     revision: Option<&str>,
     payload: SaveSkillPayload,
 ) -> Result<String, String> {
@@ -425,7 +438,7 @@ fn save_document(
         .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
     let directory = destination_dir(&root, &payload.name)?;
     if let Some(current_target) = current_target {
-        let current = PathBuf::from(current_target);
+        let current = PathBuf::from(target_os_string(current_target));
         validate_existing_skill_path(&current, ctx)?;
         let current_file = current.join(SKILL_FILE);
         let current_text = read_text(&current_file)?;
@@ -448,17 +461,18 @@ fn save_document(
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("failed to create {}: {error}", directory.display()))?;
     atomic_write(&directory.join(SKILL_FILE), payload.markdown.as_bytes())?;
-    document_json(directory.to_string_lossy().as_ref(), ctx)
+    document_json(&path_source_text(&directory), ctx)
 }
 
 fn move_skill(
     ctx: &SkillsAdminContext,
-    source: &str,
+    source: &ClientTextDto,
     scope: &str,
     revision: Option<&str>,
     next_name: Option<&str>,
 ) -> Result<(), String> {
-    let current = PathBuf::from(source);
+    let source_path = target_os_string(source);
+    let current = PathBuf::from(&source_path);
     validate_existing_skill_path(&current, ctx)?;
     let current_text = read_text(&current.join(SKILL_FILE))?;
     ensure_revision(
@@ -467,7 +481,7 @@ fn move_skill(
         "skill",
     )?;
     let root = root_for_scope(ctx, scope)?;
-    let inherited_name = file_name(source);
+    let inherited_name = file_name(&source_path);
     let name = next_name.unwrap_or(inherited_name.as_str());
     validate_skill_name(name)?;
     let destination = destination_dir(&root, name)?;
@@ -477,10 +491,10 @@ fn move_skill(
 
 fn trash_skill(
     ctx: &SkillsAdminContext,
-    target: &str,
+    target: &ClientTextDto,
     revision: Option<&str>,
 ) -> Result<(), String> {
-    let current = PathBuf::from(target);
+    let current = PathBuf::from(target_os_string(target));
     validate_existing_skill_path(&current, ctx)?;
     let current_text = read_text(&current.join(SKILL_FILE))?;
     ensure_revision(
@@ -509,12 +523,13 @@ fn trash_skill(
 
 fn restore_skill(
     ctx: &SkillsAdminContext,
-    trash_id: &str,
+    trash_id: &ClientTextDto,
     scope: &str,
     next_name: Option<&str>,
 ) -> Result<PathBuf, String> {
-    validate_skill_name(trash_id)?;
-    let trash_dir = trash_root(&ctx.lingxi_home).join(trash_id);
+    let trash_id = target_os_string(trash_id);
+    validate_skill_name(&trash_id)?;
+    let trash_dir = trash_root(&ctx.lingxi_home).join(&trash_id);
     validate_existing_trash_path(&trash_dir, &ctx.lingxi_home)?;
     let metadata: TrashMetadata =
         serde_json::from_str(&read_text(&trash_dir.join(TRASH_META_FILE))?)
@@ -528,9 +543,10 @@ fn restore_skill(
     Ok(destination)
 }
 
-fn purge_skill(ctx: &SkillsAdminContext, trash_id: &str) -> Result<(), String> {
-    validate_skill_name(trash_id)?;
-    let path = trash_root(&ctx.lingxi_home).join(trash_id);
+fn purge_skill(ctx: &SkillsAdminContext, trash_id: &ClientTextDto) -> Result<(), String> {
+    let trash_id = target_os_string(trash_id);
+    validate_skill_name(&trash_id)?;
+    let path = trash_root(&ctx.lingxi_home).join(&trash_id);
     validate_existing_trash_path(&path, &ctx.lingxi_home)?;
     std::fs::remove_dir_all(&path)
         .map_err(|error| format!("failed to purge {}: {error}", path.display()))
@@ -556,7 +572,7 @@ fn trash_entries(ctx: &SkillsAdminContext) -> Result<Vec<SkillCatalogEntry>, Str
         let inspection =
             inspect_markdown(&read_text(&directory.join(SKILL_FILE)).unwrap_or_default());
         out.push(SkillCatalogEntry {
-            id: directory.to_string_lossy().into_owned(),
+            id: path_source_text(&directory),
             name: file_name(metadata.as_ref().map_or_else(
                 || directory.to_string_lossy().into_owned(),
                 |meta| meta.original_directory.clone(),
@@ -571,7 +587,7 @@ fn trash_entries(ctx: &SkillsAdminContext) -> Result<Vec<SkillCatalogEntry>, Str
             when_to_use: inspection.when_to_use,
             parse_error: inspection.parse_error,
             diagnostics_json: inspection.diagnostics_json,
-            trash_id: Some(trash_id),
+            trash_id: Some(ClientTextDto::from(trash_id)),
             trashed_at: metadata.map(|meta| meta.trashed_at),
         });
     }
@@ -580,19 +596,27 @@ fn trash_entries(ctx: &SkillsAdminContext) -> Result<Vec<SkillCatalogEntry>, Str
 }
 
 fn entry_for_path(path: &Path, ctx: &SkillsAdminContext) -> Result<SkillCatalogEntry, String> {
-    if let Some(rest) = path.to_string_lossy().strip_prefix("<bundled:") {
-        let name = rest.trim_end_matches('>');
-        return bundled_entries()?
-            .into_iter()
-            .find(|entry| entry.name == name)
-            .ok_or_else(|| format!("unknown bundled skill: {name}"));
-    }
     let mut entries = catalog_entries(ctx)?;
     entries.extend(trash_entries(ctx)?);
     entries
         .into_iter()
         .find(|entry| entry.directory == path.to_string_lossy())
         .ok_or_else(|| format!("unknown skill path: {}", path.display()))
+}
+
+fn target_os_string(target: &ClientTextDto) -> String {
+    String::from_utf16_lossy(&target.code_units)
+}
+
+fn path_source_text(path: &Path) -> ClientTextDto {
+    ClientTextDto::from(path.to_string_lossy().into_owned())
+}
+
+fn bundled_name_units(target: &[u16]) -> Option<&[u16]> {
+    let prefix = "<bundled:".encode_utf16().collect::<Vec<_>>();
+    target
+        .strip_prefix(prefix.as_slice())?
+        .strip_suffix(&[b'>' as u16])
 }
 
 fn validate_existing_skill_path(path: &Path, ctx: &SkillsAdminContext) -> Result<(), String> {
@@ -912,6 +936,43 @@ mod tests {
         SkillsAdminContext { cwd, lingxi_home }
     }
 
+    #[test]
+    fn catalog_identity_round_trips_through_document_loading() {
+        let root = temp_root("catalog-source-id");
+        let ctx = context(&root);
+        let user_root = ctx.lingxi_home.join("skills");
+        let dir = write_skill(
+            &user_root,
+            "rocket-🚀",
+            "---\nname: rocket\ndescription: source id\n---\nBody\n",
+        );
+        let entry = catalog_entries(&ctx)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.directory == dir.to_string_lossy())
+            .expect("skill appears in catalog");
+        let expected = dir.to_string_lossy().encode_utf16().collect::<Vec<_>>();
+        assert_eq!(entry.id.code_units, expected);
+
+        let catalog = Utf16JsonProjection::parse(&catalog_json(&ctx).unwrap()).unwrap();
+        let entry_count = catalog.array_len("/entries").unwrap();
+        assert!((0..entry_count).any(|index| {
+            catalog.string_units(&format!("/entries/{index}/id")) == Some(expected.clone())
+        }));
+
+        let document =
+            Utf16JsonProjection::parse(&document_json(&entry.id, &ctx).unwrap()).unwrap();
+        assert_eq!(document.string_units("/id"), Some(expected));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bundled_identity_prefix_keeps_lone_surrogate_units() {
+        let mut identity = "<bundled:".encode_utf16().collect::<Vec<_>>();
+        identity.extend([0xd800, b'>' as u16]);
+        assert_eq!(bundled_name_units(&identity), Some(&[0xd800][..]));
+    }
+
     fn write_skill(root: &Path, name: &str, markdown: &str) -> PathBuf {
         let dir = root.join(name);
         fs::create_dir_all(&dir).unwrap();
@@ -937,7 +998,8 @@ mod tests {
             "---\nname: alpha\ndescription: alpha\n---\nBody\n",
         );
         let revision = sha256_hex(&fs::read(dir.join(SKILL_FILE)).unwrap());
-        trash_skill(&ctx, dir.to_string_lossy().as_ref(), Some(&revision)).unwrap();
+        let dir_target = ClientTextDto::from(dir.to_string_lossy().into_owned());
+        trash_skill(&ctx, &dir_target, Some(&revision)).unwrap();
         let trash = trash_entries(&ctx).unwrap();
         let trash_id = trash[0].trash_id.clone().unwrap();
         let restored = restore_skill(&ctx, &trash_id, "project", Some("beta")).unwrap();
@@ -960,7 +1022,7 @@ mod tests {
         let save_err = save_document(
             &ctx,
             "user",
-            Some(outside.to_string_lossy().as_ref()),
+            Some(&ClientTextDto::from(outside.to_string_lossy().into_owned())),
             None,
             SaveSkillPayload {
                 name: "rogue".to_string(),
@@ -972,7 +1034,7 @@ mod tests {
 
         let move_err = move_skill(
             &ctx,
-            outside.to_string_lossy().as_ref(),
+            &ClientTextDto::from(outside.to_string_lossy().into_owned()),
             "user",
             None,
             Some("moved"),
@@ -1002,7 +1064,7 @@ mod tests {
         let error = save_document(
             &ctx,
             "user",
-            Some(damaged.to_string_lossy().as_ref()),
+            Some(&ClientTextDto::from(damaged.to_string_lossy().into_owned())),
             Some(&stale_revision),
             SaveSkillPayload {
                 name: "damaged".to_string(),
@@ -1061,7 +1123,7 @@ mod tests {
             SkillAdminCommandDto {
                 action: "purge_trash_skill".to_string(),
                 operation_id: None,
-                target: Some("skill-1".to_string()),
+                target: Some("skill-1".to_string().into()),
                 scope: None,
                 revision: None,
                 payload_json: Some(json!({ "confirmed": false }).to_string()),
@@ -1076,7 +1138,7 @@ mod tests {
             SkillAdminCommandDto {
                 action: "purge_trash_skill".to_string(),
                 operation_id: None,
-                target: Some("skill-1".to_string()),
+                target: Some("skill-1".to_string().into()),
                 scope: None,
                 revision: None,
                 payload_json: Some(json!({ "confirmed": true }).to_string()),

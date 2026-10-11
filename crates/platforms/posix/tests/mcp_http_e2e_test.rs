@@ -10,8 +10,8 @@
 //! returns the appropriate result envelope, echoing the request `id` back.
 //! HTTP is 1:1 request/response, so a single handler suffices (no SSE channel).
 
-use axum::{Json, Router, routing::post};
-use serde_json::{Value, json};
+use axum::{routing::post, Json, Router};
+use serde_json::{json, Value};
 use std::time::Duration;
 
 use lingxi_core::host::{McpTransport, McpTransportSpec};

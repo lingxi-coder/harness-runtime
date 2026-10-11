@@ -560,7 +560,7 @@ fn load_workspace_manifest(workspace: &Path) -> Result<Option<AppManifest>, AppE
             return Err(AppError::Io(format!(
                 "read workspace manifest {}: {error}",
                 path.display()
-            )))
+            )));
         }
     };
     let manifest: AppManifest = serde_json::from_str(&body).map_err(|error| {
@@ -637,7 +637,7 @@ pub(crate) fn restore_host_managed_files(
                 return Err(AppError::Io(format!(
                     "inspect host-managed workspace file {}: {error}",
                     path.display()
-                )))
+                )));
             }
         };
         if is_matching_regular_file {
@@ -1080,7 +1080,7 @@ impl LocalAppBuilder<'_> {
                 Err(error) => {
                     return Err(AppError::Io(format!(
                         "inspect build state directory: {error}"
-                    )))
+                    )));
                 }
             }
             std::fs::create_dir_all(directory)
@@ -2413,7 +2413,7 @@ fn recover_build_promotion(build_root: &Path) -> Result<(), AppError> {
         Err(error) => {
             return Err(AppError::Io(format!(
                 "scan interrupted build promotion: {error}"
-            )))
+            )));
         }
     };
     let mut backups = Vec::new();
@@ -4969,15 +4969,15 @@ mod tests {
                 uri,
                 lsp::DiagnosticEntry {
                     version: Some(3),
-                    diagnostics: vec![lsp_types::Diagnostic {
+                    diagnostics: vec![lsp::SourceDiagnostic {
                         range: lsp_types::Range::new(
                             lsp_types::Position::new(1, 4),
                             lsp_types::Position::new(1, 5),
                         ),
                         severity: Some(lsp_types::DiagnosticSeverity::ERROR),
-                        code: Some(lsp_types::NumberOrString::Number(2304)),
                         message: "Cannot find name 'oops'.".into(),
-                        ..Default::default()
+                        source: None,
+                        code: Some(lsp::DiagnosticCodeSource::Number(2304)),
                     }],
                 },
             )
@@ -5047,15 +5047,14 @@ mod tests {
                 uri,
                 lsp::DiagnosticEntry {
                     version: Some(2),
-                    diagnostics: vec![lsp_types::Diagnostic {
-                        range: lsp_types::Range::new(
+                    diagnostics: vec![lsp::SourceDiagnostic::new(
+                        lsp_types::Range::new(
                             lsp_types::Position::new(0, 0),
                             lsp_types::Position::new(0, 1),
                         ),
-                        severity: Some(lsp_types::DiagnosticSeverity::ERROR),
-                        message: "stale".into(),
-                        ..Default::default()
-                    }],
+                        Some(lsp_types::DiagnosticSeverity::ERROR),
+                        "stale".into(),
+                    )],
                 },
             )
             .await;

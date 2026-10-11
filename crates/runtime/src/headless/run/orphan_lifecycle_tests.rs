@@ -1,6 +1,7 @@
 use super::tests::fixture_runtime;
 use super::*;
 use crate::headless::stream_json_input::spawn_stdin_router_from_reader;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::io::{Cursor, Read};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -8,7 +9,8 @@ use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::mpsc as sync_mpsc;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
+    ValidationError,
 };
 use tool_api::{ToolProgressSender, ToolUseContext};
 
@@ -54,9 +56,19 @@ impl Tool for ReplayTool {
     fn name(&self) -> &str {
         "OwnedReplay"
     }
-    fn input_schema(&self) -> &Value {
-        static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-        SCHEMA.get_or_init(|| json!({"type":"object","properties":{}}))
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: std::sync::OnceLock<Utf16JsonProjection> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            Utf16JsonProjection::from_serde_value(&json!({"type":"object","properties":{}}))
+                .expect("replay input schema projection")
+        })
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -64,25 +76,29 @@ impl Tool for ReplayTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         !self.block
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         if self.block {
             InterruptBehavior::Block
         } else {
             InterruptBehavior::Cancel
         }
     }
-    async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> Result<(), ValidationError> {
+    async fn validate_input(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _: &Value,
+        _: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -94,15 +110,15 @@ impl Tool for ReplayTool {
             metadata: Default::default(),
         }
     }
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "controlled replay".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+        Utf16JsonProjection::from("")
     }
     async fn call(
         &self,
-        _: Value,
+        _: Utf16JsonProjection,
         _: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -112,7 +128,10 @@ impl Tool for ReplayTool {
         self.release.notified().await;
         self.completed
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        Ok(ToolCallResult::from_data(json!({"committed":true})))
+        Ok(ToolCallResult::from_data(
+            Utf16JsonProjection::from_serde_value(&json!({"committed":true}))
+                .expect("replay result projection"),
+        ))
     }
 }
 
@@ -156,7 +175,8 @@ async fn cwd_during_replay(
         &Arc::new(super::lifecycle::PrintAuxTaskGroup::default()),
         &runtime.execution_errors,
     )
-    .await;
+    .await
+    .expect("set_cwd control request dispatches successfully");
     let crate::headless::stream_json::OutboundMsg::Line(line) = response.recv().await.unwrap()
     else {
         panic!("control response")
@@ -205,13 +225,14 @@ async fn replay_case(block: bool) {
             per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::ToolUse {
-                input_projection: None,
                 id: id.clone(),
                 name: "OwnedReplay".into(),
-                input: json!({}),
+                input: Utf16JsonProjection::from_serde_value(&json!({}))
+                    .expect("replay input projection"),
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         },
     );
     let runtime = Arc::new(runtime);
@@ -306,11 +327,28 @@ async fn replay_case(block: bool) {
     assert!(!plane.is_busy().await);
     let session = runtime.orchestrator.session();
     let history = &session.lock().await.history;
-    assert!(history.iter().any(|message| match message {
-        lingxi_core::types::ConversationMessage::User { content, .. } => content.iter().any(|block_result| matches!(block_result,
-            lingxi_core::types::ContentBlock::ToolResult { tool_use_id, is_error, .. } if tool_use_id == &id && *is_error == Some(!block))),
-        _ => false,
-    }), "exact recovered result persisted before owner release");
+    let recovered_result = history.iter().find_map(|message| match message {
+        lingxi_core::types::ConversationMessage::User { content, .. } => {
+            content.iter().find_map(|block_result| match block_result {
+                lingxi_core::types::ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                    ..
+                } if tool_use_id == &id => Some((content, is_error)),
+                _ => None,
+            })
+        }
+        _ => None,
+    });
+    let (content, is_error) = recovered_result.expect("exact recovered result persisted");
+    if block {
+        // Successful tools omit `is_error` unless their result mapper explicitly sets it.
+        assert_eq!(*is_error, None);
+        assert_eq!(content.string_at(""), Some(r#"{"committed":true}"#));
+    } else {
+        assert_eq!(*is_error, Some(true));
+    }
     tasks.abort_and_join().await;
     assert!(
         runtime

@@ -526,6 +526,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parked_request_preserves_absent_and_explicit_null_prompt_options() {
+        let dir = tempdir().unwrap();
+        let id = lingxi_core::types::AgentId::new();
+        let mut source = row(id);
+        source.request.system_prompt_override =
+            Some(lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap());
+        // Keep addendum absent so this covers both Some(null) and None.
+        source.request.system_prompt_addendum = None;
+
+        write_row(dir.path(), &source).await.unwrap();
+        let restored = read_row(dir.path(), &id.to_string()).await.expect("row");
+        assert_eq!(restored.request, source.request);
+    }
+
+    #[tokio::test]
     async fn parked_description_preserves_lone_utf16_units_in_the_raw_row() {
         let dir = tempdir().unwrap();
         let id = lingxi_core::types::AgentId::new();

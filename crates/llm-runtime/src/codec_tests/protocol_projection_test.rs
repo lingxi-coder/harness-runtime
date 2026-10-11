@@ -97,7 +97,6 @@ fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
 
 fn exact_tool_result(cache_control: Option<CacheControl>) -> ContentBlock {
     ContentBlock::ToolResult {
-        output_projection: None,
         tool_call_id: "call-1".into(),
         output: lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(&[
             65, 0xd83d, 10,
@@ -165,11 +164,8 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
             assert!(!sent.contains("lingxi_tool_result_string_utf16"));
             assert!(!sent.contains("foreign"));
             assert_eq!(
-                super::json_payload_value(&encoded.body_json)["messages"][0]["content"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                2
+                super::json_payload_projection(&encoded.body_json).array_len("/messages/0/content"),
+                Some(2)
             );
             assert_eq!(request, original);
         }
@@ -187,9 +183,11 @@ fn tool_result_sidecars_become_display_text_on_chat_wire() {
     let encoded = OpenAiChatCodec::new("https://example.test/v1")
         .encode_request(&request)
         .unwrap();
+    let projected = super::json_payload_projection(&encoded.body_json);
+    assert_eq!(projected.string_at("/messages/0/content"), Some("A�\n"));
     assert_eq!(
-        super::json_payload_value(&encoded.body_json)["messages"][0]["content"],
-        "A�\n"
+        projected.string_units("/messages/0/content").as_deref(),
+        Some(&[65, 0xd83d, 10][..])
     );
     assert!(!encoded
         .body_json

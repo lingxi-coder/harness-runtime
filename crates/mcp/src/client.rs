@@ -30,7 +30,7 @@ use lingxi_core::host::{
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 
-type UJP = Utf16JsonProjection;
+type JsonProjection = Utf16JsonProjection;
 
 use crate::hook_dispatch::HookDispatcher;
 use crate::inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
@@ -537,7 +537,7 @@ struct InitializeResponse {
         default,
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    instructions: Option<UJP>,
+    instructions: Option<JsonProjection>,
 }
 
 /// Decode the server's capability JSON object into the trait DTO.
@@ -585,18 +585,32 @@ fn decode_server_capabilities(raw: &Utf16JsonProjection) -> ServerCapabilitiesDt
 pub(crate) fn modern_meta(
     version: &str,
     elicitation: lingxi_core::host::McpElicitationMode,
-) -> serde_json::Value {
-    serde_json::json!({
-        "io.modelcontextprotocol/protocolVersion": version,
-        "io.modelcontextprotocol/clientInfo": {
-            "name": crate::CLIENT_NAME,
-            "title": crate::CLIENT_TITLE,
-            "version": env!("CARGO_PKG_VERSION"),
-            "description": "An agentic coding tool",
-            "websiteUrl": crate::MCP_WEBSITE_URL,
-        },
-        "io.modelcontextprotocol/clientCapabilities": lingxi_core::host::mcp_client_capabilities(elicitation),
-    })
+) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(vec![
+        (
+            "io.modelcontextprotocol/protocolVersion".into(),
+            source_string(version),
+        ),
+        (
+            "io.modelcontextprotocol/clientInfo".into(),
+            Utf16JsonProjection::object(vec![
+                ("name".into(), source_string(crate::CLIENT_NAME)),
+                ("title".into(), source_string(crate::CLIENT_TITLE)),
+                ("version".into(), source_string(env!("CARGO_PKG_VERSION"))),
+                (
+                    "description".into(),
+                    source_string("An agentic coding tool"),
+                ),
+                ("websiteUrl".into(), source_string(crate::MCP_WEBSITE_URL)),
+            ])
+            .expect("fixed MCP client info fields are unique"),
+        ),
+        (
+            "io.modelcontextprotocol/clientCapabilities".into(),
+            lingxi_core::host::mcp_client_capabilities(elicitation),
+        ),
+    ])
+    .expect("fixed MCP metadata fields are unique")
 }
 
 fn modern_request_requires_meta(method: &str) -> bool {
@@ -653,7 +667,7 @@ pub struct McpClient {
     /// Server-provided instructions string from the `initialize` response,
     /// truncated to [`MAX_MCP_DESCRIPTION_LENGTH`] chars on receipt
     /// (matches claude-code `client.ts:1163-1166`).
-    server_instructions: RwLock<Option<UJP>>,
+    server_instructions: RwLock<Option<JsonProjection>>,
     /// Per-server `tools/call` timeout (ms) from the resolved
     /// [`crate::McpServerConfig::timeout_ms`]; fed to [`mcp_tool_timeout_for`]
     /// (`BHs`). `None` = fall back to the `MCP_TOOL_TIMEOUT` env / default.
@@ -1032,9 +1046,7 @@ impl McpClient {
         if !self.modern() || !modern_request_requires_meta(method) {
             return params;
         }
-        let required_value = modern_meta(&self.negotiated.version, self.elicitation.modern);
-        let mut required = Utf16JsonProjection::from_serde_value(&required_value)
-            .expect("fixed MCP metadata is JSON");
+        let mut required = modern_meta(&self.negotiated.version, self.elicitation.modern);
         if let Ok(existing) = params.subprojection("/_meta") {
             if existing.object_entries().is_some() {
                 required
@@ -1058,11 +1070,9 @@ impl McpClient {
             return drive_modern_request(
                 &JsonrpcMcpResultIo {
                     connection: self.connection.clone(),
-                    client_capabilities: Utf16JsonProjection::from_serde_value(
-                        &modern_meta(&self.negotiated.version, self.elicitation.modern)
-                            ["io.modelcontextprotocol/clientCapabilities"],
-                    )
-                    .expect("fixed MCP client capabilities are JSON"),
+                    client_capabilities: lingxi_core::host::mcp_client_capabilities(
+                        self.elicitation.modern,
+                    ),
                 },
                 method,
                 params,
@@ -1141,11 +1151,9 @@ impl McpClient {
         };
         let io = JsonrpcMcpResultIo {
             connection: self.connection.clone(),
-            client_capabilities: Utf16JsonProjection::from_serde_value(
-                &modern_meta(&self.negotiated.version, self.elicitation.modern)
-                    ["io.modelcontextprotocol/clientCapabilities"],
-            )
-            .expect("fixed MCP client capabilities are JSON"),
+            client_capabilities: lingxi_core::host::mcp_client_capabilities(
+                self.elicitation.modern,
+            ),
         };
         let request = drive_modern_request(&io, "tools/call", params, options);
         let idle_timeout = mcp_tool_idle_timeout_for(self.config_timeout_ms, self.transport_kind);
@@ -1292,7 +1300,7 @@ impl McpClient {
 
     /// Returns the (possibly truncated) server instructions captured during
     /// `initialize`, or `None` if the server omitted them.
-    pub async fn server_instructions(&self) -> Option<UJP> {
+    pub async fn server_instructions(&self) -> Option<JsonProjection> {
         self.server_instructions.read().await.clone()
     }
 
@@ -1305,7 +1313,9 @@ impl McpClient {
     async fn list_paginated<T>(
         &self,
         method: &'static str,
-        decode: fn(&Utf16JsonProjection) -> Result<(Vec<T>, Option<UJP>), McpClientError>,
+        decode: fn(
+            &Utf16JsonProjection,
+        ) -> Result<(Vec<T>, Option<JsonProjection>), McpClientError>,
     ) -> Result<Vec<T>, McpClientError> {
         // Claude Code's modern `client.listTools()` path reports one aggregate
         // event, while legacy tools plus every prompts/resources traversal use
@@ -1316,7 +1326,7 @@ impl McpClient {
         let mut retry_index = 0_usize;
         'retry: loop {
             let mut items = Vec::new();
-            let mut cursor: Option<UJP> = None;
+            let mut cursor: Option<JsonProjection> = None;
             let mut sent_cursor_identities = BTreeSet::new();
             let mut page_count = 0_usize;
             loop {
@@ -2060,7 +2070,7 @@ impl McpClient {
     /// envelope without materializing an arbitrary JSON value.
     pub async fn get_prompt(
         &self,
-        name: &UJP,
+        name: &JsonProjection,
         arguments: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, McpClientError> {
         let params = Utf16JsonProjection::object(vec![
@@ -2097,7 +2107,10 @@ impl McpClient {
     /// Fetch the contents of one resource by URI. Returns the FIRST element
     /// of the server's `contents` array (the protocol allows multiple but
     /// claude-code always reads the first).
-    pub async fn read_resource(&self, uri: &UJP) -> Result<McpResourceContentDto, McpClientError> {
+    pub async fn read_resource(
+        &self,
+        uri: &JsonProjection,
+    ) -> Result<McpResourceContentDto, McpClientError> {
         let params = Utf16JsonProjection::object(vec![("uri".to_owned(), uri.clone())])
             .expect("fixed resources/read request members are unique");
         let raw_source = self
@@ -2136,7 +2149,7 @@ impl McpClient {
     /// bytes are written to (a session/tool-results dir in production).
     pub async fn read_resource_rich(
         &self,
-        uri: &UJP,
+        uri: &JsonProjection,
         output_dir: &std::path::Path,
     ) -> Result<Vec<lingxi_core::host::McpResourceContentsRich>, McpClientError> {
         let params = Utf16JsonProjection::object(vec![("uri".to_owned(), uri.clone())])
@@ -2215,10 +2228,10 @@ impl McpClient {
     /// this method does not re-derive it.
     pub async fn read_mcp_directory(
         &self,
-        uri: &UJP,
+        uri: &JsonProjection,
     ) -> Result<Vec<McpDirectoryEntry>, McpClientError> {
         let mut out: Vec<McpDirectoryEntry> = Vec::new();
-        let mut cursor: Option<UJP> = None;
+        let mut cursor: Option<JsonProjection> = None;
         let mut page: usize = 0;
         loop {
             let mut fields = vec![("uri".to_owned(), uri.clone())];
@@ -2322,7 +2335,7 @@ struct PromptsListResponse {
         default,
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    next_cursor: Option<UJP>,
+    next_cursor: Option<JsonProjection>,
     #[serde(default)]
     prompts: Vec<RawPrompt>,
 }
@@ -2331,9 +2344,9 @@ struct PromptsListResponse {
 #[derive(Debug, Deserialize)]
 struct RawPrompt {
     #[serde(deserialize_with = "deserialize_required_source_string")]
-    name: UJP,
+    name: JsonProjection,
     #[serde(default, deserialize_with = "deserialize_optional_source_string")]
-    description: Option<UJP>,
+    description: Option<JsonProjection>,
     #[serde(default)]
     arguments: Vec<RawPromptArgument>,
 }
@@ -2342,9 +2355,9 @@ struct RawPrompt {
 #[derive(Debug, Deserialize)]
 struct RawPromptArgument {
     #[serde(deserialize_with = "deserialize_required_source_string")]
-    name: UJP,
+    name: JsonProjection,
     #[serde(default, deserialize_with = "deserialize_optional_source_string")]
-    description: Option<UJP>,
+    description: Option<JsonProjection>,
     #[serde(default)]
     required: bool,
 }
@@ -2357,7 +2370,7 @@ struct ResourcesListResponse {
         default,
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    next_cursor: Option<UJP>,
+    next_cursor: Option<JsonProjection>,
     #[serde(default)]
     resources: Vec<RawResource>,
 }
@@ -2371,14 +2384,14 @@ pub const MAX_MCP_LIST_PAGES: usize = 20;
 #[derive(Debug, Deserialize)]
 struct RawResource {
     #[serde(deserialize_with = "deserialize_required_source_string")]
-    uri: UJP,
+    uri: JsonProjection,
     #[serde(
         default = "empty_source_string",
         deserialize_with = "deserialize_required_source_string"
     )]
-    name: UJP,
+    name: JsonProjection,
     #[serde(default, deserialize_with = "deserialize_optional_source_string")]
-    description: Option<UJP>,
+    description: Option<JsonProjection>,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
     #[serde(
@@ -2386,7 +2399,7 @@ struct RawResource {
         default,
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    meta: Option<UJP>,
+    meta: Option<JsonProjection>,
 }
 
 /// TR-03 `NSf` (oracle @289724681) — the hard page cap on a paginated
@@ -2404,13 +2417,13 @@ pub const MAX_MCP_DIRECTORY_PAGES: usize = 20;
 pub struct McpDirectoryEntry {
     /// Child resource URI — the value to pass back as `uri` to descend.
     #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
-    pub uri: UJP,
+    pub uri: JsonProjection,
     /// Child resource name.
     #[serde(
         default = "empty_source_string",
         with = "lingxi_core::types::utf16_json::raw_json_serde"
     )]
-    pub name: UJP,
+    pub name: JsonProjection,
     /// Child MIME type; absent when the server omits it (the oracle maps
     /// `c.mimeType!==void 0 ? qG(c.mimeType) : void 0`, i.e. an omitted type
     /// stays omitted rather than becoming `""`).
@@ -2421,7 +2434,7 @@ pub struct McpDirectoryEntry {
         serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    pub mime_type: Option<UJP>,
+    pub mime_type: Option<JsonProjection>,
 }
 
 /// Wire-level shape of one `resources/directory/read` page.
@@ -2435,7 +2448,7 @@ struct DirectoryReadResponse {
         default,
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    next_cursor: Option<UJP>,
+    next_cursor: Option<JsonProjection>,
 }
 
 /// `s instanceof Jy && s.code === Qp.InvalidParams` — the oracle's tolerated
@@ -2461,12 +2474,12 @@ struct ResourceReadResponse {
 #[derive(Debug, Deserialize)]
 struct RawResourceContent {
     #[serde(deserialize_with = "deserialize_required_source_string")]
-    uri: UJP,
+    uri: JsonProjection,
     #[serde(
         default = "empty_source_string",
         deserialize_with = "deserialize_required_source_string"
     )]
-    text: UJP,
+    text: JsonProjection,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
     #[serde(
@@ -2474,7 +2487,7 @@ struct RawResourceContent {
         default,
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    meta: Option<UJP>,
+    meta: Option<JsonProjection>,
 }
 
 /// Wire-level shape of a `resources/read` response for the MCP-5d rich path.
@@ -2491,7 +2504,7 @@ struct ResourceReadRichResponse {
 #[derive(Debug, Deserialize)]
 struct RawResourceContentRich {
     #[serde(default, deserialize_with = "deserialize_optional_source_string")]
-    uri: Option<UJP>,
+    uri: Option<JsonProjection>,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
     #[serde(
@@ -2499,9 +2512,9 @@ struct RawResourceContentRich {
         default,
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    meta: Option<UJP>,
+    meta: Option<JsonProjection>,
     #[serde(default, deserialize_with = "deserialize_optional_source_string")]
-    text: Option<UJP>,
+    text: Option<JsonProjection>,
     #[serde(default)]
     blob: Option<String>,
 }
@@ -2855,7 +2868,7 @@ struct ToolsListResponse {
 struct RawTool {
     name: String,
     #[serde(default, deserialize_with = "deserialize_optional_source_string")]
-    description: Option<UJP>,
+    description: Option<JsonProjection>,
     #[serde(
         rename = "inputSchema",
         default = "null_projection",
@@ -2910,7 +2923,7 @@ fn decode_tools_list_page(
 
 fn decode_prompts_list_page(
     raw: &Utf16JsonProjection,
-) -> Result<(Vec<RawPrompt>, Option<UJP>), McpClientError> {
+) -> Result<(Vec<RawPrompt>, Option<JsonProjection>), McpClientError> {
     let source = raw
         .to_json_string()
         .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
@@ -2932,7 +2945,7 @@ fn decode_prompts_list_page(
 
 fn decode_resources_list_page(
     raw: &Utf16JsonProjection,
-) -> Result<(Vec<RawResource>, Option<UJP>), McpClientError> {
+) -> Result<(Vec<RawResource>, Option<JsonProjection>), McpClientError> {
     let source = raw
         .to_json_string()
         .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
@@ -2944,7 +2957,9 @@ fn decode_resources_list_page(
     ))
 }
 
-fn decode_next_cursor(cursor: Option<UJP>) -> Result<Option<UJP>, McpClientError> {
+fn decode_next_cursor(
+    cursor: Option<JsonProjection>,
+) -> Result<Option<JsonProjection>, McpClientError> {
     match cursor {
         None => Ok(None),
         Some(value) if value.at_pointer("").is_some_and(|view| view.is_null()) => Ok(None),
@@ -2990,7 +3005,7 @@ mod pagination_cursor_identity_tests {
     }
 }
 
-fn sanitize_source_prompt_string(value: UJP) -> UJP {
+fn sanitize_source_prompt_string(value: JsonProjection) -> JsonProjection {
     let Some(units) = value.string_units("") else {
         return value;
     };
@@ -3002,7 +3017,7 @@ fn sanitize_source_prompt_string(value: UJP) -> UJP {
     source_string(&partially_sanitize_unicode(&text))
 }
 
-fn tool_meta_search_hint(meta: &Option<Utf16JsonProjection>) -> Option<UJP> {
+fn tool_meta_search_hint(meta: &Option<Utf16JsonProjection>) -> Option<JsonProjection> {
     let source = meta
         .as_ref()?
         .subprojection_property_units(&"anthropic/searchHint".encode_utf16().collect::<Vec<_>>())
@@ -3103,7 +3118,7 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
     /// Underlying JSON-RPC transport returned an error response or framing
     /// failure; the inner string is the stringified `JsonRpcError`.
     #[error("JSON-RPC error: {}", .0.string_at("").unwrap_or_default())]
-    Rpc(UJP),
+    Rpc(JsonProjection),
     /// HTTP status metadata retained by streamable HTTP/SSE transports.
     #[error("HTTP {status}{detail}", detail = www_authenticate.as_ref().map(|value| format!(": {value}")).unwrap_or_default())]
     HttpResponse {
@@ -3113,7 +3128,7 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
         www_authenticate: Option<String>,
         /// Original transport error text. Retained for the MCP SDK's narrow
         /// HTTP-400 stale-session phrases; never emitted as telemetry.
-        message: UJP,
+        message: JsonProjection,
     },
     /// Native modern SDK or locally registered handler failure.
     #[error(transparent)]
@@ -3121,7 +3136,7 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
     /// Server returned a syntactically valid response that did not match
     /// the expected DTO shape.
     #[error("malformed response: {}", .0.string_at("").unwrap_or_default())]
-    Deserialize(UJP),
+    Deserialize(JsonProjection),
     /// Server returned structured tool output that failed its advertised
     /// output schema. The validator detail stays in the source projection so
     /// tool-result hooks and error adapters do not have to stringify it.
@@ -3140,7 +3155,7 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
     },
     /// `initialize` handshake failed.
     #[error("initialize failed: {}", .0.string_at("").unwrap_or_default())]
-    Initialize(UJP),
+    Initialize(JsonProjection),
 }
 
 impl McpClientError {
@@ -3148,7 +3163,7 @@ impl McpClientError {
     /// and schema diagnostics retain their original UTF-16 data; only errors
     /// created from Rust diagnostics are projected from valid UTF-8 text.
     #[must_use]
-    pub fn source_diagnostic(&self) -> Option<UJP> {
+    pub fn source_diagnostic(&self) -> Option<JsonProjection> {
         match self {
             Self::Rpc(message) => Some(prepend_source_text("JSON-RPC error: ", message)),
             Self::HttpResponse { message, .. } => Some(message.clone()),
@@ -3218,7 +3233,7 @@ impl McpClientError {
     }
 }
 
-fn source_contains_ascii(source: &UJP, needle: &str) -> bool {
+fn source_contains_ascii(source: &JsonProjection, needle: &str) -> bool {
     let Some(units) = source.string_units("") else {
         return false;
     };
@@ -3238,7 +3253,7 @@ fn source_contains_ascii(source: &UJP, needle: &str) -> bool {
     })
 }
 
-fn has_stale_session_phrase(message: &UJP) -> bool {
+fn has_stale_session_phrase(message: &JsonProjection) -> bool {
     source_contains_ascii(message, "server not initialized")
         || source_contains_ascii(message, "no valid session id")
         || source_contains_ascii(message, "mcp-session-id header is required")

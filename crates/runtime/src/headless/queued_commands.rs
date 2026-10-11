@@ -122,6 +122,10 @@ struct Inner {
     cancelled: HashSet<String>,
     terminal_emitted: HashSet<String>,
     current_turn_uuids: Vec<String>,
+    /// Queue UUIDs added to the active turn by `on_folded`, so a failed
+    /// post-tool delivery can undo only its own additions without removing the
+    /// active turn's primary UUID.
+    folded_current_turn_uuids: HashSet<String>,
 }
 
 impl QueuedCommands {
@@ -154,6 +158,7 @@ impl QueuedCommands {
         let run = !inner.cancelled.remove(uuid);
         if run {
             inner.current_turn_uuids.clear();
+            inner.folded_current_turn_uuids.clear();
             inner.current_turn_uuids.push(uuid.to_owned());
         }
         run
@@ -177,15 +182,45 @@ impl QueuedCommands {
             .any(|current| current == uuid)
         {
             inner.current_turn_uuids.push(uuid.to_owned());
+            inner.folded_current_turn_uuids.insert(uuid.to_owned());
         }
         true
     }
 
+    /// Restore a drained snapshot to the front of the queue after its required
+    /// terminal delivery failed. IDs already resident because they were not
+    /// processed yet are moved to the same original snapshot order.
+    pub(crate) fn restore_queued_front(&self, uuids: &[String]) {
+        if uuids.is_empty() {
+            return;
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for uuid in uuids {
+            if inner.folded_current_turn_uuids.remove(uuid) {
+                inner.current_turn_uuids.retain(|current| current != uuid);
+            }
+        }
+        inner.queued.retain(|queued| !uuids.contains(queued));
+        inner
+            .terminal_emitted
+            .retain(|queued| !uuids.contains(queued));
+        let mut restored = uuids.to_vec();
+        restored.append(&mut inner.queued);
+        inner.queued = restored;
+    }
+
+    /// Drain the UUIDs folded into the current turn, in their observed order.
+    ///
+    /// The registry is empty for the current turn after this call.
     pub fn take_current_turn_uuids(&self) -> Vec<String> {
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.folded_current_turn_uuids.clear();
         std::mem::take(&mut inner.current_turn_uuids)
     }
 
@@ -254,6 +289,10 @@ impl QueuedCommands {
         resident
     }
 
+    /// Compare a UUID set with the messages associated with the current turn.
+    ///
+    /// Returns `None` when no current-turn UUIDs are tracked, otherwise whether
+    /// any tracked UUID matches an argument case-insensitively.
     pub fn current_turn_matches(&self, uuids: &[String]) -> Option<bool> {
         let inner = self
             .inner
@@ -388,6 +427,9 @@ impl QueueLifecycle {
             .map_err(|_| "queue journal binding raced".into())
     }
 
+    /// Flush pending queue-operation records through the bound session writer.
+    ///
+    /// This is a no-op when no live writer is bound; write failures are returned.
     pub async fn flush_journal(&self) -> Result<(), String> {
         if let Some(writer) = self
             .journal_writer
@@ -403,6 +445,9 @@ impl QueueLifecycle {
         Ok(())
     }
 
+    /// Record an enqueue operation when the turn carries queue-delivery metadata.
+    ///
+    /// Recording is skipped when journaling is disabled or the turn was not queued.
     pub fn record_enqueued(&self, turn: &crate::headless::stream_json_input::UserTurn) {
         if self
             .journal_disabled
@@ -428,6 +473,9 @@ impl QueueLifecycle {
             .push_back(record);
     }
 
+    /// Record that one queued command was consumed from the input channel.
+    ///
+    /// Recording is skipped when journaling is disabled.
     pub fn record_dequeued(&self) {
         if self
             .journal_disabled

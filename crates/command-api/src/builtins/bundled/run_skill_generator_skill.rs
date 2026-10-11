@@ -41,7 +41,6 @@ impl BundledPromptFn for RunSkillGeneratorPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     #[test]
     fn body_is_frontmatter_stripped_and_branded() {

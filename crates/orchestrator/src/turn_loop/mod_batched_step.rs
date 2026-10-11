@@ -34,6 +34,7 @@ pub(super) struct Request {
     pub guarded_async_hook_reminders: Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
     pub context_announcements: crate::conversation::PreparedContextAnnouncements,
     pub cost_scope: Option<cost::CostSessionScope>,
+    pub native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     pub turn_id: String,
     pub index: u32,
     pub effort: Option<String>,
@@ -348,6 +349,7 @@ pub(super) async fn dispatch(
                         &mut params.guarded_async_hook_reminders,
                         &params.context_announcements,
                         params.cost_scope.as_ref(),
+                        params.native_anthropic_request_context.clone(),
                     ),
                 ),
             )
@@ -489,6 +491,7 @@ pub(super) async fn dispatch(
                     &mut params.guarded_async_hook_reminders,
                     &params.context_announcements,
                     params.cost_scope.as_ref(),
+                    params.native_anthropic_request_context.clone(),
                 ),
             )
             .await?;

@@ -561,9 +561,9 @@ fn source_merge_properties(
     }
 }
 
-fn source_resolve_local_ref<'a>(
+fn source_resolve_local_ref(
     node: &Utf16JsonProjection,
-    root: &'a Utf16JsonProjection,
+    root: &Utf16JsonProjection,
 ) -> Option<Utf16JsonProjection> {
     let reference = node.string_at("/$ref")?;
     let rest = reference.strip_prefix("#/")?;
@@ -578,7 +578,7 @@ fn source_resolve_local_ref<'a>(
 }
 
 fn source_branch_summary(branch: &Utf16JsonProjection) -> Option<String> {
-    if let Some(required) = branch.subprojection("/required").ok() {
+    if let Ok(required) = branch.subprojection("/required") {
         let length = required.array_len("")?;
         if length > 0 {
             let values = (0..length)

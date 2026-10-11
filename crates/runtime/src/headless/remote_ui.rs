@@ -5,11 +5,13 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Remote UI client registry backed by the headless stdio control plane.
 pub struct HeadlessRemoteUiHost {
     plane: Arc<StdioControlPlane>,
     clients: Mutex<Vec<ModRemoteUiClient>>,
 }
 impl HeadlessRemoteUiHost {
+    /// Create an empty remote UI host that routes requests through `plane`.
     pub fn new(plane: Arc<StdioControlPlane>) -> Arc<Self> {
         Arc::new(Self {
             plane,

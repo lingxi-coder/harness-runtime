@@ -1,7 +1,5 @@
 //! Small source helpers shared by Monitor validation and permission checks.
 
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
-
 /// Upstream's control-character check for WebSocket URL display.
 pub(super) fn hidden_control(text: &str) -> bool {
     text.chars()
@@ -9,7 +7,7 @@ pub(super) fn hidden_control(text: &str) -> bool {
 }
 
 #[cfg(test)]
-fn has_command(value: Option<&Utf16JsonProjection>) -> bool {
+fn has_command(value: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) -> bool {
     value
         .and_then(|value| value.string_units(""))
         .is_some_and(|units| !units.is_empty())

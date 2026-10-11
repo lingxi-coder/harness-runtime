@@ -660,17 +660,23 @@ impl OutputStream for AdapterOutputStream {
             timestamp: message.timestamp.clone(),
             request_id: message.request_id.clone(),
             request_ref_json: message.request_ref.as_ref().map(|request_ref| {
-                serde_json::to_string(request_ref).expect("request reference serializes to JSON")
+                request_ref
+                    .to_json_string()
+                    .expect("request reference is a valid source JSON projection")
             }),
             message: ServerFallbackProviderMessageDto {
                 id: message.provider_message_id.clone(),
                 model: message.model.clone(),
                 stop_reason: message.stop_reason.clone(),
                 stop_details_json: message.stop_details.as_ref().map(|details| {
-                    serde_json::to_string(details).expect("stop details serialize to JSON")
+                    details
+                        .to_json_string()
+                        .expect("stop details are a valid source JSON projection")
                 }),
                 usage_json: message.usage.as_ref().map(|usage| {
-                    serde_json::to_string(usage).expect("usage facts serialize to JSON")
+                    usage
+                        .to_json_string()
+                        .expect("usage is a valid source JSON projection")
                 }),
                 content_json: serde_json::to_string(&message.content)
                     .expect("core content blocks serialize to JSON"),
@@ -976,7 +982,8 @@ impl OutputStream for AdapterOutputStream {
                 messages_before,
                 messages_after,
                 bytes_saved,
-                summary: ClientTextDto::from_projection(summary).expect("compaction summary is text"),
+                summary: ClientTextDto::from_projection(summary)
+                    .expect("compaction summary is text"),
             })
             .await;
     }
@@ -1116,12 +1123,6 @@ mod tests {
     fn projection(text: &str) -> Utf16JsonProjection {
         Utf16JsonProjection::root_string(text.to_string(), text.encode_utf16().collect())
             .expect("scalar text is a valid root string")
-    }
-
-    fn exact_projection(code_units: Vec<u16>) -> Utf16JsonProjection {
-        let display = String::from_utf16_lossy(&code_units);
-        Utf16JsonProjection::root_string(display, code_units)
-            .expect("display is derived from the exact UTF-16 units")
     }
 
     fn json_projection(value: &serde_json::Value) -> Utf16JsonProjection {
@@ -1433,6 +1434,19 @@ mod tests {
         let content: serde_json::Value =
             serde_json::from_str(&message.message.content_json).expect("content array JSON");
         assert_eq!(content.as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            content[0],
+            serde_json::json!({"type": "text", "text": "old assistant output"})
+        );
+        assert_eq!(content[1]["type"], "tool_use");
+        assert_eq!(
+            content[1]["input"],
+            serde_json::json!({"file_path": "/tmp/discarded"})
+        );
+        assert_eq!(content[1]["provider_id"], "toolu_discarded");
+        assert_eq!(message.message.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(message.is_api_error_message, Some(false));
+        assert_eq!(message.supersedes_uuids, None);
         let ClientEvent::MessageComplete {
             message: Some(message),
             ..

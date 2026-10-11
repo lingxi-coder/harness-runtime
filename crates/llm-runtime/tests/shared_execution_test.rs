@@ -123,7 +123,8 @@ async fn shared_execution_sends_exact_tool_result_string_without_internal_sideca
     let requests = transport.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     let body = std::str::from_utf8(&requests[0].body).unwrap();
-    assert!(body.contains(r#""content":"A\ud83d\n""#), "{body}");
+    assert!(body.contains(r#""content":"A�\n""#), "{body}");
+    assert!(!body.contains(r#""content":"A\ud83d\n""#), "{body}");
     assert!(!body.contains("lingxi_tool_result_string_utf16"));
 }
 #[tokio::test]
@@ -148,7 +149,8 @@ async fn service_signs_the_final_policy_request_and_uses_only_shared_raw_executi
     assert_eq!(requests.len(), 1);
     let sent = &requests[0];
     let headers: std::collections::BTreeMap<_, _> = sent.headers.iter().cloned().collect();
-    assert!(headers.contains_key("x-request-id"));
+    assert!(!headers.contains_key("x-request-id"));
+    assert!(headers.contains_key("user-agent"));
     let mut unsigned = headers.clone();
     let actual = unsigned.remove("Authorization").unwrap();
     let date = unsigned.remove("x-amz-date").unwrap();

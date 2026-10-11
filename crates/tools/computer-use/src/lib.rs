@@ -1006,13 +1006,11 @@ impl ComputerTool {
                 Err(e) => {
                     self.invalidate_frame(ctx).await;
                     self.release_owned_inputs(ctx).await?;
-                    return Ok(finish(
-                        json!({
-                            "stepsCompleted": results.len(),
-                            "stepFailed": { "action": sub_action, "error": e.to_string() },
-                            "results": results,
-                        }),
-                        "computer_batch",
+                    return Ok(batch_failure_result(
+                        sub_action,
+                        results.len(),
+                        &results,
+                        e.model_facing_message(),
                     ));
                 }
             }
@@ -1192,8 +1190,7 @@ impl ComputerTool {
                 .backend_mouse_dirty = false;
         }
         let release = self.release_keys(&added).await;
-        let result = result.and_then(|value| release.map(|()| value));
-        result
+        result.and_then(|value| release.map(|()| value))
     }
 
     fn require_grant_flag(
@@ -2124,6 +2121,30 @@ fn finish(mut data: Value, action: &str) -> ToolCallResult {
     }
 }
 
+/// Build a failed batch result while carrying the sub-action's exact
+/// model-facing error source through the structured stepFailed.error field.
+fn batch_failure_result(
+    action: &str,
+    steps_completed: usize,
+    results: &[Value],
+    error: Utf16JsonProjection,
+) -> ToolCallResult {
+    let mut result = finish(
+        json!({
+            "stepsCompleted": steps_completed,
+            "stepFailed": { "action": action, "error": "" },
+            "results": results,
+        }),
+        "computer_batch",
+    );
+    result
+        .data
+        .replace_pointer_projection("/stepFailed/error", error)
+        .expect("batch failure error field exists");
+    result.model_content = tool_api::tool_result_media::computer_batch_model_text(&result.data);
+    result
+}
+
 /// Register the `computer` tool against `reg`, denying every
 /// `request_access` call (no live UI to ask). Composition roots with a live
 /// TUI should call [`register_all_with_access_resolver`] instead.
@@ -2165,6 +2186,21 @@ fn test_data(value: &Utf16JsonProjection) -> Value {
 #[cfg(test)]
 fn test_model_text(value: Option<&Utf16JsonProjection>) -> Option<&str> {
     value.and_then(|text| text.string_at(""))
+}
+
+#[cfg(test)]
+trait ModelFacingErrorText {
+    fn model_facing_text(&self) -> String;
+}
+
+#[cfg(test)]
+impl ModelFacingErrorText for tool_api::tool_trait::ToolError {
+    fn model_facing_text(&self) -> String {
+        self.model_facing_message()
+            .string_at("")
+            .expect("tool errors carry a root-string model message")
+            .to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -2294,16 +2330,16 @@ mod tests {
                 &json!({ "scroll_direction": "up", "scroll_amount": 101 })
             ))
             .unwrap_err()
-            .to_string(),
-            "invalid input: scroll_amount exceeds maximum of 100"
+            .model_facing_text(),
+            "scroll_amount exceeds maximum of 100"
         );
         assert_eq!(
             scroll_delta(&test_projection(
                 &json!({ "scroll_direction": "up", "scroll_amount": -1 })
             ))
             .unwrap_err()
-            .to_string(),
-            "invalid input: scroll_amount must be a non-negative int"
+            .model_facing_text(),
+            "scroll_amount must be a non-negative int"
         );
     }
 
@@ -2312,8 +2348,8 @@ mod tests {
         assert_eq!(
             scroll_delta(&test_projection(&json!({ "scroll_direction": "sideways" })))
                 .unwrap_err()
-                .to_string(),
-            "invalid input: scroll_direction must be 'up', 'down', 'left', or 'right'"
+                .model_facing_text(),
+            "scroll_direction must be 'up', 'down', 'left', or 'right'"
         );
     }
 
@@ -2767,8 +2803,8 @@ mod integration_tests {
             .await
             .unwrap_err();
         assert_eq!(
-            err.to_string(),
-            "invalid input: mouse button already held, call left_mouse_up first"
+            err.model_facing_text(),
+            "mouse button already held, call left_mouse_up first"
         );
         call(&tool, json!({ "action": "left_mouse_up" }))
             .await
@@ -2841,15 +2877,65 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn computer_batch_step_failure_keeps_model_facing_validation_detail() {
+        let mut mock = MockCc::default();
+        *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
+        let tool = tool_with(mock);
+        call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+        )
+        .await
+        .unwrap();
+
+        let result = call(
+            &tool,
+            json!({
+                "action": "computer_batch",
+                "actions": [
+                    { "action": "left_mouse_down" },
+                    { "action": "left_mouse_down" },
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.data.number_at("/stepsCompleted"), Some(1.0));
+        assert_eq!(
+            result.data.string_at("/stepFailed/error"),
+            Some("mouse button already held, call left_mouse_up first")
+        );
+        assert_eq!(result.data.array_len("/results"), Some(1));
+        assert!(
+            !tool.state.lock().unwrap().mouse_button_held,
+            "batch failure cleanup must still release the held mouse button"
+        );
+    }
+
+    #[test]
+    fn computer_batch_step_failure_preserves_unpaired_error_source_units() {
+        let units = vec![u16::from(b'A'), 0xd800, u16::from(b'B')];
+        let error =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let result = batch_failure_result(
+            "type",
+            0,
+            &[],
+            ToolError::InvalidInput(error).model_facing_message(),
+        );
+
+        assert_eq!(result.data.string_units("/stepFailed/error"), Some(units));
+    }
+
+    #[tokio::test]
     async fn computer_batch_rejects_empty_actions_array() {
         let tool = tool_with(MockCc::default());
         let err = call(&tool, json!({ "action": "computer_batch", "actions": [] }))
             .await
             .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "invalid input: actions must be a non-empty array"
-        );
+        assert_eq!(err.model_facing_text(), "actions must be a non-empty array");
     }
 
     #[tokio::test]
@@ -2985,7 +3071,7 @@ mod integration_tests {
         )
         .await
         .unwrap_err();
-        let msg = err.to_string();
+        let msg = err.model_facing_text();
         assert!(msg.contains("Nonexistent Monitor"), "{msg}");
         assert!(msg.contains("Built-in Retina Display"), "{msg}");
     }

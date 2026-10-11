@@ -5,6 +5,24 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use crate::agent_test_support::{
         arc_mock_budget, arc_mock_mailbox, arc_mock_spawner, arc_mock_task_registry,
         MockBudgetEnforcerHandle, MockSubagentSpawner,
@@ -27,6 +45,29 @@ mod tests {
     /// blocks. `None` (no model known) also takes the LONG arm, mirroring the
     /// binary's `Dh(undefined) === false`.
     const LONG_MODEL: Option<&str> = Some("claude-sonnet-4-5");
+
+    struct EnvVarRestore {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarRestore {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     /// Test-only inspection boundary for locally generated Agent results.
     fn projection_value(
@@ -491,7 +532,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn agent_tool_producer_attaches_the_session_owner_to_both_spawn_modes() {
-        let _guard = AGENT_LIST_ENV_LOCK
+        let _guard = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -574,7 +615,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn agent_tool_pool_full_refusal_does_not_count_as_a_spawn() {
-        let _guard = AGENT_LIST_ENV_LOCK
+        let _guard = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -629,7 +670,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn agent_tool_budget_refusal_records_without_preparing_a_spawn() {
-        let _guard = AGENT_LIST_ENV_LOCK
+        let _guard = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -827,9 +868,10 @@ mod tests {
             &self,
             subagent_type: &str,
             model: Option<&str>,
+            model_profile: Option<&str>,
         ) -> lingxi_core::host::subagent_spawn::SelectedAgentMeta {
             arc_mock_spawner()
-                .resolve_selection(subagent_type, model)
+                .resolve_selection(subagent_type, model, model_profile)
                 .await
         }
 
@@ -870,7 +912,10 @@ mod tests {
             )
             .await
             .expect_err("a failed child stays a tool error");
-        assert_eq!(error.model_facing_message(), "provider request failed");
+        assert_eq!(
+            error.model_facing_message().string_at(""),
+            Some("provider request failed")
+        );
         assert!(matches!(
             error,
             ToolError::SubagentFailed { agent_id: id, .. } if id == agent_id
@@ -1116,7 +1161,7 @@ mod tests {
             .call(input, ctx, fresh_tx())
             .await
             .expect_err("spawn cap must trip once the session limit is reached");
-        let msg = format!("{err}");
+        let msg = source_text(&err.model_facing_message());
         assert!(
             msg.contains(
                 "Subagent spawn limit reached (1000 of 200 agents spawned). \
@@ -2040,7 +2085,14 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             .await,
         );
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
-        assert!(prompt.contains("- fusion:"), "{prompt}");
+        assert!(
+            prompt.contains("`fusion` is also available: Parallel multi-model deliberation"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("- fusion:"),
+            "the agent catalog is attached separately"
+        );
         assert!(!prompt.contains("fusion-panel"));
         let result = tool
             .call(
@@ -3834,8 +3886,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             )
             .await
             .expect_err("disallowed egress must reject");
-        assert!(err
-            .to_string()
+        assert!(source_text(&err.model_facing_message())
             .contains("cross-provider fusion is not allowed"));
 
         let events = sink.events().await;
@@ -4001,8 +4052,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         // `lingxi_core::host::parse_fusion_model_ref`.
         let err = parse_fusion_models(&["openai:".to_string()]).unwrap_err();
         assert_eq!(
-            err.to_string(),
-            "invalid input: invalid fusion request: invalid fusion models entry `openai:`"
+            source_text(&err.model_facing_message()),
+            "invalid fusion request: invalid fusion models entry `openai:`"
         );
     }
 
@@ -4174,8 +4225,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             .await
             .expect_err("disallowed egress must reject");
 
-        assert!(error
-            .to_string()
+        assert!(source_text(&error.model_facing_message())
             .contains("cross-provider fusion is not allowed"));
         assert_eq!(fusion.runs.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
@@ -4353,13 +4403,12 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 "Agents run in the background by default; you will be notified when one completes. Set to false only when your very next action depends on this agent's result and nothing else could usefully happen while it runs — otherwise leave it in the background so the user can hand you other work."
             )
         );
-        // 2.1.266 `G4o()` @3573156 — the sentence pair names the configured
-        // default subagent model. 2.1.238's text ("or inherits from the
-        // parent") described a precedence the resolver no longer has.
+        // Lock the current provider-neutral schema wording, including catalog
+        // IDs, profile-qualified models, deployment overrides, and fork rules.
         assert_eq!(
             AGENT_INPUT_SCHEMA["properties"]["model"]["description"],
             json!(
-                "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter and the configured default subagent model. If omitted, uses the agent definition's model, else the default (inherits from the parent unless a default subagent model is configured). Ignored for subagent_type: \"fork\" — forks always inherit the parent model."
+                "Optional catalog model ID, configured alias, or profile-qualified model (\"profile/model\") for this agent. Takes precedence over the agent definition's model and the configured default subagent model. A configured deployment model override can replace this model and profile. If omitted, uses the agent definition's model, else the configured default or the parent model. Unqualified selections prefer the parent's provider profile unless model_profile is specified. Ignored for subagent_type: \"fork\" — forks always inherit the parent model and profile."
             )
         );
         assert!(AGENT_INPUT_SCHEMA["properties"]["model"]["description"]
@@ -4477,49 +4526,6 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
     }
 
     #[test]
-    fn model_profile_hook_preserves_missing_and_clears_explicit_null() {
-        assert_eq!(
-            model_profile_after_hook(&json!({}), Some("openai".into())).unwrap(),
-            Some("openai".into())
-        );
-        assert_eq!(
-            model_profile_after_hook(&json!({"model_profile":null}), Some("openai".into()))
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            model_profile_after_hook(&json!({"model_profile":"gemini"}), Some("openai".into()))
-                .unwrap(),
-            Some("gemini".into())
-        );
-        assert!(model_profile_after_hook(&json!({"model_profile":42}), None).is_err());
-    }
-
-    #[test]
-    fn named_hook_model_clearing_keeps_the_selection_pair_consistent() {
-        let mut parsed: AgentToolInput = serde_json::from_value(json!({
-            "description":"inspect", "prompt":"inspect", "name":"scout",
-            "model":"gpt-4o", "model_profile":"openai",
-        }))
-        .unwrap();
-        let rewrite = json!({"model":null,"model_profile":null});
-        parsed.model = model_after_hook(&rewrite, parsed.model.take()).unwrap();
-        parsed.model_profile =
-            model_profile_after_hook(&rewrite, parsed.model_profile.take()).unwrap();
-        assert!(parsed.model.is_none());
-        assert!(parsed.model_profile.is_none());
-        assert_eq!(
-            model_after_hook(&json!({}), Some("gpt-4o".into())).unwrap(),
-            Some("gpt-4o".into())
-        );
-        assert_eq!(
-            model_after_hook(&json!({"model":"gemini-2.5-pro"}), Some("gpt-4o".into())).unwrap(),
-            Some("gemini-2.5-pro".into())
-        );
-        assert!(model_after_hook(&json!({"model":42}), None).is_err());
-    }
-
-    #[test]
     fn forced_schema_ignores_profile_only_model_selection() {
         for (coordinator, model_forced, coordinator_forces) in
             [(false, true, false), (true, false, true)]
@@ -4602,11 +4608,183 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 "{launch}"
             );
             assert_eq!(
-                spawner.agent_spawn_inputs()[0]["model_profile"],
-                json!("openai"),
+                spawner.agent_spawn_inputs()[0].string_at("/model_profile"),
+                Some("openai"),
                 "{launch}"
             );
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn ordinary_mod_model_rewrite_preserves_and_updates_the_model_profile_pair() {
+        let _guard = AGENT_PROMPT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _force = EnvVarRestore::set(branding::SUBAGENT_MODEL_FORCE_ENV, "0");
+        for (rewrite, expected_model, expected_profile) in [
+            (json!({}), Some("gpt-4o"), Some("openai")),
+            (json!({"model_profile":null}), Some("gpt-4o"), None),
+            (
+                json!({"model":"gemini-2.5-pro"}),
+                Some("gemini-2.5-pro"),
+                Some("openai"),
+            ),
+            (
+                json!({"model":"gemini-2.5-pro","model_profile":"gemini"}),
+                Some("gemini-2.5-pro"),
+                Some("gemini"),
+            ),
+            (json!({"model":null,"model_profile":null}), None, None),
+        ] {
+            let spawner = arc_mock_spawner();
+            spawner.script_agent_spawn_rewrite(rewrite);
+            let tool = AgentTool::new(wired_ctx(
+                spawner.clone(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ));
+            tool.call(
+                json!({
+                    "description":"inspect", "prompt":"inspect",
+                    "model":"gpt-4o", "model_profile":"openai",
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("valid Mod model/profile rewrites reach spawn");
+            let calls = spawner.invocations();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].request.model.as_deref(), expected_model);
+            assert_eq!(calls[0].request.model_profile.as_deref(), expected_profile);
+            assert_eq!(
+                spawner.agent_spawn_inputs()[0].string_at("/model_profile"),
+                Some("openai"),
+                "the Mod receives the caller's profile before its rewrite"
+            );
+        }
+
+        for rewrite in [json!({"model":null}), json!({"model_profile":42})] {
+            let spawner = arc_mock_spawner();
+            spawner.script_agent_spawn_rewrite(rewrite);
+            let tool = AgentTool::new(wired_ctx(
+                spawner.clone(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ));
+            let result = tool
+                .call(
+                    json!({
+                        "description":"inspect", "prompt":"inspect",
+                        "model":"gpt-4o", "model_profile":"openai",
+                    }),
+                    fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                    fresh_tx(),
+                )
+                .await;
+            assert!(matches!(result, Err(ToolError::InvalidInput(_))));
+            assert!(spawner.invocations().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn profile_only_mod_rewrite_refreshes_selection_and_telemetry() {
+        let _guard = AGENT_PROMPT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let sink = Arc::new(telemetry::sinks::InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let spawner = arc_mock_spawner();
+        spawner.script_profile_resolved_model("anthropic", "parent-route-model");
+        spawner.script_profile_resolved_model("openai", "rewritten-route-model");
+        spawner.script_agent_spawn_rewrite(json!({"model_profile":"openai"}));
+        let bctx = wired_ctx_with_bus(spawner.clone(), bus).await;
+        let tool = AgentTool::new(bctx);
+        tool.call(
+            json!({
+                "description":"inspect", "prompt":"inspect",
+                "subagent_type":"general-purpose",
+                "model":"sonnet", "model_profile":"anthropic",
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("profile-only rewrite dispatches with the original model preference");
+
+        assert_eq!(
+            spawner.selection_requests(),
+            vec![
+                (
+                    "general-purpose".to_string(),
+                    Some("sonnet".to_string()),
+                    Some("anthropic".to_string()),
+                ),
+                (
+                    "general-purpose".to_string(),
+                    Some("sonnet".to_string()),
+                    Some("openai".to_string()),
+                ),
+            ],
+            "the resolver must be called again when only the profile changes"
+        );
+        let request = &spawner.invocations()[0].request;
+        assert_eq!(request.model.as_deref(), Some("sonnet"));
+        assert_eq!(request.model_profile.as_deref(), Some("openai"));
+
+        let selected = sink
+            .events()
+            .await
+            .into_iter()
+            .find(|event| event.name == "tengu_agent_tool_selected")
+            .expect("selection telemetry is emitted after the Mod rewrite");
+        assert!(matches!(
+            selected.metadata.get("model"),
+            Some(telemetry::AnalyticsValue::String(model))
+                if model == "rewritten-route-model"
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn forced_model_inheritance_ignores_mod_model_profile_rewrites() {
+        let _guard = AGENT_PROMPT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _force = EnvVarRestore::set(branding::SUBAGENT_MODEL_FORCE_ENV, "1");
+        let spawner = arc_mock_spawner();
+        spawner.script_agent_spawn_rewrite(json!({
+            "model":"gpt-4o", "model_profile":"openai",
+        }));
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        tool.call(
+            json!({
+                "description":"inspect", "prompt":"inspect",
+                "model":"gpt-4o", "model_profile":"openai",
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("forced model selection still dispatches");
+        let calls = spawner.invocations();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].request.model.is_none());
+        assert!(calls[0].request.model_profile.is_none());
+        let mod_input = &spawner.agent_spawn_inputs()[0];
+        assert!(!mod_input.contains_property("model"));
+        assert!(!mod_input.contains_property("model_profile"));
     }
 
     #[tokio::test]
@@ -4629,8 +4807,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             )
             .await
             .unwrap_err();
-        assert!(error
-            .to_string()
+        assert!(source_text(&error.model_facing_message())
             .contains("model_profile requires an explicit model"));
         assert!(spawner.invocations().is_empty());
     }
@@ -4749,7 +4926,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             .call(input, ctx, fresh_tx())
             .await
             .expect_err("explicit unknown subagent_type must be rejected");
-        let msg = format!("{err}");
+        let msg = source_text(&err.model_facing_message());
         // The available-agents list comes from the mock listing
         // (general-purpose, Explore, Plan), in listing order. The INNER message
         // is byte-locked to claude (AgentTool.tsx:353); the LingXi
@@ -4884,7 +5061,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 Some(self.0.lock().unwrap().clone())
             }
         }
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5064,7 +5241,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             )
             .await
             .unwrap_err();
-        assert!(format!("{error}").contains("Subagent spawn denied by a plugin: policy refused"));
+        assert!(source_text(&error.model_facing_message())
+            .contains("Subagent spawn denied by a plugin: policy refused"));
         assert!(spawner.invocations().is_empty());
         assert_eq!(registry.get_total_agent_spawns(), 0);
     }
@@ -5392,7 +5570,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 None
             }
         }
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let gate = Arc::new(ReviewingGate(StdMutex::new(Vec::new())));
@@ -6227,6 +6405,9 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
+        spawner.script_agent_spawn_rewrite(json!({
+            "model":"gpt-4o", "model_profile":"openai",
+        }));
         let bctx = wired_ctx(
             spawner.clone(),
             arc_mock_task_registry(),
@@ -6269,6 +6450,9 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         // Fork path sends model: None (claude model: undefined).
         assert!(inv[0].request.model.is_none());
         assert!(inv[0].request.model_profile.is_none());
+        let mod_input = &spawner.agent_spawn_inputs()[0];
+        assert!(!mod_input.contains_property("model"));
+        assert!(!mod_input.contains_property("model_profile"));
         assert_eq!(
             inv[0].request.parent_model_profile_override.as_deref(),
             Some("anthropic")
@@ -6291,18 +6475,23 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ));
         match &fc[2] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
-                // 1 tool_result (one tool_use) + the directive Text block.
+                // 1 tool_result (one tool_use) + the source-backed directive.
                 assert_eq!(content.len(), 2);
                 assert!(matches!(
                     content[0],
                     lingxi_core::types::ContentBlock::ToolResult { .. }
                 ));
                 match &content[1] {
-                    lingxi_core::types::ContentBlock::Text { text, .. } => {
+                    lingxi_core::types::ContentBlock::TextJsUtf16 {
+                        text,
+                        utf16_code_units,
+                        ..
+                    } => {
                         assert!(text.starts_with("<fork-boilerplate>"));
                         assert!(text.ends_with("Your directive: Do the subtask"));
+                        assert_eq!(utf16_code_units, &text.encode_utf16().collect::<Vec<_>>());
                     }
-                    other => panic!("expected Text, got {other:?}"),
+                    other => panic!("expected source-backed directive, got {other:?}"),
                 }
             }
             other => panic!("expected User, got {other:?}"),
@@ -6385,6 +6574,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ));
         let utf16_code_units = child_message.string_units("").unwrap();
         let boilerplate = lingxi_core::types::ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                 text: String::from_utf16_lossy(&utf16_code_units),
@@ -6409,7 +6599,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             .call(input, ctx, fresh_tx())
             .await
             .expect_err("fork inside a fork child must be rejected");
-        let msg = format!("{err}");
+        let msg = source_text(&err.model_facing_message());
         assert!(
             msg.contains(
                 "Fork is not available inside a forked worker. Complete your task directly using your tools."
@@ -6654,9 +6844,25 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
 
     #[tokio::test]
     async fn named_teammate_mod_rewrite_carries_model_pair_and_actual_agent_identity() {
-        for rewrite in [
-            json!({"model":"gpt-4o","model_profile":"openai"}),
-            json!({"model":null,"model_profile":null}),
+        for (rewrite, expected_model, expected_profile) in [
+            (
+                json!({"model":"gpt-4o","model_profile":"openai"}),
+                Some("gpt-4o"),
+                Some("openai"),
+            ),
+            (json!({"model":null,"model_profile":null}), None, None),
+            (json!({}), Some("haiku"), Some("anthropic")),
+            (json!({"model_profile":null}), Some("haiku"), None),
+            (
+                json!({"model":"gemini-2.5-pro"}),
+                Some("gemini-2.5-pro"),
+                Some("anthropic"),
+            ),
+            (
+                json!({"model_profile":"openai"}),
+                Some("haiku"),
+                Some("openai"),
+            ),
         ] {
             let spawner = arc_mock_spawner();
             spawner.enable_teammates();
@@ -6678,22 +6884,75 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 )
                 .await
                 .expect("a valid admitted teammate must return success");
-            assert_eq!(result.data["status"], "teammate_spawned");
-            assert_eq!(result.data["teammate_id"], "scout@session");
+            assert_eq!(result.data.string_at("/status"), Some("teammate_spawned"));
+            assert_eq!(result.data.string_at("/teammate_id"), Some("scout@session"));
             let actual_id = lingxi_core::types::AgentId::parse_prefixed(
-                result.data["agent_id"].as_str().unwrap(),
+                result.data.string_at("/agent_id").unwrap(),
             )
             .unwrap();
             let receipts = spawner.agent_spawn_started();
             assert_eq!(receipts.len(), 1);
             assert_eq!(receipts[0].0, actual_id);
             let calls = spawner.invocations();
-            assert_eq!(calls[0].request.model.as_deref(), rewrite["model"].as_str());
+            assert_eq!(calls[0].request.model.as_deref(), expected_model);
+            assert_eq!(calls[0].request.model_profile.as_deref(), expected_profile);
             assert_eq!(
-                calls[0].request.model_profile.as_deref(),
-                rewrite["model_profile"].as_str()
+                spawner.agent_spawn_inputs()[0].string_at("/model_profile"),
+                Some("anthropic")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn named_teammate_keeps_qualified_model_for_child_profile_resolution() {
+        let spawner = arc_mock_spawner();
+        spawner.enable_teammates();
+        spawner.script_selection(lingxi_core::host::subagent_spawn::SelectedAgentMeta {
+            agent_type: "general-purpose".into(),
+            resolved_model: "shared-balanced".into(),
+            ..Default::default()
+        });
+        spawner.script_agent_spawn_rewrite(json!({
+            "model":"b/shared-balanced", "model_profile":null,
+        }));
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.options.model_profile = Some("a".into());
+        tool.call(
+            json!({
+                "description":"inspect", "prompt":"inspect", "name":"scout",
+                "model":"shared-balanced", "model_profile":"a",
+            }),
+            ctx,
+            fresh_tx(),
+        )
+        .await
+        .expect("qualified named teammate selection launches");
+
+        let request = &spawner.invocations()[0].request;
+        assert_eq!(request.model.as_deref(), Some("b/shared-balanced"));
+        assert!(request.model_profile.is_none());
+        assert_eq!(request.parent_model_profile_override.as_deref(), Some("a"));
+        assert_eq!(
+            spawner.selection_requests(),
+            vec![
+                (
+                    "general-purpose".to_string(),
+                    Some("shared-balanced".to_string()),
+                    Some("a".to_string()),
+                ),
+                (
+                    "general-purpose".to_string(),
+                    Some("b/shared-balanced".to_string()),
+                    None,
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -6855,11 +7114,10 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn offered_catalog_hides_agent_but_explicit_raw_lookup_still_dispatches() {
-        let _g = AGENT_LIST_ENV_LOCK
+    async fn explicit_raw_lookup_dispatches_independent_of_prompt_catalog() {
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
 
         let entry = |agent_type: &str, when_to_use: &str| SubagentListingEntry {
@@ -6890,8 +7148,12 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             })
             .await,
         );
-        assert!(prompt.contains("- general-purpose:"));
+        assert!(prompt.contains(
+            "Available agent types are listed in <system-reminder> messages in the conversation."
+        ));
+        assert!(!prompt.contains("- general-purpose:"));
         assert!(!prompt.contains("hidden-agent"));
+        assert!(!prompt.contains("secret task"));
 
         tool.call(
             serde_json::json!({
@@ -6909,7 +7171,6 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             "hidden-agent"
         );
 
-        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
@@ -6973,7 +7234,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             .await
             .unwrap_err();
         assert!(
-            matches!(err, ToolError::InvalidInput(ref message) if message.contains("has been denied by permission rule"))
+            matches!(err, ToolError::InvalidInput(ref message) if message.string_at("").is_some_and(|text| text.contains("has been denied by permission rule")))
         );
         assert!(spawner.invocations().is_empty());
     }

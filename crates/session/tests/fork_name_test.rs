@@ -31,13 +31,23 @@ fn user(content: serde_json::Value) -> JsonlMessage {
 
 fn compact_summary(content: serde_json::Value) -> JsonlMessage {
     let mut m = user(content);
-    m.extra.set_field("isCompactSummary", lingxi_core::types::utf16_json::Utf16JsonProjection::parse("true").unwrap()).unwrap();
+    m.extra
+        .set_field(
+            "isCompactSummary",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse("true").unwrap(),
+        )
+        .unwrap();
     m
 }
 
 fn meta(content: serde_json::Value) -> JsonlMessage {
     let mut m = user(content);
-    m.extra.set_field("isMeta", lingxi_core::types::utf16_json::Utf16JsonProjection::parse("true").unwrap()).unwrap();
+    m.extra
+        .set_field(
+            "isMeta",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse("true").unwrap(),
+        )
+        .unwrap();
     m
 }
 

@@ -1,6 +1,6 @@
 ---
-source: apps/engine-desktop/tests/desktop_tool_list_snapshot.rs
-assertion_line: 32
+source: crates/runtime/tests/desktop/desktop_tool_list_snapshot.rs
+assertion_line: 33
 expression: names
 ---
 - Agent
@@ -34,7 +34,6 @@ expression: names
 - SendUserMessage
 - Skill
 - Sleep
-- StructuredOutput
 - TaskCreate
 - TaskGet
 - TaskList

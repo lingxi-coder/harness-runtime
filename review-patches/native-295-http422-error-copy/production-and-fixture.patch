@@ -1,0 +1,1301 @@
+--- a/crates/orchestrator/src/turn_loop/error_reporting.rs
++++ b/crates/orchestrator/src/turn_loop/error_reporting.rs
+@@ -931,7 +931,7 @@
+                 error
+                     .native_anthropic_error_facts()
+                     .and_then(|_| match error.http_status() {
+-                        Some(400) => Some("API Error: "),
++                        Some(400 | 422) => Some("API Error: "),
+                         Some(401 | 403) => Some("Failed to authenticate. API Error: "),
+                         _ => None,
+                     });
+--- a/crates/orchestrator/src/conversation/tests/main_thread_agent_tests.rs
++++ b/crates/orchestrator/src/conversation/tests/main_thread_agent_tests.rs
+@@ -992,9 +992,10 @@
+     assert_eq!(orch.session().lock().await.model, "base-model");
+ }
+ 
+-/// Implementation contract test for the status-gated Native-facts renderer.
+-/// The checked-in 2.1.293 capture establishes the 400 prefix; no Native 422
+-/// capture is available, so the 422 row below is not a parity claim.
++/// Contract test for the status-gated Native-facts renderer.
++/// The checked-in 2.1.293 and 2.1.295 captures establish the 400 and 422
++/// prefixes; the 2.1.295 422 capture is replayed through the production path
++/// by `native_295_http_422_capture_reaches_real_orchestrator_output_and_jsonl`.
+ #[tokio::test]
+ async fn provider_invalid_request_uses_status_gated_native_error_copy() {
+     let orch = orch_with_config(OrchestratorConfig::default());
+@@ -1032,7 +1033,7 @@
+         ),
+         (
+             r#"422 {"error":{"message":"unsupported field"}}"#,
+-            "422 unsupported field",
++            "API Error: 422 unsupported field",
+             true,
+         ),
+         (
+--- a/crates/orchestrator/tests/provider_error_output_293_test.rs
++++ b/crates/orchestrator/tests/provider_error_output_293_test.rs
+@@ -17,6 +17,7 @@
+ use platform_posix::fs::PosixFileSystem;
+ use serde_json::json;
+ use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
++use sha2::{Digest, Sha256};
+ use std::sync::{
+     atomic::{AtomicUsize, Ordering},
+     Arc, Mutex,
+@@ -685,3 +686,301 @@
+         }
+     }
+ }
++
++fn fixture_sha256(bytes: &[u8]) -> String {
++    Sha256::digest(bytes)
++        .iter()
++        .map(|byte| format!("{byte:02x}"))
++        .collect()
++}
++
++#[tokio::test]
++async fn native_295_http_422_capture_reaches_real_orchestrator_output_and_jsonl() {
++    let capture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
++        .join("../../docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422");
++    let case_raw =
++        std::fs::read(capture_dir.join("capture.json")).expect("Native 422 capture receipt");
++    let case: serde_json::Value = serde_json::from_slice(&case_raw).expect("valid case receipt");
++    let manifest_raw =
++        std::fs::read(capture_dir.join("capture-manifest.json")).expect("capture runner manifest");
++    let manifest: serde_json::Value =
++        serde_json::from_slice(&manifest_raw).expect("valid manifest");
++    let runner_raw =
++        std::fs::read(capture_dir.join("capture-runner.py")).expect("captured runner source");
++    assert_eq!(case["phase"], "complete");
++    assert_eq!(case["capture_complete"], true);
++    assert_eq!(case["native_process_launches"], 1);
++    assert_eq!(case["messages_request_count"], 1);
++    assert_eq!(case["native_exit_code"], 1);
++    assert_eq!(case["timed_out"], false);
++    assert_eq!(
++        case["native_sha256_actual"],
++        "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
++    );
++    assert_eq!(manifest["target_native_version"], "2.1.295");
++    assert_eq!(
++        manifest["target_native_sha256"],
++        case["native_sha256_actual"]
++    );
++    assert_eq!(
++        fixture_sha256(&runner_raw),
++        case["runner_sha256"].as_str().expect("runner hash")
++    );
++    assert_eq!(case["runner_sha256"], manifest["runner_sha256"]);
++    assert_eq!(
++        case["runner_relative_path"],
++        manifest["runner_relative_path"]
++    );
++    assert_eq!(
++        fixture_sha256(&manifest_raw),
++        case["runner_manifest_sha256"]
++            .as_str()
++            .expect("runner manifest hash")
++    );
++
++    let requests_raw = std::fs::read(capture_dir.join("requests.json")).expect("request receipt");
++    let requests: Vec<serde_json::Value> =
++        serde_json::from_slice(&requests_raw).expect("valid requests");
++    assert_eq!(requests.len(), 1);
++    let request = &requests[0];
++    assert_eq!(request["peer"], "127.0.0.1");
++    assert_eq!(request["method"], "POST");
++    assert_eq!(request["target"], "/v1/messages?beta=true");
++    assert_eq!(request["status"], 422);
++    assert_eq!(request["model"], MODEL);
++    assert_eq!(request["x_api_key_is_dummy"], true);
++
++    let request_bytes = std::fs::read(capture_dir.join("request-000.raw")).expect("raw request");
++    let request_headers =
++        std::fs::read(capture_dir.join("request-000-headers.raw")).expect("raw request headers");
++    let request_body =
++        std::fs::read(capture_dir.join("request-000-body.raw")).expect("raw request body");
++    assert_eq!(
++        request_bytes,
++        [request_headers.as_slice(), request_body.as_slice()].concat()
++    );
++    assert_eq!(
++        fixture_sha256(&request_bytes),
++        "86532df92c00790f148eb1772f3f22db411b141898c7e5daa3bd547253d24037"
++    );
++    assert_eq!(
++        fixture_sha256(&request_headers),
++        "f6d629fb7452d22b1ced18ae951295693c9c31afad6327ed3be308d42d9b4cca"
++    );
++    assert_eq!(
++        fixture_sha256(&request_body),
++        "aa027db7c377ef31b0eb26836028aa544b3e7ca8805e7cc57c49f3a85d4daa9f"
++    );
++    assert_eq!(
++        fixture_sha256(&request_bytes),
++        request["request_sha256"]
++            .as_str()
++            .expect("raw request hash")
++    );
++    assert_eq!(
++        fixture_sha256(&request_headers),
++        request["headers_sha256"].as_str().expect("raw header hash")
++    );
++    assert_eq!(
++        fixture_sha256(&request_body),
++        request["body_sha256"].as_str().expect("raw body hash")
++    );
++    let request_json: serde_json::Value =
++        serde_json::from_slice(&request_body).expect("captured request JSON");
++    assert_eq!(request_json["model"], MODEL);
++    assert_eq!(request_json["stream"], true);
++    let prompt = std::fs::read(capture_dir.join("invocation.json"))
++        .ok()
++        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
++        .and_then(|invocation| invocation["prompt"].as_str().map(ToOwned::to_owned))
++        .expect("fixed captured prompt");
++    assert_eq!(request_json["messages"][0]["content"][0]["text"], prompt);
++    let captured_shape = RequestShape {
++        model: Some(MODEL.to_owned()),
++        stream: Some(true),
++    };
++
++    let response_bytes = std::fs::read(capture_dir.join("response-000.raw")).expect("raw response");
++    let response_body =
++        std::fs::read(capture_dir.join("response-000-body.raw")).expect("raw response body");
++    assert!(response_bytes.starts_with(b"HTTP/1.1 422 Unprocessable Entity\r\n"));
++    assert_eq!(
++        response_body.as_slice(),
++        br#"{"type":"error","error":{"type":"invalid_request_error","message":"NATIVE_295_PRINT_HTTP_422_ERROR_COPY_PROBE"}}"#
++    );
++    assert_eq!(
++        fixture_sha256(&response_bytes),
++        "f572e57d8def4499ff96b437385b911ecd6d904b50dd2b0202f7cfb7a03bbe82"
++    );
++    assert_eq!(
++        fixture_sha256(&response_body),
++        "2f92d0946ef4a3e49cfecd806411010044670dbccfa2edc80ca0e6e3bfa1129a"
++    );
++    assert_eq!(
++        fixture_sha256(&response_bytes),
++        request["response_sha256"]
++            .as_str()
++            .expect("raw response hash")
++    );
++    assert_eq!(
++        fixture_sha256(&response_body),
++        request["response_body_sha256"]
++            .as_str()
++            .expect("raw response body hash")
++    );
++
++    let stdout_raw =
++        std::fs::read(capture_dir.join("native.stdout.raw")).expect("raw Native stdout");
++    let stderr_raw =
++        std::fs::read(capture_dir.join("native.stderr.raw")).expect("raw Native stderr");
++    assert_eq!(
++        fixture_sha256(&stdout_raw),
++        "aefe021e6303428b141ae07387783b7b2dad3538afee85332eec1cb8cb2a350c"
++    );
++    assert_eq!(
++        fixture_sha256(&stderr_raw),
++        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
++    );
++    let exit_raw =
++        std::fs::read(capture_dir.join("native-exit.json")).expect("Native exit receipt");
++    let exit: serde_json::Value = serde_json::from_slice(&exit_raw).expect("valid exit receipt");
++    assert_eq!(exit["returncode"], 1);
++    assert_eq!(exit["timed_out"], false);
++    assert_eq!(exit["native_process_launches"], 1);
++    assert_eq!(
++        exit["stdout_sha256"].as_str().expect("stdout hash"),
++        fixture_sha256(&stdout_raw)
++    );
++    assert_eq!(
++        exit["stderr_sha256"].as_str().expect("stderr hash"),
++        fixture_sha256(&stderr_raw)
++    );
++    let native_stdout = std::str::from_utf8(&stdout_raw).expect("captured stdout is UTF-8 JSON");
++    let native_envelope: serde_json::Value =
++        serde_json::from_slice(&stdout_raw).expect("Native result JSON");
++    assert_eq!(native_envelope["is_error"], true);
++    assert_eq!(native_envelope["api_error_status"], 422);
++    assert_eq!(native_envelope["terminal_reason"], "api_error");
++    let native_result_units = Utf16JsonProjection::parse(native_stdout)
++        .expect("Native result JSON retains source units")
++        .string_units("/result")
++        .expect("Native result text");
++    assert_eq!(
++        String::from_utf16_lossy(&native_result_units),
++        "API Error: 422 NATIVE_295_PRINT_HTTP_422_ERROR_COPY_PROBE"
++    );
++
++    for streaming in [false, true] {
++        let dir = tempdir().expect("isolated transcript directory");
++        let transcript_path = dir.path().join("session.jsonl");
++        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
++        let writer = Arc::new(JsonlWriter::new(transcript_path.clone(), fs.clone()));
++        let transport = Arc::new(FixedHttpError {
++            status: 422,
++            body: response_body.clone(),
++            response_headers: Vec::new(),
++            calls: AtomicUsize::new(0),
++            request_shapes: Mutex::new(Vec::new()),
++            request_authorities: Mutex::new(Vec::new()),
++        });
++        let adapter = Arc::new(ProviderApiAdapter::new(api_service(transport.clone())));
++        let output = Arc::new(MockOutputStream::new());
++        let orchestrator = ConversationOrchestrator::into_shared(
++            ConversationOrchestrator::new_with_streaming(
++                OrchestratorConfig {
++                    model: MODEL.to_owned(),
++                    max_turns: 1,
++                    system_prompt_override: Some(
++                        "You are a local deterministic headless fixture.".into(),
++                    ),
++                    ..OrchestratorConfig::default()
++                },
++                adapter.clone(),
++                adapter,
++                Arc::new(ToolRegistry::new()),
++                noop_hook_executor(),
++                Arc::new(NoOpPermissionGate),
++                output.clone(),
++                Arc::new(StaticMemoryProvider::empty()),
++                dir.path().to_path_buf(),
++            )
++            .with_session_id(fixed_session_id_with(
++                case["session_id"].as_str().expect("session id"),
++            ))
++            .with_jsonl_writer(writer),
++        );
++        let outcome = if streaming {
++            orchestrator.run_turn_streaming(&prompt).await
++        } else {
++            orchestrator.run_turn(&prompt).await
++        }
++        .expect("captured HTTP 422 is a completed model-error turn");
++        assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
++        assert_eq!(
++            transport.calls.load(Ordering::SeqCst),
++            1,
++            "streaming={streaming}"
++        );
++        if streaming {
++            assert_eq!(
++                transport
++                    .request_shapes
++                    .lock()
++                    .expect("request-shape mutex")
++                    .as_slice(),
++                std::slice::from_ref(&captured_shape),
++                "the live streaming dispatch retains the captured model and stream setting"
++            );
++        }
++        let metrics = orchestrator
++            .completed_turn_metrics()
++            .expect("completed 422 turn metrics");
++        assert_eq!(metrics.api_error_status, Some(422));
++        assert_eq!(
++            metrics.api_error_stop_reason.as_deref(),
++            Some("stop_sequence")
++        );
++
++        let events = output.snapshot().await;
++        assert!(events.iter().any(|event| matches!(
++            event,
++            OutputEvent::TerminalApiError { api_error_status: Some(422), terminal_reason, stop_reason }
++                if terminal_reason == "api_error" && stop_reason == "stop_sequence"
++        )), "terminal 422 metadata must survive the production output path: streaming={streaming}: {events:#?}");
++        let text_events = events
++            .iter()
++            .filter(|event| matches!(event, OutputEvent::Text { .. }))
++            .collect::<Vec<_>>();
++        assert_eq!(text_events.len(), 1, "streaming={streaming}: {events:#?}");
++        let OutputEvent::Text { text } = text_events[0] else {
++            unreachable!("filtered Text event")
++        };
++        assert_eq!(
++            text.string_units("").expect("exact output text units"),
++            native_result_units,
++            "the production output text must match Native's captured HTTP 422 result: streaming={streaming}"
++        );
++        let serialized = serde_json::to_string(text_events[0]).expect("Text event serialization");
++        let serialized_projection =
++            Utf16JsonProjection::parse(&serialized).expect("serialized event source JSON");
++        assert_eq!(
++            serialized_projection.string_units("/Text/text"),
++            Some(native_result_units.clone())
++        );
++
++        let rows = JsonlReader::new(transcript_path, fs)
++            .read_all()
++            .await
++            .expect("session JSONL replay");
++        let assistant_rows = rows
++            .iter()
++            .filter(|row| row.message_type == "assistant")
++            .collect::<Vec<_>>();
++        assert_eq!(assistant_rows.len(), 1, "streaming={streaming}");
++        assert_eq!(
++            assistant_rows[0].message.string_units("/content/0/text").expect("assistant text source"),
++            native_result_units,
++            "persisted assistant text must match Native's captured 422 result: streaming={streaming}"
++        );
++    }
++}
+--- a/docs/parity/current-alignment/fixtures/provider-error-295/README.md
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/README.md
+@@ -13,6 +13,17 @@
+ header `x-should-retry:false` and each sent one request. The uncontrolled 401/500
+ retry lifecycle is outside this probe.
+ 
++A separate public `--print --output-format json` HTTP 422 capture is checked in at
++`native-baseline/2.1.295/http-422/`. It records one Native 2.1.295 process, one
++Messages request, exit 1, and the exact result `API Error: 422
++NATIVE_295_PRINT_HTTP_422_ERROR_COPY_PROBE`. Its raw files, receipt, runner
++manifest/source, and SHA256SUMS remain separate from the original eight-case
++status-control set. The production replay regression is
++`native_295_http_422_capture_reaches_real_orchestrator_output_and_jsonl` in
++`provider_error_output_293_test.rs`; it exercises the captured response through
++the current SDK adapter and real orchestrator output/JSONL path. This closes the
++previously implementation-only 422 rendering row, not full CLI envelope parity.
++
+ `comparison-to-293.json` compares untouched JSON `result` string literal bytes
+ from the two versions. Seven are byte-identical. The 500 result differs only in
+ the actual loopback gateway port; its authority is checked against the listener
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/README.md b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/README.md
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/README.md
+@@ -0,0 +1,7 @@
++# Native 2.1.295 PRINT HTTP 422 capture
++
++This is a repository-local copy of the completed one-shot capture in `acceptance/native-print-http422-error-copy-295/attempt-01`. Native 2.1.295 ran once against the localhost stub, sent one Messages request, returned exit code 1, and did not time out. The raw response is HTTP 422 with an `invalid_request_error`; raw Native stdout contains result `API Error: 422 NATIVE_295_PRINT_HTTP_422_ERROR_COPY_PROBE`, `is_error: true`, `api_error_status: 422`, and `terminal_reason: api_error`.
++
++`capture.json`, `capture-manifest.json`, and `capture-runner.py` retain the capture receipt, exact runner manifest, and exact runner source used. The binary SHA-256 is `0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70`; the runner SHA-256 is `d32199315bb52a43498f4c4b54c5ed0e40867efdf99addfe1389cad3658524e9`. The fixture is a source/result capture, not a claim of full request or envelope parity.
++
++All raw artifacts retain their captured bytes. `SHA256SUMS` covers the receipt, source, request/response, stdout/stderr, and sandbox records.
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/SHA256SUMS b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/SHA256SUMS
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/SHA256SUMS
+@@ -0,0 +1,18 @@
++f09eed72d543d1e68c1f910cc76c37e3113a3f80823fbcf70b1970c9cf732758  README.md
++9f1b9299eeb38b07910907813a3526233e9c431fb9d5d35cb59d379cb5f06f82  capture-manifest.json
++d32199315bb52a43498f4c4b54c5ed0e40867efdf99addfe1389cad3658524e9  capture-runner.py
++44edec51435b9be02ba2e789813b76bff283a3a72904eb54640722caec0f62a1  capture.json
++c5d8502ee9c2c130341d8bd410ec5e1c8ad1b5e63da5b104f6f5332414f3699f  invocation.json
++32251e887add58b15e57fd832a1bbb65d9ddfead99fc84d019f398a8761a37c1  native-exit.json
++e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  native.stderr.raw
++aefe021e6303428b141ae07387783b7b2dad3538afee85332eec1cb8cb2a350c  native.stdout.raw
++aa027db7c377ef31b0eb26836028aa544b3e7ca8805e7cc57c49f3a85d4daa9f  request-000-body.raw
++f6d629fb7452d22b1ced18ae951295693c9c31afad6327ed3be308d42d9b4cca  request-000-headers.raw
++86532df92c00790f148eb1772f3f22db411b141898c7e5daa3bd547253d24037  request-000.raw
++4dd425c2adaee0d65a4fc4f5b035ec986cc485b77925cffc7871817f67f68bca  requests.json
++2f92d0946ef4a3e49cfecd806411010044670dbccfa2edc80ca0e6e3bfa1129a  response-000-body.raw
++f572e57d8def4499ff96b437385b911ecd6d904b50dd2b0202f7cfb7a03bbe82  response-000.raw
++e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  sandbox-preflight.stderr.raw
++e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  sandbox-preflight.stdout.raw
++e9c5bc8039a306938630a8f18da272f4a519dbc56eb60abbe4e34c65d3e224a9  sandbox-profile.sbpl
++37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570  server-errors.json
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/capture-manifest.json b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/capture-manifest.json
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/capture-manifest.json
+@@ -0,0 +1,44 @@
++{
++  "schema_version": 1,
++  "status": "prepared_not_executed",
++  "runner_relative_path": "acceptance/native-print-http422-error-copy-295-runner-v2/capture_native_print_http422_295.py",
++  "runner_sha256": "d32199315bb52a43498f4c4b54c5ed0e40867efdf99addfe1389cad3658524e9",
++  "origin_runner_relative_path": "acceptance/per-turn-control-295-capture-plan/capture_one_default_headless.py",
++  "origin_runner_sha256": "107e0ec2046230ab5a73d8a1d6af14be0eef5bb95353ecb71c981c853a7e0aeb",
++  "target_native_version": "2.1.295",
++  "target_native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
++  "target_native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
++  "capture_case_id": "native-print-http422-error-copy-295",
++  "session_id": "00000000-0000-4000-8000-000000029508",
++  "output_root": "acceptance/native-print-http422-error-copy-295",
++  "mode": "public --bare --print --output-format json",
++  "provider_route": "first-party Anthropic Messages to 127.0.0.1 only",
++  "model": "claude-sonnet-4-5",
++  "prompt": "Return the fixed Native HTTP 422 error-copy probe.",
++  "http_status": 422,
++  "expected_native_exit_code": 1,
++  "native_process_launches": 1,
++  "expected_messages_requests": 1,
++  "max_native_seconds": 60,
++  "client_retry_environment": {
++    "ANTHROPIC_MAX_RETRIES": "0"
++  },
++  "extra_request_policy": "Preserve every observed request and response; a count above one makes this one-request capture incomplete. This does not claim that the client will not attempt fallback requests.",
++  "dummy_api_key": "sk-ant-print-http422-local-dummy-only",
++  "fixed_response_body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"NATIVE_295_PRINT_HTTP_422_ERROR_COPY_PROBE\"}}",
++  "response_body_sha256": "2f92d0946ef4a3e49cfecd806411010044670dbccfa2edc80ca0e6e3bfa1129a",
++  "execution_command": "python3 acceptance/native-print-http422-error-copy-295-runner-v2/capture_native_print_http422_295.py --print-http422",
++  "raw_artifacts": [
++    "request-NNN.raw",
++    "request-NNN-headers.raw",
++    "request-NNN-body.raw",
++    "response-NNN.raw",
++    "response-NNN-body.raw",
++    "native.stdout.raw",
++    "native.stderr.raw",
++    "native-exit.json",
++    "requests.json",
++    "server-errors.json"
++  ],
++  "attempt_policy": "One runner invocation and at most one Native process launch. The runner does not retry Native. The output root is claimed atomically and cannot be reused."
++}
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/capture-runner.py b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/capture-runner.py
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/capture-runner.py
+@@ -0,0 +1,584 @@
++#!/usr/bin/env python3
++"""One-shot Native 2.1.295 public PRINT HTTP 422 capture against localhost."""
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++from pathlib import Path
++import signal
++import socket
++import subprocess
++import sys
++import threading
++import time
++from urllib.parse import urlsplit
++
++
++HERE = Path(__file__).resolve().parent
++INTEGRATION = HERE.parent.parent
++CASE_ID = "native-print-http422-error-copy-295"
++SESSION_ID = "00000000-0000-4000-8000-000000029508"
++PROMPT = "Return the fixed Native HTTP 422 error-copy probe."
++MODEL = "claude-sonnet-4-5"
++API_KEY = "sk-ant-print-http422-local-dummy-only"
++BINARY = Path("/Users/luolingfeng/.local/share/claude/versions/2.1.295")
++BINARY_SHA256 = "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
++MAX_NATIVE_SECONDS = 60
++PROCESS_RUN_SECONDS = 55
++TERM_GRACE_SECONDS = 2
++KILL_GRACE_SECONDS = 2
++MAX_HEADER_BYTES = 128 * 1024
++MAX_BODY_BYTES = 2 * 1024 * 1024
++HTTP_422_BODY = (
++    b'{"type":"error","error":{"type":"invalid_request_error",'
++    b'"message":"NATIVE_295_PRINT_HTTP_422_ERROR_COPY_PROBE"}}'
++)
++OUTPUT_ROOT = INTEGRATION / "acceptance" / CASE_ID
++
++
++class CaptureInterrupted(Exception):
++    def __init__(self, signum: int):
++        super().__init__(f"capture interrupted by signal {signum}")
++        self.signum = signum
++
++
++class RequestReadError(Exception):
++    def __init__(self, message: str, raw: bytes):
++        super().__init__(message)
++        self.raw = raw
++
++
++def sha256(raw: bytes) -> str:
++    return hashlib.sha256(raw).hexdigest()
++
++
++def write_json(path: Path, value: object) -> None:
++    path.write_text(json.dumps(value, ensure_ascii=True, indent=2) + "\n", encoding="ascii")
++
++
++def load_manifest() -> tuple[dict, bytes, str]:
++    manifest_path = HERE / "manifest.json"
++    raw = manifest_path.read_bytes()
++    manifest = json.loads(raw)
++    runner = Path(__file__).resolve()
++    relative = runner.relative_to(INTEGRATION).as_posix()
++    if manifest.get("runner_relative_path") != relative:
++        raise SystemExit("manifest runner path does not match this copy")
++    if manifest.get("runner_sha256") != sha256(runner.read_bytes()):
++        raise SystemExit("manifest runner SHA mismatch")
++    expected = {
++        "target_native_version": "2.1.295",
++        "target_native_path": str(BINARY),
++        "target_native_sha256": BINARY_SHA256,
++        "capture_case_id": CASE_ID,
++        "session_id": SESSION_ID,
++        "output_root": OUTPUT_ROOT.relative_to(INTEGRATION).as_posix(),
++        "mode": "public --bare --print --output-format json",
++        "provider_route": "first-party Anthropic Messages to 127.0.0.1 only",
++        "model": MODEL,
++        "prompt": PROMPT,
++        "http_status": 422,
++        "expected_native_exit_code": 1,
++        "native_process_launches": 1,
++        "expected_messages_requests": 1,
++        "max_native_seconds": MAX_NATIVE_SECONDS,
++        "response_body_sha256": sha256(HTTP_422_BODY),
++    }
++    if any(manifest.get(key) != value for key, value in expected.items()):
++        raise SystemExit("manifest capture contract mismatch")
++    return manifest, raw, relative
++
++
++def parse_request(connection: socket.socket) -> tuple[bytes, bytes, bytes, str, str, str, dict[str, list[str]]]:
++    data = bytearray()
++    separator = b"\r\n\r\n"
++    while separator not in data:
++        try:
++            chunk = connection.recv(8192)
++        except OSError as error:
++            raise RequestReadError(f"header read failed: {type(error).__name__}: {error}", bytes(data)) from error
++        if not chunk:
++            raise RequestReadError("request ended before headers completed", bytes(data))
++        data.extend(chunk)
++        if separator not in data and len(data) > MAX_HEADER_BYTES:
++            raise RequestReadError("request headers exceed limit", bytes(data))
++
++    split_at = data.index(separator)
++    header = bytes(data[:split_at + len(separator)])
++    body = bytearray(data[split_at + len(separator):])
++    try:
++        lines = header[:-len(separator)].split(b"\r\n")
++        method, target, protocol = lines[0].decode("latin1").split(" ", 2)
++        parsed: dict[str, list[str]] = {}
++        for line in lines[1:]:
++            if b":" not in line:
++                raise ValueError("malformed header field")
++            name, value = line.split(b":", 1)
++            parsed.setdefault(name.decode("latin1").lower(), []).append(value.lstrip().decode("latin1"))
++        if parsed.get("transfer-encoding"):
++            raise ValueError("transfer-encoded request framing is unsupported")
++        lengths = parsed.get("content-length", [])
++        if lengths and len(set(lengths)) != 1:
++            raise ValueError("conflicting Content-Length headers")
++        length = int(lengths[0]) if lengths else 0
++        if length < 0 or length > MAX_BODY_BYTES:
++            raise ValueError(f"request body length outside limit: {length}")
++        if len(body) > length:
++            raise ValueError("request contains bytes beyond Content-Length")
++        while len(body) < length:
++            try:
++                chunk = connection.recv(min(65536, length - len(body)))
++            except OSError as error:
++                raise RequestReadError(
++                    f"body read failed: {type(error).__name__}: {error}", header + bytes(body)
++                ) from error
++            if not chunk:
++                raise ValueError("request body ended before Content-Length")
++            body.extend(chunk)
++        return header + bytes(body), header, bytes(body), method, target, protocol, parsed
++    except (ValueError, UnicodeError) as error:
++        raise RequestReadError(f"invalid request: {error}", header + bytes(body)) from error
++
++
++def contains_prompt(value: object) -> bool:
++    if isinstance(value, str):
++        return PROMPT in value
++    if isinstance(value, list):
++        return any(contains_prompt(item) for item in value)
++    if isinstance(value, dict):
++        return any(contains_prompt(item) for item in value.values())
++    return False
++
++
++def main() -> int:
++    if sys.argv != [sys.argv[0], "--print-http422"]:
++        raise SystemExit("usage: capture_native_print_http422_295.py --print-http422")
++
++    manifest, manifest_raw, runner_relative = load_manifest()
++    if OUTPUT_ROOT.exists():
++        raise SystemExit(f"Refusing one-shot capture because output path already exists: {OUTPUT_ROOT}")
++    OUTPUT_ROOT.parent.mkdir(parents=True, exist_ok=True)
++    # mkdir is the atomic one-shot claim; concurrent invocations cannot both own it.
++    OUTPUT_ROOT.mkdir()
++    case_dir = OUTPUT_ROOT / "attempt-01"
++    case_dir.mkdir()
++    runtime = case_dir / "runtime"
++    runtime.mkdir()
++    home = runtime / "home"
++    config = runtime / "config"
++    tmp = runtime / "tmp"
++    cwd = runtime / "cwd"
++    for directory in (home, config, tmp, cwd):
++        directory.mkdir()
++
++    initial = {
++        "case": CASE_ID,
++        "capture_mode": "public-print-http422",
++        "provider": "firstParty",
++        "model": MODEL,
++        "session_id": SESSION_ID,
++        "prompt": PROMPT,
++        "phase": "preflight",
++        "native_process_launches": 0,
++        "one_shot_output_root": True,
++        "runner_relative_path": runner_relative,
++        "runner_sha256": sha256(Path(__file__).read_bytes()),
++        "runner_manifest_sha256": sha256(manifest_raw),
++        "native_sha256_expected": BINARY_SHA256,
++        "native_sha256_actual": None,
++        "timeout_budget_seconds": MAX_NATIVE_SECONDS,
++        "client_retry_environment": {"ANTHROPIC_MAX_RETRIES": "0"},
++        "request_semantics": "one Native process launch; Native client fallback/retry requests are captured separately and make this one-request capture incomplete",
++    }
++    write_json(case_dir / "case.json", initial)
++
++    if not BINARY.is_file():
++        initial["preflight_error"] = "pinned Native binary is missing"
++        write_json(case_dir / "case.json", initial)
++        return 3
++    binary_hash = sha256(BINARY.read_bytes())
++    initial["native_sha256_actual"] = binary_hash
++    if binary_hash != BINARY_SHA256:
++        initial["preflight_error"] = "pinned Native binary SHA mismatch"
++        write_json(case_dir / "case.json", initial)
++        return 3
++
++    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++    try:
++        listener.bind(("127.0.0.1", 0))
++        listener.listen(8)
++        listener.settimeout(0.2)
++    except OSError as error:
++        listener.close()
++        initial["preflight_error"] = f"loopback listener failed before Native launch: {type(error).__name__}: {error}"
++        write_json(case_dir / "case.json", initial)
++        return 4
++
++    port = listener.getsockname()[1]
++    base_url = f"http://127.0.0.1:{port}"
++    sandbox = (
++        "(version 1)\n"
++        "(allow default)\n"
++        "(deny network-outbound)\n"
++        f'(allow network-outbound (remote ip "localhost:{port}"))\n'
++        "(deny network-inbound)\n"
++    ).encode("ascii")
++    sandbox_path = case_dir / "native-child-network.sbpl"
++    sandbox_path.write_bytes(sandbox)
++    sandbox_check = subprocess.run(
++        ["/usr/bin/sandbox-exec", "-f", str(sandbox_path), "/usr/bin/true"],
++        cwd=cwd,
++        env={"PATH": "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(tmp)},
++        capture_output=True,
++        timeout=8,
++        check=False,
++    )
++    (case_dir / "sandbox-preflight.stdout.raw").write_bytes(sandbox_check.stdout)
++    (case_dir / "sandbox-preflight.stderr.raw").write_bytes(sandbox_check.stderr)
++    if sandbox_check.returncode != 0:
++        listener.close()
++        initial.update({
++            "preflight_error": "sandbox profile preflight failed; Native was not launched",
++            "sandbox_preflight_exit": sandbox_check.returncode,
++        })
++        write_json(case_dir / "case.json", initial)
++        return 5
++
++    env = {
++        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
++        "HOME": str(home),
++        "TMPDIR": str(tmp),
++        "LANG": "C.UTF-8",
++        "TZ": "UTC",
++        "TERM": "xterm-256color",
++        "CLAUDE_CONFIG_DIR": str(config),
++        "ANTHROPIC_BASE_URL": base_url,
++        "ANTHROPIC_API_KEY": API_KEY,
++        "ANTHROPIC_MAX_RETRIES": "0",
++        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
++        "DISABLE_TELEMETRY": "1",
++        "DO_NOT_TRACK": "1",
++        "DISABLE_AUTOUPDATER": "1",
++        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
++    }
++    argv = [
++        str(BINARY), "--bare", "--print", "--output-format", "json",
++        "--model", MODEL,
++        "--system-prompt", "You are a local deterministic headless fixture.",
++        "--tools", "",
++        "--permission-mode", "dontAsk",
++        "--permission-prompts", "none",
++        "--session-id", SESSION_ID,
++        PROMPT,
++    ]
++    write_json(case_dir / "invocation.json", {
++        "argv": argv,
++        "cwd": str(cwd),
++        "env": {**env, "ANTHROPIC_API_KEY": "<fixed-dummy>"},
++        "inherited_environment": False,
++        "session_id": SESSION_ID,
++        "prompt": PROMPT,
++        "base_url": base_url,
++        "native_process_launches_allowed": 1,
++        "client_retry_environment": {"ANTHROPIC_MAX_RETRIES": "0"},
++    })
++
++    records: list[dict] = []
++    server_errors: list[str] = []
++    done = threading.Event()
++    active_lock = threading.Lock()
++    active_connections: set[socket.socket] = set()
++
++    def serve() -> None:
++        while not done.is_set():
++            try:
++                connection, address = listener.accept()
++            except socket.timeout:
++                continue
++            except OSError as error:
++                if not done.is_set():
++                    server_errors.append(f"accept: {type(error).__name__}: {error}")
++                return
++            with active_lock:
++                active_connections.add(connection)
++            try:
++                with connection:
++                    connection.settimeout(2)
++                    index = len(records)
++                    record: dict = {"index": index, "peer": address[0]}
++                    try:
++                        raw_request, header_raw, body_raw, method, target, protocol, headers = parse_request(connection)
++                    except RequestReadError as error:
++                        raw_request = error.raw
++                        header_raw = raw_request.split(b"\r\n\r\n", 1)[0] + b"\r\n\r\n" if b"\r\n\r\n" in raw_request else raw_request
++                        body_raw = raw_request[len(header_raw):] if raw_request.startswith(header_raw) else b""
++                        request_prefix = case_dir / f"request-{index:03d}"
++                        request_prefix.with_suffix(".raw").write_bytes(raw_request)
++                        (case_dir / f"request-{index:03d}-headers.raw").write_bytes(header_raw)
++                        (case_dir / f"request-{index:03d}-body.raw").write_bytes(body_raw)
++                        record.update({
++                            "parse_error": str(error),
++                            "messages_request": False,
++                            "raw_request_path": f"request-{index:03d}.raw",
++                            "raw_header_path": f"request-{index:03d}-headers.raw",
++                            "raw_body_path": f"request-{index:03d}-body.raw",
++                        })
++                        records.append(record)
++                        server_errors.append(f"request {index}: {error}")
++                        response = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
++                        status = 400
++                    else:
++                        request_prefix = case_dir / f"request-{index:03d}"
++                        request_prefix.with_suffix(".raw").write_bytes(raw_request)
++                        (case_dir / f"request-{index:03d}-headers.raw").write_bytes(header_raw)
++                        (case_dir / f"request-{index:03d}-body.raw").write_bytes(body_raw)
++                        try:
++                            body_json = json.loads(body_raw) if body_raw else None
++                        except (UnicodeDecodeError, json.JSONDecodeError):
++                            body_json = None
++                        path = urlsplit(target).path
++                        is_messages = method == "POST" and path == "/v1/messages"
++                        header_map = {key.lower(): value for key, value in headers.items()}
++                        record.update({
++                            "method": method,
++                            "target": target,
++                            "protocol": protocol,
++                            "request_bytes": len(raw_request),
++                            "request_sha256": sha256(raw_request),
++                            "headers_sha256": sha256(header_raw),
++                            "body_sha256": sha256(body_raw),
++                            "messages_request": is_messages,
++                            "health_check": method == "HEAD" and path == "/api/hello",
++                            "model": body_json.get("model") if isinstance(body_json, dict) else None,
++                            "body_json_valid": isinstance(body_json, dict),
++                            "prompt_matches_fixed_input": contains_prompt(body_json),
++                            "x_api_key_is_dummy": API_KEY in header_map.get("x-api-key", []),
++                            "raw_request_path": f"request-{index:03d}.raw",
++                            "raw_header_path": f"request-{index:03d}-headers.raw",
++                            "raw_body_path": f"request-{index:03d}-body.raw",
++                        })
++                        records.append(record)
++                        if record["health_check"]:
++                            response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
++                            status = 200
++                        elif is_messages and isinstance(body_json, dict):
++                            response = (
++                                f"HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nContent-Length: {len(HTTP_422_BODY)}\r\nConnection: close\r\n\r\n".encode("ascii")
++                                + HTTP_422_BODY
++                            )
++                            status = 422
++                        else:
++                            response = b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
++                            status = 404
++
++                    response_body = response.split(b"\r\n\r\n", 1)[1]
++                    (case_dir / f"response-{index:03d}.raw").write_bytes(response)
++                    (case_dir / f"response-{index:03d}-body.raw").write_bytes(response_body)
++                    record["status"] = status
++                    record["response_bytes"] = len(response)
++                    record["response_sha256"] = sha256(response)
++                    record["response_body_sha256"] = sha256(response_body)
++                    try:
++                        connection.sendall(response)
++                    except OSError as error:
++                        record["response_send_error"] = f"{type(error).__name__}: {error}"
++            except Exception as error:
++                server_errors.append(f"connection: {type(error).__name__}: {error}")
++            finally:
++                with active_lock:
++                    active_connections.discard(connection)
++
++    server_thread = threading.Thread(target=serve, name="http422-local-stub", daemon=True)
++    server_thread.start()
++
++    old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
++    cleanup_started = False
++
++    def interrupt(signum: int, _frame: object) -> None:
++        if cleanup_started:
++            return
++        raise CaptureInterrupted(signum)
++
++    process: subprocess.Popen[bytes] | None = None
++    stdout = b""
++    stderr = b""
++    timed_out = False
++    interrupted_signal: int | None = None
++    launch_error: str | None = None
++    started_at: float | None = None
++    try:
++        signal.signal(signal.SIGINT, interrupt)
++        signal.signal(signal.SIGTERM, interrupt)
++        initial.update({
++            "phase": "native-starting",
++            "sandbox_profile_sha256": sha256(sandbox),
++            "sandbox_preflight_exit": sandbox_check.returncode,
++            "loopback_port": port,
++        })
++        write_json(case_dir / "case.json", initial)
++        started_at = time.monotonic()
++        previous_signal_mask = signal.pthread_sigmask(
++            signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
++        )
++        try:
++            process = subprocess.Popen(
++                ["/usr/bin/sandbox-exec", "-f", str(sandbox_path), *argv],
++                cwd=cwd,
++                env=env,
++                stdin=subprocess.DEVNULL,
++                stdout=subprocess.PIPE,
++                stderr=subprocess.PIPE,
++                start_new_session=True,
++            )
++        except OSError as error:
++            launch_error = f"{type(error).__name__}: {error}"
++        finally:
++            signal.pthread_sigmask(signal.SIG_SETMASK, previous_signal_mask)
++        if process is not None:
++            initial["native_process_launches"] = 1
++            initial["native_launched"] = True
++            initial["phase"] = "native-running"
++            write_json(case_dir / "case.json", initial)
++            try:
++                stdout, stderr = process.communicate(timeout=PROCESS_RUN_SECONDS)
++            except subprocess.TimeoutExpired:
++                timed_out = True
++            except CaptureInterrupted as error:
++                interrupted_signal = error.signum
++    except CaptureInterrupted as error:
++        interrupted_signal = error.signum
++    finally:
++        # Keep the handlers active but non-raising during teardown and artifact writes.
++        cleanup_started = True
++        if process is not None:
++            if process.poll() is None:
++                try:
++                    os.killpg(process.pid, signal.SIGTERM)
++                except ProcessLookupError:
++                    pass
++                try:
++                    stdout, stderr = process.communicate(timeout=TERM_GRACE_SECONDS)
++                except subprocess.TimeoutExpired:
++                    try:
++                        os.killpg(process.pid, signal.SIGKILL)
++                    except ProcessLookupError:
++                        pass
++                    try:
++                        stdout, stderr = process.communicate(timeout=KILL_GRACE_SECONDS)
++                    except subprocess.TimeoutExpired as error:
++                        stdout = error.output or b""
++                        stderr = error.stderr or b""
++                        server_errors.append("Native process group remained after SIGKILL grace period")
++            elif process.poll() is not None:
++                try:
++                    stdout, stderr = process.communicate(timeout=TERM_GRACE_SECONDS)
++                except subprocess.TimeoutExpired:
++                    try:
++                        os.killpg(process.pid, signal.SIGKILL)
++                    except ProcessLookupError:
++                        pass
++                    try:
++                        stdout, stderr = process.communicate(timeout=KILL_GRACE_SECONDS)
++                    except subprocess.TimeoutExpired as error:
++                        stdout = error.output or b""
++                        stderr = error.stderr or b""
++                        server_errors.append("Native output pipes remained open after SIGKILL cleanup")
++        done.set()
++        listener.close()
++        with active_lock:
++            active = list(active_connections)
++        for connection in active:
++            try:
++                connection.shutdown(socket.SHUT_RDWR)
++            except OSError:
++                pass
++            try:
++                connection.close()
++            except OSError:
++                pass
++        server_thread.join(timeout=3)
++
++    exit_code = process.returncode if process is not None else None
++    (case_dir / "native.stdout.raw").write_bytes(stdout)
++    (case_dir / "native.stderr.raw").write_bytes(stderr)
++    write_json(case_dir / "native-exit.json", {
++        "returncode": exit_code,
++        "launch_error": launch_error,
++        "timed_out": timed_out,
++        "interrupted_signal": interrupted_signal,
++        "native_process_launches": 1 if process is not None else 0,
++        "elapsed_seconds": round(time.monotonic() - started_at, 3) if started_at is not None else 0,
++        "max_native_seconds": MAX_NATIVE_SECONDS,
++        "stdout_bytes": len(stdout),
++        "stdout_sha256": sha256(stdout),
++        "stderr_bytes": len(stderr),
++        "stderr_sha256": sha256(stderr),
++    })
++    write_json(case_dir / "requests.json", records)
++    write_json(case_dir / "server-errors.json", server_errors)
++
++    messages = [record for record in records if record.get("messages_request")]
++    all_requests_expected = all(record.get("messages_request") or record.get("health_check") for record in records)
++    request_route_ok = all(
++        record.get("peer") == "127.0.0.1"
++        and urlsplit(record.get("target", "")).path == "/v1/messages"
++        for record in messages
++    )
++    request_identity_ok = all(
++        record.get("model") == MODEL
++        and record.get("body_json_valid") is True
++        and record.get("prompt_matches_fixed_input") is True
++        and record.get("x_api_key_is_dummy") is True
++        for record in messages
++    )
++    response_status_ok = len(messages) == 1 and messages[0].get("status") == 422
++    response_delivery_ok = len(messages) == 1 and not messages[0].get("response_send_error")
++    process_exit_ok = process is not None and exit_code == 1 and not timed_out and interrupted_signal is None
++    server_stopped = not server_thread.is_alive()
++    capture_complete = (
++        process_exit_ok
++        and len(messages) == 1
++        and all_requests_expected
++        and request_route_ok
++        and request_identity_ok
++        and response_status_ok
++        and response_delivery_ok
++        and not server_errors
++        and server_stopped
++    )
++    result = {
++        **initial,
++        "phase": "complete",
++        "native_exit_code": exit_code,
++        "expected_native_exit_code": 1,
++        "native_exit_code_matches_expected": exit_code == 1,
++        "native_process_launches": 1 if process is not None else 0,
++        "messages_request_count": len(messages),
++        "all_request_count": len(records),
++        "all_requests_are_expected": all_requests_expected,
++        "request_route_is_loopback_messages": request_route_ok,
++        "request_model_prompt_and_dummy_key_match": request_identity_ok,
++        "http_422_observed_on_single_message_request": response_status_ok,
++        "response_delivery_valid": response_delivery_ok,
++        "timed_out": timed_out,
++        "interrupted_signal": interrupted_signal,
++        "server_thread_stopped": server_stopped,
++        "server_errors": server_errors,
++        "capture_complete": capture_complete,
++        "capture_scope": "one Native process launch and exactly one Messages request; extra client fallback/retry requests are preserved and make capture incomplete",
++        "parity_verdict": "not assessed; this is one captured tuple only",
++    }
++    write_json(case_dir / "case.json", result)
++    for sig, handler in old_handlers.items():
++        signal.signal(sig, handler)
++    print(json.dumps({key: result[key] for key in (
++        "case", "native_process_launches", "native_exit_code", "timed_out",
++        "interrupted_signal", "messages_request_count", "all_request_count", "capture_complete",
++    )}, indent=2))
++    return 0 if capture_complete else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/capture.json b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/capture.json
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/capture.json
+@@ -0,0 +1,42 @@
++{
++  "case": "native-print-http422-error-copy-295",
++  "capture_mode": "public-print-http422",
++  "provider": "firstParty",
++  "model": "claude-sonnet-4-5",
++  "session_id": "00000000-0000-4000-8000-000000029508",
++  "prompt": "Return the fixed Native HTTP 422 error-copy probe.",
++  "phase": "complete",
++  "native_process_launches": 1,
++  "one_shot_output_root": true,
++  "runner_relative_path": "acceptance/native-print-http422-error-copy-295-runner-v2/capture_native_print_http422_295.py",
++  "runner_sha256": "d32199315bb52a43498f4c4b54c5ed0e40867efdf99addfe1389cad3658524e9",
++  "runner_manifest_sha256": "9f1b9299eeb38b07910907813a3526233e9c431fb9d5d35cb59d379cb5f06f82",
++  "native_sha256_expected": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
++  "native_sha256_actual": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
++  "timeout_budget_seconds": 60,
++  "client_retry_environment": {
++    "ANTHROPIC_MAX_RETRIES": "0"
++  },
++  "request_semantics": "one Native process launch; Native client fallback/retry requests are captured separately and make this one-request capture incomplete",
++  "sandbox_profile_sha256": "e9c5bc8039a306938630a8f18da272f4a519dbc56eb60abbe4e34c65d3e224a9",
++  "sandbox_preflight_exit": 0,
++  "loopback_port": 59031,
++  "native_launched": true,
++  "native_exit_code": 1,
++  "expected_native_exit_code": 1,
++  "native_exit_code_matches_expected": true,
++  "messages_request_count": 1,
++  "all_request_count": 1,
++  "all_requests_are_expected": true,
++  "request_route_is_loopback_messages": true,
++  "request_model_prompt_and_dummy_key_match": true,
++  "http_422_observed_on_single_message_request": true,
++  "response_delivery_valid": true,
++  "timed_out": false,
++  "interrupted_signal": null,
++  "server_thread_stopped": true,
++  "server_errors": [],
++  "capture_complete": true,
++  "capture_scope": "one Native process launch and exactly one Messages request; extra client fallback/retry requests are preserved and make capture incomplete",
++  "parity_verdict": "not assessed; this is one captured tuple only"
++}
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/invocation.json b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/invocation.json
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/invocation.json
+@@ -0,0 +1,48 @@
++{
++  "argv": [
++    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
++    "--bare",
++    "--print",
++    "--output-format",
++    "json",
++    "--model",
++    "claude-sonnet-4-5",
++    "--system-prompt",
++    "You are a local deterministic headless fixture.",
++    "--tools",
++    "",
++    "--permission-mode",
++    "dontAsk",
++    "--permission-prompts",
++    "none",
++    "--session-id",
++    "00000000-0000-4000-8000-000000029508",
++    "Return the fixed Native HTTP 422 error-copy probe."
++  ],
++  "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-print-http422-error-copy-295/attempt-01/runtime/cwd",
++  "env": {
++    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
++    "HOME": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-print-http422-error-copy-295/attempt-01/runtime/home",
++    "TMPDIR": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-print-http422-error-copy-295/attempt-01/runtime/tmp",
++    "LANG": "C.UTF-8",
++    "TZ": "UTC",
++    "TERM": "xterm-256color",
++    "CLAUDE_CONFIG_DIR": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-print-http422-error-copy-295/attempt-01/runtime/config",
++    "ANTHROPIC_BASE_URL": "http://127.0.0.1:59031",
++    "ANTHROPIC_API_KEY": "<fixed-dummy>",
++    "ANTHROPIC_MAX_RETRIES": "0",
++    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
++    "DISABLE_TELEMETRY": "1",
++    "DO_NOT_TRACK": "1",
++    "DISABLE_AUTOUPDATER": "1",
++    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"
++  },
++  "inherited_environment": false,
++  "session_id": "00000000-0000-4000-8000-000000029508",
++  "prompt": "Return the fixed Native HTTP 422 error-copy probe.",
++  "base_url": "http://127.0.0.1:59031",
++  "native_process_launches_allowed": 1,
++  "client_retry_environment": {
++    "ANTHROPIC_MAX_RETRIES": "0"
++  }
++}
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/native-exit.json b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/native-exit.json
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/native-exit.json
+@@ -0,0 +1,13 @@
++{
++  "returncode": 1,
++  "launch_error": null,
++  "timed_out": false,
++  "interrupted_signal": null,
++  "native_process_launches": 1,
++  "elapsed_seconds": 0.637,
++  "max_native_seconds": 60,
++  "stdout_bytes": 1235,
++  "stdout_sha256": "aefe021e6303428b141ae07387783b7b2dad3538afee85332eec1cb8cb2a350c",
++  "stderr_bytes": 0,
++  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
++}
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/native.stderr.raw b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/native.stderr.raw
+new file mode 100644
+index 0000000..e69de29
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/native.stdout.raw b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/native.stdout.raw
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/native.stdout.raw
+@@ -0,0 +1,1 @@
++{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"00000000-0000-4000-8000-000000029508","total_cost_usd":0,"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],"speed":"standard","fallback_credit":null},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","fast_mode_state":"off","fast_mode_disabled_reason":"sdk_opt_in_required","subagent_stats":{"spawned":0,"requested":{"background":0,"foreground":0,"unset":0},"started_in_background":0,"max_depth":0,"spawned_by_subagents":0,"completed":0,"failed":0,"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,"concurrency_limit":0,"budget":0},"by_type":{}},"safety_stops":0,"is_error":true,"num_turns":1,"subtype":"success","api_error_status":422,"result":"API Error: 422 NATIVE_295_PRINT_HTTP_422_ERROR_COPY_PROBE","type":"result","duration_ms":25,"uuid":"2e747a5f-680a-4409-b62e-be77eb05e493","queued_turn_count":0,"result_index":0}
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/request-000-body.raw b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/request-000-body.raw
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/request-000-body.raw
+@@ -0,0 +1,1 @@
++{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":[{"type":"text","text":"Return the fixed Native HTTP 422 error-copy probe.","cache_control":{"type":"ephemeral"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.295.990; cc_entrypoint=sdk-cli;"},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"You are a local deterministic headless fixture.","cache_control":{"type":"ephemeral"}}],"tools":[],"metadata":{"user_id":"{\"device_id\":\"5dfd3134764360932730ce8a6c30cba2b5f02f1fd24e5570ea2a42916d4c6f60\",\"account_uuid\":\"\",\"session_id\":\"00000000-0000-4000-8000-000000029508\"}"},"max_tokens":32000,"thinking":{"budget_tokens":31999,"type":"enabled","display":"omitted"},"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"stream":true}
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/request-000-headers.raw b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/request-000-headers.raw
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/request-000-headers.raw
+@@ -0,0 +1,23 @@
++POST /v1/messages?beta=true HTTP/1.1
++Accept: application/json
++Content-Type: application/json
++User-Agent: claude-cli/2.1.295 (external, sdk-cli)
++X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000029508
++X-Stainless-Arch: arm64
++X-Stainless-Lang: js
++X-Stainless-OS: MacOS
++X-Stainless-Package-Version: 0.128.0
++X-Stainless-Retry-Count: 0
++X-Stainless-Runtime: node
++X-Stainless-Runtime-Version: v26.3.0
++X-Stainless-Timeout: 600
++anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05
++anthropic-dangerous-direct-browser-access: true
++anthropic-version: 2023-06-01
++x-api-key: sk-ant-print-http422-local-dummy-only
++x-app: cli
++Connection: keep-alive
++Host: 127.0.0.1:59031
++Accept-Encoding: gzip, deflate, br, zstd
++Content-Length: 914
++
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/request-000.raw b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/request-000.raw
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/request-000.raw
+@@ -0,0 +1,24 @@
++POST /v1/messages?beta=true HTTP/1.1
++Accept: application/json
++Content-Type: application/json
++User-Agent: claude-cli/2.1.295 (external, sdk-cli)
++X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000029508
++X-Stainless-Arch: arm64
++X-Stainless-Lang: js
++X-Stainless-OS: MacOS
++X-Stainless-Package-Version: 0.128.0
++X-Stainless-Retry-Count: 0
++X-Stainless-Runtime: node
++X-Stainless-Runtime-Version: v26.3.0
++X-Stainless-Timeout: 600
++anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05
++anthropic-dangerous-direct-browser-access: true
++anthropic-version: 2023-06-01
++x-api-key: sk-ant-print-http422-local-dummy-only
++x-app: cli
++Connection: keep-alive
++Host: 127.0.0.1:59031
++Accept-Encoding: gzip, deflate, br, zstd
++Content-Length: 914
++
++{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":[{"type":"text","text":"Return the fixed Native HTTP 422 error-copy probe.","cache_control":{"type":"ephemeral"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.295.990; cc_entrypoint=sdk-cli;"},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"You are a local deterministic headless fixture.","cache_control":{"type":"ephemeral"}}],"tools":[],"metadata":{"user_id":"{\"device_id\":\"5dfd3134764360932730ce8a6c30cba2b5f02f1fd24e5570ea2a42916d4c6f60\",\"account_uuid\":\"\",\"session_id\":\"00000000-0000-4000-8000-000000029508\"}"},"max_tokens":32000,"thinking":{"budget_tokens":31999,"type":"enabled","display":"omitted"},"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"stream":true}
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/requests.json b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/requests.json
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/requests.json
+@@ -0,0 +1,26 @@
++[
++  {
++    "index": 0,
++    "peer": "127.0.0.1",
++    "method": "POST",
++    "target": "/v1/messages?beta=true",
++    "protocol": "HTTP/1.1",
++    "request_bytes": 1771,
++    "request_sha256": "86532df92c00790f148eb1772f3f22db411b141898c7e5daa3bd547253d24037",
++    "headers_sha256": "f6d629fb7452d22b1ced18ae951295693c9c31afad6327ed3be308d42d9b4cca",
++    "body_sha256": "aa027db7c377ef31b0eb26836028aa544b3e7ca8805e7cc57c49f3a85d4daa9f",
++    "messages_request": true,
++    "health_check": false,
++    "model": "claude-sonnet-4-5",
++    "body_json_valid": true,
++    "prompt_matches_fixed_input": true,
++    "x_api_key_is_dummy": true,
++    "raw_request_path": "request-000.raw",
++    "raw_header_path": "request-000-headers.raw",
++    "raw_body_path": "request-000-body.raw",
++    "status": 422,
++    "response_bytes": 221,
++    "response_sha256": "f572e57d8def4499ff96b437385b911ecd6d904b50dd2b0202f7cfb7a03bbe82",
++    "response_body_sha256": "2f92d0946ef4a3e49cfecd806411010044670dbccfa2edc80ca0e6e3bfa1129a"
++  }
++]
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/response-000-body.raw b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/response-000-body.raw
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/response-000-body.raw
+@@ -0,0 +1,1 @@
++{"type":"error","error":{"type":"invalid_request_error","message":"NATIVE_295_PRINT_HTTP_422_ERROR_COPY_PROBE"}}
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/response-000.raw b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/response-000.raw
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/response-000.raw
+@@ -0,0 +1,6 @@
++HTTP/1.1 422 Unprocessable Entity
++Content-Type: application/json
++Content-Length: 112
++Connection: close
++
++{"type":"error","error":{"type":"invalid_request_error","message":"NATIVE_295_PRINT_HTTP_422_ERROR_COPY_PROBE"}}
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/sandbox-preflight.stderr.raw b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/sandbox-preflight.stderr.raw
+new file mode 100644
+index 0000000..e69de29
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/sandbox-preflight.stdout.raw b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/sandbox-preflight.stdout.raw
+new file mode 100644
+index 0000000..e69de29
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/sandbox-profile.sbpl b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/sandbox-profile.sbpl
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/sandbox-profile.sbpl
+@@ -0,0 +1,5 @@
++(version 1)
++(allow default)
++(deny network-outbound)
++(allow network-outbound (remote ip "localhost:59031"))
++(deny network-inbound)
+diff --git a/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/server-errors.json b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/server-errors.json
+new file mode 100644
+--- /dev/null
++++ b/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/http-422/server-errors.json
+@@ -0,0 +1,1 @@
++[]

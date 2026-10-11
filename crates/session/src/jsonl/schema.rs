@@ -40,7 +40,10 @@
 //! appended after the trailer in `extra` iteration order, so read→write
 //! round-trips of unported fields stay byte-faithful.
 
-use crate::jsonl::exact_json::PRIVATE_UTF16_KEY;
+use crate::jsonl::exact_json::{
+    message_source_key_order, set_message_source_key_order, PRIVATE_SOURCE_KEY_ORDER_KEY,
+    PRIVATE_UTF16_KEY,
+};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::value::RawValue;
@@ -297,6 +300,11 @@ impl JsonlMessage {
         };
 
         let mut extra_fields = Vec::new();
+        let mut source_key_order = Vec::new();
+        let source_order_key_units = PRIVATE_SOURCE_KEY_ORDER_KEY
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let utf16_key_units = PRIVATE_UTF16_KEY.encode_utf16().collect::<Vec<_>>();
         let known = [
             "type",
             "uuid",
@@ -329,9 +337,11 @@ impl JsonlMessage {
             .object_entries()
             .ok_or_else(|| "JSONL row must be an object".to_owned())?
         {
-            if known_units.iter().any(|key| key == entry.code_units)
-                || entry.code_units == PRIVATE_UTF16_KEY.encode_utf16().collect::<Vec<_>>()
-            {
+            if entry.code_units == source_order_key_units || entry.code_units == utf16_key_units {
+                continue;
+            }
+            source_key_order.push(entry.code_units.to_vec());
+            if known_units.iter().any(|key| key == entry.code_units) {
                 continue;
             }
             let value = row
@@ -346,7 +356,7 @@ impl JsonlMessage {
                 .as_bool()
                 .ok_or_else(|| "JSONL field isSidechain must be a boolean".to_owned())?,
         };
-        Ok(Self {
+        let mut message = Self {
             message_type: string_field("type")?,
             uuid: string_field("uuid")?,
             parent_uuid: nullable_string("parentUuid")?,
@@ -371,7 +381,9 @@ impl JsonlMessage {
             logical_parent_uuid: optional_string("logicalParentUuid")?,
             extra: Utf16JsonProjection::object_units(extra_fields)
                 .map_err(|error| format!("invalid JSONL extra object: {error}"))?,
-        })
+        };
+        set_message_source_key_order(&mut message, source_key_order);
+        Ok(message)
     }
 }
 
@@ -744,6 +756,7 @@ impl Serialize for JsonlMessage {
                     continue;
                 };
                 if key == crate::jsonl::exact_json::PRIVATE_UTF16_KEY
+                    || key == crate::jsonl::exact_json::PRIVATE_SOURCE_KEY_ORDER_KEY
                     || RECOGNIZED_EXTRA.contains(&key.as_str())
                     || (is_user
                         && (USER_HEAD_EXTRA.contains(&key.as_str()) || key == "usageLimitNote"))
@@ -770,6 +783,15 @@ impl Serialize for JsonlMessage {
         }
         if let Some(projection) = &self.turn_origin_projection {
             push_projection(&mut fields, "turnOrigin", projection.clone());
+        }
+
+        if let Some(source_order) = message_source_key_order(self) {
+            fields.sort_by_cached_key(|(key, _)| {
+                source_order
+                    .iter()
+                    .position(|source_key| source_key == key)
+                    .unwrap_or(usize::MAX)
+            });
         }
 
         let row = Utf16JsonProjection::object_units(fields).map_err(serde::ser::Error::custom)?;
@@ -1194,6 +1216,145 @@ mod tool_result_head_tests {
         let s = serde_json::to_string(&base()).unwrap();
         assert!(!s.contains("toolDenialKind"));
         assert!(s.contains(r#""timestamp":"T","userType":"external""#));
+    }
+
+    #[test]
+    fn new_rows_without_source_order_keep_the_canonical_native_order() {
+        let message = base();
+        assert!(!message
+            .extra
+            .contains_property(super::PRIVATE_SOURCE_KEY_ORDER_KEY));
+        assert_eq!(
+            serde_json::to_string(&message).unwrap(),
+            r#"{"parentUuid":"p","isSidechain":false,"type":"user","message":{"role":"user","content":[]},"uuid":"u","timestamp":"T","userType":"external","entrypoint":"cli","cwd":"/w","sessionId":"s","version":"0.12.0"}"#
+        );
+    }
+
+    #[test]
+    fn recovered_source_order_survives_modify_delete_and_new_fields() {
+        let source = Utf16JsonProjection::parse(
+            r#"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[]},"uuid":"u","timestamp":"T","userType":"external","cwd":"/old","sessionId":"s","version":"v","opaque":{"items":[1,2]},"origin":{"kind":"peer"}}"#,
+        )
+        .unwrap();
+        let mut message = JsonlMessage::from_projection(&source).unwrap();
+        message.cwd = "/updated".into();
+        message.user_type = None;
+        message.extra.remove_field("opaque").unwrap();
+        message.entrypoint = Some("cli".into());
+
+        let serialized =
+            Utf16JsonProjection::parse(&serde_json::to_string(&message).unwrap()).unwrap();
+        let keys = serialized
+            .object_entries()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.display_key.to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                "parentUuid",
+                "isSidechain",
+                "type",
+                "message",
+                "uuid",
+                "timestamp",
+                "cwd",
+                "sessionId",
+                "version",
+                "origin",
+                "entrypoint",
+            ]
+            .map(str::to_owned)
+        );
+        assert_eq!(serialized.string_at("/cwd"), Some("/updated"));
+        assert_eq!(
+            serialized
+                .subprojection("/message")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            source
+                .subprojection("/message")
+                .unwrap()
+                .to_json_string()
+                .unwrap()
+        );
+        assert_eq!(
+            serialized
+                .subprojection("/origin")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            source
+                .subprojection("/origin")
+                .unwrap()
+                .to_json_string()
+                .unwrap()
+        );
+        assert!(!serialized.contains_property(super::PRIVATE_SOURCE_KEY_ORDER_KEY));
+    }
+
+    #[test]
+    fn recovered_order_keeps_lone_utf16_extra_key_and_ignores_forged_metadata() {
+        let source = Utf16JsonProjection::parse(
+            r#"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[]},"\ud800":"opaque","uuid":"u","timestamp":"T","userType":"external","cwd":"/c","sessionId":"s","version":"v","origin":{"kind":"peer"},"lingxi_jsonl_source_key_order":["origin","version"]}"#,
+        )
+        .unwrap();
+        let message = JsonlMessage::from_projection(&source).unwrap();
+        let json = serde_json::to_string(&message).unwrap();
+        let serialized = Utf16JsonProjection::parse(&json).unwrap();
+        let keys = serialized
+            .object_entries()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.code_units.to_vec())
+            .collect::<Vec<_>>();
+        let utf16 = |key: &str| key.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                utf16("parentUuid"),
+                utf16("isSidechain"),
+                utf16("type"),
+                utf16("message"),
+                vec![0xd800],
+                utf16("uuid"),
+                utf16("timestamp"),
+                utf16("userType"),
+                utf16("cwd"),
+                utf16("sessionId"),
+                utf16("version"),
+                utf16("origin"),
+            ]
+        );
+        assert!(json.contains(r#""\ud800":"opaque""#));
+        assert!(!json.contains(super::PRIVATE_SOURCE_KEY_ORDER_KEY));
+        assert!(!serialized.contains_property(super::PRIVATE_SOURCE_KEY_ORDER_KEY));
+        assert_eq!(
+            serialized
+                .subprojection("/message")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            source
+                .subprojection("/message")
+                .unwrap()
+                .to_json_string()
+                .unwrap()
+        );
+        assert_eq!(
+            serialized
+                .subprojection("/origin")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            source
+                .subprojection("/origin")
+                .unwrap()
+                .to_json_string()
+                .unwrap()
+        );
     }
 }
 

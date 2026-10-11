@@ -1,0 +1,26 @@
+[
+  {
+    "index": 0,
+    "peer": "127.0.0.1",
+    "method": "POST",
+    "target": "/v1/messages?beta=true",
+    "protocol": "HTTP/1.1",
+    "request_bytes": 1771,
+    "request_sha256": "86532df92c00790f148eb1772f3f22db411b141898c7e5daa3bd547253d24037",
+    "headers_sha256": "f6d629fb7452d22b1ced18ae951295693c9c31afad6327ed3be308d42d9b4cca",
+    "body_sha256": "aa027db7c377ef31b0eb26836028aa544b3e7ca8805e7cc57c49f3a85d4daa9f",
+    "messages_request": true,
+    "health_check": false,
+    "model": "claude-sonnet-4-5",
+    "body_json_valid": true,
+    "prompt_matches_fixed_input": true,
+    "x_api_key_is_dummy": true,
+    "raw_request_path": "request-000.raw",
+    "raw_header_path": "request-000-headers.raw",
+    "raw_body_path": "request-000-body.raw",
+    "status": 422,
+    "response_bytes": 221,
+    "response_sha256": "f572e57d8def4499ff96b437385b911ecd6d904b50dd2b0202f7cfb7a03bbe82",
+    "response_body_sha256": "2f92d0946ef4a3e49cfecd806411010044670dbccfa2edc80ca0e6e3bfa1129a"
+  }
+]

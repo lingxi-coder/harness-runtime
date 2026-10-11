@@ -1447,6 +1447,7 @@ impl ConversationOrchestrator {
     /// Assemble the full system-prompt STRING from the static prompt members
     /// plus the current dynamic `systemContext` block.
     /// Bypassed when `OrchestratorConfig::system_prompt_override` is `Some(_)`.
+    #[cfg(test)]
     pub(super) async fn build_system_prompt(&self) -> String {
         self.build_system_prompt_parts().await.text
     }

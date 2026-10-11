@@ -4,10 +4,10 @@
 //! coercion from src_160357157.js ($Gt). Both host tools use this surface.
 
 use crate::tool_trait::{
-    CoercedInput, generated_builtin_schema, source_text_projection, source_text_projection_units,
+    generated_builtin_schema, source_text_projection, source_text_projection_units, CoercedInput,
 };
 use lingxi_core::types::utf16_json::{Utf16JsonBuilder, Utf16JsonProjection};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::OnceLock;
 
 /// Latest feature-dependent schema; ordinary agents do not require teams.
@@ -816,20 +816,16 @@ mod tests {
             r#"{"to":"team-lead","message":{"type":"shutdown_response","request_id":"r1","approve":false,"reason":"  \u00a0 "}}"#,
         )
         .unwrap();
-        assert!(
-            validate(&empty_reason, true, false)
-                .unwrap_err()
-                .contains("reason is required")
-        );
+        assert!(validate(&empty_reason, true, false)
+            .unwrap_err()
+            .contains("reason is required"));
 
         let cross_session = Utf16JsonProjection::parse(
             r#"{"to":"session:other","message":{"type":"shutdown_response","request_id":"r1","approve":false,"reason":"no"}}"#,
         )
         .unwrap();
-        assert!(
-            validate(&cross_session, true, false)
-                .unwrap_err()
-                .contains("cross-session")
-        );
+        assert!(validate(&cross_session, true, false)
+            .unwrap_err()
+            .contains("cross-session"));
     }
 }

@@ -1195,10 +1195,13 @@ mod tests {
         );
         let input = decoded.tool_calls[0]
             .subprojection("/input")
-            .ok()
             .expect("tool call keeps its JSON input");
         assert_eq!(input.string_units("/arg"), Some(vec![0xD800]));
-        assert!(input.to_json_string().unwrap().contains("1e400"));
+        assert_eq!(input.number_at("/large"), Some(f64::INFINITY));
+        assert!(
+            input.to_json_string().unwrap().contains(r#""large":null"#),
+            "JavaScript JSON.stringify emits null for an infinite Number"
+        );
     }
 
     fn tool_declaration(
@@ -1387,7 +1390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordinary_sidequery_keeps_exact_utf16_in_the_recorded_sdk_request() {
+    async fn ordinary_sidequery_preserves_source_until_native_generation_sealing() {
         let response_body = serde_json::json!({
             "id":"msg_ordinary_utf16",
             "model":"claude-haiku-4-5",
@@ -1418,6 +1421,16 @@ mod tests {
             turn_origin: None,
         }];
 
+        // The source carrier retains lone code units through conversion. Native
+        // generation sealing then replaces malformed string values (SDK VNe
+        // policy), just as it does for hook side queries; this is not data loss
+        // in the host's source projection.
+        let converted = convert_messages(request.messages.clone()).unwrap();
+        assert!(matches!(
+            &converted[0].content[0],
+            llm_runtime::ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                if utf16_code_units == &[b'a' as u16, 0xd800, b'z' as u16]
+        ));
         client.query(request).await.expect("ordinary side query");
 
         let received = transport.received.lock().unwrap();
@@ -1426,8 +1439,12 @@ mod tests {
             .body
             .as_deref()
             .expect("recorded SDK request body");
-        assert!(wire.contains(r#"a\ud800z"#), "{wire}");
-        assert!(!wire.contains('\u{fffd}'), "{wire}");
+        let wire_source = Utf16JsonProjection::parse(wire).unwrap();
+        assert_eq!(
+            wire_source.string_units("/messages/0/content/0/text"),
+            Some(vec![b'a' as u16, 0xfffd, b'z' as u16])
+        );
+        assert!(!wire.contains(r#"\ud800"#), "{wire}");
     }
 
     #[tokio::test]
@@ -1654,10 +1671,7 @@ mod tests {
 
         let structured = resp.structured.expect("structured present");
         assert_eq!(structured.array_len("/filenames"), Some(2));
-        assert_eq!(
-            structured.string_at("/filenames/0").as_deref(),
-            Some("a.md")
-        );
+        assert_eq!(structured.string_at("/filenames/0"), Some("a.md"));
     }
 
     #[tokio::test]
@@ -1721,10 +1735,7 @@ mod tests {
         // Only the client-side `tool_use` reaches `tool_calls` (server_tool_use
         // / advisor_tool_result dropped).
         assert_eq!(resp.tool_calls.len(), 1);
-        assert_eq!(
-            resp.tool_calls[0].string_at("/name").as_deref(),
-            Some("search")
-        );
+        assert_eq!(resp.tool_calls[0].string_at("/name"), Some("search"));
     }
 
     #[tokio::test]
@@ -1758,10 +1769,10 @@ mod tests {
         assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
         assert_eq!(resp.tool_calls.len(), 1);
         let call = &resp.tool_calls[0];
-        assert_eq!(call.string_at("/name").as_deref(), Some("search"));
-        assert_eq!(call.string_at("/input/q").as_deref(), Some("rust"));
+        assert_eq!(call.string_at("/name"), Some("search"));
+        assert_eq!(call.string_at("/input/q"), Some("rust"));
         // ToolUseId serialises transparently as the bare UUID string.
-        assert_eq!(call.string_at("/id").as_deref(), Some(tu));
+        assert_eq!(call.string_at("/id"), Some(tu));
     }
 
     #[tokio::test]

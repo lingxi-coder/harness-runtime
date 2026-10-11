@@ -32,7 +32,10 @@
 //!   repo's `.lingxi/<subdir>` is added iff the worktree itself lacks one.
 //! * Frontmatter parsing reuses the existing `serde_yaml` dependency and the
 //!   `---`/`\n---\n` splitter pattern from `skill-api::frontmatter`
-//!   (`parse_skill_markdown`) without depending on `skill-api`.
+//!   (`parse_skill_markdown`) without depending on `skill-api`. It mirrors the
+//!   Native YAML repair retry for selected plain scalars and leading tabs; a
+//!   closed block still separates its body when metadata parsing ultimately
+//!   fails.
 //! * Directory-format `.lingxi/skills/<name>/SKILL.md` files use a separate
 //!   loader path because their command name comes from the skill directory, not
 //!   the `SKILL.md` file stem.
@@ -779,24 +782,150 @@ pub fn parse_skill_command_markdown(
     }
 }
 
-/// Split a raw markdown string into frontmatter + body. Mirrors the
+/// Split a raw markdown string. Mirrors the
 /// `skill-api::frontmatter::parse_skill_markdown` `---`/`\n---\n` splitter (the
-/// shape the spec asks to reuse without depending on `skill-api`). Malformed or
-/// absent frontmatter yields default frontmatter and the raw body.
+/// shape the spec asks to reuse without depending on `skill-api`). Closed
+/// frontmatter keeps its body even when both metadata parse attempts fail;
+/// absent or unterminated frontmatter yields defaults and the raw input.
 fn parse_frontmatter(raw: &str) -> (CommandFrontmatter, String) {
     let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
     if let Some(rest) = raw.strip_prefix("---") {
         if let Some(end) = rest.find("\n---\n") {
             let yaml = &rest[..end];
             let body = &rest[end + 5..];
-            if let Ok(raw_fm) = serde_yaml::from_str::<RawFrontmatter>(yaml) {
-                return (build_frontmatter(raw_fm), body.trim_start().to_string());
-            }
-            // Malformed YAML: treat as no frontmatter (TS parse failure -> skip,
-            // but here we fail open with defaults + full body for robustness).
+            let frontmatter = parse_frontmatter_yaml(yaml)
+                .map(build_frontmatter)
+                .unwrap_or_default();
+            return (frontmatter, body.trim_start().to_string());
         }
     }
     (CommandFrontmatter::default(), raw.to_string())
+}
+
+/// Parse Native's frontmatter YAML with its one repair retry. Native 2.1.295
+/// first parses the original block; only on failure does it quote selected
+/// YAML-sensitive plain scalars, expand leading tabs, and retry. Invalid
+/// quoted values (including an escaped lone surrogate) remain invalid, so a
+/// failed retry returns no metadata to [`parse_frontmatter`].
+fn parse_frontmatter_yaml(yaml: &str) -> Option<RawFrontmatter> {
+    if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml) {
+        return serde_yaml::from_value(value).ok();
+    }
+
+    let repaired = quote_native_yaml_sensitive_scalars(yaml);
+    let repaired = expand_native_yaml_leading_tabs(&repaired);
+    let value = serde_yaml::from_str::<serde_yaml::Value>(&repaired).ok()?;
+    serde_yaml::from_value(value).ok()
+}
+
+/// Native 2.1.295's `I` helper. It quotes unquoted top-level-looking lines
+/// whose values contain YAML-sensitive punctuation, except values already
+/// quoted and complete bracketed arrays. Keeping this retry general is
+/// important: the malformed `allowed-tools` capture is repaired to a scalar,
+/// while a quoted invalid Unicode escape is deliberately left for YAML to
+/// reject.
+fn quote_native_yaml_sensitive_scalars(yaml: &str) -> String {
+    let mut output = String::with_capacity(yaml.len());
+    for (index, line) in yaml.split('\n').enumerate() {
+        if index != 0 {
+            output.push('\n');
+        }
+
+        let Some((key, value)) = native_yaml_key_value_line(line) else {
+            output.push_str(line);
+            continue;
+        };
+        let already_quoted = (value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\''));
+        if already_quoted {
+            output.push_str(line);
+            continue;
+        }
+        if value.starts_with('[')
+            && value.ends_with(']')
+            && serde_yaml::from_str::<serde_yaml::Value>(value)
+                .is_ok_and(|parsed| matches!(parsed, serde_yaml::Value::Sequence(_)))
+        {
+            output.push_str(line);
+            continue;
+        }
+
+        let yaml_sensitive = value.chars().any(|character| {
+            matches!(
+                character,
+                '{' | '}' | '[' | ']' | '*' | '&' | '#' | '!' | '|' | '>' | '%' | '@' | '`'
+            )
+        }) || value.contains(": ");
+        if !yaml_sensitive {
+            output.push_str(line);
+            continue;
+        }
+
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        output.push_str(key);
+        output.push_str(": \"");
+        output.push_str(&escaped);
+        output.push('"');
+    }
+    output
+}
+
+/// Match Native's `^([a-zA-Z_-]+):\\s+(\\S.*)$` line prefix without adding a
+/// regex dependency to this platform-agnostic crate.
+fn native_yaml_key_value_line(line: &str) -> Option<(&str, &str)> {
+    let colon = line.find(':')?;
+    let key = &line[..colon];
+    if key.is_empty()
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
+    }
+
+    let after_colon = &line[colon + 1..];
+    let (value_offset, _) = after_colon
+        .char_indices()
+        .find(|(_, character)| !is_native_yaml_regex_whitespace(*character))?;
+    if value_offset == 0 {
+        return None;
+    }
+    Some((key, &after_colon[value_offset..]))
+}
+
+/// ECMAScript regular-expression `\s` set used by Native's repair matcher.
+fn is_native_yaml_regex_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'..='\u{000d}'
+            | '\u{0020}'
+            | '\u{00a0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202f}'
+            | '\u{205f}'
+            | '\u{3000}'
+            | '\u{feff}'
+    )
+}
+
+/// Native's `^\\t+` multiline replacement: each indentation tab becomes two
+/// spaces before its YAML retry.
+fn expand_native_yaml_leading_tabs(yaml: &str) -> String {
+    let mut output = String::with_capacity(yaml.len());
+    for (index, line) in yaml.split('\n').enumerate() {
+        if index != 0 {
+            output.push('\n');
+        }
+        let leading_tabs = line.bytes().take_while(|byte| *byte == b'\t').count();
+        for _ in 0..leading_tabs {
+            output.push_str("  ");
+        }
+        output.push_str(&line[leading_tabs..]);
+    }
+    output
 }
 
 /// Map the raw kebab-case YAML frontmatter onto the typed [`CommandFrontmatter`].
@@ -1296,6 +1425,106 @@ mod tests {
         assert!(fm.argument_hints.is_empty());
         assert!(fm.argument_names.is_empty());
         assert_eq!(body, "just a body\nwith lines");
+    }
+
+    #[test]
+    fn invalid_native_unicode_escape_defaults_metadata_but_keeps_closed_body() {
+        let raw = include_str!(
+            "../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.295/skill-description-width/lone-surrogate-escape/SKILL.md.raw"
+        );
+        let (frontmatter, body) = parse_frontmatter(raw);
+
+        assert_eq!(frontmatter, CommandFrontmatter::default());
+        assert_eq!(body.trim_end(), "Return the fixed skill-width response.");
+    }
+
+    #[test]
+    fn invalid_native_unicode_escape_discards_metadata_in_either_field_order() {
+        for raw in [
+            r#"---
+description: "\uD800"
+disable-model-invocation: true
+---
+body after the closed fence
+"#,
+            r#"---
+disable-model-invocation: true
+description: "\uD800"
+---
+body after the closed fence
+"#,
+        ] {
+            let (frontmatter, body) = parse_frontmatter(raw);
+            assert_eq!(frontmatter, CommandFrontmatter::default(), "raw: {raw}");
+            assert_eq!(body, "body after the closed fence\n", "raw: {raw}");
+        }
+    }
+
+    #[test]
+    fn native_retry_quotes_malformed_allowed_tools_and_preserves_other_fields() {
+        // Native 2.1.295's accepted capture retains this valid description
+        // despite the open flow sequence. The selected-scalar retry turns the
+        // malformed value into a string rather than dropping the whole block.
+        let raw = r#"---
+description: "frontmatter-description-must-not-be-listed"
+allowed-tools: [Bash, Read
+---
+Return the fixed ordinary-malformed-frontmatter body fallback.
+"#;
+        let (frontmatter, body) = parse_frontmatter(raw);
+
+        assert_eq!(
+            frontmatter.description,
+            "frontmatter-description-must-not-be-listed"
+        );
+        assert_eq!(
+            frontmatter.allowed_tools,
+            Some(vec!["[Bash".to_string(), "Read".to_string()])
+        );
+        assert_eq!(
+            body,
+            "Return the fixed ordinary-malformed-frontmatter body fallback.\n"
+        );
+
+        let parsed = parse_frontmatter_yaml("description: \"d\"\nallowed-tools: [Bash, Read")
+            .expect("Native's retry should retain this block");
+        assert_eq!(parsed.description.as_deref(), Some("d"));
+        assert!(matches!(
+            parsed.allowed_tools,
+            Some(ToolsField::One(value)) if value == "[Bash, Read"
+        ));
+    }
+
+    #[test]
+    fn valid_yaml_with_invalid_typed_field_does_not_trigger_native_retry() {
+        // Native retries only when generic YAML parsing fails. This mapping is
+        // valid YAML, so it must not be reinterpreted as a scalar merely to fit
+        // the Rust frontmatter carrier's String field.
+        let (frontmatter, body) =
+            parse_frontmatter("---\ndescription: { nested: value }\n---\nbody\n");
+
+        assert_eq!(frontmatter, CommandFrontmatter::default());
+        assert_eq!(body, "body\n");
+    }
+
+    #[test]
+    fn valid_control_frontmatter_preserves_description_and_disable_flag() {
+        let (frontmatter, body) = parse_frontmatter(
+            "---\ndescription: control description\ndisable-model-invocation: true\n---\nbody\n",
+        );
+
+        assert_eq!(frontmatter.description, "control description");
+        assert!(frontmatter.disable_model_invocation);
+        assert_eq!(body, "body\n");
+    }
+
+    #[test]
+    fn unterminated_frontmatter_remains_raw_input() {
+        let raw = "---\ndescription: unclosed\nbody without a closing fence";
+        let (frontmatter, body) = parse_frontmatter(raw);
+
+        assert_eq!(frontmatter, CommandFrontmatter::default());
+        assert_eq!(body, raw);
     }
 
     #[test]

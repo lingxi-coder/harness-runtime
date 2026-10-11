@@ -1038,7 +1038,7 @@ mod tests {
                 protocol,
                 value,
             }) if protocol == "anthropic_messages"
-                && value.string_at("/text").as_deref() == Some("visible answer")
+                && value.string_at("/text") == Some("visible answer")
                 && value.at_pointer("/citations").is_some_and(|value| value.is_null())
                 && value
                     .at_pointer("/future_annotation/keep")

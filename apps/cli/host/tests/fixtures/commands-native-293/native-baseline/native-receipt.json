@@ -1,0 +1,280 @@
+{
+  "native_version": "2.1.293",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "base_url_scope": "127.0.0.1 only, dummy key, no relay; telemetry disabled in fixture env",
+  "fixed_inputs": {
+    "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/commands/run-output/run/cwd",
+    "config_dir": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/commands/run-output/run/config",
+    "model": "claude-sonnet-4-5",
+    "locale": "C.UTF-8",
+    "timezone": "UTC",
+    "skills": [
+      "skill-🧪-probe",
+      "skill.alpha+beta"
+    ]
+  },
+  "cases": [
+    {
+      "id": "slash-only",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003001",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003001",
+        "/"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "slash-only.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "slash-only.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "slash-only",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 39711,
+          "sha256": "a7b673578ecaaff41fea7c110196d50cb891e99841b59307abbd8a84d471fd56",
+          "raw_file": "run-output/requests/slash-only.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-harness-runtime-docs-parity-current-alignment-fixtures-commands-run-output-run-cwd/00000000-0000-4000-8000-000000003001.jsonl",
+        "capture_file": "run-output/sessions/slash-only.jsonl",
+        "bytes": 83259,
+        "sha256": "892831971682d70fe98a365bb9431c9a6278e0805923e8713c9410cf963e3faa"
+      }
+    },
+    {
+      "id": "unknown-slash-command",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003002",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003002",
+        "/__native_unknown_293__ fixed-argument"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "unknown-slash-command.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "unknown-slash-command.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unknown-slash-command",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 42490,
+          "sha256": "b5842c57005caba2c9f6fd4264c271375c75c0cbda6b2fe517410770c3b9ee3a",
+          "raw_file": "run-output/requests/unknown-slash-command.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-harness-runtime-docs-parity-current-alignment-fixtures-commands-run-output-run-cwd/00000000-0000-4000-8000-000000003002.jsonl",
+        "capture_file": "run-output/sessions/unknown-slash-command.jsonl",
+        "bytes": 89821,
+        "sha256": "c483294c680324dd5b35550e459c7291bec64e48ce4c7a7ad290f750f6c18a2b"
+      }
+    },
+    {
+      "id": "unicode-skill-name",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003003",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003003",
+        "/skill-🧪-probe"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "unicode-skill-name.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "unicode-skill-name.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unicode-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 42445,
+          "sha256": "0b88a07f1fb5f50b8439c6edb28e955f2bf7c9bb583ba8b27f0ffc55070f5599",
+          "raw_file": "run-output/requests/unicode-skill-name.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-harness-runtime-docs-parity-current-alignment-fixtures-commands-run-output-run-cwd/00000000-0000-4000-8000-000000003003.jsonl",
+        "capture_file": "run-output/sessions/unicode-skill-name.jsonl",
+        "bytes": 89460,
+        "sha256": "c579fc52b15aaf6cae800f2d536cadee865a1f7a2f7daa8cc77f42fcafc4194b"
+      }
+    },
+    {
+      "id": "punctuation-skill-name",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003004",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003004",
+        "/skill.alpha+beta"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "punctuation-skill-name.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "punctuation-skill-name.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "punctuation-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 42445,
+          "sha256": "91109e5ea2dd436ec5f6755ff579d35bf23a61523951cc866da855b5305fb201",
+          "raw_file": "run-output/requests/punctuation-skill-name.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-harness-runtime-docs-parity-current-alignment-fixtures-commands-run-output-run-cwd/00000000-0000-4000-8000-000000003004.jsonl",
+        "capture_file": "run-output/sessions/punctuation-skill-name.jsonl",
+        "bytes": 89457,
+        "sha256": "3446ec22e73f7d0c37bb62fe7c58420368fa921793e1bdf288c2e33856c61dbe"
+      }
+    },
+    {
+      "id": "unpaired-surrogate-skill-name",
+      "kind": "stream-json",
+      "session_id": "00000000-0000-4000-8000-000000003005",
+      "prompt_code_units_hex": "2f0073006b0069006c006c005f0000d85f00700072006f0062006500",
+      "input_file": "inputs/unpaired-surrogate-skill-name.stdin.jsonl",
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003005",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "unpaired-surrogate-skill-name.stdout",
+      "stdout_bytes": 4519,
+      "stdout_sha256": "de10b4bac7186834d310cde21319e62aa8009c7787b75b094ccee90cc611e690",
+      "stderr_file": "unpaired-surrogate-skill-name.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unpaired-surrogate-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 39302,
+          "sha256": "b722075a854625d150277fddd68ac68a5fabba2fdb38c8663095273f4d9214ca",
+          "raw_file": "run-output/requests/unpaired-surrogate-skill-name.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-harness-runtime-docs-parity-current-alignment-fixtures-commands-run-output-run-cwd/00000000-0000-4000-8000-000000003005.jsonl",
+        "capture_file": "run-output/sessions/unpaired-surrogate-skill-name.jsonl",
+        "bytes": 82233,
+        "sha256": "ea680943502fa5513cb2a45950f697fa7897dd2abb2bbfb88541980fd9a63177"
+      }
+    }
+  ],
+  "all_requests_accepted_locally": true,
+  "no_upstream_relay": true,
+  "scope": "Native command parse/fallback, Unicode/punctuation/unpaired-surrogate Skill-name and session persistence fixtures; no Harness result implied"
+}

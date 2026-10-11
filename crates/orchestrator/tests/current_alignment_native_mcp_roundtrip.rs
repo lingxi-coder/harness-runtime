@@ -10,8 +10,8 @@ mod common;
 
 use bytes::Bytes;
 use common::{
-    api_service, assert_fixed_usage, find_tool_result, paired_mcp_connection, read_fixture,
-    FixedAnthropicTransport, UnusedMcpTransport, MODEL,
+    api_service, assert_fixed_usage, paired_mcp_connection, read_fixture, FixedAnthropicTransport,
+    UnusedMcpTransport, MODEL,
 };
 use lingxi_core::host::{FileSystem, OutputEvent};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -34,10 +34,30 @@ use tool_api::registry::ToolRegistry;
 use tool_api::tool_trait::Tool;
 use tool_mcp::MCPTool;
 
+fn find_tool_result(
+    request: &Utf16JsonProjection,
+    tool_use_id: &str,
+) -> Option<Utf16JsonProjection> {
+    let messages = request.array_len("/messages")?;
+    for message_index in 0..messages {
+        let content = format!("/messages/{message_index}/content");
+        let Some(blocks) = request.array_len(&content) else {
+            continue;
+        };
+        for block_index in 0..blocks {
+            let base = format!("{content}/{block_index}");
+            if request.string_at(&format!("{base}/type")) == Some("tool_result")
+                && request.string_at(&format!("{base}/tool_use_id")) == Some(tool_use_id)
+            {
+                return request.subprojection(&base).ok();
+            }
+        }
+    }
+    None
+}
 const TOOL_USE_ID: &str = "toolu_native_mcp_fixture_1";
 const SESSION_UUID: &str = "00000000-0000-4000-8000-000000002943";
-const FIXTURE_DIR: &str =
-    "../../docs/parity/current-alignment/fixtures/mcp-roundtrip/native-baseline/structured-content-lone";
+const FIXTURE_DIR: &str = "../../docs/parity/current-alignment/fixtures/mcp-roundtrip/native-baseline/structured-content-lone";
 
 async fn mcp_peer(
     fixture_dir: PathBuf,
@@ -321,7 +341,9 @@ async fn native_mcp_structured_content_round_trips_through_orchestrator_and_sdk(
     assert!(model_tool_result.at_pointer("/is_error").is_none());
     assert_eq!(
         expected_model_content.string_at(""),
-        Some("{\"ok\":true,\"label\":\"structured-\\ud800Ω\"}\n\n<system-reminder>\n<total_tokens>14999985 tokens left</total_tokens>\n</system-reminder>"),
+        Some(
+            "{\"ok\":true,\"label\":\"structured-\\ud800Ω\"}\n\n<system-reminder>\n<total_tokens>14999985 tokens left</total_tokens>\n</system-reminder>"
+        ),
         "Native's structuredContent is JSON text before the inline reminder"
     );
 

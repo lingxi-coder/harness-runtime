@@ -12,25 +12,39 @@ use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use crate::tool_trait::ToolError;
 
 #[derive(Clone, Copy)]
+/// JSON value types accepted by the source-native output-shape parser.
 pub enum OutputFieldType {
+    /// Any JSON string, including strings with exact UTF-16 units not representable in Rust UTF-8.
     String,
+    /// A finite JSON number.
     Number,
+    /// A JSON boolean.
     Boolean,
+    /// A JSON array, without validating its item types.
     Array,
+    /// A JSON object, without validating its member values.
     Object,
+    /// An object recursively checked against these fields; nested unknown keys are stripped.
     ObjectShape(&'static [OutputField]),
+    /// A JSON string or `null`.
     StringOrNull,
+    /// The literal JSON boolean `false`.
     False,
 }
 
 #[derive(Clone, Copy)]
+/// One named property rule in an object output shape.
 pub struct OutputField {
+    /// Object member name to look up in the input.
     pub name: &'static str,
+    /// Type or nested shape required for the member's value.
     pub kind: OutputFieldType,
+    /// Whether absence of this member produces a validation issue.
     pub required: bool,
 }
 
 #[derive(Clone, Copy)]
+/// Policy for members not listed in an output object's shape.
 pub enum UnknownOutputKeys {
     /// Default Zod objects return only known properties.
     Strip,
@@ -38,6 +52,12 @@ pub enum UnknownOutputKeys {
     Passthrough,
 }
 
+/// Validate an output projection against an object shape and return its parsed form.
+///
+/// With [`UnknownOutputKeys::Strip`], the result contains only declared properties in schema
+/// order. With [`UnknownOutputKeys::Passthrough`], unrecognized top-level properties are retained.
+/// Nested [`OutputFieldType::ObjectShape`] fields strip their own unknown properties. Validation
+/// failures are returned as [`ToolError::InvalidInput`].
 pub fn parse_object(
     input: &Utf16JsonProjection,
     tool_name: &str,
@@ -138,6 +158,10 @@ fn false_literal_issue(path: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
     .expect("literal output issue")
 }
 
+/// Read an array at `pointer`, requiring every item to be a string.
+///
+/// Successful items are returned as flat projections retaining exact string and key units. Wrong
+/// item types are reported together as output validation issues.
 pub fn string_array(
     input: &Utf16JsonProjection,
     pointer: &str,
@@ -173,6 +197,10 @@ pub fn string_array(
     }
 }
 
+/// Read an array at `pointer` and return each item as a flat projection retaining exact string and
+/// key units.
+///
+/// This helper checks the array container but does not validate the item shapes.
 pub fn array_values(
     input: &Utf16JsonProjection,
     pointer: &str,
@@ -198,6 +226,7 @@ pub fn array_values(
         .collect()
 }
 
+/// Build an invalid-input tool error with `tool_name` prefixed to `message`.
 pub fn invalid(tool_name: &str, message: &str) -> ToolError {
     ToolError::InvalidInput(format!("{tool_name}: {message}").into())
 }

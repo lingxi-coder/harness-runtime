@@ -338,11 +338,19 @@ pub fn bash_image_content_blocks(data: &Utf16JsonProjection) -> Option<Vec<Utf16
         .decode(payload)
         .ok()?;
     let media_type = crate::util::image_sniff::sniff_image_media_type(&bytes)?;
-    Some(vec![media_block(
-        "image",
-        source_text_projection(payload),
-        source_text_projection(media_type),
-    )])
+    // Native Bash's data-URI mapper orders source fields differently from
+    // the generic Read/MCP media mapping: type, media_type, then data.
+    Some(vec![source_object(vec![
+        ("type", source_text_projection("image")),
+        (
+            "source",
+            source_object(vec![
+                ("type", source_text_projection("base64")),
+                ("media_type", source_text_projection(media_type)),
+                ("data", source_text_projection(payload)),
+            ]),
+        ),
+    ])])
 }
 
 /// The media blocks a tool result's `data` should be delivered as, or `None`

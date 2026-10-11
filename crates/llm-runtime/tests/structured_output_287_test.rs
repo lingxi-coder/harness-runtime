@@ -525,8 +525,10 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         let wires = capture.0.lock().unwrap();
         assert_eq!(wires.len(), before + 1);
         let wire = std::str::from_utf8(&wires.last().unwrap().body).unwrap();
-        assert!(wire.contains(r#""0":"\ud83d""#), "{wire}");
-        assert!(wire.contains(r#""1":"\udca5""#), "{wire}");
+        assert!(wire.contains(r#""0":"�""#), "{wire}");
+        assert!(wire.contains(r#""1":"�""#), "{wire}");
+        assert!(!wire.contains(r#""0":"\ud83d""#), "{wire}");
+        assert!(!wire.contains(r#""1":"\udca5""#), "{wire}");
     }
     std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
     for protocol in [

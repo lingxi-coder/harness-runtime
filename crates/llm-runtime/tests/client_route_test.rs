@@ -1014,7 +1014,7 @@ fn assign_history(request: &mut llm_runtime::LlmRequest, messages: &[llm_runtime
 }
 
 #[tokio::test]
-async fn native_hook_prompt_keeps_exact_input_until_sdk_final_serialization() {
+async fn native_hook_prompt_prepared_draft_keeps_exact_input_until_sdk_seal() {
     use lingxi_llm_client::protocol::{ContentBlock, ConversationMessage, MessageRole};
 
     let mut anthropic = llm_runtime::builtin_presets()
@@ -1047,30 +1047,39 @@ async fn native_hook_prompt_keeps_exact_input_until_sdk_final_serialization() {
         .insert("/messages/0/content/0/text".into(), vec![0xd800]);
 
     let prepared = client.prepare(&request).await.unwrap();
-    let body = json_payload_value(&prepared.provider_request.body_json);
-    let prompt_text = &body["messages"][0]["content"][0]["text"];
-    assert_eq!(prompt_text, "\u{fffd}");
+    let prompt_pointer = "/messages/0/content/0/text";
     assert_eq!(
-        prepared.provider_request.json_string_overrides["/messages/0/content/0/text"],
-        vec![0xd800],
-        "pre-serialization host view retains exact units"
+        prepared
+            .provider_request
+            .body_json
+            .string_at(prompt_pointer)
+            .as_deref(),
+        Some("\u{fffd}"),
+        "the display projection remains replacement-safe"
     );
+    assert_eq!(
+        prepared.provider_request.json_string_overrides[prompt_pointer],
+        vec![0xd800],
+        "the prepared host request retains the exact source unit"
+    );
+    // ProviderRequest bytes describe the unsealed source draft. The SDK applies
+    // Native's Claude final-body normalization when RequestDraft is sealed.
     let wire = prepared.provider_request.wire_body_bytes().unwrap();
     let wire = String::from_utf8(wire).unwrap();
-    assert!(wire.contains("\u{fffd}"));
-    assert!(!wire.contains("\\ud800"));
+    assert!(wire.contains("\\ud800"));
+    assert!(!wire.contains("\u{fffd}"));
 
     let mut ordinary_request = request;
     ordinary_request.execution.query_source = None;
     let ordinary = client.prepare(&ordinary_request).await.unwrap();
     assert_eq!(
-        ordinary.provider_request.json_string_overrides["/messages/0/content/0/text"],
+        ordinary.provider_request.json_string_overrides[prompt_pointer],
         vec![0xd800]
     );
     let ordinary_wire = ordinary.provider_request.wire_body_bytes().unwrap();
-    assert!(String::from_utf8(ordinary_wire)
-        .unwrap()
-        .contains("\\ud800"));
+    let ordinary_wire = String::from_utf8(ordinary_wire).unwrap();
+    assert!(ordinary_wire.contains("\\ud800"));
+    assert!(!ordinary_wire.contains("\u{fffd}"));
 }
 
 #[tokio::test]
@@ -1107,7 +1116,7 @@ async fn openai_codecs_reindex_and_retain_exact_text_units() {
         request.input.messages.push(ConversationMessage {
             role: MessageRole::User,
             content: vec![ContentBlock::Text {
-                text: "display".into(),
+                text: String::from_utf16_lossy(&[0xd800]),
                 thought_signature: None,
                 citations: None,
             }],
@@ -1118,6 +1127,15 @@ async fn openai_codecs_reindex_and_retain_exact_text_units() {
             .execution
             .message_json_string_overrides
             .insert("/messages/0/content/0/text".into(), vec![0xd800]);
+
+        let mut mismatched = request.clone();
+        if let ContentBlock::Text { text, .. } = &mut mismatched.input.messages[0].content[0] {
+            *text = "unrelated display".into();
+        }
+        assert!(matches!(
+            client.prepare(&mismatched).await,
+            Err(LlmError::InvalidRequest { .. })
+        ));
 
         let prepared = client.prepare(&request).await.unwrap();
         assert_eq!(prepared.route.protocol, protocol);

@@ -116,15 +116,13 @@ impl lingxi_core::host::PermissionGate for LiveSkillGate {
 }
 
 async fn bash_description(orchestrator: &ConversationOrchestrator) -> String {
-    orchestrator
-        .mcp_tool_definitions()
-        .await
-        .into_iter()
-        .find(|tool| tool["name"] == "Bash")
-        .unwrap()["description"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    let tools = orchestrator.mcp_tool_definitions().await;
+    tools
+        .iter()
+        .find(|tool| tool.string_at("/name") == Some("Bash"))
+        .and_then(|tool| tool.string_at("/description"))
+        .expect("Bash tool description is advertised")
+        .to_owned()
 }
 
 #[tokio::test]
@@ -305,4 +303,172 @@ fn code_review_suggestion_uses_live_owned_settings_and_session_cwd() {
     .unwrap();
     cwd.swap(next_cwd, vec![]);
     assert!(!provider());
+}
+
+#[tokio::test]
+async fn native_295_skill_description_lines_reach_outbound_messages_unchanged() {
+    use llm_runtime::ContentBlock as LlmContentBlock;
+    use orchestrator::test_support::{
+        mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+
+    // These are the four input files and raw Native line slices. The Native
+    // capture verified that each slice is the exact UTF-8 representation of
+    // the target line in its JSON-string token. The assertion below is at the
+    // orchestrator -> API-client boundary, before provider HTTP serialization.
+    let cases: [(&str, &[u8], &[u8]); 4] = [
+        (
+            "ascii-250",
+            include_bytes!(
+                "../../../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.295/skill-description-width/ascii-250/SKILL.md.raw"
+            ),
+            include_bytes!(
+                "../../../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.295/skill-description-width/ascii-250/skill-listing-line.raw"
+            ),
+        ),
+        (
+            "unicode-250",
+            include_bytes!(
+                "../../../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.295/skill-description-width/unicode-250/SKILL.md.raw"
+            ),
+            include_bytes!(
+                "../../../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.295/skill-description-width/unicode-250/skill-listing-line.raw"
+            ),
+        ),
+        (
+            "ascii-1200",
+            include_bytes!(
+                "../../../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.295/skill-description-width/ascii-1200/SKILL.md.raw"
+            ),
+            include_bytes!(
+                "../../../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.295/skill-description-width/ascii-1200/skill-listing-line.raw"
+            ),
+        ),
+        (
+            "lone-surrogate-escape",
+            include_bytes!(
+                "../../../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.295/skill-description-width/lone-surrogate-escape/SKILL.md.raw"
+            ),
+            include_bytes!(
+                "../../../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.295/skill-description-width/lone-surrogate-escape/skill-listing-line.raw"
+            ),
+        ),
+    ];
+    let target_prefix: Vec<u16> = "- native-width-probe: ".encode_utf16().collect();
+
+    for (case, skill_markdown, native_line) in cases {
+        let temporary = tempfile::tempdir().expect("isolated skill roots");
+        let home = temporary.path().join("home");
+        let cwd = home.join("project");
+        let lingxi_home = temporary.path().join("config");
+        let skill_path = cwd
+            .join(branding::DOT_DIR)
+            .join("skills/native-width-probe/SKILL.md");
+        std::fs::create_dir_all(skill_path.parent().unwrap()).expect("skill directory");
+        std::fs::create_dir_all(&home).expect("home directory");
+        std::fs::create_dir_all(&lingxi_home).expect("user config directory");
+        std::fs::write(&skill_path, skill_markdown).expect("write captured SKILL.md bytes");
+
+        let mut command_registry = CommandRegistry::new();
+        let registered = command_api::builtins::load_and_register_skill_commands_with_roots(
+            &mut command_registry,
+            &cwd,
+            &lingxi_home,
+            None,
+            &home,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            registered, 1,
+            "{case}: disk loader should register one skill"
+        );
+
+        let command_registry = Arc::new(RwLock::new(command_registry));
+        let listing_provider = registry_skill_listing_provider(
+            command_registry.clone(),
+            tool_api::read_file_state::new_read_file_state_map(),
+            Arc::new(|| false),
+        );
+
+        let context = tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(tool_skill::SkillTool::with_loader(
+            context,
+            Arc::new(skill_loader::CommandRegistrySkillLoader::new(
+                command_registry,
+            )),
+        )));
+
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "fixed skill-width response".into(),
+                cache_control: None,
+                citations: None,
+            }],
+            Some("end_turn"),
+        )]));
+        let orchestrator = ConversationOrchestrator::new(
+            orchestrator::OrchestratorConfig {
+                model: "claude-opus-4-8".into(),
+                ..Default::default()
+            },
+            api.clone(),
+            Arc::new(tools),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            cwd,
+        )
+        .with_skill_listing(listing_provider);
+
+        orchestrator
+            .run_turn("List the available skills.")
+            .await
+            .unwrap_or_else(|error| panic!("{case}: model turn failed: {error}"));
+
+        let captured_calls = api.captured_msgs().await;
+        assert_eq!(captured_calls.len(), 1, "{case}: one outbound API call");
+        let mut target_lines = Vec::new();
+        for message in captured_calls.iter().flatten() {
+            let lingxi_core::types::ConversationMessage::User { content, .. } = message else {
+                continue;
+            };
+            for block in content {
+                let lingxi_core::types::ContentBlock::TextJsUtf16 {
+                    text,
+                    utf16_code_units,
+                    ..
+                } = block
+                else {
+                    continue;
+                };
+                for line in utf16_code_units.split(|unit| *unit == b'\n' as u16) {
+                    if line.starts_with(&target_prefix) {
+                        // These four Native target lines contain only valid
+                        // scalar values (the D800 input falls back to ASCII).
+                        // Strict decoding makes the UTF-8 byte comparison
+                        // honest and avoids any lossy normalization.
+                        let line_text = String::from_utf16(line)
+                            .expect("target listing line has valid UTF-16 scalar text");
+                        assert!(text.contains(&line_text));
+                        target_lines.push(line_text);
+                    }
+                }
+            }
+        }
+        assert_eq!(target_lines.len(), 1, "{case}: one listed target line");
+        assert_eq!(
+            target_lines[0].as_bytes(),
+            native_line,
+            "{case}: exact line bytes"
+        );
+    }
 }

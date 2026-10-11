@@ -118,12 +118,6 @@ pub(crate) struct PromptSectionSlot {
 }
 
 impl PromptSectionSlot {
-    fn id_units(&self) -> Vec<u16> {
-        self.id_utf16_code_units
-            .clone()
-            .unwrap_or_else(|| self.id.encode_utf16().collect())
-    }
-
     pub(crate) fn id_prompt(
         &self,
     ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
@@ -158,17 +152,6 @@ impl PromptSectionSlot {
                 },
             )
         })
-    }
-
-    pub(crate) fn public_id_prompt(
-        &self,
-    ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
-        lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
-            self.id_units()
-                .into_iter()
-                .take_while(|unit| *unit != b':' as u16)
-                .collect(),
-        )
     }
 }
 
@@ -325,23 +308,6 @@ impl PromptSection {
             || {
                 lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
                     self.text.clone(),
-                )
-            },
-            |units| {
-                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
-                    units.clone(),
-                )
-            },
-        )
-    }
-
-    pub(crate) fn id_prompt(
-        &self,
-    ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
-        self.id_utf16_code_units.as_ref().map_or_else(
-            || {
-                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
-                    self.id.clone(),
                 )
             },
             |units| {

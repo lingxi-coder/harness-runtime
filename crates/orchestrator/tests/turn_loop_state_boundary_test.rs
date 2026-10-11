@@ -88,7 +88,7 @@ fn batched_orch(responses: Vec<HistoryResponse>) -> ConversationOrchestrator {
     )
 }
 
-fn streaming_orch() -> ConversationOrchestrator {
+fn streaming_orch() -> Arc<ConversationOrchestrator> {
     let script = scripted![
         message_start("m1", "claude-opus-4-7"),
         content_block_start_text(0),
@@ -97,7 +97,7 @@ fn streaming_orch() -> ConversationOrchestrator {
         message_delta_stop("end_turn"),
         message_stop(),
     ];
-    ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
         Arc::new(MockStreamingApiClient::with_turns(vec![script])),
@@ -107,7 +107,7 @@ fn streaming_orch() -> ConversationOrchestrator {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    )
+    ))
 }
 
 #[test]

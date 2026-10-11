@@ -149,7 +149,12 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
     let tools = Arc::new(registry);
 
     let orch = ConversationOrchestrator::new(
-        OrchestratorConfig::default(),
+        OrchestratorConfig {
+            // Keep this tool-loop fixture's explicit additionalContext layout;
+            // announced-context persistence is covered by the JSONL tests.
+            context_rendering: lingxi_core::host::instructions::InstructionRendering::Inline,
+            ..Default::default()
+        },
         api.clone(),
         tools,
         hooks,

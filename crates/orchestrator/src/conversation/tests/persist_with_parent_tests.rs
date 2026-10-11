@@ -5,13 +5,22 @@ use crate::test_support::{
 use crate::OrchestratorConfig;
 use hooks::attachment::HookPublicationGuard;
 use lingxi_core::host::OrchestratorHandle;
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::SessionId;
 use platform_posix::fs::PosixFileSystem;
 use session::jsonl::schema::JsonlMessage;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 use uuid::Uuid;
+
+// Source-backed JSON fixtures stay in the current projection type rather than
+// being converted back through a legacy Value sidecar.
+macro_rules! source_literal {
+    ($($tokens:tt)*) => {
+        Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)*))
+            .expect("generated source JSON fixture")
+    };
+}
 
 fn source_payload(message: JsonlMessage) -> Utf16JsonProjection {
     let bytes = session::jsonl::exact_json::native_message_bytes(&message)
@@ -91,7 +100,7 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
         "interleaved-append-log",
         dir.path(),
         &module,
-        source_fixture!({}),
+        source_literal!({}),
     )
     .await
     .expect("load session.append Mod");
@@ -139,10 +148,11 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: tool_use_id.clone(),
             name: "Read".into(),
-            input: serde_json::json!({"file_path":"fixture.txt"}),
+            input: source_literal!({"file_path":"fixture.txt"}),
             provider_id: None,
         }],
         stop_reason: Some("tool_use".into()),
+        resumable: None,
     };
     orch.session.lock().await.history.push(assistant.clone());
 
@@ -160,7 +170,7 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
     let attachment = hooks::attachment::deferred_tool_attachment(
         tool_use_id.as_str(),
         "Read",
-        &source_fixture!({"file_path":"fixture.txt"}),
+        &source_literal!({"file_path":"fixture.txt"}),
         "PreToolUse:Read",
         "default",
         None,
@@ -195,8 +205,13 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[1].message_type, "attachment");
     assert_eq!(
-        rows[1].extra.subprojection("/attachment/type").unwrap(),
-        source_fixture!("hook_deferred_tool")
+        rows[1]
+            .attachment_projection
+            .as_ref()
+            .unwrap()
+            .subprojection("/type")
+            .unwrap(),
+        source_literal!("hook_deferred_tool")
     );
     assert_eq!(rows[2].message_type, "assistant");
     assert_eq!(rows[2].parent_uuid.as_deref(), Some(rows[1].uuid.as_str()));
@@ -239,7 +254,7 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
             .extra
             .subprojection("/sourceToolAssistantUUID")
             .unwrap(),
-        source_fixture!(serde_json::Value::String(rows[2].uuid.clone()))
+        source_literal!(serde_json::Value::String(rows[2].uuid.clone()))
     );
 
     let stale_root = lingxi_core::host::CancellationToken::new();
@@ -731,9 +746,10 @@ async fn fusion_append_waits_for_foreground_and_never_rewinds_a_newer_parent() {
         );
     }
     let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
+    let session_uuid = id.as_uuid().to_string();
     let (chain, loaded_session) =
-        session::jsonl::loader::build_conversation_chain(&loaded, &id.to_string());
-    assert_eq!(loaded_session, id.to_string());
+        session::jsonl::loader::build_conversation_chain(&loaded, &session_uuid);
+    assert_eq!(loaded_session, session_uuid);
     let chain_ids: Vec<_> = chain.iter().map(|row| row.uuid.as_str()).collect();
     for row in messages {
         assert!(
@@ -820,7 +836,7 @@ async fn fusion_meta_appends_only_to_launch_session_and_stays_out_of_model_conte
     );
     let launch_lines = read_jsonl(&launch_path);
     assert_eq!(launch_lines.len(), 1);
-    assert_eq!(launch_lines[0].session_id, launch.to_string());
+    assert_eq!(launch_lines[0].session_id, launch.as_uuid().to_string());
     assert_eq!(
         launch_lines[0]
             .extra
@@ -1199,7 +1215,7 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: tuid.clone(),
             name: "Bash".into(),
-            input: source_fixture!({"command":"ls"}),
+            input: source_literal!({"command":"ls"}),
             provider_id: None,
         }],
         stop_reason: None,
@@ -1217,7 +1233,7 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
     // 2. The tool's structured result, recorded at dispatch.
     orch.record_tool_use_result(
         &tuid,
-        source_fixture!({"stdout":"a\n","stderr":"","interrupted":false}),
+        source_literal!({"stdout":"a\n","stderr":"","interrupted":false}),
     )
     .await;
 
@@ -1322,9 +1338,9 @@ async fn mcp_result_line_carries_mcp_meta_as_a_top_level_sibling() {
     let orch = orch_with_writer(dir.path(), session_path.clone());
 
     let tuid = lingxi_core::types::ToolUseId::new();
-    orch.record_tool_use_result(&tuid, source_fixture!([{"type":"text","text":"hi"}]))
+    orch.record_tool_use_result(&tuid, source_literal!([{"type":"text","text":"hi"}]))
         .await;
-    orch.record_tool_use_mcp_meta(&tuid, source_fixture!({"_meta":{"claude/endTurn":true}}))
+    orch.record_tool_use_mcp_meta(&tuid, source_literal!({"_meta":{"claude/endTurn":true}}))
         .await;
 
     let msg = ConversationMessage::User {
@@ -1369,9 +1385,9 @@ async fn mcp_end_turn_result_persists_only_mcp_meta() {
     let orch = orch_with_writer(dir.path(), session_path.clone());
 
     let tuid = lingxi_core::types::ToolUseId::new();
-    orch.record_tool_use_result(&tuid, source_fixture!([{"type":"text","text":"hi"}]))
+    orch.record_tool_use_result(&tuid, source_literal!([{"type":"text","text":"hi"}]))
         .await;
-    orch.record_tool_use_mcp_meta(&tuid, source_fixture!({"_meta":{"claude/endTurn":true}}))
+    orch.record_tool_use_mcp_meta(&tuid, source_literal!({"_meta":{"claude/endTurn":true}}))
         .await;
     orch.record_pending_tool_result_turn_end(
         &tuid,
@@ -1420,7 +1436,7 @@ async fn native_end_turn_result_persists_tool_ends_turn() {
     let orch = orch_with_writer(dir.path(), session_path.clone());
 
     let tuid = lingxi_core::types::ToolUseId::new();
-    orch.record_tool_use_result(&tuid, source_fixture!({"ok": true}))
+    orch.record_tool_use_result(&tuid, source_literal!({"ok": true}))
         .await;
     orch.record_pending_tool_result_turn_end(
         &tuid,
@@ -1509,9 +1525,9 @@ async fn two_tool_results_in_one_user_message_get_no_head_keys() {
 
     let a = lingxi_core::types::ToolUseId::new();
     let b = lingxi_core::types::ToolUseId::new();
-    orch.record_tool_use_result(&a, source_fixture!({"stdout":"a"}))
+    orch.record_tool_use_result(&a, source_literal!({"stdout":"a"}))
         .await;
-    orch.record_tool_use_result(&b, source_fixture!({"stdout":"b"}))
+    orch.record_tool_use_result(&b, source_literal!({"stdout":"b"}))
         .await;
     orch.record_source_tool_assistant_uuid(&a, "aaa".into())
         .await;
@@ -1743,27 +1759,27 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
     );
     assert_eq!(
         inner.subprojection("/id").unwrap(),
-        source_fixture!("inner-abc")
+        source_literal!("inner-abc")
     );
     assert_eq!(
         inner.subprojection("/type").unwrap(),
-        source_fixture!("message")
+        source_literal!("message")
     );
     assert_eq!(
         inner.subprojection("/role").unwrap(),
-        source_fixture!("assistant")
+        source_literal!("assistant")
     );
     assert_eq!(
         inner.subprojection("/model").unwrap(),
-        source_fixture!("claude-opus-4-8")
+        source_literal!("claude-opus-4-8")
     );
     assert_eq!(
         inner.subprojection("/stop_reason").unwrap(),
-        source_fixture!("end_turn")
+        source_literal!("end_turn")
     );
     assert_eq!(
         inner.subprojection("/stop_sequence").unwrap(),
-        source_fixture!(null)
+        source_literal!(null)
     );
     assert_eq!(
         inner.subprojection("/usage").unwrap(),
@@ -1823,45 +1839,45 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
     );
     assert_eq!(
         pinner.subprojection("/id").unwrap(),
-        source_fixture!("inner-abc")
+        source_literal!("inner-abc")
     );
     assert_eq!(
         pinner.subprojection("/model").unwrap(),
-        source_fixture!("<synthetic>")
+        source_literal!("<synthetic>")
     );
     assert_eq!(
         pinner.subprojection("/container").unwrap(),
-        source_fixture!(null)
+        source_literal!(null)
     );
     assert_eq!(
         pinner.subprojection("/role").unwrap(),
-        source_fixture!("assistant")
+        source_literal!("assistant")
     );
     assert_eq!(
         pinner.subprojection("/stop_details").unwrap(),
-        source_fixture!(null)
+        source_literal!(null)
     );
     // Hardcoded "stop_sequence", NOT the message's own "end_turn".
     assert_eq!(
         pinner.subprojection("/stop_reason").unwrap(),
-        source_fixture!("stop_sequence")
+        source_literal!("stop_sequence")
     );
     assert_eq!(
         pinner.subprojection("/stop_sequence").unwrap(),
-        source_fixture!("")
+        source_literal!("")
     );
     assert_eq!(
         pinner.subprojection("/type").unwrap(),
-        source_fixture!("message")
+        source_literal!("message")
     );
     assert_eq!(
         pinner.subprojection("/context_management").unwrap(),
-        source_fixture!(null)
+        source_literal!(null)
     );
     // `usage` is PRESENT and is `Mqm`'s zeroed default, key order included.
     assert_eq!(
         pinner.subprojection("/diagnostics").unwrap(),
-        source_fixture!(null)
+        source_literal!(null)
     );
     let pusage = pinner
         .subprojection("/usage")
@@ -1890,34 +1906,34 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
     );
     assert_eq!(
         pusage.subprojection("/output_tokens_details").unwrap(),
-        source_fixture!(null)
+        source_literal!(null)
     );
     assert_eq!(
         pusage.subprojection("/input_tokens").unwrap(),
-        source_fixture!(0)
+        source_literal!(0)
     );
     assert_eq!(
         pusage.subprojection("/output_tokens").unwrap(),
-        source_fixture!(0)
+        source_literal!(0)
     );
     assert_eq!(
         pusage.subprojection("/server_tool_use").unwrap(),
-        source_fixture!({"web_search_requests": 0, "web_fetch_requests": 0})
+        source_literal!({"web_search_requests": 0, "web_fetch_requests": 0})
     );
     assert_eq!(
         pusage.subprojection("/cache_creation").unwrap(),
-        source_fixture!({
+        source_literal!({
             "ephemeral_1h_input_tokens": 0,
             "ephemeral_5m_input_tokens": 0
         })
     );
     assert_eq!(
         pinner.subprojection("/content/0/type").unwrap(),
-        source_fixture!("text")
+        source_literal!("text")
     );
     assert_eq!(
         pinner.subprojection("/content/0/text").unwrap(),
-        source_fixture!("hi")
+        source_literal!("hi")
     );
 }
 
@@ -1967,7 +1983,7 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
     );
     assert_eq!(
         bare.message.subprojection("/stop_reason").unwrap(),
-        source_fixture!("stop_sequence"),
+        source_literal!("stop_sequence"),
         "no-override keeps the synthetic stop_sequence"
     );
 
@@ -2028,7 +2044,7 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
     );
     assert_eq!(
         refusal.message.subprojection("/stop_reason").unwrap(),
-        source_fixture!("refusal"),
+        source_literal!("refusal"),
         "refusal overrides the inner stop_reason"
     );
 
@@ -2443,13 +2459,13 @@ async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_repare
             lingxi_core::types::ContentBlock::ToolUse {
                 id: id_a.clone(),
                 name: "Alpha".into(),
-                input: source_fixture!({}),
+                input: source_literal!({}),
                 provider_id: None,
             },
             lingxi_core::types::ContentBlock::ToolUse {
                 id: id_b.clone(),
                 name: "Bravo".into(),
-                input: source_fixture!({}),
+                input: source_literal!({}),
                 provider_id: None,
             },
         ],
@@ -2661,7 +2677,7 @@ async fn stitched_stream_rows_keep_provider_identity_and_supersedes_order() {
             content: vec![lingxi_core::types::ContentBlock::ToolUse {
                 id: tool_use_id.clone(),
                 name: "Run".into(),
-                input: source_fixture!({}),
+                input: source_literal!({}),
                 provider_id: Some("provider-tool-id".into()),
             }],
             session_append_dispatched: false,
@@ -2711,7 +2727,7 @@ async fn stitched_stream_rows_keep_provider_identity_and_supersedes_order() {
         .expect("stitched row records source rows in order");
     assert_eq!(
         supersedes,
-        source_fixture!([
+        source_literal!([
             old_text_id.as_uuid().to_string(),
             old_metadata_id.as_uuid().to_string()
         ])
@@ -2826,7 +2842,7 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: tool_use_id.clone(),
             name: "Run".into(),
-            input: source_fixture!({}),
+            input: source_literal!({}),
             provider_id: Some("provider-tool-id".into()),
         }],
         session_append_dispatched: false,
@@ -2861,32 +2877,32 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
     assert_eq!(assistant_rows[0].parent_uuid, Some(parent_uuid));
     assert_eq!(
         assistant_rows[0].message.subprojection("/id").unwrap(),
-        source_fixture!("provider-response-1")
+        source_literal!("provider-response-1")
     );
     assert_eq!(
         assistant_rows[0].message.subprojection("/model").unwrap(),
-        source_fixture!("served-model")
+        source_literal!("served-model")
     );
     assert_eq!(
         assistant_rows[0]
             .message
             .subprojection("/stop_reason")
             .unwrap(),
-        source_fixture!("end_turn")
+        source_literal!("end_turn")
     );
     assert_eq!(
         assistant_rows[0]
             .message
             .subprojection("/usage/input_tokens")
             .unwrap(),
-        source_fixture!(11)
+        source_literal!(11)
     );
     assert_eq!(
         assistant_rows[0]
             .message
             .subprojection("/usage/output_tokens")
             .unwrap(),
-        source_fixture!(3)
+        source_literal!(3)
     );
     assert!(assistant_rows[0]
         .message
@@ -2909,7 +2925,7 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
     assert_eq!(assistant_rows[0].timestamp, "2026-10-03T12:00:00.000Z");
     assert_eq!(
         assistant_rows[0].extra.subprojection("/requestId").unwrap(),
-        source_fixture!("request-1")
+        source_literal!("request-1")
     );
     assert_eq!(assistant_rows[1].uuid, tool_row_uuid);
     assert_eq!(
@@ -2948,7 +2964,7 @@ async fn completed_row_mod_content_rewrite_preserves_response_envelope() {
         "completed-row-rewrite",
         dir.path(),
         &module,
-        source_fixture!({}),
+        source_literal!({}),
     )
     .await
     .expect("load session.append Mod");
@@ -3017,51 +3033,51 @@ async fn completed_row_mod_content_rewrite_preserves_response_envelope() {
     assert_eq!(persisted.uuid, row_id.as_uuid().to_string());
     assert_eq!(
         persisted.message.subprojection("/id").unwrap(),
-        source_fixture!("physical-provider-message")
+        source_literal!("physical-provider-message")
     );
     assert_eq!(
         persisted.message.subprojection("/model").unwrap(),
-        source_fixture!("physical-response-model")
+        source_literal!("physical-response-model")
     );
     assert_eq!(
         persisted.message.subprojection("/stop_reason").unwrap(),
-        source_fixture!("refusal")
+        source_literal!("refusal")
     );
     assert_eq!(
         persisted.message.subprojection("/stop_details").unwrap(),
-        source_fixture!(serde_json::to_value(stop_details).unwrap())
+        source_literal!(serde_json::to_value(stop_details).unwrap())
     );
     assert_eq!(
         persisted.message.subprojection("/content/0/text").unwrap(),
-        source_fixture!("mod rewritten text")
+        source_literal!("mod rewritten text")
     );
     assert_eq!(
         persisted
             .message
             .subprojection("/usage/input_tokens")
             .unwrap(),
-        source_fixture!(17)
+        source_literal!(17)
     );
     assert_eq!(
         persisted
             .message
             .subprojection("/usage/output_tokens")
             .unwrap(),
-        source_fixture!(6)
+        source_literal!(6)
     );
     assert_eq!(
         persisted
             .message
             .subprojection("/usage/cache_creation_input_tokens")
             .unwrap(),
-        source_fixture!(2)
+        source_literal!(2)
     );
     assert_eq!(
         persisted
             .message
             .subprojection("/usage/cache_read_input_tokens")
             .unwrap(),
-        source_fixture!(3)
+        source_literal!(3)
     );
     assert!(persisted
         .message
@@ -3083,11 +3099,11 @@ async fn completed_row_mod_content_rewrite_preserves_response_envelope() {
         .is_none());
     assert_eq!(
         persisted.extra.subprojection("/requestId").unwrap(),
-        source_fixture!("physical-request-id")
+        source_literal!("physical-request-id")
     );
     assert_eq!(
         persisted.extra.subprojection("/modelProfile").unwrap(),
-        source_fixture!("physical-route-profile")
+        source_literal!("physical-route-profile")
     );
     assert_eq!(persisted.timestamp, "2026-10-03T12:34:56.789Z");
 }
@@ -3123,7 +3139,7 @@ async fn preappended_stream_result_keeps_raw_query_history_and_dispatches_append
         "stream-result-rewrite",
         dir.path(),
         &module,
-        source_fixture!({}),
+        source_literal!({}),
     )
     .await
     .expect("load session.append Mod");
@@ -3172,7 +3188,7 @@ async fn preappended_stream_result_keeps_raw_query_history_and_dispatches_append
     assert_eq!(rows[0].timestamp, timestamp);
     assert_eq!(
         rows[0].message.subprojection("/content/0/content").unwrap(),
-        source_fixture!("stored result 1")
+        source_literal!("stored result 1")
     );
 }
 
@@ -3206,7 +3222,7 @@ async fn preappended_api_error_retains_native_identity_metadata_and_raw_query_ro
         "error-row-rewrite",
         dir.path(),
         &module,
-        source_fixture!({}),
+        source_literal!({}),
     )
     .await
     .expect("load session.append Mod");
@@ -3249,23 +3265,23 @@ async fn preappended_api_error_retains_native_identity_metadata_and_raw_query_ro
     assert_eq!(rows[0].timestamp, row.timestamp);
     assert_eq!(
         rows[0].message.subprojection("/id").unwrap(),
-        source_fixture!(inner_uuid)
+        source_literal!(inner_uuid)
     );
     assert_ne!(
         rows[0].message.subprojection("/id").unwrap(),
-        source_fixture!(rows[0].uuid)
+        source_literal!(rows[0].uuid)
     );
     assert_eq!(
         rows[0].message.subprojection("/model").unwrap(),
-        source_fixture!("<synthetic>")
+        source_literal!("<synthetic>")
     );
     assert_eq!(
         rows[0].message.subprojection("/content/0/text").unwrap(),
-        source_fixture!("stored decline 1")
+        source_literal!("stored decline 1")
     );
     assert_eq!(
         rows[0].message.subprojection("/stop_reason").unwrap(),
-        source_fixture!("refusal")
+        source_literal!("refusal")
     );
     assert_eq!(
         rows[0].message.subprojection("/stop_details").unwrap(),
@@ -3277,15 +3293,15 @@ async fn preappended_api_error_retains_native_identity_metadata_and_raw_query_ro
     );
     assert_eq!(
         rows[0].extra.subprojection("/requestId").unwrap(),
-        source_fixture!("event-request-id")
+        source_literal!("event-request-id")
     );
     assert_eq!(
         rows[0].extra.subprojection("/error").unwrap(),
-        source_fixture!("invalid_request")
+        source_literal!("invalid_request")
     );
     assert_eq!(
         rows[0].extra.subprojection("/isApiErrorMessage").unwrap(),
-        source_fixture!(true)
+        source_literal!(true)
     );
     assert_eq!(
         orch.transcript.last_jsonl_uuid.lock().await.as_deref(),
@@ -3320,13 +3336,13 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
         lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::from("toolu_shared"),
             name: "Echo".into(),
-            input: source_fixture!({ "x": 1 }),
+            input: source_literal!({ "x": 1 }),
             provider_id: None,
         },
         lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::from("toolu_followup"),
             name: "Echo".into(),
-            input: source_fixture!({ "x": 2 }),
+            input: source_literal!({ "x": 2 }),
             provider_id: None,
         },
     ];
@@ -3364,13 +3380,13 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
             lingxi_core::types::ContentBlock::ToolUse {
                 id: lingxi_core::types::ToolUseId::from("toolu_shared"),
                 name: "Echo".into(),
-                input: source_fixture!({ "x": 1 }),
+                input: source_literal!({ "x": 1 }),
                 provider_id: None,
             },
             lingxi_core::types::ContentBlock::ToolUse {
                 id: lingxi_core::types::ToolUseId::from("toolu_followup"),
                 name: "Echo".into(),
-                input: source_fixture!({ "x": 2 }),
+                input: source_literal!({ "x": 2 }),
                 provider_id: None,
             },
         ],
@@ -3543,13 +3559,13 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
             lingxi_core::types::ContentBlock::ToolUse {
                 id: mcp_id.clone(),
                 name: "McpEnd".into(),
-                input: source_fixture!({}),
+                input: source_literal!({}),
                 provider_id: None,
             },
             lingxi_core::types::ContentBlock::ToolUse {
                 id: native_id.clone(),
                 name: "NativeEnd".into(),
-                input: source_fixture!({}),
+                input: source_literal!({}),
                 provider_id: None,
             },
         ],
@@ -3560,9 +3576,9 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
     orch.persist_assistant_merged(&assistant, None, None, None)
         .await;
 
-    orch.record_tool_use_result(&mcp_id, source_fixture!({"mcp": true}))
+    orch.record_tool_use_result(&mcp_id, source_literal!({"mcp": true}))
         .await;
-    orch.record_tool_use_mcp_meta(&mcp_id, source_fixture!({"_meta":{"claude/endTurn":true}}))
+    orch.record_tool_use_mcp_meta(&mcp_id, source_literal!({"_meta":{"claude/endTurn":true}}))
         .await;
     orch.record_pending_tool_result_turn_end(
         &mcp_id,
@@ -3571,7 +3587,7 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
         },
     )
     .await;
-    orch.record_tool_use_result(&native_id, source_fixture!({"native": true}))
+    orch.record_tool_use_result(&native_id, source_literal!({"native": true}))
         .await;
     orch.record_pending_tool_result_turn_end(
         &native_id,
@@ -3676,23 +3692,23 @@ async fn scheduled_persistence_keeps_actual_settings_separate_from_session_defau
             .unwrap();
         assert_eq!(
             row.message.subprojection("/model").unwrap(),
-            source_fixture!("claude-opus-4-6")
+            source_literal!("claude-opus-4-6")
         );
         assert_eq!(
             row.extra.subprojection("/modelProfile").unwrap(),
-            source_fixture!("anthropic")
+            source_literal!("anthropic")
         );
         assert_eq!(
             row.extra.subprojection("/effort").unwrap(),
-            source_fixture!("high")
+            source_literal!("high")
         );
         assert_eq!(
             row.extra.subprojection("/reasoningSelection").unwrap(),
-            source_fixture!({"type":"level","id":"high"})
+            source_literal!({"type":"level","id":"high"})
         );
         assert_eq!(
             row.extra.subprojection("/perTurnSettings").unwrap(),
-            source_fixture!(true)
+            source_literal!(true)
         );
         assert_eq!(orch.session().lock().await.model, "claude-sonnet-4-6");
     }
@@ -3738,25 +3754,22 @@ async fn loop_wakeup_survives_jsonl_resume_without_entering_model_context() {
     assert_eq!(rows[1].parent_uuid.as_deref(), Some(rows[0].uuid.as_str()));
     assert_eq!(
         rows[1].extra.subprojection("/subtype").unwrap(),
-        source_fixture!("scheduled_task_fire")
+        source_literal!("scheduled_task_fire")
     );
     assert_eq!(
         rows[1].extra.subprojection("/noOpStreak").unwrap(),
-        source_fixture!(1)
+        source_literal!(1)
     );
     assert_eq!(
         rows[1].extra.subprojection("/foldedUuids").unwrap(),
-        source_fixture!([rows[0].uuid])
+        source_literal!([rows[0].uuid])
     );
     assert!(rows[1].extra.get_property("loopWakeup").is_none());
     assert!(rows[1]
         .extra
         .get_property("isModelContextExcluded")
         .is_none());
-    assert_eq!(
-        rows[2].extra.subprojection("/turnCompanion").unwrap(),
-        source_fixture!(true)
-    );
+    assert_eq!(rows[2].turn_companion, Some(Some(true)));
     let restored = crate::resume::state_from_messages(Uuid::new_v4(), &rows);
     assert_eq!(restored.history.len(), 3);
     assert_eq!(restored.model_context_excluded_messages.len(), 2);

@@ -47,7 +47,7 @@ pub fn resolve_max_retries(env_value: Option<&str>) -> i64 {
         return DEFAULT_MAX_STRUCTURED_OUTPUT_RETRIES;
     }
     if negative {
-        if magnitude >= (i64::MAX as u64) + 1 {
+        if magnitude > (i64::MAX as u64) {
             i64::MIN
         } else {
             -(magnitude as i64)
@@ -61,11 +61,10 @@ pub fn resolve_max_retries(env_value: Option<&str>) -> i64 {
 mod tests {
     use super::*;
     use lingxi_core::host::json_schema_validator::{
-        CompiledJsonSchema, JsonSchemaValidation, JsonSchemaValidator, JsonSchemaValidatorSession,
-        SchemaProfile,
+        JsonSchemaValidation, JsonSchemaValidator, SchemaProfile,
     };
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     type TestValidator = crate::json_schema_validator::BunJsonSchemaValidator;
 
@@ -112,11 +111,18 @@ mod tests {
             &json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}),
         )
         .unwrap();
+        let validator = test_validator();
+        let session = validator.new_session(SchemaProfile::StructuredOutputDraft7);
+        let compiled = session
+            .compile(&schema)
+            .await
+            .expect("configured test schema compiles");
         let slot: orchestrator::structured_output::StructuredOutputSlot =
             Arc::new(Mutex::new(None));
         let dynamic: Arc<dyn Tool> =
             Arc::new(orchestrator::structured_output::StructuredOutputTool::new(
                 schema.clone(),
+                compiled,
                 slot.clone(),
             ));
         registry.register_builtin(dynamic.clone());
@@ -137,12 +143,12 @@ mod tests {
             &registry.find_registered("StructuredOutput").unwrap(),
             &dynamic
         ));
-        assert_eq!(selected.input_schema_projection(), Some(schema));
+        assert_eq!(selected.input_schema(), &schema);
         let (tx, _rx) = tool_api::progress::progress_channel();
         let result = selected
             .call(
                 Utf16JsonProjection::from_serde_value(&json!({"answer":"captured"})).unwrap(),
-                ToolUseContext::model_seed("schema-owner".into(), None),
+                ToolUseContext::model_seed("schema-owner".into()),
                 tx,
             )
             .await
@@ -262,11 +268,9 @@ mod tests {
             "properties": { "a": { "type": "string" } },
             "additionalProperties": false
         });
-        assert!(
-            validate(&validator, &json!({"a": "x"}), &schema)
-                .await
-                .is_empty()
-        );
+        assert!(validate(&validator, &json!({"a": "x"}), &schema)
+            .await
+            .is_empty());
         let errs = validate(&validator, &json!({"a": "x", "b": 1}), &schema).await;
         assert_eq!(errs.len(), 1);
         assert!(
@@ -344,29 +348,23 @@ mod tests {
     #[tokio::test]
     async fn false_schema_and_unresolvable_reference_are_not_accepted() {
         let validator = test_validator();
-        assert!(
-            !validate(&validator, &json!({}), &json!(false))
-                .await
-                .is_empty()
-        );
-        assert!(
-            !validate(
-                &validator,
-                &json!({}),
-                &json!({"$ref":"#/definitions/missing"})
-            )
+        assert!(!validate(&validator, &json!({}), &json!(false))
             .await
-            .is_empty()
-        );
-        assert!(
-            !validate(
-                &validator,
-                &json!({}),
-                &json!({"type":"not-a-json-schema-type"})
-            )
-            .await
-            .is_empty()
-        );
+            .is_empty());
+        assert!(!validate(
+            &validator,
+            &json!({}),
+            &json!({"$ref":"#/definitions/missing"})
+        )
+        .await
+        .is_empty());
+        assert!(!validate(
+            &validator,
+            &json!({}),
+            &json!({"type":"not-a-json-schema-type"})
+        )
+        .await
+        .is_empty());
     }
 
     #[tokio::test]
@@ -383,10 +381,8 @@ mod tests {
                 "Output does not match required schema: root: must have required property 'answer'"
             ]
         );
-        assert!(
-            validate(&validator, &json!({"answer":"ok"}), &schema)
-                .await
-                .is_empty()
-        );
+        assert!(validate(&validator, &json!({"answer":"ok"}), &schema)
+            .await
+            .is_empty());
     }
 }

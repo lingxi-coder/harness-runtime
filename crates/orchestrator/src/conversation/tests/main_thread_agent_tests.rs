@@ -992,36 +992,64 @@ async fn main_thread_agent_no_model_override_leaves_session_model() {
     assert_eq!(orch.session().lock().await.model, "base-model");
 }
 
-/// Native 2.1.293 surfaces a provider APIError without the taxonomy's
-/// `invalid request:` prefix. Local validator failures have no provider status.
+/// Contract test for the status-gated Native-facts renderer.
+/// The checked-in 2.1.293 and 2.1.295 captures establish the 400 and 422
+/// prefixes; the 2.1.295 422 capture is replayed through the production path
+/// by `native_295_http_422_capture_reaches_real_orchestrator_output_and_jsonl`.
 #[tokio::test]
-async fn provider_invalid_request_uses_native_api_error_copy() {
+async fn provider_invalid_request_uses_status_gated_native_error_copy() {
     let orch = orch_with_config(OrchestratorConfig::default());
-    for (message, expected) in [
+    let native_provider_error = |message: &str| {
+        let text = lingxi_llm_client::protocol::ProviderErrorText::new(
+            message.to_owned(),
+            message.encode_utf16().collect(),
+        )
+        .unwrap();
+        LlmError::ProviderErrorText {
+            source: Box::new(LlmError::InvalidRequest {
+                message: message.to_owned(),
+            }),
+            text,
+            native_anthropic_facts: Some(lingxi_llm_client::protocol::NativeAnthropicErrorFacts {
+                provider_id: lingxi_llm_client::protocol::ProviderId::from("anthropic"),
+                protocol: lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+                request_authority: None,
+                thinking_resumption_refused: false,
+                thinking_resumption_beta_requested: None,
+                thinking_resumption_beta_refused: false,
+            }),
+        }
+    };
+    for (message, expected, native) in [
         (
             "400 HEADLESS_LOCAL_PROVIDER_ERROR",
             "API Error: 400 HEADLESS_LOCAL_PROVIDER_ERROR",
+            true,
         ),
         (
             r#"400 {"type":"error","error":{"message":"bad request"}}"#,
             "API Error: 400 bad request",
+            true,
         ),
         (
             r#"422 {"error":{"message":"unsupported field"}}"#,
             "API Error: 422 unsupported field",
+            true,
         ),
         (
             "invalid model configuration",
-            "invalid request: invalid model configuration",
+            "invalid model configuration",
+            false,
         ),
     ] {
-        assert_eq!(
-            orch.model_error_text(&LlmError::InvalidRequest {
-                message: message.into()
-            })
-            .await,
-            expected,
-        );
+        let error = if native {
+            native_provider_error(message)
+        } else {
+            LlmError::InvalidRequest {
+                message: message.into(),
+            }
+        };
+        assert_eq!(orch.model_error_text(&error).await, expected);
     }
 }
 
@@ -1035,22 +1063,23 @@ async fn graceful_provider_error_metrics_preserve_actual_status_without_guessing
         ("422 unsupported field", Some(422)),
         ("invalid model configuration", None),
     ] {
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(vec![])),
-            Arc::new(MockStreamingApiClient::with_open_error(
-                LlmError::InvalidRequest {
-                    message: message.into(),
-                },
-                vec![],
-            )),
-            Arc::new(ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/work/repo"),
-        );
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(MockStreamingApiClient::with_open_error(
+                    LlmError::InvalidRequest {
+                        message: message.into(),
+                    },
+                    vec![],
+                )),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/work/repo"),
+            ));
         orch.run_turn_streaming_with_cancel("hi", tokio_util::sync::CancellationToken::new())
             .await
             .expect("APIError remains a graceful assistant result");

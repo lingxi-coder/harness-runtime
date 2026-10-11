@@ -15,8 +15,8 @@ use tool_api::registry::ToolRegistry;
 fn orch(
     streaming: Arc<MockStreamingApiClient>,
     output: Arc<MockOutputStream>,
-) -> ConversationOrchestrator {
-    ConversationOrchestrator::new_with_streaming(
+) -> Arc<ConversationOrchestrator> {
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
         streaming,
@@ -26,14 +26,15 @@ fn orch(
         output,
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    )
+    ))
 }
 
 /// #10 (faithful port of `query.ts:955-997` catch): a mid-stream model/runtime
 /// error (here a `Transport` connection reset) is NOT a hard failure. The turn
-/// ends GRACEFULLY with `reason:"model_error"` and the raw error text is surfaced
-/// as an api-error assistant message — instead of the prior `OrchestratorError`
-/// bubble (which showed a phantom "[Request interrupted by user]" to SDK callers).
+/// ends GRACEFULLY with `reason:"model_error"` and the runtime's current TLS
+/// display copy is surfaced as an api-error assistant message — instead of the
+/// prior `OrchestratorError` bubble (which showed a phantom
+/// "[Request interrupted by user]" to SDK callers).
 ///
 /// The fixture is a TERMINAL error raised before any content, and both halves
 /// of that are load-bearing:
@@ -83,14 +84,15 @@ async fn mid_stream_err_ends_turn_gracefully_as_model_error() {
         )),
         "turn must end with stop_reason model_error; events={events:#?}"
     );
-    // The raw error text is surfaced verbatim (createAssistantAPIErrorMessage,
-    // NOT an `API Error:`-prefixed template).
+    // TLS certificate errors use the current runtime display mapping, not the
+    // provider's lower-level message. The api-error assistant still carries it
+    // verbatim (without an `API Error:` prefix).
     let texts = output.text_events().await;
     assert!(
         texts
             .iter()
-            .any(|t| t.contains("certificate has expired (CERT_HAS_EXPIRED)")),
-        "the raw error text must be surfaced as the model_error message; \
+            .any(|text| text == "Unable to connect to API: SSL certificate has expired"),
+        "the current TLS error display must be surfaced as the model_error message; \
          texts={texts:#?}"
     );
 }

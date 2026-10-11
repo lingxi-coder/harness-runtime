@@ -17,7 +17,7 @@ use lingxi_core::host::observer_pairing::ObserverPairing;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::OnceLock;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -253,6 +253,7 @@ mod tests {
     use lingxi_core::host::observer_pairing::{ObserverPairings, PairingState, MAIN_PAIRING_KEY};
     use lingxi_core::host::subagent_spawn::ObserverSpec;
     use lingxi_core::types::AgentId;
+    use serde_json::Value;
     use std::sync::Arc;
 
     fn test_value(value: &Utf16JsonProjection) -> Value {

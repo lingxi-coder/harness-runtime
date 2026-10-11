@@ -363,6 +363,7 @@ mod tests {
                 .to_string()
                 .into(),
             subtype: Some("mod_attachment_source".into()),
+            api_system: None,
             compact_metadata: None,
             model_fallback: None,
             refusal_fallback: None,
@@ -425,6 +426,7 @@ mod tests {
             )
             .into(),
             subtype: Some("mod_attachment_source".into()),
+            api_system: None,
             compact_metadata: None,
             model_fallback: None,
             refusal_fallback: None,

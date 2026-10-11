@@ -2536,6 +2536,13 @@ pub(super) async fn build_mobile_inner_with_ask(
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);
     }
+    // Keep the resolved provider identity when the selected model is shared
+    // by multiple profiles. Session initialization does not emit switch hooks.
+    if let Some(profile) = default_model_profile.as_deref() {
+        orch_inner
+            .seed_initial_model_profile(&default_model_id, profile)
+            .await;
+    }
     let orch = orchestrator::ConversationOrchestrator::into_shared(
         orch_inner.with_loop_wakeup_armed_slot(loop_wakeup_armed),
     );
@@ -3617,7 +3624,7 @@ pub fn build_mobile_engine_inner(
         scheduled_reload: std::sync::atomic::AtomicBool::new(false),
         settings,
         task_notification_watcher,
-        runtime,
+        runtime: Some(runtime),
         inner,
         event_sink,
         connection_sink,
@@ -3656,7 +3663,7 @@ pub fn build_mobile_engine_inner(
         handles.retain(|existing| existing.strong_count() > 0);
         handles.push(Arc::downgrade(&handle));
     }
-    handle.runtime.block_on(handle.emit_controls_snapshot());
-    handle.runtime.block_on(handle.emit_typescript_lsp_mode());
+    handle.runtime().block_on(handle.emit_controls_snapshot());
+    handle.runtime().block_on(handle.emit_typescript_lsp_mode());
     Ok(handle)
 }

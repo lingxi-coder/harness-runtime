@@ -20,7 +20,7 @@ use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
 use regex::Regex;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -1816,6 +1816,24 @@ mod tests {
     }
 
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use lingxi_core::host::worktree::WorktreeManager;
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
@@ -1937,7 +1955,7 @@ mod tests {
             )
             .await
             .expect_err("space must reject");
-        let msg = format!("{err}");
+        let msg = source_text(&err.model_facing_message());
         assert!(msg.contains("EnterWorktree: invalid slug:"), "msg: {msg}");
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&ENTER_WORKTREE_FAILED.to_string()));
@@ -2148,8 +2166,8 @@ mod tests {
             .await
             .expect_err("create while already in a worktree must reject");
         assert_eq!(
-            format!("{err}"),
-            format!("invalid input: {ALREADY_IN_WORKTREE_MESSAGE}")
+            source_text(&err.model_facing_message()),
+            format!("{ALREADY_IN_WORKTREE_MESSAGE}")
         );
         // No worktree was created; the cwd was NOT swapped again; and the active
         // session record is left intact by the rejected create.
@@ -2199,8 +2217,8 @@ mod tests {
             .await
             .expect_err("create from an isolated subagent must refuse");
         assert_eq!(
-            format!("{err}"),
-            format!("invalid input: {ENTER_SUBAGENT_CWD_OVERRIDE_MESSAGE}")
+            source_text(&err.model_facing_message()),
+            format!("{ENTER_SUBAGENT_CWD_OVERRIDE_MESSAGE}")
         );
         assert_eq!(mock.created().len(), 0, "no worktree created");
         assert_eq!(
@@ -2483,8 +2501,8 @@ mod tests {
             .await
             .expect_err("no active session must be a no-op error");
         assert_eq!(
-            format!("{err}"),
-            format!("invalid input: {EXIT_NO_ACTIVE_SESSION_MESSAGE}")
+            source_text(&err.model_facing_message()),
+            format!("{EXIT_NO_ACTIVE_SESSION_MESSAGE}")
         );
         // No filesystem/cwd changes were made.
         assert_eq!(tool.ctx.cwd(), boot_cwd);
@@ -2518,8 +2536,8 @@ mod tests {
             .await
             .expect_err("ExitWorktree from an isolated subagent must refuse");
         assert_eq!(
-            format!("{err}"),
-            format!("invalid input: {EXIT_SUBAGENT_CWD_OVERRIDE_MESSAGE}")
+            source_text(&err.model_facing_message()),
+            format!("{EXIT_SUBAGENT_CWD_OVERRIDE_MESSAGE}")
         );
         // Guard fired first: no removal, no swap, session record intact.
         assert_eq!(mock.removed().len(), 0, "no removal");
@@ -2558,9 +2576,9 @@ mod tests {
             .await
             .expect_err("remove on an entered worktree must refuse");
         assert_eq!(
-            format!("{err}"),
+            source_text(&err.model_facing_message()),
             format!(
-                "invalid input: {}",
+                "{}",
                 exit_not_owner_message(&wt.to_string_lossy(), &original.to_string_lossy())
             )
         );
@@ -2897,9 +2915,9 @@ mod tests {
             .await
             .expect_err("unverifiable state must refuse");
         assert_eq!(
-            format!("{err}"),
+            source_text(&err.model_facing_message()),
             format!(
-                "invalid input: {}",
+                "{}",
                 exit_cannot_verify_message("/tmp/repo-unknown/.lingxi/worktrees/feat")
             )
         );
@@ -2938,11 +2956,8 @@ mod tests {
             .await
             .expect_err("dirty worktree must refuse");
         assert_eq!(
-            format!("{err}"),
-            format!(
-                "invalid input: {}",
-                exit_has_changes_message("1 uncommitted file")
-            )
+            source_text(&err.model_facing_message()),
+            format!("{}", exit_has_changes_message("1 uncommitted file"))
         );
         assert_eq!(mock.removed().len(), 0);
         // Refused BEFORE the cwd restore/removal — still in the worktree
@@ -2980,9 +2995,9 @@ mod tests {
         // Files fragment BEFORE commits fragment (oracle push order), commits
         // fragment carries "on {branch}".
         assert_eq!(
-            format!("{err}"),
+            source_text(&err.model_facing_message()),
             format!(
-                "invalid input: {}",
+                "{}",
                 exit_has_changes_message("3 uncommitted files and 2 commits on worktree-feat")
             )
         );

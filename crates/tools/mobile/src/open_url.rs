@@ -6,14 +6,14 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::PermissionResult;
 use serde::Deserialize;
-use serde_json::{Value, json};
-use tool_api::BuiltinToolContext;
+use serde_json::json;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
+use tool_api::BuiltinToolContext;
 use url::Url;
 
 use crate::device_support::{

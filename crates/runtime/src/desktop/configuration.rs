@@ -363,6 +363,15 @@ pub struct DesktopConfig {
     pub anthropic_key_fd_present: bool,
     /// Working directory the orchestrator + tool context are rooted at.
     pub cwd: std::path::PathBuf,
+    /// Whether the embedding host reports this workspace as remote.
+    /// Ordinary local CLI/Desktop hosts leave this false; remote hosts must
+    /// set it from their session capability rather than inferred transport.
+    pub remote_workspace: bool,
+    /// Whether the host explicitly reports that local disk access is unavailable.
+    pub diskless: bool,
+    /// Network directories explicitly trusted by the host, before local
+    /// working-directory filters are applied.
+    pub trusted_network_directories: Vec<std::path::PathBuf>,
     /// The `~/.claude` root the hook / agents / global-MCP / settings loaders
     /// walk. Explicit so a host can redirect it to a sandbox.
     pub lingxi_home: std::path::PathBuf,
@@ -391,6 +400,10 @@ pub struct DesktopConfig {
     /// Parsed CLI `--settings` / `flagSettings` layer. The CLI host fills this
     /// from an inline JSON object or file; non-CLI hosts leave it absent.
     pub flag_settings: Option<lingxi_core::settings::SettingsJson>,
+    /// Original CLI `--settings` source text, retained because `SettingsJson`
+    /// intentionally ignores unknown `autoMode` settings. Only the permission
+    /// composition root consumes this trusted flag-tier source.
+    pub flag_settings_source: Option<String>,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
     /// `llm_runtime::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
@@ -961,6 +974,12 @@ impl std::fmt::Debug for DesktopConfig {
                     .sum::<usize>(),
             )
             .field("cwd", &self.cwd)
+            .field("remote_workspace", &self.remote_workspace)
+            .field("diskless", &self.diskless)
+            .field(
+                "trusted_network_directory_count",
+                &self.trusted_network_directories.len(),
+            )
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
             .field("fallback_model", &self.fallback_model)
@@ -1114,6 +1133,9 @@ impl Default for DesktopConfig {
             managed_oauth_only: false,
             anthropic_key_fd_present: false,
             cwd: std::path::PathBuf::from("."),
+            remote_workspace: false,
+            diskless: false,
+            trusted_network_directories: Vec::new(),
             lingxi_home: std::path::PathBuf::new(),
             default_model: DesktopEngineConfig::default().default_model,
             default_model_explicit: false,
@@ -1121,6 +1143,7 @@ impl Default for DesktopConfig {
             fallback_model: None,
             custom_betas: Vec::new(),
             flag_settings: None,
+            flag_settings_source: None,
             provider_profiles: None,
             routing: None,
             mcp_paths: Vec::new(),

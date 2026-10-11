@@ -1048,6 +1048,13 @@ function validPromptSubmitResult(input, result, downstream) {
     && validPromptSubmitContext(result.context);
 }
 
+function remotePromptArgumentError(event, input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.text !== 'string') return 'takes { text } (a string)';
+  if (event === 'prompt.fill' && input.mode !== undefined && !['replace','append','insert'].includes(input.mode)) return 'takes { mode } of replace, append, insert';
+  if (event === 'prompt.fill' && input.decorations !== undefined && (!Array.isArray(input.decorations) || !input.decorations.every(run => run && typeof run === 'object' && Number.isInteger(run.start) && run.start >= 0 && Number.isInteger(run.end) && run.end > run.start && ['color','backgroundColor'].every(key => run[key] === undefined || typeof run[key] === 'string') && ['dimColor','bold','italic','underline','strikethrough'].every(key => run[key] === undefined || typeof run[key] === 'boolean')))) return 'takes { decorations }';
+  if (event === 'prompt.suggest' && input.text.trim() === '') return 'takes a non-empty suggestion';
+}
+
 function validOperationResult(event, input, result, downstream = []) {
   if (event === 'prompt.submit') return validPromptSubmitResult(input, result, downstream);
   if (event === 'agent.offer') return validExactEventObject(result,

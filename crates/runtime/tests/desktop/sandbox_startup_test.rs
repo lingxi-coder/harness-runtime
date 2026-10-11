@@ -152,6 +152,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         bg_session_forker: None,
         worktree_launch: None,
         tmux_launch: None,
+        ..DesktopConfig::default()
     };
     (tmp, cfg)
 }

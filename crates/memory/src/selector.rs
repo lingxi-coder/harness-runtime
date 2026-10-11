@@ -328,7 +328,12 @@ mod tests {
             self.0.lock().unwrap().push((req.model, req.profile));
             Ok(SideQueryResponse {
                 text: None,
-                structured: Some(serde_json::json!({ "filenames": ["guide.md"] })),
+                structured: Some(
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({ "filenames": ["guide.md"] }),
+                    )
+                    .unwrap(),
+                ),
                 tool_calls: Vec::new(),
                 usage: cost::Usage::default(),
                 stop_reason: Some("end_turn".into()),

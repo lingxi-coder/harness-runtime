@@ -11,6 +11,13 @@ pub(super) fn json_payload_value(
     serde_json::from_str(payload.as_json_source()).expect("generated provider body is valid JSON")
 }
 
+pub(super) fn json_payload_projection(
+    payload: &lingxi_llm_client::protocol::JsonPayload,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(payload.as_json_source())
+        .expect("generated provider body is valid UTF-16 JSON")
+}
+
 pub(super) fn fragment_is_text(
     fragment: &lingxi_llm_client::protocol::JsonPayloadFragment,
     expected: &str,

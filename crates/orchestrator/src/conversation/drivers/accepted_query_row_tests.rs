@@ -187,6 +187,7 @@ async fn accepted_assistant_row_is_w1_current_row_but_not_prequery_history() {
         provider_id: Some("toolu_original".into()),
     };
     let source_row = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             ContentBlock::Text {

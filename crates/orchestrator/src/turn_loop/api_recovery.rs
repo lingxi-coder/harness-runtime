@@ -113,6 +113,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // first provider dispatch. Explicit recovery calls reuse it rather than
     // resolving whichever session happens to be active later.
     cost_scope: Option<&cost::CostSessionScope>,
+    // The main request's once-captured Native policy context. Every PTL retry
+    // reuses this exact projection instead of re-running host filesystem/git
+    // producers during recovery.
+    native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
     let request_dispatch_observer = orch.turn_request_dispatch_observer();
     crate::prompt::async_hook_response::retain_current_async_hook_reminders(
@@ -266,6 +270,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         history_snapshot,
         tools.clone(),
     );
+    request.opts.native_anthropic_request_context = native_anthropic_request_context.clone();
     request.opts.request_dispatch_observer = request_dispatch_observer.clone();
     request.opts.skip_global_cache_for_system_prompt = skip_global_cache_for_system_prompt;
     request.opts.tool_result_reminder_suffixes = tool_result_reminder_suffixes;
@@ -396,6 +401,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         retry,
                         tools.clone(),
                     );
+                    request.opts.native_anthropic_request_context =
+                        native_anthropic_request_context.clone();
                     request.opts.request_dispatch_observer = request_dispatch_observer.clone();
                     request.opts.skip_global_cache_for_system_prompt =
                         skip_global_cache_for_system_prompt;
@@ -495,6 +502,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     retry,
                     tools.clone(),
                 );
+                request.opts.native_anthropic_request_context =
+                    native_anthropic_request_context.clone();
                 request.opts.request_dispatch_observer = request_dispatch_observer.clone();
                 request.opts.query_source = Some(
                     crate::config::sanitize_query_source(&orch.config.query_source).to_string(),
@@ -771,6 +780,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     history,
                     tools,
                 );
+                request.opts.native_anthropic_request_context =
+                    native_anthropic_request_context.clone();
                 request.opts.request_dispatch_observer = request_dispatch_observer.clone();
                 request.opts.query_source = Some(
                     crate::config::sanitize_query_source(&orch.config.query_source).to_string(),

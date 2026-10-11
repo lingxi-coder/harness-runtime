@@ -136,7 +136,10 @@ fn assert_empty_context_and_budget_announcements<'a>(
             Value::Null,
             "native attachment has no inner message"
         );
-        assert_eq!(source_value(&row.extra).get("attachment"), Some(&payload));
+        assert_eq!(
+            row.attachment_projection.as_ref().map(source_value),
+            Some(payload)
+        );
         assert!(!row.is_sidechain);
         assert_eq!(row.logical_parent_uuid, None);
         assert_eq!(row.parent_uuid.as_deref(), Some(parent.as_str()));

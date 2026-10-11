@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":5,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","content":[{"type":"text","text":"MCP_RESULT_ISERROR_TRUE"}],"structuredContent":{"case":"result_true"},"isError":true}}

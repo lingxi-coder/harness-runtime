@@ -601,6 +601,18 @@ fn compaction_messages_text_source(
     .expect("display summary is derived from exact UTF-16 units")
 }
 
+async fn emit_compact_summary_messages(
+    output: &dyn OutputStream,
+    messages: &[ConversationMessage],
+) {
+    for message in messages {
+        let summary = compaction_messages_text_source(std::slice::from_ref(message));
+        output
+            .emit_compact_summary(&message.id().as_uuid().to_string(), &summary)
+            .await;
+    }
+}
+
 fn join_compact_sources(
     parts: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
 ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
@@ -1429,9 +1441,7 @@ impl ConversationOrchestrator {
                                     instructions.as_ref(),
                                     direction,
                                 ) => result.map_err(|error| {
-                                    hooks::mods::ModError::Native(
-                                        Self::summarize_error(error).to_string(),
-                                    )
+                                    hooks::mods::ModError::Native(Self::summarize_error(error))
                                 })?,
                             };
                             let api_duration = api_started.elapsed();
@@ -1554,11 +1564,9 @@ impl ConversationOrchestrator {
 
     /// Map a compactor error onto the user-visible sentence, shared by the
     /// summarize path with `/compact`'s mapping.
-    fn summarize_error(
-        error: compaction::autocompact::CompactionError,
-    ) -> lingxi_core::host::HandleError {
+    fn summarize_error(error: compaction::autocompact::CompactionError) -> String {
         use compaction::autocompact::CompactionError;
-        lingxi_core::host::HandleError::ActionFailed(match error {
+        match error {
             CompactionError::MaxRetriesExceeded => {
                 "Compaction failed \u{b7} conversation could not be reduced below the context limit"
                     .to_string()
@@ -1571,7 +1579,7 @@ impl ConversationOrchestrator {
                 format!("Error during compaction: {detail}")
             }
             other => format!("Error during compaction: {other}"),
-        })
+        }
     }
 
     /// Manual `/compact` with optional focus text and cooperative cancellation.
@@ -1718,9 +1726,7 @@ impl ConversationOrchestrator {
                                     source_messages.clone(),
                                     instructions.as_ref(),
                                 ) => result.map_err(|error| {
-                                    hooks::mods::ModError::Native(
-                                        Self::summarize_error(error).to_string(),
-                                    )
+                                    hooks::mods::ModError::Native(Self::summarize_error(error))
                                 })?,
                             };
                             Ok(SessionCompactCoreOutput::new(
@@ -2894,11 +2900,7 @@ impl ConversationOrchestrator {
         self.output
             .emit_compact_boundary(&marker.id().as_uuid().to_string(), &metadata)
             .await;
-        for summary in &result.messages {
-            self.output
-                .emit_compact_summary(&summary.id().as_uuid().to_string(), &summary.text_content())
-                .await;
-        }
+        emit_compact_summary_messages(self.output.as_ref(), &result.messages).await;
 
         // Best-effort emit so the TUI hears about it.
         self.output
@@ -3892,6 +3894,382 @@ mod session_compact_mod_tests {
         );
 
         assert_eq!(result.total_tokens_freed, expected);
+    }
+
+    #[derive(Default)]
+    struct CompactSummaryCapture {
+        summaries: tokio::sync::Mutex<Vec<(String, CompactSource)>>,
+        completed: tokio::sync::Mutex<Vec<CompactSource>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutputStream for CompactSummaryCapture {
+        async fn emit_text(&self, _text: &CompactSource) {}
+
+        async fn emit_tool_call(
+            &self,
+            _id: &lingxi_core::types::ToolUseId,
+            _tool: &str,
+            _input: &CompactSource,
+        ) {
+        }
+
+        async fn emit_tool_result(
+            &self,
+            _id: &lingxi_core::types::ToolUseId,
+            _tool: &str,
+            _model_text: &CompactSource,
+            _result: &CompactSource,
+            _mcp_meta: Option<&CompactSource>,
+        ) {
+        }
+
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &lingxi_core::host::CostSnapshot) {
+        }
+
+        async fn emit_compact_summary(&self, uuid: &str, summary: &CompactSource) {
+            self.summaries
+                .lock()
+                .await
+                .push((uuid.to_string(), summary.clone()));
+        }
+
+        async fn emit_compaction_completed(
+            &self,
+            _messages_before: u32,
+            _messages_after: u32,
+            _bytes_saved: u64,
+            summary: &CompactSource,
+        ) {
+            self.completed.lock().await.push(summary.clone());
+        }
+    }
+
+    fn native_compact_summary_response() -> CompactSource {
+        const SSE: &str = include_str!(
+            "../../../../docs/parity/current-alignment/fixtures/compact-summary-295/native-d800-response-03.sse.raw"
+        );
+        SSE.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| CompactSource::parse(data).ok())
+            .find_map(|frame| {
+                (frame.string_at("/type") == Some("content_block_delta"))
+                    .then(|| frame.subprojection("/delta/text").ok())
+                    .flatten()
+            })
+            .expect("Native compact-summary SSE has a text delta")
+    }
+
+    fn native_compact_summary_row() -> CompactSource {
+        CompactSource::parse(include_str!(
+            "../../../../docs/parity/current-alignment/fixtures/compact-summary-295/native-d800-summary-row.jsonl"
+        ))
+        .expect("Native compact-summary JSONL row is valid source")
+    }
+
+    fn raw_message_content_source(row_source: &str) -> String {
+        #[derive(serde::Deserialize)]
+        struct RawRow {
+            message: Box<serde_json::value::RawValue>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawMessage {
+            content: Box<serde_json::value::RawValue>,
+        }
+
+        let row: RawRow = serde_json::from_str(row_source).expect("raw JSONL row is valid");
+        let message: RawMessage =
+            serde_json::from_str(row.message.get()).expect("raw message is valid JSON");
+        message.content.get().to_owned()
+    }
+
+    fn transcript_path_in_content_source(source: &str) -> &str {
+        const PATH_MARKER: &str = "read the full transcript at: ";
+        const AFTER_PATH: &str = r#"\nContinue the conversation"#;
+        let path_start = source
+            .find(PATH_MARKER)
+            .expect("continuation summary contains its transcript path")
+            + PATH_MARKER.len();
+        let path_end = source[path_start..]
+            .find(AFTER_PATH)
+            .map(|offset| path_start + offset)
+            .expect("continuation summary ends the path before its fixed instruction");
+        &source[path_start..path_end]
+    }
+
+    fn normalize_compact_transcript_path(source: &str) -> String {
+        let path_start = source
+            .find(transcript_path_in_content_source(source))
+            .expect("continuation summary contains its transcript path");
+        let path_end = path_start + transcript_path_in_content_source(source).len();
+        format!(
+            "{}<transcript-path>{}",
+            &source[..path_start],
+            &source[path_end..]
+        )
+    }
+
+    #[tokio::test]
+    async fn source_summary_row_reaches_output_callback_with_lone_surrogate_units() {
+        let row = CompactSource::parse(
+            r#"{"role":"assistant","text":"before\ud800after","toolUses":[]}"#,
+        )
+        .expect("compact row is valid source JSON");
+        let replacement = session_compact_message_from_row(&row).unwrap();
+        let mut result = empty_compaction_result();
+        apply_session_compact_result(
+            &mut result,
+            &SessionCompactEventResult {
+                messages: vec![replacement],
+                tokens_before: None,
+                tokens_after: None,
+                usage: None,
+            },
+            &[],
+        );
+
+        let mut expected_units = "before".encode_utf16().collect::<Vec<_>>();
+        expected_units.push(0xd800);
+        expected_units.extend("after".encode_utf16());
+        assert_eq!(
+            result.raw_summary_text.string_units(""),
+            Some(expected_units.clone())
+        );
+        assert_eq!(result.messages[0].text_content(), "before\u{fffd}after");
+
+        let output = CompactSummaryCapture::default();
+        emit_compact_summary_messages(&output, &result.messages).await;
+        let summaries = output.summaries.lock().await;
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].0,
+            result.messages[0].id().as_uuid().to_string()
+        );
+        assert_eq!(summaries[0].1.string_units(""), Some(expected_units));
+    }
+
+    #[tokio::test]
+    async fn native_295_compact_summary_reaches_output_and_jsonl_with_exact_source() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, NoOpPermissionGate, StaticMemoryProvider,
+        };
+        use lingxi_core::host::FileSystem;
+        use lingxi_core::types::{ContentBlock, MessageId};
+        use platform_posix::fs::PosixFileSystem;
+        use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+        use tool_api::registry::ToolRegistry;
+
+        struct CapturedSummaryClient(CompactSource);
+
+        #[async_trait::async_trait]
+        impl SideQueryClient for CapturedSummaryClient {
+            async fn query(
+                &self,
+                _request: SideQueryRequest,
+            ) -> Result<SideQueryResponse, SideQueryError> {
+                Ok(SideQueryResponse {
+                    text: Some(self.0.clone()),
+                    structured: None,
+                    tool_calls: Vec::new(),
+                    usage: cost::Usage::default(),
+                    stop_reason: Some("end_turn".into()),
+                    retry_count: 0,
+                })
+            }
+        }
+
+        let response = native_compact_summary_response();
+        assert_eq!(response.string_units(""), Some(vec![65, 0xd800, 66]));
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript_path = cwd.join("session.jsonl");
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(cwd.clone()));
+        let writer = Arc::new(session::JsonlWriter::new(transcript_path.clone(), fs));
+        let output = Arc::new(CompactSummaryCapture::default());
+        let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+        let runner = Arc::new(sidequery::ForkedAgentRunner::new().with_side_query_client(
+            Arc::new(CapturedSummaryClient(response)),
+            "test-compact-model".into(),
+        ));
+        let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
+            compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+            1_000,
+        ));
+        let orchestrator = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_jsonl_writer(writer)
+        .with_compaction(compactor)
+        .with_cache_safe_slot(slot);
+
+        let assistant = |text: &str| ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+        };
+        orchestrator.session.lock().await.history = vec![
+            ConversationMessage::user(MessageId::new(), "first request".into()),
+            assistant("first response"),
+            ConversationMessage::user(MessageId::new(), "second request".into()),
+            assistant("second response"),
+        ];
+
+        orchestrator
+            .force_compact_with_instructions_and_cancel(
+                None,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("the real forced-compaction path succeeds");
+
+        let raw_rows = std::fs::read_to_string(&transcript_path).unwrap();
+        let mut persisted_summary_raw = None;
+        let rows = raw_rows
+            .lines()
+            .map(|line| {
+                let row = CompactSource::parse(line).expect("persisted JSONL row is valid");
+                if row
+                    .at_pointer("/isCompactSummary")
+                    .and_then(|value| value.as_bool())
+                    == Some(true)
+                {
+                    persisted_summary_raw = Some(line.to_owned());
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        let boundary = rows
+            .iter()
+            .find(|row| row.string_at("/subtype") == Some("compact_boundary"))
+            .expect("manual compaction persists its boundary");
+        let summary_row = rows
+            .iter()
+            .find(|row| {
+                row.at_pointer("/isCompactSummary")
+                    .and_then(|value| value.as_bool())
+                    == Some(true)
+            })
+            .expect("manual compaction persists a compact-summary user row");
+        let native_boundary = CompactSource::parse(include_str!(
+            "../../../../docs/parity/current-alignment/fixtures/compact-summary-295/native-d800-boundary-row.jsonl"
+        ))
+        .expect("Native compact boundary row is valid source");
+        let native_summary = native_compact_summary_row();
+        assert!(native_boundary.at_pointer("/parentUuid").unwrap().is_null());
+        assert_eq!(native_summary.string_at("/type"), Some("user"));
+        assert_eq!(
+            native_summary
+                .at_pointer("/isCompactSummary")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            native_summary
+                .at_pointer("/isVisibleInTranscriptOnly")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            native_summary.string_at("/parentUuid"),
+            native_boundary.string_at("/uuid"),
+            "the captured Native summary follows its compact boundary"
+        );
+
+        assert_eq!(boundary.string_at("/subtype"), Some("compact_boundary"));
+        assert!(boundary.at_pointer("/parentUuid").unwrap().is_null());
+        assert_eq!(
+            summary_row.string_at("/type"),
+            Some("user"),
+            "the persisted summary is a user row"
+        );
+        assert_eq!(
+            summary_row
+                .at_pointer("/isCompactSummary")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            summary_row
+                .at_pointer("/isVisibleInTranscriptOnly")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            summary_row.string_at("/parentUuid"),
+            boundary.string_at("/uuid"),
+            "the persisted summary follows its compact boundary"
+        );
+
+        let native_content = native_summary.subprojection("/message/content").unwrap();
+        let persisted_content = summary_row.subprojection("/message/content").unwrap();
+        let native_content_source = raw_message_content_source(include_str!(
+            "../../../../docs/parity/current-alignment/fixtures/compact-summary-295/native-d800-summary-row.jsonl"
+        ));
+        let persisted_content_source =
+            raw_message_content_source(persisted_summary_raw.as_deref().unwrap());
+        assert_eq!(
+            transcript_path_in_content_source(&persisted_content_source),
+            transcript_path.to_str().unwrap(),
+            "the embedded reference is the active temporary JSONL path"
+        );
+        assert!(
+            !transcript_path_in_content_source(&native_content_source).is_empty(),
+            "the Native fixture contains its captured transcript reference"
+        );
+        assert_eq!(
+            normalize_compact_transcript_path(&persisted_content_source),
+            normalize_compact_transcript_path(&native_content_source),
+            "all raw fixed content bytes match after isolating only the dynamic transcript path"
+        );
+        assert!(persisted_content_source.contains(r#"A\ud800B"#));
+        assert!(persisted_content
+            .string_units("")
+            .unwrap()
+            .windows(3)
+            .any(|window| window == [65, 0xd800, 66]));
+        assert!(native_content
+            .string_units("")
+            .unwrap()
+            .windows(3)
+            .any(|window| window == [65, 0xd800, 66]));
+
+        let emitted = output.summaries.lock().await;
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(
+            emitted[0].0,
+            summary_row.string_at("/uuid").unwrap(),
+            "output and persistence use the same summary identity"
+        );
+        assert_eq!(
+            emitted[0].1.string_units(""),
+            persisted_content.string_units("")
+        );
+        assert_eq!(
+            emitted[0].1.to_json_string().unwrap(),
+            persisted_content.to_json_string().unwrap(),
+            "the output callback and persistent row carry the same exact text source"
+        );
+        drop(emitted);
+
+        let completed = output.completed.lock().await;
+        assert_eq!(completed.len(), 1);
+        assert_eq!(
+            completed[0].string_units(""),
+            persisted_content.string_units("")
+        );
     }
 
     #[test]

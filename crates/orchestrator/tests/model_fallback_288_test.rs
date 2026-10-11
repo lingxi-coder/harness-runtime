@@ -728,26 +728,25 @@ async fn current_configured_fallback_budget_route_notice_and_resume_lifecycle() 
         if name == "server" {
             orch = orch.with_cost_tracker(tracker.clone());
         }
+        let orch = ConversationOrchestrator::into_shared(orch);
         orch.session().lock().await.model_profile = Some("direct".into());
         for _ in 0..queries {
             let outcome = orch.run_turn_streaming("fixture").await;
             if name == "http-no-double-body-overload" {
                 assert!(
                     matches!(
-                        outcome,
-                        Err(orchestrator::OrchestratorError::ApiCall(
-                            llm_runtime::LlmError::Overloaded { .. }
-                        ))
+                        &outcome,
+                        Err(orchestrator::OrchestratorError::ApiCall(error))
+                            if matches!(error.classification_source(), llm_runtime::LlmError::Overloaded { .. })
                     ),
                     "{outcome:?}"
                 );
             } else if name == "http-529-early-budget-exhaustion" {
                 assert!(
                     matches!(
-                        outcome,
-                        Err(orchestrator::OrchestratorError::Streaming(
-                            llm_runtime::LlmError::Overloaded { .. }
-                        ))
+                        &outcome,
+                        Err(orchestrator::OrchestratorError::Streaming(error))
+                            if matches!(error.classification_source(), llm_runtime::LlmError::Overloaded { .. })
                     ),
                     "{outcome:?}"
                 );

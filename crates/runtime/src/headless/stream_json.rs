@@ -223,7 +223,9 @@ impl CoalescedHeartbeatLines {
     }
 }
 
+/// Commands consumed by the single headless stdout writer.
 pub enum OutboundMsg {
+    /// Write one already-serialized protocol line.
     Line(String),
     /// A stream-event line whose pending-capacity reservation is tracked by
     /// the drain task. Keeping the kind out-of-band avoids classifying an
@@ -232,10 +234,13 @@ pub enum OutboundMsg {
     StreamEvent(String),
     /// Wake the single writer to drain the coalesced heartbeat mailbox.
     Heartbeats(Arc<CoalescedHeartbeatLines>),
+    /// Flush all preceding output and acknowledge the FIFO barrier.
     Flush(oneshot::Sender<std::io::Result<()>>),
+    /// Publish buffered print output and acknowledge the writer result.
     PublishJson(oneshot::Sender<std::io::Result<()>>),
     /// Internal writer command, never a protocol frame.
     RefreshHeldResultTotals(Value),
+    /// Publish terminal output and stop the sole writer after earlier commands.
     Shutdown(oneshot::Sender<std::io::Result<()>>),
 }
 
@@ -690,29 +695,48 @@ impl MessageAccum {
 /// Static init parameters for `system/init` frame.
 #[derive(Clone)]
 pub struct StreamJsonInitParams {
+    /// Working directory reported by the `system/init` frame.
     pub cwd: String,
+    /// Session identifier reported by the `system/init` frame.
     pub session_id: String,
+    /// Tool names available to the current session.
     pub tools: Vec<String>,
+    /// MCP server name/status entries included in initialization metadata.
     pub mcp_servers: Vec<Value>,
+    /// Resolved model identifier for the current session.
     pub model: String,
+    /// Resolved permission mode reported to the client.
     pub permission_mode: String,
+    /// Slash-command names available to the current session.
     pub slash_commands: Vec<String>,
     /// SLASH-15 (2.1.238): the subset of [`Self::slash_commands`] carrying the
     /// oracle's `terminalOriented:!0` flag, so a thin/remote client knows to
     /// route those four locally. Emitted immediately after `slash_commands` and
     /// only when non-empty — see [`build_init_frame`].
     pub terminal_slash_commands: Vec<String>,
+    /// Credential source label reported by the runtime.
     pub api_key_source: String,
+    /// Claude Code reference version reported by the runtime.
     pub claude_code_version: String,
+    /// Active output style reported to the client.
     pub output_style: String,
+    /// Agent types available to the current session.
     pub agents: Vec<String>,
+    /// Skills available to the current session.
     pub skills: Vec<String>,
+    /// Metadata entries for plugins loaded by the host.
     pub plugins: Vec<Value>,
+    /// Whether analytics collection is disabled for this session.
     pub analytics_disabled: bool,
+    /// Whether product feedback collection is disabled for this session.
     pub product_feedback_disabled: bool,
+    /// Optional host-provided memory path metadata; absent when unavailable.
     pub memory_paths: Option<Value>,
+    /// Optional host snapshot of whether per-turn effort is active.
     pub per_turn_effort_active: Option<bool>,
+    /// Optional current view mode supplied by the host.
     pub view_mode: Option<String>,
+    /// Current fast-mode state included in initialization metadata.
     pub fast_mode_state: String,
     /// Why fast mode is unavailable (2.1.219 `JW()` reason enum). `Some` ⇒
     /// emitted directly after `fast_mode_state`; `None` ⇒ key omitted, the
@@ -790,21 +814,35 @@ const MAX_PENDING_STREAM_EVENTS: usize = 8192;
 /// Unavailable timings are omitted, never replaced with invented zero values.
 #[derive(Debug, Clone, Default)]
 pub struct StreamJsonResultMetadata {
+    /// Whether the current result represents an error.
     pub is_error: bool,
+    /// Milliseconds from query start to the first assistant message.
     pub ttft_ms: Option<u64>,
+    /// Milliseconds from query start to the first response message start.
     pub ttft_stream_ms: Option<u64>,
+    /// Milliseconds from query start to dispatch of the first SDK request.
     pub time_to_request_ms: Option<u64>,
+    /// Milliseconds from query start to the first response content frame.
     pub first_content_frame_ms: Option<u64>,
+    /// Number of queued turns reported with this result.
     pub queued_turn_count: u64,
+    /// Zero-based index of this result in the output stream.
     pub result_index: u64,
+    /// Optional number of API turns represented by the result.
     pub num_turns: Option<u64>,
+    /// Optional terminal-reason label; defaults to `completed` when absent.
     pub terminal_reason: Option<String>,
+    /// Optional model/API stop-reason label overriding the request value.
     pub stop_reason: Option<String>,
+    /// Optional HTTP status associated with an API error.
     pub api_error_status: Option<u16>,
+    /// Optional aggregate statistics for subagent work.
     pub subagent_stats: Option<Value>,
+    /// Optional count of safety-stop events.
     pub safety_stops: Option<u64>,
     /// Exact aggregate usage shape/order from the session usage owner.
     pub usage: Option<Value>,
+    /// Per-model usage entries for the result frame.
     pub model_usage: Option<serde_json::Map<String, Value>>,
 }
 
@@ -1060,6 +1098,9 @@ impl StreamJsonStream {
         self.wait_for_drain_ack(done_rx).await
     }
 
+    /// Record a delivery failure using `reason` and wake output waiters.
+    ///
+    /// This stops delivery independently of model/input cancellation.
     pub fn abort_delivery(&self, reason: impl Into<String>) {
         self.output.abort_delivery(reason);
     }
@@ -1344,6 +1385,7 @@ impl StreamJsonStream {
         )
     }
 
+    /// Construct a stream that publishes verbose JSON output frames.
     pub fn new_verbose_json_mode(init_params: StreamJsonInitParams, output: Output) -> Self {
         Self::new_inner_with_output_mode(
             Some(init_params),
@@ -1419,6 +1461,9 @@ impl StreamJsonStream {
         Value::Object(obj)
     }
 
+    /// Enqueue a `prompt_suggestion` frame for non-empty suggestion text.
+    ///
+    /// The frame is omitted when output frames are suppressed or the text is blank.
     pub async fn emit_prompt_suggestion(&self, suggestion: &str) {
         if self.suppress_frames || suggestion.trim().is_empty() {
             return;
@@ -1571,6 +1616,19 @@ impl StreamJsonStream {
             frame["isSynthetic"] = json!(true);
         }
         frame
+    }
+
+    fn build_compact_user_frame_projected(
+        session_id: &str,
+        uuid: &str,
+        timestamp: &str,
+        content: &Utf16JsonProjection,
+        synthetic: bool,
+    ) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
+        let envelope = Self::build_compact_user_frame(session_id, uuid, timestamp, "", synthetic);
+        let mut frame = project_json_value(&envelope);
+        frame.replace_pointer_projection("/message/content", content.clone())?;
+        Ok(frame)
     }
 
     fn enqueue_tool_result_frame(
@@ -1980,6 +2038,7 @@ impl StreamJsonStream {
         self.enqueue_projected(&projection);
     }
 
+    /// Replace the metadata snapshot used when constructing result frames.
     pub async fn set_result_metadata(&self, metadata: StreamJsonResultMetadata) {
         *self.result_metadata.lock().await = metadata;
     }
@@ -2017,6 +2076,7 @@ impl StreamJsonStream {
         Ok(())
     }
 
+    /// Mark a staged queued-message UUID as started for the next result frame.
     pub fn start_queued_request_marker(&self, uuid: Utf16JsonProjection) -> Result<(), String> {
         self.request_markers
             .lock()
@@ -2114,6 +2174,10 @@ impl StreamJsonStream {
         )
     }
 
+    /// Build a successful native `result` frame from response and usage data.
+    ///
+    /// The method returns the frame value without enqueueing it; current result
+    /// metadata and request-marker metrics are included when present.
     pub async fn build_result_success_frame(
         &self,
         result_text: &str,
@@ -2798,19 +2862,25 @@ impl OutputStream for StreamJsonStream {
         ));
     }
 
-    async fn emit_compact_summary(&self, summary_uuid: &str, summary: &str) {
+    async fn emit_compact_summary(&self, summary_uuid: &str, summary: &Utf16JsonProjection) {
         if self.suppress_frames {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
         let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        self.enqueue(&Self::build_compact_user_frame(
+        let frame = Self::build_compact_user_frame_projected(
             &session_id,
             summary_uuid,
             &timestamp,
             summary,
             true,
-        ));
+        );
+        match frame {
+            Ok(frame) => self.enqueue_projected(&frame),
+            Err(error) => {
+                self.abort_delivery(format!("invalid compact summary projection: {error}"))
+            }
+        }
     }
 
     /// Emit a forwarded subagent assistant message (`--forward-subagent-text`).
@@ -3498,20 +3568,30 @@ pub fn collect_mcp_server_errors(
 /// diagnostics paths and privacy state; codec collection reads no process globals.
 #[derive(Clone, Debug, Default)]
 pub struct StreamJsonInitHostMetadata {
+    /// Host-resolved working directory to report in the init frame.
     pub cwd: std::path::PathBuf,
+    /// MCP configuration entries skipped during validation, for init diagnostics.
     pub mcp_server_errors: Vec<Value>,
+    /// Host privacy setting for analytics collection.
     pub analytics_disabled: bool,
+    /// Host privacy setting for product feedback collection.
     pub product_feedback_disabled: bool,
+    /// Optional host snapshot of per-turn effort state.
     pub per_turn_effort_active: Option<bool>,
+    /// Optional view mode snapshot to include in initialization metadata.
     pub view_mode: Option<String>,
 }
 
 /// One plugin advertised by the host's loaded plugin registry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamJsonPlugin {
+    /// Plugin name advertised in the initialization frame.
     pub name: String,
+    /// Host path or path label associated with the loaded plugin.
     pub path: String,
+    /// Origin label for the plugin registration.
     pub source: String,
+    /// Optional plugin version reported by its loaded registration.
     pub version: Option<String>,
 }
 
@@ -4006,7 +4086,10 @@ mod tests {
                 serialize_ndjson_line(&result),
                 format!("{}\n", native["rawLine"].as_str().unwrap())
             );
-            assert_eq!(result["user_message_uuid"], client_uuid.string_at(""));
+            assert_eq!(
+                result["user_message_uuid"].as_str(),
+                client_uuid.string_at("")
+            );
             stream.finish().await.unwrap();
         }
     }
@@ -4194,19 +4277,119 @@ mod tests {
 
     #[test]
     fn compact_summary_matches_261_synthetic_user_bytes() {
-        let frame = StreamJsonStream::build_compact_user_frame(
+        let units = "summary\ntext".encode_utf16().collect::<Vec<_>>();
+        let content = Utf16JsonProjection::root_string("summary\ntext".into(), units)
+            .expect("summary text is a JSON string");
+        let frame = StreamJsonStream::build_compact_user_frame_projected(
             "s",
             "summary",
             "timestamp",
-            "summary\ntext",
+            &content,
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(
-            serialize_ndjson_line(&frame),
+            serialize_projected_ndjson_line(&frame).unwrap(),
             concat!(
                 r#"{"type":"user","message":{"role":"user","content":"summary\ntext"},"session_id":"s","parent_tool_use_id":null,"uuid":"summary","timestamp":"timestamp","isReplay":false,"isSynthetic":true}"#,
                 "\n"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn native_295_compact_summary_formatter_reaches_json_sink_exactly() {
+        use serde_json::value::RawValue;
+
+        #[derive(serde::Deserialize)]
+        struct RawRow {
+            message: Box<RawValue>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawMessage {
+            content: Box<RawValue>,
+        }
+
+        const RESPONSE: &str = include_str!(
+            "../../../../docs/parity/current-alignment/fixtures/compact-summary-295/native-d800-response-03.sse.raw"
+        );
+        const SUMMARY_ROW: &str = include_str!(
+            "../../../../docs/parity/current-alignment/fixtures/compact-summary-295/native-d800-summary-row.jsonl"
+        );
+        let response = RESPONSE
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| Utf16JsonProjection::parse(data).ok())
+            .find_map(|frame| {
+                (frame.string_at("/type") == Some("content_block_delta"))
+                    .then(|| frame.subprojection("/delta/text").ok())
+                    .flatten()
+            })
+            .expect("Native compact-summary SSE has a text delta");
+        assert_eq!(response.string_units(""), Some(vec![65, 0xd800, 66]));
+
+        let native_row = Utf16JsonProjection::parse(SUMMARY_ROW)
+            .expect("Native compact-summary row is valid JSON");
+        let native_content = native_row
+            .subprojection("/message/content")
+            .expect("Native summary row has message content");
+        let native_raw: RawRow = serde_json::from_str(SUMMARY_ROW).unwrap();
+        let native_message: RawMessage = serde_json::from_str(native_raw.message.get()).unwrap();
+        let native_content_source = native_message.content.get();
+        let path_marker = "read the full transcript at: ";
+        let after_path = r#"\nContinue the conversation"#;
+        let path_start = native_content_source.find(path_marker).unwrap() + path_marker.len();
+        let path_end = path_start
+            + native_content_source[path_start..]
+                .find(after_path)
+                .expect("Native summary ends its transcript path before the continuation");
+        let native_transcript_path = &native_content_source[path_start..path_end];
+        let content = compaction::prompt::get_compact_user_summary_message_with_source(
+            &response,
+            true,
+            Some(native_transcript_path),
+            false,
+            false,
+        );
+        assert_eq!(content.string_units(""), native_content.string_units(""));
+        assert_eq!(content.to_json_string().unwrap(), native_content_source);
+
+        let stream = StreamJsonStream::new(make_params("s"), Output::new(tokio::io::sink()));
+        let mut receiver = stream.drain_rx.lock().await.take().unwrap();
+        stream
+            .emit_compact_summary("captured-summary", &content)
+            .await;
+        let OutboundMsg::Line(line) = receiver.try_recv().unwrap() else {
+            panic!("expected projected compact summary frame");
+        };
+
+        let reparsed = Utf16JsonProjection::parse(line.trim_end())
+            .expect("projected compact frame remains valid JSON");
+        assert_eq!(reparsed.string_at("/type"), Some("user"));
+        assert_eq!(reparsed.string_at("/uuid"), Some("captured-summary"));
+        assert_eq!(
+            reparsed
+                .at_pointer("/isSynthetic")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            reparsed
+                .at_pointer("/isReplay")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(reparsed
+            .at_pointer("/parent_tool_use_id")
+            .unwrap()
+            .is_null());
+        assert_eq!(
+            reparsed.string_units("/message/content"),
+            native_content.string_units("")
+        );
+        assert!(
+            line.contains(&format!("\"content\":{native_content_source}")),
+            "the actual sink line retains the Native raw content token: {line}"
         );
     }
 
@@ -6398,7 +6581,8 @@ mod tests {
         let stream = StreamJsonStream::new_placeholder(Output::new(writer));
         stream.enqueue(&json!({"type":"assistant","message":"one"}));
         crate::headless::stream_json_input::ControlPlaneWriter::new(stream.outbound_tx())
-            .reply_success("req", None);
+            .reply_success("req", None)
+            .unwrap();
         stream.enqueue(&json!({"type":"result","subtype":"success"}));
         stream.finish().await.unwrap();
         let expected = "{\"type\":\"assistant\",\"message\":\"one\"}\n{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"req\"}}\n{\"type\":\"result\",\"subtype\":\"success\"}\n";

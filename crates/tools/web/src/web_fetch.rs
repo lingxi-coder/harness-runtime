@@ -28,7 +28,7 @@ use lingxi_core::types::{HttpMethod, HttpRequest};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use telemetry::pii::{PiiTagged, Verified};

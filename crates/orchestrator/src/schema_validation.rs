@@ -277,12 +277,12 @@ pub(crate) fn validate_tool_schema_projected(
     }
 
     let native_issues = tool.input_validation_issues(input);
-    if has_unpaired_source_units(schema) || has_unpaired_source_units(input) {
-        if schema_uses_regex(schema) {
-            return Err(source_error(
-                "Exact UTF-16 schema regex validation is unavailable".into(),
-            ));
-        }
+    if (has_unpaired_source_units(schema) || has_unpaired_source_units(input))
+        && schema_uses_regex(schema)
+    {
+        return Err(source_error(
+            "Exact UTF-16 schema regex validation is unavailable".into(),
+        ));
     }
 
     let mut sources = Vec::with_capacity(2 + native_issues.len());
@@ -785,6 +785,7 @@ fn collect_issues(
 /// not discard a hook's valid replacement), matching the `?.` short-circuit in
 /// the binary (`success!==!1` is also satisfied when `safeParse` is `undefined`
 /// because `outputSchema` is absent — handled by the caller's `None` branch).
+#[cfg(test)]
 pub(crate) fn validate_tool_output_schema(
     schema: &serde_json::Value,
     output: &serde_json::Value,
@@ -795,8 +796,7 @@ pub(crate) fn validate_tool_output_schema(
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_named_tool_input_schema, validate_tool_input_schema, validate_tool_output_schema,
-        validate_tool_schema_detailed,
+        validate_tool_input_schema, validate_tool_output_schema, validate_tool_schema_detailed,
     };
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use serde_json::{json, Value};
@@ -811,6 +811,7 @@ mod tests {
         name: String,
         schema: Utf16JsonProjection,
         refinement_issue: Option<Utf16JsonProjection>,
+        native_input_validation: bool,
     }
 
     #[async_trait::async_trait]
@@ -832,7 +833,7 @@ mod tests {
         }
 
         fn native_input_validation(&self) -> bool {
-            true
+            self.native_input_validation
         }
 
         fn input_validation_issues(&self, _: &Utf16JsonProjection) -> Vec<Utf16JsonProjection> {
@@ -885,6 +886,22 @@ mod tests {
         Utf16JsonProjection::from_serde_value(value).expect("UTF-8 fixture is valid JSON")
     }
 
+    fn validate_rich_input_schema(name: &str, schema: &Value, input: &Value) -> Result<(), String> {
+        let tool = NativeCronSchema {
+            name: name.into(),
+            schema: source(schema),
+            refinement_issue: None,
+            native_input_validation: false,
+        };
+        validate_tool_schema_detailed(&tool, &source(input)).map_err(|error| {
+            error
+                .display
+                .string_at("")
+                .expect("schema validation display is a string")
+                .to_owned()
+        })
+    }
+
     #[test]
     fn projected_schema_matches_exact_keys_required_enums_and_utf16_lengths() {
         use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
@@ -893,6 +910,7 @@ mod tests {
             name: "Exact".into(),
             schema: projection,
             refinement_issue: None,
+            native_input_validation: true,
         };
         for raw in [
             r#"{"\ud800":"\ud801"}"#,
@@ -924,6 +942,7 @@ mod tests {
             name: "Exact".into(),
             schema: projection,
             refinement_issue: None,
+            native_input_validation: true,
         };
         let error = super::validate_tool_schema_projected(
             &tool,
@@ -948,6 +967,7 @@ mod tests {
             name: "Exact".into(),
             schema,
             refinement_issue: None,
+            native_input_validation: true,
         };
         let input = Projection::parse(r#"{"\ud800":"\ud802"}"#).unwrap();
         let error = super::validate_tool_schema_projected(&tool, &input).unwrap_err();
@@ -963,6 +983,7 @@ mod tests {
             )
             .unwrap(),
             refinement_issue: None,
+            native_input_validation: true,
         };
         assert!(super::validate_tool_schema_projected(
             &union_tool,
@@ -978,6 +999,7 @@ mod tests {
             name: "Nested".into(),
             schema: nested_schema,
             refinement_issue: None,
+            native_input_validation: true,
         };
         assert!(super::validate_tool_schema_projected(
             &nested_tool,
@@ -997,6 +1019,7 @@ mod tests {
             )
             .unwrap(),
             refinement_issue: None,
+            native_input_validation: true,
         };
         let input = Projection::parse(r#"{"path":"/tmp/\ud800.txt"}"#).unwrap();
         assert!(validate_tool_schema_detailed(&tool, &input).is_ok());
@@ -1019,6 +1042,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
+            native_input_validation: true,
         };
         let error =
             validate_tool_schema_detailed(&tool, &Projection::parse("{}").unwrap()).unwrap_err();
@@ -1048,6 +1072,7 @@ mod tests {
                 name: name.into(),
                 schema: source(&oracle["schemas"][name]),
                 refinement_issue: None,
+                native_input_validation: true,
             };
             // The companion tool-cron test locks the real Tool::coerce_input
             // output to these actual native preprocessors before this gate.
@@ -1087,6 +1112,7 @@ mod tests {
                 name: name.into(),
                 schema: source(&oracle["schemas"][name]),
                 refinement_issue: None,
+                native_input_validation: true,
             }));
         }
         let orch = crate::conversation::ConversationOrchestrator::new(
@@ -1135,11 +1161,8 @@ mod tests {
                 ),
                 "model {index}"
             );
-            let persisted = orch
-                .transcript
-                .tool_use_results
-                .lock()
-                .await
+            let persisted_results = orch.transcript.tool_use_results.lock().await;
+            let persisted = persisted_results
                 .get(&id.to_string())
                 .and_then(|value| value.string_at(""));
             let expected = format!("InputValidationError: {}", case["raw"].as_str().unwrap());
@@ -1239,8 +1262,8 @@ mod tests {
             super::js_json(&json!([1.0, -0.0, 1e-7, 1e-6, 1e20, 1e21]), false),
             "[1,0,1e-7,0.000001,100000000000000000000,1e+21]"
         );
-        assert_eq!(validate_named_tool_input_schema("Tool", &json!({"type":"object","properties":{},"additionalProperties":false}), &json!({"10":1,"2":1,"01":1})).unwrap_err(), "Tool failed due to the following issues:\nAn unexpected parameter `2` was provided\nAn unexpected parameter `10` was provided\nAn unexpected parameter `01` was provided");
-        assert!(validate_named_tool_input_schema("Tool", &json!({"const":1}), &json!(1.0)).is_ok());
+        assert_eq!(validate_rich_input_schema("Tool", &json!({"type":"object","properties":{},"additionalProperties":false}), &json!({"10":1,"2":1,"01":1})).unwrap_err(), "Tool failed due to the following issues:\nAn unexpected parameter `2` was provided\nAn unexpected parameter `10` was provided\nAn unexpected parameter `01` was provided");
+        assert!(validate_rich_input_schema("Tool", &json!({"const":1}), &json!(1.0)).is_ok());
     }
 
     #[test]
@@ -1249,7 +1272,7 @@ mod tests {
             serde_json::from_str(include_str!("../testdata/schema-validation-2.1.263.json"))
                 .unwrap();
         for case in fixtures["cases"].as_array().unwrap() {
-            let actual = validate_named_tool_input_schema("Tool", &case["schema"], &case["input"]);
+            let actual = validate_rich_input_schema("Tool", &case["schema"], &case["input"]);
             let expected = case["expected"]
                 .as_str()
                 .map_or(Ok(()), |s| Err(s.to_owned()));
@@ -1263,7 +1286,7 @@ mod tests {
             "a": {"type":"number"}, "path": {"type":"string"}
         }, "required":["path"], "additionalProperties":false});
         assert_eq!(
-            validate_named_tool_input_schema("Read", &schema, &json!({"a":true,"extra":1}))
+            validate_rich_input_schema("Read", &schema, &json!({"a":true,"extra":1}))
                 .unwrap_err(),
             "Read failed due to the following issues:\nThe required parameter `path` is missing\nAn unexpected parameter `extra` was provided\nThe parameter `a` type is expected as `number` but provided as `boolean`"
         );
@@ -1273,7 +1296,7 @@ mod tests {
     fn named_error_uses_zod_array_path_and_singular_prefix() {
         let schema = json!({"type":"object", "properties":{"rows":{"type":"array", "items":{"type":"object", "properties":{"name":{"type":"string"}}, "required":["name"]}}}});
         assert_eq!(
-            validate_named_tool_input_schema("Tool", &schema, &json!({"rows":[{}]})).unwrap_err(),
+            validate_rich_input_schema("Tool", &schema, &json!({"rows":[{}]})).unwrap_err(),
             "Tool failed due to the following issue:\nThe required parameter `rows[0].name` is missing"
         );
     }
@@ -1283,20 +1306,20 @@ mod tests {
         let schema = json!({"type":"string", "enum":["a","b"]});
         let expected = json!([{"code":"invalid_value","values":["a","b"],"path":[],"message":"Invalid option: expected one of \"a\"|\"b\""}]);
         assert_eq!(
-            validate_named_tool_input_schema("Tool", &schema, &json!("c")).unwrap_err(),
+            validate_rich_input_schema("Tool", &schema, &json!("c")).unwrap_err(),
             serde_json::to_string_pretty(&expected).unwrap()
         );
     }
 
     #[test]
     fn string_constraints_count_utf16_code_units() {
-        assert!(validate_named_tool_input_schema(
+        assert!(validate_rich_input_schema(
             "Tool",
             &json!({"type":"string","minLength":2}),
             &json!("😀")
         )
         .is_ok());
-        let error = validate_named_tool_input_schema(
+        let error = validate_rich_input_schema(
             "Tool",
             &json!({"type":"string","maxLength":1}),
             &json!("😀"),
@@ -1311,17 +1334,17 @@ mod tests {
         let schema = json!({"type":"object", "properties": {
             "z": {"type":"string"}, "a":{"type":"string"}, "mode":{"type":"string", "enum":["a"]}
         }, "required":["z","a","mode"]});
-        assert_eq!(validate_named_tool_input_schema("Tool", &schema, &json!({"mode":"bad"})).unwrap_err(),
+        assert_eq!(validate_rich_input_schema("Tool", &schema, &json!({"mode":"bad"})).unwrap_err(),
             "Tool failed due to the following issues:\nThe required parameter `z` is missing\nThe required parameter `a` is missing");
     }
 
     #[test]
     fn union_returns_nested_zod_errors_and_prefers_dirty_branch() {
         let schema = json!({"anyOf":[{"type":"string","minLength":5},{"type":"number"}]});
-        let error = validate_named_tool_input_schema("Tool", &schema, &json!("a")).unwrap_err();
+        let error = validate_rich_input_schema("Tool", &schema, &json!("a")).unwrap_err();
         let issues: serde_json::Value = serde_json::from_str(&error).unwrap();
         assert_eq!(issues[0]["code"], "too_small");
-        let error = validate_named_tool_input_schema("Tool", &schema, &json!(true)).unwrap_err();
+        let error = validate_rich_input_schema("Tool", &schema, &json!(true)).unwrap_err();
         let issues: serde_json::Value = serde_json::from_str(&error).unwrap();
         assert_eq!(issues[0]["code"], "invalid_union");
         assert_eq!(issues[0]["errors"][0][0]["code"], "invalid_type");

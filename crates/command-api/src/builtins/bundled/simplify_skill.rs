@@ -63,7 +63,6 @@ impl BundledPromptFn for SimplifyPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     #[test]
     fn body_is_the_resolved_inline_template() {

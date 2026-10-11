@@ -1,0 +1,422 @@
+warning: unused import: `JsonPayload`
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/jsonrpc/src/connection.rs:29:27
+   |
+29 | use crate::messages::{Id, JsonPayload, Message, Notification, Request, Response};
+   |                           ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `jsonrpc` (lib) generated 1 warning (run `cargo fix --lib -p jsonrpc` to apply 1 suggestion)
+warning: unused variable: `content`
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/core/src/host/mcp_result.rs:1896:25
+     |
+1896 |             if let Some(content) = result.get_property("content") {
+     |                         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_content`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `deserialize_present_bool` is never used
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/core/src/types/messages.rs:24:4
+   |
+24 | fn deserialize_present_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `deserialize_present_nullable_value` is never used
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/core/src/types/messages.rs:31:4
+   |
+31 | fn deserialize_present_nullable_value<'de, D>(
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deserialize_present_nullable_projection` is never used
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/core/src/types/messages.rs:80:4
+   |
+80 | fn deserialize_present_nullable_projection<'de, D>(
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deserialize_json_projection` is never used
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/core/src/types/messages.rs:97:4
+   |
+97 | fn deserialize_json_projection<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `raw_projection_array_or_empty` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/core/src/types/messages.rs:260:4
+    |
+260 | fn raw_projection_array_or_empty<E>(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `raw_present_nullable` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/core/src/types/messages.rs:292:4
+    |
+292 | fn raw_present_nullable<T, E>(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `core` (lib) generated 7 warnings (run `cargo fix --lib -p core` to apply 1 suggestion)
+warning: unused import: `json`
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/persist.rs:29:18
+   |
+29 | use serde_json::{json, Value};
+   |                  ^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `serde_json::Value`
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/policy_gate.rs:67:5
+   |
+67 | use serde_json::Value;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Deserialize`
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/result.rs:256:17
+    |
+256 |     use serde::{Deserialize, Deserializer, Serializer};
+    |                 ^^^^^^^^^^^
+
+warning: unused import: `Deserialize`
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/result.rs:296:17
+    |
+296 |     use serde::{Deserialize, Deserializer, Serializer};
+    |                 ^^^^^^^^^^^
+
+warning: variants `Pipeline` and `Ast` are never constructed
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/policy.rs:92:5
+   |
+91 | enum ShellReasonTree {
+   |      --------------- variants in this enum
+92 |     Pipeline(Vec<String>),
+   |     ^^^^^^^^
+93 |     Ast(Vec<String>),
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `split_field_pattern` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/policy.rs:4360:4
+     |
+4360 | fn split_field_pattern(content: &str) -> Option<(&str, &str)> {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `stringify_primitive` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/policy.rs:4408:4
+     |
+4408 | fn stringify_primitive(value: JsonValueView<'_>) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `stringify_primitive` is never used
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/source_input.rs:39:15
+   |
+39 | pub(crate) fn stringify_primitive(value: JsonValueView<'_>) -> Option<String> {
+   |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `exact_operation_strings` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/source_input.rs:132:15
+    |
+132 | pub(crate) fn exact_operation_strings(groups: &[&[u16]]) -> Option<Vec<String>> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `contains_text` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/permission/src/source_input.rs:197:15
+    |
+197 | pub(crate) fn contains_text(value: &Utf16JsonProjection, needle: &str) -> bool {
+    |               ^^^^^^^^^^^^^
+
+warning: `permission` (lib) generated 10 warnings (run `cargo fix --lib -p permission` to apply 4 suggestions)
+warning: variable does not need to be mutable
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:9097:13
+     |
+9097 |         let mut core = core;
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `serde::de::Error`
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/response.rs:134:9
+    |
+134 |     use serde::de::Error as DeError;
+    |         ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Deserialize`
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:30:13
+   |
+30 | use serde::{Deserialize, Serialize};
+   |             ^^^^^^^^^^^
+
+warning: unused import: `Serialize`
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:30:26
+   |
+30 | use serde::{Deserialize, Serialize};
+   |                          ^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/attachment.rs:554:9
+    |
+554 |     let mut fields = vec![
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui_client_host.rs:378:9
+    |
+378 |     let mut normalized = match subtype {
+    |         ----^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `object`
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui_client_host.rs:1489:18
+     |
+1489 |         let Some(object) = node.object_entries() else {
+     |                  ^^^^^^ help: if this is intentional, prefix it with an underscore: `_object`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `module`
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui_client_host.rs:2929:13
+     |
+2929 |         let module = String::from_utf16(module_identity.utf16_code_units.as_slice())
+     |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_module`
+
+warning: unused variable: `storage_id`
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:7154:33
+     |
+7154 | ...                   let storage_id = message
+     |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_storage_id`
+
+warning: unused variable: `generation_ticket`
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:7158:33
+     |
+7158 | ...                   let generation_ticket = message
+     |                           ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_generation_ticket`
+
+warning: unused variable: `live_cwd`
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:7574:13
+     |
+7574 |         let live_cwd = if cwd_is_pinned {
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_live_cwd`
+
+warning: function `object_projection` is never used
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:67:4
+   |
+67 | fn object_projection(
+   |    ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `mod_optional_exact_json_at_pointer` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:2112:4
+     |
+2112 | fn mod_optional_exact_json_at_pointer(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `js_object_keys` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:2697:4
+     |
+2697 | fn js_object_keys(map: &serde_json::Map<String, Value>) -> Vec<String> {
+     |    ^^^^^^^^^^^^^^
+
+warning: field `worker_bootstrap` is never read
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mods.rs:2827:5
+     |
+2823 | struct ModWorkerEpoch {
+     |        -------------- field in this struct
+...
+2827 |     worker_bootstrap: Option<Arc<ModWorkerBootstrap>>,
+     |     ^^^^^^^^^^^^^^^^
+
+warning: function `set_exact_string_field` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui_client_host.rs:1379:4
+     |
+1379 | fn set_exact_string_field(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_client_parent_element` is never used
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:38:15
+   |
+38 | pub(super) fn validate_client_parent_element(node: &Value) -> Result<(), String> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `valid_client_percentage` is never used
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:92:4
+   |
+92 | fn valid_client_percentage(value: &str) -> bool {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_client_plain_data` is never used
+  --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:99:4
+   |
+99 | fn validate_client_plain_data(value: &Value, label: &str) -> Result<(), String> {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_plain_data_values` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:109:4
+    |
+109 | fn count_plain_data_values(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `normalize_ui_render_event` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:160:15
+    |
+160 | pub(crate) fn normalize_ui_render_event(input: &Value) -> Result<Value, String> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_ui_render_event_shape` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:211:4
+    |
+211 | fn validate_ui_render_event_shape(input: &Value) -> Result<(), String> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_desktop_parent_tree` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:331:15
+    |
+331 | pub(crate) fn validate_desktop_parent_tree(tree: &Value) -> Result<(), String> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DesktopTreeBudget` is never constructed
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:341:8
+    |
+341 | struct DesktopTreeBudget {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `validate_desktop_node` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:345:4
+    |
+345 | fn validate_desktop_node(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_parent_group` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:563:4
+    |
+563 | fn validate_parent_group(group: &Value) -> Result<(), String> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_parent_hover` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:578:4
+    |
+578 | fn validate_parent_hover(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `subtree_has_hover` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:707:4
+    |
+707 | fn subtree_has_hover(node: &Value) -> bool {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `validate_parent_press` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:718:4
+    |
+718 | fn validate_parent_press(node: &serde_json::Map<String, Value>, kind: &str) -> Result<(), String> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `keys_are_only` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:739:4
+    |
+739 | fn keys_are_only(props: &serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
+    |    ^^^^^^^^^^^^^
+
+warning: function `finite_number` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:743:4
+    |
+743 | fn finite_number(value: &Value, minimum: f64, maximum: f64) -> bool {
+    |    ^^^^^^^^^^^^^
+
+warning: function `safe_integer` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:749:4
+    |
+749 | fn safe_integer(value: &Value, minimum: i64, maximum: i64) -> bool {
+    |    ^^^^^^^^^^^^
+
+warning: function `safe_unsigned_value` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:758:4
+    |
+758 | fn safe_unsigned_value(value: &Value) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `safe_unsigned` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:764:4
+    |
+764 | fn safe_unsigned(value: &Value, minimum: u64) -> bool {
+    |    ^^^^^^^^^^^^^
+
+warning: function `valid_percent_or_dimension` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:768:4
+    |
+768 | fn valid_percent_or_dimension(value: &Value) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `valid_color` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:772:4
+    |
+772 | fn valid_color(value: &Value) -> bool {
+    |    ^^^^^^^^^^^
+
+warning: function `validate_box_props` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:782:4
+    |
+782 | fn validate_box_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_text_props` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:940:4
+    |
+940 | fn validate_text_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_button_props` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:997:4
+    |
+997 | fn validate_button_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_input_props` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:1043:4
+     |
+1043 | fn validate_input_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_select_props` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:1071:4
+     |
+1071 | fn validate_select_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_link_props` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:1108:4
+     |
+1108 | fn validate_link_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_code_props` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:1126:4
+     |
+1126 | fn validate_code_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_markdown_props` is never used
+    --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/mod_ui.rs:1150:4
+     |
+1150 | fn validate_markdown_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deserialize` is never used
+   --> /private/tmp/mods-current-source-consumer-gates-v1644/work/crates/hooks/src/response.rs:152:12
+    |
+152 |     pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ExactHookText>, D::Error>
+    |            ^^^^^^^^^^^
+
+warning: `hooks` (lib) generated 45 warnings (run `cargo fix --lib -p hooks` to apply 8 suggestions)
+   Compiling native-harness-append-byte-gate v0.0.0 (/private/tmp/mods-current-native-harness-append-gate-v1647)
+    Finished `test` profile [unoptimized] target(s) in 0.93s
+     Running tests/native_append.rs (/private/tmp/mods-current-core-session-graph-gates-v1312/target/debug/deps/native_append-b52bfa4c02789c73)
+
+running 1 test
+test actual_rust_bun_host_matches_native_append_result_bytes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+

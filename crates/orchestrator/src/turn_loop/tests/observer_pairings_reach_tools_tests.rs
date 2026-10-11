@@ -7,7 +7,7 @@ use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use lingxi_core::host::observer_pairing::ObserverPairings;
 use lingxi_core::types::{ContentBlock, ToolUseId};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tool_api::context::ToolUseContext;

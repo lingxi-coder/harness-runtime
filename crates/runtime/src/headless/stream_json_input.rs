@@ -38,12 +38,12 @@
 #![forbid(unsafe_code)]
 
 use crate::headless::io::{Input, Output};
-use crate::headless::stream_json::{OutboundMsg, OutboundTx, serialize_ndjson_line};
+use crate::headless::stream_json::{serialize_ndjson_line, OutboundMsg, OutboundTx};
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::{
     CompactBoundaryMetadata, ContentBlock, ConversationMessage, MessageId, ToolUseId,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
@@ -198,10 +198,13 @@ fn display_value(projection: &Utf16JsonProjection) -> Value {
 pub struct UserTurn {
     /// The message content: either a single string or a JSON array of content blocks.
     pub content: Value,
+    /// Source-preserving projection of the extracted message content.
     pub content_projection: Utf16JsonProjection,
+    /// Source-preserving projection of the complete input frame.
     pub frame_projection: Utf16JsonProjection,
     /// The optional uuid from the frame (used for dedup).
     pub uuid: Option<String>,
+    /// Host queue delivery identity, when this turn came from an accepted queued input.
     pub queue_delivery: Option<orchestrator::prompt::mid_turn_input::MidTurnInputDelivery>,
 }
 
@@ -212,6 +215,7 @@ pub struct HistoryInput {
     pub message: ConversationMessage,
     /// Original normalized assistant frame for `--replay-user-messages`.
     pub replay_frame: Option<Value>,
+    /// Source-preserving projection of the original normalized history frame.
     pub frame_projection: Utf16JsonProjection,
 }
 
@@ -250,9 +254,13 @@ pub enum FrameAction {
     /// claude-code's `SDKUserMessageReplaySchema` requires the original uuid +
     /// content (re-minting them defeats the host's replay correlation).
     DuplicateUser {
+        /// UUID from the duplicate input frame, retained for the replay ack.
         uuid: String,
+        /// Parsed content from the original user frame.
         content: Value,
+        /// Timestamp from the duplicate frame, when present.
         timestamp: Option<String>,
+        /// Source-preserving projection used to echo original frame fields.
         frame_projection: Utf16JsonProjection,
     },
     /// A `control_request` frame — routed to the control dispatcher.
@@ -266,6 +274,7 @@ pub enum FrameAction {
     /// A `control_cancel_request` frame for an in-flight outbound control request.
     /// Carries the `request_id` to cancel.
     ControlCancel(Utf16JsonProjection),
+    /// Environment-variable values supplied by an update frame.
     UpdateEnvironmentVariables(HashMap<String, String>),
     /// The frame was silently consumed (keep_alive, update_environment_variables,
     /// assistant/system, unknown with warning).
@@ -329,9 +338,9 @@ pub fn process_line(
                 .at_pointer("/variables")
                 .and_then(|variables| variables.object_entries())
             else {
-                diagnostics(&format!(
-                    "[structuredIO] dropped update_environment_variables: variables must be an object of string values"
-                ));
+                diagnostics(
+                    "[structuredIO] dropped update_environment_variables: variables must be an object of string values",
+                );
                 return Ok(FrameAction::Consumed);
             };
             // Every value must be a string (oracle schema `z.record(z.string())`);
@@ -341,9 +350,9 @@ pub fn process_line(
             // drop is surfaced via the same stderr log the port uses for other
             // structuredIO validation failures.)
             if env_vars.iter().any(|entry| entry.value.as_str().is_none()) {
-                diagnostics(&format!(
-                    "[structuredIO] dropped update_environment_variables: variables must be an object of string values"
-                ));
+                diagnostics(
+                    "[structuredIO] dropped update_environment_variables: variables must be an object of string values",
+                );
                 return Ok(FrameAction::Consumed);
             }
             let mut refused: Vec<String> = Vec::new();
@@ -373,7 +382,7 @@ pub fn process_line(
         "control_request" => {
             // require `request` field (byte-exact error matches binary).
             if !projection.contains_property("request") {
-                diagnostics(&format!("Error: Missing request on control_request"));
+                diagnostics("Error: Missing request on control_request");
                 return Err(InputError::MissingRequest);
             }
             // Route to the control dispatcher.
@@ -397,7 +406,7 @@ pub fn process_line(
             let role = projection.string_at("/message/role").unwrap_or("");
             if role != "user" {
                 let got = role.to_string();
-                diagnostics(&format!("Error: Expected message role 'user'"));
+                diagnostics("Error: Expected message role 'user'");
                 return Err(InputError::BadRole(got));
             }
 
@@ -728,6 +737,11 @@ pub fn emit_raw_frame_queued(out_tx: &OutboundTx, frame: &Value) -> Result<(), I
         .map_err(|_| InputError::DeliveryFailed)
 }
 
+/// Serialize and enqueue a source-preserving NDJSON frame on the stdout writer.
+///
+/// # Errors
+///
+/// Returns an error if the projection is malformed or the outbound queue is closed.
 pub fn emit_projected_frame_queued(
     out_tx: &OutboundTx,
     frame: &Utf16JsonProjection,
@@ -739,6 +753,14 @@ pub fn emit_projected_frame_queued(
         .map_err(|_| InputError::DeliveryFailed)
 }
 
+/// Enqueue a replay acknowledgement that preserves the original projected fields.
+///
+/// The acknowledgement uses the supplied session ID and retains the source UUID,
+/// timestamp, and message content when those fields are present.
+///
+/// # Errors
+///
+/// Returns an error if projection editing fails or the outbound queue is closed.
 pub fn emit_replay_ack_projected_queued(
     out_tx: &OutboundTx,
     original: &Utf16JsonProjection,
@@ -905,17 +927,26 @@ fn read_input_turns(
 }
 
 // ── Streaming injected input router ────────────────────────────────────────
+/// Control-plane frame parsed from the injected NDJSON input stream.
 #[derive(Debug)]
 pub enum StdinControlFrame {
+    /// An inbound control request, preserved as a JSON projection.
     Request(Utf16JsonProjection),
+    /// A cancellation request for an in-flight control request.
     Cancel(Utf16JsonProjection),
+    /// Updated environment values supplied by the input stream.
     UpdateEnvironmentVariables(HashMap<String, String>),
 }
+/// Terminal and active states reported by the stdin router.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StdinReaderStatus {
+    /// The router is reading and dispatching input frames.
     Reading,
+    /// The input stream reached a clean end of file.
     Eof,
+    /// Reading or parsing stopped because of an input error.
     Failed(InputError),
+    /// The host requested cancellation of the reader task.
     Stopped,
 }
 
@@ -926,9 +957,15 @@ pub struct StdinReaderControl {
     task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl StdinReaderControl {
+    /// Request cancellation of the input reader task.
     pub fn stop(&self) {
         self.stop.cancel();
     }
+    /// Wait for the reader task to finish.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InputError::ReadFailed`] if the reader task panicked.
     pub async fn join(&self) -> Result<(), InputError> {
         if let Some(task) = self.task.lock().await.take() {
             task.await.map_err(|_| InputError::ReadFailed)?;
@@ -942,12 +979,19 @@ impl Drop for StdinReaderControl {
     }
 }
 
+/// Channels and lifecycle control returned by [`spawn_stdin_router`].
 pub struct StdinChannels {
+    /// Bounded receiver for ordered user turns, history seeds, and Bash commands.
     pub input_rx: mpsc::Receiver<StreamInput>,
+    /// FIFO entries accepted by the router but not yet delivered to `input_rx`.
     pub input_pending: PendingInputQueue,
+    /// Receiver for inbound control requests, cancellations, and env updates.
     pub control_req_rx: mpsc::UnboundedReceiver<StdinControlFrame>,
+    /// Receiver for responses to outbound control requests.
     pub control_resp_rx: mpsc::UnboundedReceiver<Utf16JsonProjection>,
+    /// Watch receiver for reader progress and terminal status.
     pub status: tokio::sync::watch::Receiver<StdinReaderStatus>,
+    /// Handle used to stop and join the input reader task.
     pub reader: StdinReaderControl,
 }
 
@@ -955,6 +999,10 @@ pub struct StdinChannels {
 /// and post-tool snapshots use this one lock; no item is removed in flight.
 pub type PendingInputQueue = Arc<StdMutex<VecDeque<StreamInput>>>;
 
+/// Start the asynchronous NDJSON input router and its bounded data/control channels.
+///
+/// Replay acknowledgements and projected output frames use `out_tx`, preserving
+/// their FIFO order with the stream-json output writer.
 pub fn spawn_stdin_router(
     input: Input,
     stderr: Output,
@@ -1152,6 +1200,7 @@ pub struct ControlPlaneWriter {
 }
 
 impl ControlPlaneWriter {
+    /// Enqueue an error response preserving the request ID's source projection.
     pub fn reply_error_projected(
         &self,
         request_id: Utf16JsonProjection,
@@ -1175,9 +1224,11 @@ impl ControlPlaneWriter {
         Self { tx }
     }
 
+    /// Enqueue a control frame without converting its JSON projection to a string.
     pub fn send_projected(&self, frame: &Utf16JsonProjection) -> Result<(), InputError> {
         emit_projected_frame_queued(&self.tx, frame)
     }
+    /// Enqueue a success response with an optional source-preserving payload.
     pub fn reply_success_projected(
         &self,
         request_id: Utf16JsonProjection,
@@ -1258,33 +1309,37 @@ mod tests {
 
     #[test]
     fn normalize_top_level_request_id() {
-        let mut v = json!({"requestId": "abc", "type": "user"});
-        normalize_control_message_keys(&mut v);
+        let mut v = projection_from_value(&json!({"requestId": "abc", "type": "user"}));
+        normalize_projected_control_message_keys(&mut v).unwrap();
         assert!(
-            v.get("request_id").is_some(),
+            v.contains_property("request_id"),
             "requestId should become request_id"
         );
-        assert!(v.get("requestId").is_none(), "requestId should be removed");
+        assert!(
+            !v.contains_property("requestId"),
+            "requestId should be removed"
+        );
     }
 
     #[test]
     fn normalize_nested_response_request_id() {
-        let mut v =
-            json!({"type": "control_response", "response": {"requestId": "xyz", "data": 1}});
-        normalize_control_message_keys(&mut v);
-        let resp = v.get("response").unwrap().as_object().unwrap();
+        let mut v = projection_from_value(
+            &json!({"type": "control_response", "response": {"requestId": "xyz", "data": 1}}),
+        );
+        normalize_projected_control_message_keys(&mut v).unwrap();
+        let resp = v.subprojection("/response").unwrap();
         assert!(
-            resp.contains_key("request_id"),
+            resp.contains_property("request_id"),
             "response.requestId should become request_id"
         );
-        assert!(!resp.contains_key("requestId"));
+        assert!(!resp.contains_property("requestId"));
     }
 
     #[test]
     fn normalize_leaves_snake_case_unchanged() {
-        let mut v = json!({"request_id": "abc", "type": "user"});
-        normalize_control_message_keys(&mut v);
-        assert_eq!(v["request_id"], "abc");
+        let mut v = projection_from_value(&json!({"request_id": "abc", "type": "user"}));
+        normalize_projected_control_message_keys(&mut v).unwrap();
+        assert_eq!(v.string_at("/request_id"), Some("abc"));
     }
 
     // ── keep_alive ───────────────────────────────────────────────────────────
@@ -1401,7 +1456,7 @@ mod tests {
                 },
                 replay_frame: None,
                 ..
-            }) if content == "Conversation compacted"
+            }) if content.string_at("") == Some("Conversation compacted")
                 && subtype == "compact_boundary"
                 && metadata.trigger == lingxi_core::types::CompactTrigger::Manual
                 && metadata.pre_tokens == 42
@@ -1440,12 +1495,10 @@ mod tests {
         let preserved = metadata.preserved_messages.unwrap();
         assert_eq!(preserved.uuids, ["tail"]);
         assert!(preserved.all_uuids.is_empty());
-        assert!(
-            serde_json::to_value(preserved)
-                .unwrap()
-                .get("allUuids")
-                .is_none()
-        );
+        assert!(serde_json::to_value(preserved)
+            .unwrap()
+            .get("allUuids")
+            .is_none());
     }
 
     #[test]
@@ -1467,8 +1520,13 @@ mod tests {
             panic!("expected typed compact boundary");
         };
         let goal = metadata.active_goal.expect("active goal");
-        assert_eq!(goal.condition, "finish");
-        assert_eq!(goal.last_reason.as_deref(), Some("working"));
+        assert_eq!(goal.condition.string_at(""), Some("finish"));
+        assert_eq!(
+            goal.last_reason
+                .as_ref()
+                .and_then(|reason| reason.string_at("")),
+            Some("working")
+        );
     }
 
     #[test]
@@ -1764,7 +1822,9 @@ mod tests {
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::headless::stream_json::OutboundMsg>();
         let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
-        writer.reply_success("req-1", Some(json!({"pid": 42})));
+        writer
+            .reply_success("req-1", Some(json!({"pid": 42})))
+            .unwrap();
 
         let line = outbound_line(rx.try_recv().expect("should have sent one line"));
         let parsed: Value = serde_json::from_str(&line).unwrap();
@@ -1780,7 +1840,9 @@ mod tests {
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::headless::stream_json::OutboundMsg>();
         let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
-        writer.reply_error("req-2", "Unsupported control request subtype: foo");
+        writer
+            .reply_error("req-2", "Unsupported control request subtype: foo")
+            .unwrap();
 
         let line = outbound_line(rx.try_recv().expect("should have sent one line"));
         let parsed: Value = serde_json::from_str(&line).unwrap();
@@ -1796,7 +1858,7 @@ mod tests {
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::headless::stream_json::OutboundMsg>();
         let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
-        writer.reply_success("req-3", None);
+        writer.reply_success("req-3", None).unwrap();
 
         let line = outbound_line(rx.try_recv().expect("should have sent one line"));
         let parsed: Value = serde_json::from_str(&line).unwrap();
@@ -1826,7 +1888,8 @@ mod tests {
             &json!("hello"),
             Some("2026-07-19T00:00:00.000Z"),
             "sess-1",
-        );
+        )
+        .unwrap();
         let line = outbound_line(rx.try_recv().expect("ack must be enqueued as one line"));
         let parsed: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(parsed["type"], "user");
@@ -1851,7 +1914,8 @@ mod tests {
             &json!([{"type": "text", "text": "hi"}]),
             Some("2026-07-19T12:00:00.000Z"),
             "s",
-        );
+        )
+        .unwrap();
         let queued = outbound_line(rx.try_recv().unwrap());
         let expected = serialize_ndjson_line(&build_replay_ack_frame(
             "u",
@@ -1892,20 +1956,16 @@ mod tests {
     fn control_key_normalization_rebases_exact_identity() {
         let FrameAction::ControlRequest(frame) = process_line(r#"{"type":"control_request","requestId":"\ud800","request":{"subtype":"x","\udfff":"\ud801"}}"#, &mut fresh_seen()).unwrap() else { panic!("request") };
         assert_eq!(frame.string_units("/request_id"), Some(vec![0xd800]));
-        assert!(
-            frame
-                .to_json_string()
-                .unwrap()
-                .contains(r#""request_id":"\ud800""#)
-        );
-        assert!(
-            frame
-                .subprojection("/request")
-                .unwrap()
-                .to_json_string()
-                .unwrap()
-                .contains(r#""\udfff":"\ud801""#)
-        );
+        assert!(frame
+            .to_json_string()
+            .unwrap()
+            .contains(r#""request_id":"\ud800""#));
+        assert!(frame
+            .subprojection("/request")
+            .unwrap()
+            .to_json_string()
+            .unwrap()
+            .contains(r#""\udfff":"\ud801""#));
     }
 
     #[test]

@@ -932,12 +932,11 @@ done
             if !files.request_lines().is_empty() {
                 break;
             }
-            if exchange.is_finished() {
-                panic!(
-                    "fake worker exchange ended before readiness: {:?}",
-                    exchange.await
-                );
-            }
+            assert!(
+                !exchange.is_finished(),
+                "fake worker exchange ended before readiness: {:?}",
+                exchange.await
+            );
             if tokio::time::Instant::now() >= deadline {
                 exchange.abort();
                 let _ = exchange.await;
@@ -1059,7 +1058,9 @@ mod native_draft7_semantics_tests {
         );
         assert_eq!(
             detail.string_at(""),
-            Some("root: must have required property 'x', /a: must be >= 5, root: must NOT have additional properties ('a' is not allowed), root: must NOT have additional properties ('b' is not allowed)")
+            Some(
+                "root: must have required property 'x', /a: must be >= 5, root: must NOT have additional properties ('a' is not allowed), root: must NOT have additional properties ('b' is not allowed)"
+            )
         );
     }
 
@@ -1090,7 +1091,9 @@ mod native_draft7_semantics_tests {
         );
         assert_eq!(
             detail.string_at(""),
-            Some("root: must NOT have more than 1 properties (got 2), root: must NOT have fewer than 5 properties (got 2), root: must have required property 'x', root: must NOT have additional properties ('b' is not allowed), /a: must be integer")
+            Some(
+                "root: must NOT have more than 1 properties (got 2), root: must NOT have fewer than 5 properties (got 2), root: must have required property 'x', root: must NOT have additional properties ('b' is not allowed), /a: must be integer"
+            )
         );
 
         let union_schema = compile(
@@ -1120,7 +1123,9 @@ mod native_draft7_semantics_tests {
         );
         assert_eq!(
             detail.string_at(""),
-            Some("root: must match pattern \"^[a-z]+$\", root: property name must be valid, root: must have properties b, c when property a is present, root: must have properties b, c when property a is present, /x: must be string, /x: must be number, /x: must match exactly one schema in oneOf, /y: must be integer, /y: must be string, /y: must match a schema in anyOf")
+            Some(
+                "root: must match pattern \"^[a-z]+$\", root: property name must be valid, root: must have properties b, c when property a is present, root: must have properties b, c when property a is present, /x: must be string, /x: must be number, /x: must match exactly one schema in oneOf, /y: must be integer, /y: must be string, /y: must match a schema in anyOf"
+            )
         );
 
         let conditional_schema = compile(

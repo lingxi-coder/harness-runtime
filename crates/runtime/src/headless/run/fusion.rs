@@ -385,7 +385,7 @@ where
         if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
             // Review finding #6: this process is print mode's ONLY caller of
             // this function (confirmed: no other in-repo caller of the
-            // public `run_slash_command` wrapper), and it exits with this
+            // print-mode slash dispatcher), and it exits with this
             // function's return value moments after this fires — dropping
             // the in-process `local_fusion` worker future along with it.
             // "it may still be running" was therefore never true on this

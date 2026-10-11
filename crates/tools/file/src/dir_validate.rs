@@ -245,7 +245,7 @@ mod tests {
             canon_cwd.display()
         );
         // No sibling suggestion for a fresh tmp (its parent has no `no_such_dir`).
-        assert_eq!(err.0.string_at("").as_deref(), Some(expected.as_str()));
+        assert_eq!(err.0.string_at(""), Some(expected.as_str()));
     }
 
     /// ST-05: Grep's ENOENT arm words the lead differently — `Path does not
@@ -257,7 +257,7 @@ mod tests {
         let err = validate_grep_path("no_such_dir", tmp.path()).unwrap_err();
         let canon_cwd = std::fs::canonicalize(tmp.path()).unwrap();
         assert_eq!(
-            err.0.string_at("").as_deref(),
+            err.0.string_at(""),
             Some(
                 format!(
                     "Path does not exist: no_such_dir. Note: your current working directory is {}.",
@@ -275,7 +275,7 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         let err = validate_glob_directory(file.to_str().unwrap(), tmp.path()).unwrap_err();
         assert_eq!(
-            err.0.string_at("").as_deref(),
+            err.0.string_at(""),
             Some(format!("Path is not a directory: {}", file.display()).as_str())
         );
     }

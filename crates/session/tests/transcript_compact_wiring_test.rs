@@ -58,7 +58,8 @@ fn boundary_line() -> JsonlMessage {
         "compactMetadata".into(),
         json!({"trigger":"auto","preTokens":1000}),
     );
-    JsonlMessage {         message_type: "system".into(),
+    JsonlMessage {
+        message_type: "system".into(),
         uuid: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into(),
         parent_uuid: None,
         session_id: SESSION_ID.into(),
@@ -100,6 +101,10 @@ async fn writing_a_compact_boundary_reclaims_the_transcript() {
         let dir = TempDir::new().expect("tempdir");
         let (path, writer) = new_writer(&dir);
         seed_transcript(&path);
+        writer
+            .bootstrap_session_message_identity_snapshot(&path)
+            .await
+            .expect("import the existing Native transcript before Host append");
         let before = std::fs::metadata(&path).expect("stat").len();
 
         writer.append(&boundary_line()).await.expect("append");
@@ -122,6 +127,10 @@ async fn writing_a_compact_boundary_reclaims_the_transcript() {
         let dir = TempDir::new().expect("tempdir");
         let (path, writer) = new_writer(&dir);
         let pairs = seed_transcript(&path);
+        writer
+            .bootstrap_session_message_identity_snapshot(&path)
+            .await
+            .expect("import the existing Native transcript before Host append");
         let before = std::fs::metadata(&path).expect("stat").len();
         assert!(before >= MIN_COMPACT_FILE_BYTES, "fixture must cross I6m");
 

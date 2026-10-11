@@ -13,6 +13,25 @@ macro_rules! source_fixture {
     };
 }
 
+fn exact_text_display(block: &lingxi_core::types::ContentBlock) -> &str {
+    match block {
+        lingxi_core::types::ContentBlock::Text { text, .. } => text,
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => {
+            assert_eq!(
+                utf16_code_units,
+                &text.encode_utf16().collect::<Vec<_>>(),
+                "fixture text has ordinary Unicode and must agree with its exact UTF-16 units"
+            );
+            text
+        }
+        other => panic!("expected a text block, got {other:?}"),
+    }
+}
+
 // ============================================================================
 // #6 (main-loop parity): a hook's allowlisted `terminalSequence` is FORWARDED
 // to the host's terminal-write seam (`OutputStream::emit_terminal_sequence`),
@@ -410,12 +429,11 @@ mod read_file_state_tests {
     use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
     use lingxi_core::host::OrchestratorHandle;
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
-    use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
+    use lingxi_core::types::{HookId, ToolUseId};
     use permission::{
         PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
         PermissionRuleValue, PolicyPermissionGate,
     };
-    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::context::ToolUseContext;
@@ -803,6 +821,7 @@ mod read_file_state_tests {
             }],
             stop_reason: None,
             resumable: None,
+            per_turn_effort: None,
         }
     }
 
@@ -1247,6 +1266,7 @@ mod read_file_state_tests {
                     usage_limit_note: None,
                     origin: None,
                     turn_origin: None,
+                    api_message_override: None,
                 });
         }
         let before = orch.session().lock().await.history.len();
@@ -2951,7 +2971,7 @@ mod read_file_state_tests {
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
-        registry.set_mod_host(host);
+        registry.set_mod_host(host.clone());
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut tools = ToolRegistry::new();
         tools.register_builtin(Arc::new(SchemaCallTrackerTool {
@@ -2967,35 +2987,43 @@ mod read_file_state_tests {
             policy,
             Arc::new(NoOpPermissionGate),
         ));
-        let orch = ConversationOrchestrator::new(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(vec![])),
-            Arc::new(tools),
-            crate::test_support::noop_hook_executor(),
-            gate,
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
-        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        let uses = vec![(
-            ToolUseId::new(),
-            "Schemic".to_string(),
-            source_fixture!({"path":"/x"}),
-            None,
-        )];
-        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
-        let (content, is_error) = schema_gate_tool_result(&results[0]);
-        assert!(!is_error, "{content}");
-        assert_eq!(
-            orch.transcript
-                .tool_use_results
-                .lock()
-                .await
-                .get(uses[0].0.as_str()),
-            Some(&source_fixture!({"decision":"allow","rule":"Schemic"}))
+        let hook_registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let orch = Arc::new(
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(tools),
+                crate::test_support::noop_hook_executor(),
+                gate,
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            )
+            .with_hook_registry(hook_registry.clone()),
         );
-        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        let mod_session: Arc<dyn hooks::mods::ModSessionContext> = orch.clone();
+        hook_registry
+            .write()
+            .await
+            .attach_mod_background_context(Arc::downgrade(&mod_session));
+        let result = host
+            .dispatch_with_log_at_session(
+                "tool.call",
+                source_fixture!({"tool":"Schemic","path":"/x"}),
+                orch.as_ref(),
+                |_| async { panic!("the Mod answers the outer tool.call") },
+                |_, _| async {},
+            )
+            .await
+            .expect("Mod tool.call result");
+        assert_eq!(
+            result.to_json_string().unwrap(),
+            r#"{"result":{"decision":"allow","rule":"Schemic"}}"#
+        );
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "$.tool.check reads policy without executing the target tool"
+        );
     }
 
     async fn assert_managed_bash_dispatch_controls() {
@@ -3280,6 +3308,7 @@ mod read_file_state_tests {
                 usage_limit_note: None,
                 origin: None,
                 turn_origin: None,
+                api_message_override: None,
             };
             let rendered = orch
                 .mod_prompt_attachment(
@@ -3583,9 +3612,9 @@ mod read_file_state_tests {
                 .unwrap();
             let (content, is_error) = schema_gate_tool_result(&dispatched.results[0]);
             assert!(is_error, "{content}");
-            assert!(
-                content.starts_with("<tool_use_error>tool.call step resolved Schemic with a result that does not match its output shape:"),
-                "{content}"
+            assert_eq!(
+                content,
+                "tool.call step resolved Schemic with a result that does not match its output shape: expected object or string output"
             );
             assert_eq!(
                 called.load(std::sync::atomic::Ordering::SeqCst),
@@ -4236,7 +4265,11 @@ mod read_file_state_tests {
         )
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hooks)));
 
-        orch.build_wire_tools().await.0;
+        let initially_built = orch.build_wire_tools().await.0;
+        assert!(
+            !initially_built.iter().any(|tool| tool.name == "Read"),
+            "the deferred Read tool is omitted from the initial wire schema"
+        );
         assert!(deferral.wants_defer("Read", false));
         let first = registry.tool_search_view().entries();
         assert_eq!(
@@ -4687,6 +4720,7 @@ mod read_file_state_tests {
                         }],
                         stop_reason: Some("end_turn".into()),
                         resumable: None,
+                        per_turn_effort: None,
                     });
                 }
             }
@@ -4854,6 +4888,7 @@ mod read_file_state_tests {
                         }],
                         stop_reason: Some("end_turn".into()),
                         resumable: None,
+                        per_turn_effort: None,
                     });
                 }
             }
@@ -5298,9 +5333,7 @@ mod max_output_tokens_recovery_tests {
                 ..
             }) => {
                 assert_eq!(stop_reason.as_deref(), Some("max_tokens"));
-                let ContentBlock::Text { text, .. } = &content[0] else {
-                    panic!("expected a text block");
-                };
+                let text = super::exact_text_display(&content[0]);
                 assert!(
                     text.starts_with("API Error: Claude's response exceeded"),
                     "got: {text}"
@@ -5386,9 +5419,7 @@ mod max_output_tokens_recovery_tests {
             stop_reason.as_deref(),
             Some("model_context_window_exceeded")
         );
-        let ContentBlock::Text { text, .. } = &content[0] else {
-            panic!("expected a text block");
-        };
+        let text = super::exact_text_display(&content[0]);
         assert_eq!(
             text,
             "API Error: The model has reached its context window limit."
@@ -5466,9 +5497,7 @@ mod max_output_tokens_recovery_tests {
             panic!("expected the surfaced Assistant API-error");
         };
         assert_eq!(stop_reason.as_deref(), Some("refusal"));
-        let ContentBlock::Text { text, .. } = &content[0] else {
-            panic!("expected a text block");
-        };
+        let text = super::exact_text_display(&content[0]);
         // Either the labelled "safety measures" or the generic Usage-Policy
         // variant — both are `API Error: …` and cite the AUP URL.
         assert!(text.starts_with("API Error:"), "got: {text}");
@@ -5912,6 +5941,7 @@ mod malformed_and_thinking_only_tests {
             }],
             stop_reason: None,
             resumable: None,
+            per_turn_effort: None,
         }
     }
 
@@ -5932,6 +5962,7 @@ mod malformed_and_thinking_only_tests {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -5949,6 +5980,7 @@ mod malformed_and_thinking_only_tests {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -5958,6 +5990,7 @@ mod malformed_and_thinking_only_tests {
             content: vec![],
             stop_reason: None,
             resumable: None,
+            per_turn_effort: None,
         }
     }
 
@@ -6001,6 +6034,7 @@ mod malformed_and_thinking_only_tests {
             }],
             stop_reason: None,
             resumable: None,
+            per_turn_effort: None,
         };
         let h = vec![
             real_user("read it"),
@@ -6211,7 +6245,6 @@ mod pre_tool_hook_tests {
     use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
     use hooks::HookExecutorImpl;
     use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, MessageId, ToolUseId};
-    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::context::ToolUseContext;
@@ -8118,8 +8151,8 @@ mod pre_tool_hook_tests {
         assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
         match msg {
             ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text, .. }) => assert_eq!(
-                    text,
+                Some(block) => assert_eq!(
+                    super::exact_text_display(block),
                     "<system-reminder>\nPreToolUse:Echo hook additional context: INJECTED-CTX\n</system-reminder>"
                 ),
                 other => panic!("expected leading Text block, got {other:?}"),
@@ -8233,8 +8266,8 @@ mod pre_tool_hook_tests {
         assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
         match msg {
             ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text, .. }) => assert_eq!(
-                    text,
+                Some(block) => assert_eq!(
+                    super::exact_text_display(block),
                     "<system-reminder>\nPreToolUse:Echo hook stopped continuation: STOP-NOW\n</system-reminder>"
                 ),
                 other => panic!("expected leading Text block, got {other:?}"),
@@ -8263,8 +8296,8 @@ mod pre_tool_hook_tests {
         assert_eq!(injected.len(), 1);
         match &injected[0].0 {
             ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text, .. }) => assert_eq!(
-                    text,
+                Some(block) => assert_eq!(
+                    super::exact_text_display(block),
                     "<system-reminder>\nPreToolUse:Echo hook stopped continuation: Execution stopped by hook\n</system-reminder>"
                 ),
                 other => panic!("expected leading Text block, got {other:?}"),
@@ -8307,8 +8340,8 @@ mod pre_tool_hook_tests {
         assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
         match msg {
             ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text, .. }) => assert_eq!(
-                    text,
+                Some(block) => assert_eq!(
+                    super::exact_text_display(block),
                     "<system-reminder>\nPostToolUse:Echo hook stopped continuation: POST-STOP\n</system-reminder>"
                 ),
                 other => panic!("expected leading Text block, got {other:?}"),
@@ -9189,14 +9222,14 @@ mod pre_tool_hook_tests {
         assert_eq!(results.len(), 1);
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "a failing tool must set is_error=true");
-        // Exact content: bare "Error: kaboom" — no XML envelope AND no
+        // Exact content: bare "kaboom" — no XML envelope AND no
         // LingXi-internal `ToolError` variant prefix. claude-code's
         // `toolExecution.ts:1691` passes `formatError(error)` (= `error.message`,
         // bare) RAW into `tool_result.content`; the model never sees an
         // `internal: `/`invalid input: ` prefix (that prefix is `Display`-only,
         // for logging). Only unknown-tool and schema-validation paths wrap.
         assert_eq!(
-            content, "Error: kaboom",
+            content, "kaboom",
             "tool-execution errors must be BARE (no <tool_use_error> wrapper, no variant prefix)"
         );
         assert!(
@@ -10803,6 +10836,7 @@ mod pre_tool_hook_tests {
                     }],
                     stop_reason: Some("tool_use".into()),
                     resumable: None,
+                    per_turn_effort: None,
                 },
                 same_turn_tool_uses: vec![],
             },
@@ -10843,7 +10877,6 @@ mod pre_cancel_tests {
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use lingxi_core::types::{ContentBlock, ToolUseId};
-    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -11199,7 +11232,8 @@ mod pre_cancel_tests {
                     "pre-cancel tool_result must have is_error=true, got content={content:?}"
                 );
                 assert_eq!(
-                    content.string_at(""), Some(CANCEL_MESSAGE),
+                    content.string_at(""),
+                    Some(CANCEL_MESSAGE),
                     "pre-cancel content must be the bare CANCEL_MESSAGE (not <tool_use_error>-wrapped)"
                 );
             }
@@ -11421,6 +11455,7 @@ mod pre_cancel_tests {
                 }],
                 stop_reason: None,
                 resumable: None,
+                per_turn_effort: None,
             },
         );
     }
@@ -11457,18 +11492,7 @@ mod pre_cancel_tests {
                 .unwrap()
                 .unwrap()
         );
-        let mut expected_units = "Error: ".encode_utf16().collect::<Vec<_>>();
-        expected_units.extend(
-            ToolError::Aborted
-                .model_facing_message()
-                .string_units("")
-                .expect("generated abort error is a string"),
-        );
-        let expected = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
-            String::from_utf16_lossy(&expected_units),
-            expected_units,
-        )
-        .expect("valid UTF-16 string projection");
+        let expected = ToolError::Aborted.model_facing_message();
         let session = orch.session();
         let history = &session.lock().await.history;
         let results = history.iter().flat_map(|message| match message {
@@ -11557,7 +11581,6 @@ mod memdir_index_cap_tests {
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use lingxi_core::types::{ContentBlock, ToolUseId};
-    use serde_json::json;
     use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};

@@ -40,7 +40,7 @@ async fn streaming_text_only_three_deltas() {
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
 
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api.clone(),
@@ -50,7 +50,7 @@ async fn streaming_text_only_three_deltas() {
         output.clone(),
         memory,
         PathBuf::from("/tmp"),
-    );
+    ));
 
     let outcome = orch
         .run_turn_streaming("say hello")

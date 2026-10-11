@@ -36,6 +36,7 @@ use std::time::SystemTime;
 use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
 fn source_string(text: impl Into<String>) -> Utf16JsonProjection {
     let text = text.into();
     Utf16JsonProjection::root_string(text.clone(), text.encode_utf16().collect())

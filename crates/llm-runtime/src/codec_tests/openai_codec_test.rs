@@ -357,7 +357,6 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
         api_output_config: None,
         role: "assistant".to_string(),
         content: vec![ContentBlock::ToolResult {
-            output_projection: None,
             tool_call_id: "call_1".to_string(),
             output: super::json_payload(serde_json::json!("done")),
             is_error: Some(false),
@@ -396,7 +395,6 @@ fn encode_multiple_tool_results_preserves_each_as_tool_message() {
         role: "assistant".to_string(),
         content: vec![
             ContentBlock::ToolResult {
-                output_projection: None,
                 tool_call_id: "call_1".to_string(),
                 output: super::json_payload(serde_json::json!("first")),
                 is_error: Some(false),
@@ -404,7 +402,6 @@ fn encode_multiple_tool_results_preserves_each_as_tool_message() {
                 cache_reference: None,
             },
             ContentBlock::ToolResult {
-                output_projection: None,
                 tool_call_id: "call_2".to_string(),
                 output: super::json_payload(serde_json::json!("second")),
                 is_error: Some(false),

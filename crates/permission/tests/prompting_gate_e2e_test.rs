@@ -55,10 +55,13 @@ async fn typing_y_returns_allow() {
 
     // Read exactly the expected prompt bytes — the gate flushed already
     // and the duplex buffer holds the bytes verbatim.
-    let expected = b"Claude needs your permission to use Bash\n[y/N] ";
+    let expected = format!(
+        "{} needs your permission to use Bash\n[y/N] ",
+        branding::PRODUCT_NAME
+    );
     let mut printed = vec![0u8; expected.len()];
     stderr_reader.read_exact(&mut printed).await.unwrap();
-    assert_eq!(printed.as_slice(), expected.as_slice());
+    assert_eq!(printed.as_slice(), expected.as_bytes());
 }
 
 #[tokio::test]
@@ -87,10 +90,13 @@ async fn empty_input_with_allow_default_returns_allow() {
 
     writer_handle.await.unwrap();
 
-    let expected = b"Claude needs your permission to use Read\n[Y/n] ";
+    let expected = format!(
+        "{} needs your permission to use Read\n[Y/n] ",
+        branding::PRODUCT_NAME
+    );
     let mut printed = vec![0u8; expected.len()];
     stderr_reader.read_exact(&mut printed).await.unwrap();
-    assert_eq!(printed.as_slice(), expected.as_slice());
+    assert_eq!(printed.as_slice(), expected.as_bytes());
 }
 
 #[tokio::test]
@@ -119,10 +125,13 @@ async fn empty_input_with_deny_default_returns_deny() {
 
     writer_handle.await.unwrap();
 
-    let expected = b"Claude needs your permission to use Bash\n[y/N] ";
+    let expected = format!(
+        "{} needs your permission to use Bash\n[y/N] ",
+        branding::PRODUCT_NAME
+    );
     let mut printed = vec![0u8; expected.len()];
     stderr_reader.read_exact(&mut printed).await.unwrap();
-    assert_eq!(printed.as_slice(), expected.as_slice());
+    assert_eq!(printed.as_slice(), expected.as_bytes());
 }
 
 #[tokio::test]
@@ -156,10 +165,16 @@ async fn three_invalid_inputs_returns_invalid_input_error() {
     writer_handle.await.unwrap();
 
     // The gate writes the same prompt exactly 3 times before erroring.
-    let one = b"Claude needs your permission to use Bash\n[y/N] ";
+    let one = format!(
+        "{} needs your permission to use Bash\n[y/N] ",
+        branding::PRODUCT_NAME
+    );
     let mut printed = vec![0u8; one.len() * 3];
     stderr_reader.read_exact(&mut printed).await.unwrap();
-    let occurrences = printed.windows(one.len()).filter(|w| *w == one).count();
+    let occurrences = printed
+        .windows(one.len())
+        .filter(|w| *w == one.as_bytes())
+        .count();
     assert_eq!(
         occurrences, 3,
         "prompt must render exactly 3 times before erroring"
@@ -190,10 +205,16 @@ async fn second_attempt_valid_recovers() {
 
     writer_handle.await.unwrap();
 
-    let one = b"Claude needs your permission to use Read\n[Y/n] ";
+    let one = format!(
+        "{} needs your permission to use Read\n[Y/n] ",
+        branding::PRODUCT_NAME
+    );
     let mut printed = vec![0u8; one.len() * 2];
     stderr_reader.read_exact(&mut printed).await.unwrap();
-    let occurrences = printed.windows(one.len()).filter(|w| *w == one).count();
+    let occurrences = printed
+        .windows(one.len())
+        .filter(|w| *w == one.as_bytes())
+        .count();
     assert_eq!(
         occurrences, 2,
         "prompt must render twice — once invalid, once recovered"

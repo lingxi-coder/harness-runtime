@@ -246,7 +246,7 @@ mod tests {
     }
 
     fn ctx_with(messages: Vec<ConversationMessage>) -> ToolUseContext {
-        let mut c = ToolUseContext::model_seed("x".into(), None);
+        let mut c = ToolUseContext::model_seed("x".into());
         c.messages = messages;
         c
     }

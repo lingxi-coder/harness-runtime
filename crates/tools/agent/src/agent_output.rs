@@ -189,12 +189,12 @@ fn parse_completed(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, 
 
     let mut parsed = Vec::new();
     for field in ["status", "agentId", "agentType", "prompt"] {
-        if let Some(value) = output.subprojection(&format!("/{field}")).ok() {
+        if let Ok(value) = output.subprojection(&format!("/{field}")) {
             parsed.push((field.to_owned(), value));
         }
     }
     parsed.push(("content".into(), content));
-    if let Some(value) = output.subprojection("/resolvedModel").ok() {
+    if let Ok(value) = output.subprojection("/resolvedModel") {
         parsed.push(("resolvedModel".into(), value));
     }
     if let Some(models) = models {
@@ -216,7 +216,7 @@ fn parse_completed(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, 
         "harnessTailCount",
         "harnessSectionHash",
     ] {
-        if let Some(value) = output.subprojection(&format!("/{field}")).ok() {
+        if let Ok(value) = output.subprojection(&format!("/{field}")) {
             parsed.push((field.into(), value));
         }
     }
@@ -251,7 +251,7 @@ fn parse_async_launched(output: &Utf16JsonProjection) -> Result<Utf16JsonProject
         "description",
         "resolvedModel",
     ] {
-        if let Some(value) = output.subprojection(&format!("/{field}")).ok() {
+        if let Ok(value) = output.subprojection(&format!("/{field}")) {
             parsed.push((field.into(), value));
         }
     }
@@ -259,7 +259,7 @@ fn parse_async_launched(output: &Utf16JsonProjection) -> Result<Utf16JsonProject
         parsed.push(("modelsUsed".into(), models));
     }
     for field in ["prompt", "outputFile", "canReadOutputFile"] {
-        if let Some(value) = output.subprojection(&format!("/{field}")).ok() {
+        if let Ok(value) = output.subprojection(&format!("/{field}")) {
             parsed.push((field.into(), value));
         }
     }
@@ -487,7 +487,7 @@ fn parse_fusion(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, Too
         ("timing".into(), timing),
         ("egress".into(), egress),
     ];
-    if let Some(value) = output.subprojection("/computationStatus").ok() {
+    if let Ok(value) = output.subprojection("/computationStatus") {
         parsed.push(("computationStatus".into(), value));
     }
     if let Some(settlement) = settlement {

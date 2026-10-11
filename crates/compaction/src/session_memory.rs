@@ -40,25 +40,13 @@ use lingxi_core::types::{ConversationMessage, MessageId};
 /// `enabled` is the single master gate (no `tengu_session_memory` flag exists
 /// in v2.1.181). `compact_extracts_memory` additionally gates the §13.8
 /// dual-extraction-during-compaction path.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SessionMemoryConfig {
     /// Master gate for the whole session-memory subsystem.
     pub enabled: bool,
     /// When `true`, the compaction pass also extracts a `<session_memory>`
     /// block from its summary response (the §13.8 dual-extraction path).
     pub compact_extracts_memory: bool,
-}
-
-impl Default for SessionMemoryConfig {
-    fn default() -> Self {
-        Self {
-            // Inert by default — keeps the locked fixtures byte-identical until a
-            // composition root opts in, mirroring every other dormant-by-default
-            // parity subsystem in this codebase.
-            enabled: false,
-            compact_extracts_memory: false,
-        }
-    }
 }
 
 /// A session-memory block distilled from a compaction response, tagged with the

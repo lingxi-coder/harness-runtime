@@ -82,7 +82,7 @@ impl LocalAppsHostBroker {
                     return Err(format!(
                         "read dependency rollback source {}: {error}",
                         path.display()
-                    ))
+                    ));
                 }
             };
             files.push(DependencyUpdateFileBackup { relative, bytes });
@@ -122,7 +122,7 @@ impl LocalAppsHostBroker {
                 return Err(format!(
                     "inspect dependency rollback tree {}: {error}",
                     node_modules.display()
-                ))
+                ));
             }
         };
         let build_root = layout.root().join(layout.build_rel(false));
@@ -450,7 +450,7 @@ impl LocalAppsHostBroker {
                 return Err(format!(
                     "inspect dependency update recovery journal {}: {error}",
                     path.display()
-                ))
+                ));
             }
         };
         if metadata.file_type().is_symlink() || !metadata.is_file() {

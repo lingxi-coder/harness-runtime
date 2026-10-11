@@ -308,10 +308,7 @@ mod tests {
         assert!(is_compact_boundary(&marker));
         match marker {
             ConversationMessage::System { content, .. } => {
-                assert_eq!(
-                    content.string_at("").as_deref(),
-                    Some("Conversation compacted")
-                );
+                assert_eq!(content.string_at(""), Some("Conversation compacted"));
             }
             _ => panic!("expected a System marker"),
         }

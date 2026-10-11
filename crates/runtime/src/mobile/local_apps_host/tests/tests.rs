@@ -11,6 +11,13 @@ fn projected_value(
     .expect("test result is a generated JSON-compatible value")
 }
 
+fn source_projection(
+    value: &serde_json::Value,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(value)
+        .expect("test fixture is valid JSON")
+}
+
 /// r1-prompt-layer-20: the backticked-tool-name scanner used to be declared
 /// INSIDE the one test that ran it, so no other model-facing text could be put
 /// through it. Hoisted here so every caller in the module can reuse it.
@@ -3267,9 +3274,7 @@ async fn host_authored_model_facing_text_names_no_tool_outside_local_app_tools()
     assert!(refused.is_error, "the shell gate must refuse: {refused:?}");
     let refusal = refused
         .content
-        .get(0)
-        .and_then(|block| block.get("text"))
-        .and_then(Value::as_str)
+        .string_at("/0/text")
         .expect("the refusal carries text")
         .to_string();
     // Vacuity guards: prove this is the SHELL GATE's refusal and that it
@@ -3299,12 +3304,16 @@ async fn host_authored_model_facing_text_names_no_tool_outside_local_app_tools()
     let mut backtick_scanned = 0usize;
     for tool in &catalog {
         let label = format!("the `{}` tool description", tool.tool_name);
-        if tool.description.contains("LocalApp") {
-            assert_only_real_local_app_tool_tokens(&tool.description, &label);
+        let description = tool
+            .description
+            .string_at("")
+            .expect("host tool description is source text");
+        if description.contains("LocalApp") {
+            assert_only_real_local_app_tool_tokens(description, &label);
             token_scanned += 1;
         }
-        if tool.description.contains('`') {
-            assert_only_real_tool_names(&tool.description, &label);
+        if description.contains('`') {
+            assert_only_real_tool_names(description, &label);
             backtick_scanned += 1;
         }
     }
@@ -3350,9 +3359,7 @@ async fn the_scanners_reject_a_dead_tool_name_planted_in_each_new_source() {
         .await
         .expect("a domain refusal is a tool result")
         .content
-        .get(0)
-        .and_then(|block| block.get("text"))
-        .and_then(Value::as_str)
+        .string_at("/0/text")
         .expect("the refusal carries text")
         .to_string();
     // The plant: the retired runtime-confirmation tool, in the same two
@@ -3385,13 +3392,19 @@ async fn the_scanners_reject_a_dead_tool_name_planted_in_each_new_source() {
     let catalog = crate::mobile::local_apps_mcp::LocalAppsMcpTransport::host_tool_catalog();
     let described = catalog
         .iter()
-        .find(|tool| tool.description.contains("LocalAppPrepare"))
+        .find(|tool| {
+            tool.description
+                .string_at("")
+                .is_some_and(|text| text.contains("LocalAppPrepare"))
+        })
         .expect("a host tool description names LocalAppPrepare");
-    let planted_description = described
+    let described_text = described
         .description
-        .replace("LocalAppPrepare", "LocalAppConfirmRuntime");
+        .string_at("")
+        .expect("host tool description is source text");
+    let planted_description = described_text.replace("LocalAppPrepare", "LocalAppConfirmRuntime");
     assert_ne!(
-        planted_description, described.description,
+        planted_description, described_text,
         "the plant did not apply to the description"
     );
     let message = rejection(
@@ -3478,9 +3491,11 @@ async fn execute_mcp_flow_runs_the_host_reloaded_typed_binding() {
     )
     .expect("write flow contexts");
 
-    let mut definition =
-        lingxi_core::host::McpToolDefinitionDto::new("runtime_status", input_schema);
-    definition.output_schema = Some(output_schema);
+    let mut definition = lingxi_core::host::McpToolDefinitionDto::new(
+        "runtime_status",
+        source_projection(&input_schema),
+    );
+    definition.output_schema = Some(source_projection(&output_schema));
     let binding = json!({
         "flowId": "runtime-status-flow",
         "inputs": {
@@ -4381,11 +4396,13 @@ fn persist_initial_mcp_candidate_fixture(
         "additionalProperties": false,
     });
     let output_schema = runtime_record_output_schema();
-    let mut definition =
-        lingxi_core::host::McpToolDefinitionDto::new("runtime_status", input_schema);
+    let mut definition = lingxi_core::host::McpToolDefinitionDto::new(
+        "runtime_status",
+        source_projection(&input_schema),
+    );
     definition.title = Some("Runtime status".into());
     definition.description = Some("Read the current runtime status from the staged flow.".into());
-    definition.output_schema = Some(output_schema);
+    definition.output_schema = Some(source_projection(&output_schema));
     let flow = local_apps::AppMcpFlowBinding {
         flow_id: "runtime-status-flow".into(),
         inputs: std::collections::BTreeMap::from([(
@@ -4634,8 +4651,9 @@ async fn authoring_dispatch_preserves_validation_errors() {
         .expect("domain error remains a tool result");
     assert!(result.is_error, "{result:?}");
     assert!(
-        result.content[0]["text"]
-            .as_str()
+        result
+            .content
+            .string_at("/0/text")
             .expect("tool error text")
             .contains("missing non-empty \"workflow_run_id\""),
         "{result:?}"
@@ -4709,7 +4727,9 @@ async fn staged_create_approval_does_not_author_or_enable_mcp() {
             "app_id": shell.id,
             "workflow_run_id": workflow_run_id,
             "validated_selection_handle": handle,
-            "contract_handle": contract["contract_handle"],
+            "contract_handle": contract
+                .string_at("/contract_handle")
+                .expect("contract handle is source text"),
             "quality_level": "fast",
             "name": "Plain create",
             "brief": "MCP remains optional",
@@ -7025,7 +7045,7 @@ async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_op
     );
     assert_eq!(cancel_failures[0].0, Some("app-cancel".to_string()));
     assert!(
-        cancel_failures[0].1.contains("cancelled"),
+        cancel_failures[0].1.display().contains("cancelled"),
         "message must name the cancellation, got {:?}",
         cancel_failures[0].1
     );
@@ -7069,7 +7089,7 @@ async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_op
     );
     assert_eq!(timeout_failures[0].0, Some("app-timeout-emit".to_string()));
     assert!(
-        timeout_failures[0].1.contains("timed out"),
+        timeout_failures[0].1.display().contains("timed out"),
         "message must name the timeout, got {:?}",
         timeout_failures[0].1
     );
@@ -12627,7 +12647,7 @@ impl PinnedShell {
     /// (`append_custom_title`), which carries NO `mobileEmptySession`.
     async fn user_rename(&self, title: &str) {
         session::jsonl::writer::JsonlWriter::new(self.transcript(), self.fs.clone())
-            .append_custom_title(&self.init_session_id, title)
+            .append_custom_title(&self.init_session_id, title.into())
             .await
             .expect("user rename");
     }

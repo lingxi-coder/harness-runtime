@@ -126,7 +126,7 @@ impl FailoverTriggers {
     #[must_use]
     pub fn matches(self, error: &crate::LlmError) -> bool {
         use crate::LlmError;
-        match error {
+        match error.classification_source() {
             LlmError::RateLimited { .. } | LlmError::QuotaExceeded => self.rate_limit,
             LlmError::Overloaded { .. } => self.overloaded,
             LlmError::ProviderInternal => self.server_error,

@@ -641,7 +641,7 @@ pub(crate) fn raise_origin(origin: AppCreateOriginDto) -> Result<AppCreateOrigin
         other => {
             return Err(AppError::InvalidRequest(format!(
                 "unsupported app create origin: {other:?}"
-            )))
+            )));
         }
     })
 }
@@ -659,7 +659,7 @@ pub(crate) fn raise_surface(surface: AppSurfaceDto) -> Result<AppSurface, AppErr
         other => {
             return Err(AppError::InvalidRequest(format!(
                 "unsupported app surface: {other:?}"
-            )))
+            )));
         }
     })
 }

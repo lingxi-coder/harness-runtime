@@ -6646,6 +6646,11 @@ mod tests {
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join("hooks")).unwrap();
         fs::write(
+            plugin.join("hooks/register.js"),
+            "export function register() {}\n",
+        )
+        .unwrap();
+        fs::write(
             plugin.join("hooks/hooks.json"),
             r#"{
                 "modules": ["./register.js"],

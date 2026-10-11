@@ -767,13 +767,13 @@ async fn error_status_drains_frames_into_taxonomy() {
         .expect("error status");
 
     assert!(matches!(
-        error,
-        LlmError::RateLimited { retry_after: Some(after), .. } if after == Duration::from_secs(7)
+        error.classification_source(),
+        LlmError::RateLimited { retry_after: Some(after), .. } if *after == Duration::from_secs(7)
     ));
 }
 
 #[tokio::test]
-async fn mid_stream_failure_after_events_is_stream_interrupted() {
+async fn mid_stream_transport_error_preserves_original_cause() {
     let transport = Arc::new(StreamTransport::scripted(
         200,
         vec![
@@ -796,9 +796,10 @@ async fn mid_stream_failure_after_events_is_stream_interrupted() {
     assert!(events
         .iter()
         .any(|event| matches!(event, StreamEvent::Start { .. })));
-    assert!(
-        matches!(error, Some(SdkError::StreamInterrupted { message }) if message.contains("connection reset"))
-    );
+    assert!(matches!(
+        error,
+        Some(SdkError::Transport { message }) if message == "connection reset"
+    ));
     assert!(stream.next().await.is_none());
 }
 

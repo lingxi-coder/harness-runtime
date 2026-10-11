@@ -110,7 +110,6 @@ fn tool_invocation_carries_native_query_depth_separately_from_spawn_depth() {
 #[test]
 fn completed_result_keeps_exact_utf16_text_from_the_final_agent_row() {
     let exact_text = ConversationMessage::Assistant {
-        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::TextJsUtf16 {
             text: "�".into(),
@@ -236,6 +235,7 @@ impl crate::api::SubagentApiClient for MockSubagentApiClient {
             .push(CapturedSubagentCall {
                 request: request_for_capture,
                 response: response.as_ref().ok().cloned(),
+                fallback_target: lingxi_core::host::refusal_driver::current_fallback_target(),
             });
         let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
         Ok(futures::StreamExt::boxed(futures::stream::iter(
@@ -350,6 +350,7 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
             .push(CapturedSubagentCall {
                 request: request_for_capture,
                 response,
+                fallback_target: lingxi_core::host::refusal_driver::current_fallback_target(),
             });
         Ok(futures::StreamExt::boxed(futures::stream::iter(
             events.into_iter().map(Ok),
@@ -591,6 +592,7 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
             model_content: None,
             new_messages: vec![
                 ConversationMessage::User {
+                    api_message_override: None,
                     id: MessageId::new(),
                     content: vec![
                         ContentBlock::Text {
@@ -613,7 +615,6 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
                     turn_origin: None,
                 },
                 ConversationMessage::Assistant {
-                    per_turn_effort: None,
                     id: MessageId::new(),
                     content: vec![ContentBlock::Text {
                         text: format!("executor assistant context {tool_use_id}"),
@@ -627,6 +628,7 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
                     id: MessageId::new(),
                     content: format!("executor system context {tool_use_id}").into(),
                     subtype: None,
+                    api_system: None,
                     compact_metadata: None,
                     model_fallback: None,
                     refusal_fallback: None,
@@ -2012,6 +2014,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
     SubagentContext {
         native_query_depth: 1,
         task_registry: None,
+        model_resolution_context_provider: None,
         agent_id: AgentId::new(),
         parent_agent_id: None,
         agent_spawn_provenance: Default::default(),
@@ -2195,7 +2198,7 @@ async fn startup_instruction_failure_publishes_child_route_and_retained_history(
         async fn run(
             &self,
             request: hooks::PromptHookRequest,
-        ) -> Result<String, hooks::PromptHookError> {
+        ) -> Result<Utf16JsonProjection, hooks::PromptHookError> {
             self.0.lock().unwrap().push(request);
             Ok(r#"{"ok":true}"#.into())
         }
@@ -2333,9 +2336,7 @@ impl lingxi_core::host::ToolInvoker for RouteChangingCleanupInvoker {
             )),
             mcp_meta: None,
             turn_end: None,
-            context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!(
-                []
-            )),
+            context: Utf16JsonProjection::parse("[]").expect("empty JSON array is valid"),
             context_state: Some(
                 lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(context)),
             ),
@@ -3785,7 +3786,6 @@ async fn workflow_watchdog_retries_five_times_then_fails_without_partial_salvage
 /// Build a minimal assistant message with a single text block.
 fn assistant_text(text: &str) -> ConversationMessage {
     ConversationMessage::Assistant {
-        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: text.to_string(),
@@ -6868,7 +6868,7 @@ async fn loop_refuses_tool_outside_allowed_list_without_dispatching() {
 /// async). Verifies the `nke` set membership + the exact §7 note text.
 #[test]
 fn companion_note_returned_for_nke_tools() {
-    // Non-ant: all base nke tools AND Workflow must return the note.
+    // Every universally unavailable tool returns the note.
     for name in &[
         "TaskOutput",
         "ExitPlanMode",
@@ -6877,12 +6877,11 @@ fn companion_note_returned_for_nke_tools() {
         "ConnectGitHub",
         "WaitForMcpServers",
         "ScheduleWakeup",
-        "Workflow",
     ] {
-        let note = companion_note_for_disallowed_tool(name, /*is_ant=*/ false);
+        let note = companion_note_for_disallowed_tool(name);
         assert!(
             note.is_some(),
-            "expected companion note for {name} (non-ant); got None"
+            "expected companion note for universally unavailable tool {name}; got None"
         );
         let note = note.unwrap();
         // Binary §7 verbatim: leading `. `, toolName interpolated.
@@ -6910,7 +6909,7 @@ fn companion_note_absent_for_non_nke_tools() {
     // Regular tools must NOT get the companion note.
     for name in &["Read", "Bash", "Grep", "Glob", "Agent"] {
         assert!(
-            companion_note_for_disallowed_tool(name, false).is_none(),
+            companion_note_for_disallowed_tool(name).is_none(),
             "unexpected companion note for non-nke tool {name}"
         );
     }
@@ -6924,12 +6923,12 @@ fn companion_note_workflow_follows_tool_permissions() {
 
 #[tokio::test]
 async fn loop_nke_tool_refusal_includes_companion_note() {
-    // A non-ant subagent whose pool dropped "Workflow" (allowed_tools = ["Read"])
-    // calls "Workflow" → the refusal ToolResult must contain the §7 companion
-    // note with "Workflow" interpolated. `AskUserQuestion` is verified too.
-    for nke_tool in &["Workflow", "AskUserQuestion"] {
+    // Workflow follows the resolved catalog/allow-list and is not in the
+    // universal NKE set. AskUserQuestion is universally unavailable and gets
+    // the §7 companion note; both requests are denied by this Read-only pool.
+    for (tool, expect_companion_note) in [("Workflow", false), ("AskUserQuestion", true)] {
         let api = StreamingMockApiClient::new(vec![
-            streamed_tool_use_turn(nke_tool, "tool_use"),
+            streamed_tool_use_turn(tool, "tool_use"),
             streamed_text_turn("done", "end_turn"),
         ]);
         let invoker = CountingInvoker::new();
@@ -6941,28 +6940,40 @@ async fn loop_nke_tool_refusal_includes_companion_note() {
         run_subagent(ctx, event_rx, out_tx).await;
         let evs = drain(out_rx).await;
 
-        let note_present = evs.iter().any(|e| {
+        let refusal_text = evs.iter().find_map(|e| {
             let SubagentEvent::Message { message, .. } = e else {
-                return false;
+                return None;
             };
             let Some(ConversationMessage::User { content, .. }) =
                 try_conversation_message_from_projection(message)
             else {
-                return false;
+                return None;
             };
-            content.iter().any(|b| {
-                matches!(b,
-                    ContentBlock::ToolResult { is_error: Some(true), content, .. }
-                    if content.string_at("").is_some_and(|text|
-                        text.contains("not available inside subagents")
-                            && text.contains(nke_tool)
-                            && text.contains("return findings to the orchestrator"))
-                )
+            content.iter().find_map(|block| {
+                let ContentBlock::ToolResult {
+                    is_error: Some(true),
+                    content,
+                    ..
+                } = block
+                else {
+                    return None;
+                };
+                content.string_at("").map(str::to_owned)
             })
         });
+        let refusal_text = refusal_text.expect("a denied tool call emits an error ToolResult");
         assert!(
-            note_present,
-            "§7 companion note missing from refusal for nke tool {nke_tool}; got {evs:?}"
+            refusal_text.contains(&format!(
+                "tool {tool:?} is not in this agent's allowed tools"
+            )),
+            "denied tool reason is preserved: {refusal_text:?}"
+        );
+        let note_present = refusal_text.contains("not available inside subagents")
+            && refusal_text.contains(tool)
+            && refusal_text.contains("return findings to the orchestrator");
+        assert_eq!(
+            note_present, expect_companion_note,
+            "unexpected §7 companion-note result for denied tool {tool}; got {evs:?}"
         );
     }
 }
@@ -10665,7 +10676,6 @@ async fn oversized_mandatory_prompt_is_rejected_before_provider_call() {
 /// Build an assistant message whose only content block is a `ToolUse`.
 fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
     ConversationMessage::Assistant {
-        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolUse {
             id,
@@ -11723,7 +11733,9 @@ async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
         for name in std::iter::once("Skill").chain(second_tool) {
             registry.register_builtin(Arc::new(NestedToolEffectsProbe {
                 name,
-                schema: serde_json::json!({"type":"object","additionalProperties":true}),
+                schema: test_projection(
+                    &serde_json::json!({"type":"object","additionalProperties":true}),
+                ),
                 snapshots: Arc::new(Mutex::new(Vec::new())),
                 modifier_order: Arc::new(Mutex::new(Vec::new())),
                 meta_seen: Arc::new(AtomicUsize::new(0)),
@@ -11737,7 +11749,7 @@ async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
             picked.content.push(llm_runtime::ContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: name.into(),
-                input: serde_json::json!({}),
+                input: json_payload(&serde_json::json!({})),
             });
         }
         let api = MockSubagentApiClient::new(vec![
@@ -12070,7 +12082,6 @@ async fn a_subagent_that_never_refused_carries_no_note() {
 #[test]
 fn retracted_messages_are_dropped_but_notices_survive() {
     let assistant = |text: &str| ConversationMessage::Assistant {
-        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: text.to_string(),
@@ -12229,7 +12240,12 @@ async fn tool_reported_error_and_context_reach_model_history() {
                 == "<system-reminder>\ntool.call hook additional context: Contents of /tmp/AGENTS.md:\n\nNested rule\n</system-reminder>"
     }));
     assert!(events.iter().any(|event| {
-        matches!(event, SubagentEvent::Message { message, .. } if message["content"].as_array().is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result" && block["is_error"] == true && block["content"] == "Contract unavailable")))
+        matches!(event, SubagentEvent::Message { message, .. } if message.array_len("/content").is_some_and(|count| (0..count).any(|index| {
+            let block = format!("/content/{index}");
+            message.string_at(&format!("{block}/type")) == Some("tool_result")
+                && message.at_pointer(&format!("{block}/is_error")).and_then(|value| value.as_bool()) == Some(true)
+                && message.string_at(&format!("{block}/content")) == Some("Contract unavailable")
+        })))
     }));
     assert!(events.iter().any(|event| {
         matches!(event, SubagentEvent::Message { message, .. }
@@ -13092,6 +13108,7 @@ async fn cold_resumed_child_screens_source_attachment_without_sending_restore_ma
             .unwrap(),
         ),
         subtype: Some("mod_attachment_source".into()),
+        api_system: None,
         compact_metadata: None,
         model_fallback: None,
         refusal_fallback: None,
@@ -13259,8 +13276,8 @@ impl hooks::executor::BuiltinHookHandler for RecordingChildHookRoute {
             .push((event.event_type(), ctx.clone()));
         hooks::HookResult {
             outcome: hooks::HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -13306,9 +13323,11 @@ fn nested_model_modifiers_resolve_in_order_without_mutating_original_state() {
         })
     };
     let state = Some(
-        lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(
-            tool_api::ToolUseContext::model_seed("start".into(), Some("a".into())),
-        )),
+        lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new({
+            let mut context = tool_api::ToolUseContext::model_seed("start".into());
+            context.options.model_profile = Some("a".into());
+            context
+        })),
     );
     let prepared = apply_nested_tool_context_modifiers(
         &state,
@@ -13551,6 +13570,7 @@ impl tool_api::Tool for NestedToolEffectsProbe {
                 })),
                 mcp_meta: None,
                 is_error: false,
+                subagent_hooks_fired: false,
             }),
             _ => Ok(tool_api::ToolCallResult::from_data(
                 tool_api::tool_trait::generated_builtin_result(
@@ -13595,7 +13615,19 @@ async fn concurrency_safe_skill_override_updates_the_next_query_after_same_turn_
         Ok(tool_use_response("NestedObserve", Some("tool_use"))),
         Ok(text_response("done", Some("end_turn"))),
     ]);
-    let ctx = loop_ctx(api.clone(), Some(invoker), 4);
+    let mut ctx = loop_ctx(api.clone(), Some(invoker), 4);
+    ctx.agent_definition.model = AgentModel::Explicit("initial".into());
+    ctx.model_profile = Some("origin-provider".into());
+    ctx.model_resolution_context_provider = Some(Arc::new(|model: &str, profile: Option<&str>| {
+        Ok(crate::model_resolution::ModelResolutionContext {
+            route: crate::model_resolution::ModelRouteFacts {
+                model: model.to_string(),
+                profile: profile.map(str::to_string),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }));
     let (event_tx, event_rx) = mpsc::channel(1);
     drop(event_tx);
     let (out_tx, out_rx) = mpsc::channel(64);

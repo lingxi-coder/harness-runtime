@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
+use crate::protocol::ask_user_question::{
+    AskOptionDto, AskQuestionDto, AskUserQuestionAnswersDto, AskUserQuestionRequestDto,
+};
 use crate::protocol::events::ClientEvent;
 use crate::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -14,6 +16,22 @@ use tokio::task::JoinHandle;
 use tool_api::ask_user_question::{AskOption, AskQuestion, AskUserQuestionExchange};
 
 use crate::adapter::ClientEventSink;
+
+impl AskUserQuestionAnswersDto {
+    /// Convert ordered FFI answer pairs into the model-facing source carrier.
+    #[must_use]
+    pub fn into_projections(self) -> Vec<(Utf16JsonProjection, Utf16JsonProjection)> {
+        self.pairs
+            .into_iter()
+            .map(|pair| {
+                (
+                    pair.question.into_projection(),
+                    pair.answer.into_projection(),
+                )
+            })
+            .collect()
+    }
+}
 
 const MAX_PENDING_ASK_USER_QUESTIONS: usize = 64;
 const PUBLICATION_QUEUED: u8 = 0;

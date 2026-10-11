@@ -3,6 +3,24 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
@@ -246,7 +264,7 @@ mod tests {
                 // (2 hits) the port used to emit here. That call-phase constant
                 // is still kept, byte-locked, for its own branch.
                 assert!(
-                    err.to_string().contains(
+                    source_text(&err.model_facing_message()).contains(
                         "File has been modified since read, either by the user or by a linter."
                     ),
                     "expected the validate-phase stale error, got: {err}"
@@ -278,9 +296,9 @@ mod tests {
             "path": "/p.txt", "old_str": "a", "new_str": "b", "replace_name": "true"
         }));
         normalize_edit_aliases(&mut v);
-        assert_eq!(v.string_at("/file_path").as_deref(), Some("/p.txt"));
-        assert_eq!(v.string_at("/old_string").as_deref(), Some("a"));
-        assert_eq!(v.string_at("/new_string").as_deref(), Some("b"));
+        assert_eq!(v.string_at("/file_path"), Some("/p.txt"));
+        assert_eq!(v.string_at("/old_string"), Some("a"));
+        assert_eq!(v.string_at("/new_string"), Some("b"));
         assert_eq!(
             v.at_pointer("/replace_all")
                 .and_then(|value| value.as_bool()),
@@ -296,8 +314,8 @@ mod tests {
             "replace_name": true,
         }));
         normalize_edit_aliases(&mut v);
-        assert_eq!(v.string_at("/file_path").as_deref(), Some("/canon.txt")); // explicit canonical wins
-        assert_eq!(v.string_at("/old_string").as_deref(), Some("x"));
+        assert_eq!(v.string_at("/file_path"), Some("/canon.txt")); // explicit canonical wins
+        assert_eq!(v.string_at("/old_string"), Some("x"));
         assert_eq!(
             v.at_pointer("/replace_all")
                 .and_then(|value| value.as_bool()),
@@ -520,10 +538,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        // `ToolError::InvalidInput`'s Display prefixes "invalid input: "; the
+        // `ToolError::InvalidInput`'s Display prefixes ""; the
         // byte-exact model-facing message is the contained substring.
         assert!(
-            err.to_string()
+            source_text(&err.model_facing_message())
                 .ends_with("File is too large to edit (1GB). Maximum editable file size is 1GB."),
             "unexpected error: {err}"
         );
@@ -676,7 +694,7 @@ that bypasses Perforce tracking."
                 .await
                 .unwrap_err();
             assert!(
-                !err.to_string().contains("File is read-only"),
+                !source_text(&err.model_facing_message()).contains("File is read-only"),
                 "Perforce gate must stay dormant when mode is off; got: {err}"
             );
         }
@@ -700,7 +718,7 @@ that bypasses Perforce tracking."
                 .await
                 .unwrap_err();
             assert!(
-                err.to_string().ends_with(PERFORCE_READ_ONLY_MESSAGE),
+                source_text(&err.model_facing_message()).ends_with(PERFORCE_READ_ONLY_MESSAGE),
                 "expected byte-exact Perforce message; got: {err}"
             );
         }
@@ -724,7 +742,7 @@ that bypasses Perforce tracking."
                 .await
                 .unwrap_err();
             assert!(
-                !err.to_string().contains("File is read-only"),
+                !source_text(&err.model_facing_message()).contains("File is read-only"),
                 "owner-writable file must skip the Perforce gate; got: {err}"
             );
         }
@@ -790,8 +808,7 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap_err();
-        assert!(err
-            .to_string()
+        assert!(source_text(&err.model_facing_message())
             .contains("Cannot create new file - file already exists."));
         // original content untouched
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "already here");
@@ -839,8 +856,8 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("Jupyter Notebook"));
-        assert!(err.to_string().contains("NotebookEdit"));
+        assert!(source_text(&err.model_facing_message()).contains("Jupyter Notebook"));
+        assert!(source_text(&err.model_facing_message()).contains("NotebookEdit"));
     }
 
     #[tokio::test]
@@ -863,7 +880,7 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("No changes to make"));
+        assert!(source_text(&err.model_facing_message()).contains("No changes to make"));
     }
 
     #[tokio::test]
@@ -889,7 +906,7 @@ that bypasses Perforce tracking."
         // shares `missing`'s stem and the path is under cwd, so neither
         // `" Did you mean ...?"` suffix fires.
         let cwd = std::fs::canonicalize(tmp.path()).unwrap();
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
         assert!(
             msg.ends_with(&format!(
                 "File does not exist. Note: your current working directory is {}.",

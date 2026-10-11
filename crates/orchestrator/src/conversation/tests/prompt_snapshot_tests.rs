@@ -5,7 +5,7 @@ use crate::test_support::{
 use crate::OrchestratorConfig;
 use lingxi_core::host::{PromptSnapshot, PromptToolDescription};
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
-use serde_json::{json, Value};
+use serde_json::json;
 use session::jsonl::JsonlMessage;
 use std::sync::{Arc, Mutex as StdMutex};
 use tool_api::context::ToolUseContext;
@@ -188,13 +188,10 @@ fn attachment(payload: serde_json::Value) -> JsonlMessage {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: Source::object(vec![(
-            "attachment".to_string(),
+        extra: Source::object(Vec::new()).unwrap(),
+        attachment_projection: Some(
             Source::from_serde_value(&payload).expect("generated fixture JSON is valid"),
-        )])
-        .unwrap(),
-
-        attachment_projection: None,
+        ),
         tool_use_result_projection: None,
         mcp_meta_projection: None,
         turn_companion: None,
@@ -251,7 +248,7 @@ fn prompt_snapshot_reads_only_current_native_fields() {
 }
 
 #[tokio::test]
-async fn snapshot_persists_the_native_marker_as_its_own_source_block() {
+async fn snapshot_restores_the_provider_cache_boundary_as_its_own_source_block() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     std::env::remove_var("CLAUDE_CODE_SIMPLE");
 
@@ -322,7 +319,7 @@ async fn snapshot_persists_the_native_marker_as_its_own_source_block() {
     );
     let raw = orch.effective_system_prompt().await;
     let provider = orch.provider_system_prompt().await.display_text();
-    assert!(raw.starts_with("shared\n\nsession"));
+    assert!(raw.starts_with(&format!("shared\n\n{marker}\n\nsession")));
     assert!(provider.starts_with(&format!("shared\n\n{marker}\n\nsession")));
 }
 
@@ -591,7 +588,7 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         let rows = JsonlReader::new(path, fs.clone()).read_all().await.unwrap();
         let snapshots = rows
             .iter()
-            .filter_map(|row| row.extra.subprojection("/attachment").ok())
+            .filter_map(|row| row.attachment_projection.clone())
             .filter(|payload| payload.string_at("/type") == Some("prompt_snapshot"))
             .collect::<Vec<_>>();
         assert_eq!(snapshots.len(), 2);
@@ -605,6 +602,7 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
             );
             assert!(!payload.contains_property("hostBrandingIdentity"));
             assert!(!payload.contains_property("brandingIdentity"));
+            assert!(!payload.contains_property("systemPromptUtf16"));
         }
 
         let cold_marker = "policy loaded only after cold resume";
@@ -660,9 +658,10 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
             .system_prompt_utf16
             .iter()
             .all(Option::is_none));
-        assert!(
-            cold_snapshot.system_prompt_utf16.is_empty(),
-            "the Native snapshot attachment has no parallel UTF-16 sidecar field"
+        assert_eq!(
+            cold_snapshot.system_prompt_utf16,
+            vec![None; cold_snapshot.system_prompt.len()],
+            "valid strings use parallel empty slots only in memory"
         );
         assert_eq!(cold.current_context_rendering().await, rendering);
         cold.run_turn("cold prompt").await.unwrap();
@@ -761,7 +760,7 @@ async fn prompt_snapshot_writer_omits_absent_rendering_on_legacy_tool_update() {
     let rows = JsonlReader::new(path, fs).read_all().await.unwrap();
     let payload = rows
         .iter()
-        .filter_map(|row| row.extra.subprojection("/attachment").ok())
+        .filter_map(|row| row.attachment_projection.clone())
         .find(|payload| payload.string_at("/type") == Some("prompt_snapshot"))
         .unwrap();
     assert!(!payload.contains_property("contextRendering"));
@@ -924,13 +923,12 @@ async fn prompt_snapshot_keeps_raw_utf16_on_disk_but_cold_domain_uses_native_dis
     let snapshot_row = rows
         .iter()
         .find(|row| {
-            row.extra
-                .subprojection("/attachment")
-                .ok()
+            row.attachment_projection
+                .as_ref()
                 .is_some_and(|payload| payload.string_at("/type") == Some("prompt_snapshot"))
         })
         .unwrap();
-    let attachment = snapshot_row.extra.subprojection("/attachment").unwrap();
+    let attachment = snapshot_row.attachment_projection.as_ref().unwrap();
     assert_eq!(attachment.string_at("/systemPrompt/0"), Some("�Ω�"));
 
     assert_eq!(
@@ -939,7 +937,7 @@ async fn prompt_snapshot_keeps_raw_utf16_on_disk_but_cold_domain_uses_native_dis
     );
     let cold = crate::resume::prompt_snapshot_from_messages(&rows).unwrap();
     assert_eq!(cold.system_prompt, vec!["�Ω�"]);
-    assert!(cold.system_prompt_utf16.is_empty());
+    assert_eq!(cold.system_prompt_utf16, vec![Some(units.clone())]);
     assert_eq!(cold.tools.len(), 1);
     assert_eq!(
         cold.tools[0].description.string_units(""),

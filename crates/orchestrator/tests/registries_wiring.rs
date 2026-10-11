@@ -15,7 +15,6 @@ use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

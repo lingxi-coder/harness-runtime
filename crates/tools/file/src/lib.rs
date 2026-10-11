@@ -589,10 +589,7 @@ mod staleness_guard_tests {
         let r = check_read_before_write(&map, &p, 200, "new content", false);
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
-                assert_eq!(
-                    m.string_at("").as_deref(),
-                    Some(FILE_UNEXPECTEDLY_MODIFIED_ERROR)
-                );
+                assert_eq!(m.string_at(""), Some(FILE_UNEXPECTEDLY_MODIFIED_ERROR));
             }
             other => panic!("expected InvalidInput with the validateInput literal, got {other:?}"),
         }
@@ -624,10 +621,7 @@ mod staleness_guard_tests {
         let r = check_read_before_write(&map, &p, 200, "body\n", false);
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
-                assert_eq!(
-                    m.string_at("").as_deref(),
-                    Some(FILE_UNEXPECTEDLY_MODIFIED_ERROR)
-                );
+                assert_eq!(m.string_at(""), Some(FILE_UNEXPECTEDLY_MODIFIED_ERROR));
             }
             other => panic!("expected InvalidInput with the validateInput literal, got {other:?}"),
         }
@@ -655,7 +649,7 @@ mod staleness_guard_tests {
     fn assert_err_msg(r: Result<(), ToolError>, expected: &str) {
         match r.unwrap_err() {
             ToolError::InvalidInput(m) => {
-                assert_eq!(m.string_at("").as_deref(), Some(expected))
+                assert_eq!(m.string_at(""), Some(expected))
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -964,7 +958,7 @@ mod staleness_guard_tests {
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
                 assert_eq!(
-                    m.string_at("").as_deref(),
+                    m.string_at(""),
                     Some(FILE_UNEXPECTEDLY_MODIFIED_ERROR),
                     "a waived model must still be told the file changed"
                 );

@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
 use lingxi_core::host::panel_pool::PanelAdmissionCancellation as CancellationToken;
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-use serde_json::Value;
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::{Barrier, Notify};
 

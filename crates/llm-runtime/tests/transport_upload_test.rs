@@ -11,7 +11,6 @@ use std::sync::{
 use std::time::Duration;
 fn upload(polls: Arc<AtomicUsize>) -> HttpStreamRequest {
     HttpStreamRequest {
-        http1_header_layout: None,
         method: "POST".into(),
         url: "https://example.com/files".into(),
         headers: vec![("content-type".into(), "application/octet-stream".into())],

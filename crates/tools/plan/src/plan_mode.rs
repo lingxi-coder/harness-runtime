@@ -908,6 +908,24 @@ impl Tool for ExitPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::{AgentId, SessionId};
     use lingxi_core::SessionState;
@@ -1037,8 +1055,8 @@ mod tests {
             .await
             .expect_err("enter in agent context must fail");
         assert_eq!(
-            format!("{err}"),
-            "invalid input: EnterPlanMode tool cannot be used in agent contexts"
+            source_text(&err.model_facing_message()),
+            "EnterPlanMode tool cannot be used in agent contexts"
         );
         // The guard runs before any session mutation.
         assert!(!session.lock().await.plan_mode);
@@ -1060,8 +1078,8 @@ mod tests {
             .await
             .expect_err("second enter must fail");
         assert_eq!(
-            format!("{err}"),
-            "invalid input: EnterPlanMode: session is already in plan mode"
+            source_text(&err.model_facing_message()),
+            "EnterPlanMode: session is already in plan mode"
         );
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&ENTER_PLAN_MODE_FAILED.to_string()));
@@ -1322,12 +1340,12 @@ mod tests {
         // Out-of-plan-mode rejection now matches TS `validateInput`
         // (`ExitPlanModeV2Tool.ts:212-216`).
         assert_eq!(
-            format!("{err}"),
-            format!("invalid input: {EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG}")
+            source_text(&err.model_facing_message()),
+            format!("{EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG}")
         );
         assert_eq!(
-            format!("{err}"),
-            "invalid input: You are not in plan mode. To enter plan mode, call the EnterPlanMode tool first. If your plan was already approved, continue with implementation."
+            source_text(&err.model_facing_message()),
+            "You are not in plan mode. To enter plan mode, call the EnterPlanMode tool first. If your plan was already approved, continue with implementation."
         );
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&EXIT_PLAN_MODE_FAILED.to_string()));

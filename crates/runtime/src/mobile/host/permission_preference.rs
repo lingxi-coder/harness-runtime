@@ -62,11 +62,9 @@ mod tests {
             save(dir.path(), mode).unwrap();
             assert_eq!(load(dir.path()).unwrap().wire_str(), mode);
         }
-        assert!(
-            std::fs::read_to_string(dir.path().join("settings.json"))
-                .unwrap()
-                .contains("defaultMode\":\"default")
-        );
+        assert!(std::fs::read_to_string(dir.path().join("settings.json"))
+            .unwrap()
+            .contains("defaultMode\":\"default"));
     }
     #[test]
     fn invalid_preferences_do_not_become_permission_grants() {

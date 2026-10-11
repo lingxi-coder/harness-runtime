@@ -406,7 +406,7 @@ impl DesktopFusionCommandHandler {
             Err(message) => {
                 return CommandResult::Done {
                     display: Some(message.into()),
-                }
+                };
             }
         };
         if let Some(run_id) = retry_run_id {

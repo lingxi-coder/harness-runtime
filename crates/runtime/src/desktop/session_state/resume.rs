@@ -131,11 +131,10 @@ fn native_opening_state(
     let row = transcript
         .lines()
         .filter_map(|line| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line).ok())
-        .filter(|row| {
+        .rfind(|row| {
             row.string_at("/type") == Some("cost-state")
                 && row.string_at("/sessionId") == Some(sid.as_str())
-        })
-        .last();
+        });
     let Some(row) = row else { return Ok(None) };
     let mut state = CostState {
         session_id,

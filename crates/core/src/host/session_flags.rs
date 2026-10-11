@@ -891,9 +891,14 @@ mod request_session_tests {
     async fn request_origin_is_frozen_before_async_task_transfer() {
         let origin = crate::types::SessionId::new();
         let replacement = crate::types::SessionId::new();
-        let bound = scope_request_session_id(origin, async {
-            bind_current_request_session_id(async { current_request_session_id() })
-        })
+        let bound = scope_request_session_id(
+            origin,
+            std::future::poll_fn(|_| {
+                std::task::Poll::Ready(bind_current_request_session_id(async {
+                    current_request_session_id()
+                }))
+            }),
+        )
         .await;
         let observed =
             scope_request_session_id(replacement, async { tokio::spawn(bound).await.unwrap() })
@@ -910,16 +915,19 @@ mod request_subagent_origin_tests {
     #[tokio::test]
     async fn subagent_fact_shares_session_origin_and_survives_task_transfer() {
         let parent = crate::types::SessionId::new();
-        let work = scope_subagent_request_session_id(Some(parent), async {
-            bind_current_request_session_id(async move {
-                assert_eq!(current_request_session_id(), Some(parent));
-                assert!(current_request_is_subagent());
-                scope_request_session_id(parent, async {
+        let work = scope_subagent_request_session_id(
+            Some(parent),
+            std::future::poll_fn(|_| {
+                std::task::Poll::Ready(bind_current_request_session_id(async move {
+                    assert_eq!(current_request_session_id(), Some(parent));
                     assert!(current_request_is_subagent());
-                })
-                .await;
-            })
-        })
+                    scope_request_session_id(parent, async {
+                        assert!(current_request_is_subagent());
+                    })
+                    .await;
+                }))
+            }),
+        )
         .await;
         scope_request_session_id(crate::types::SessionId::new(), async {
             assert!(!current_request_is_subagent());

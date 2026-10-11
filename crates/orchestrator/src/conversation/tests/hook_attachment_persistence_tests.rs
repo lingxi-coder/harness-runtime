@@ -294,7 +294,6 @@ mod tool_frame_ordering_tests {
             &projection_string("REAL OUTPUT"),
             &projection_from_value(&serde_json::json!({ "stdout": "REAL OUTPUT" })),
             None,
-            None,
         )
         .await;
         orch.release_tool_frame(&id, "Bash", &projection_string("SYNTHETIC"), true)
@@ -327,7 +326,6 @@ mod tool_frame_ordering_tests {
             &projection_string("REAL OUTPUT"),
             &projection_from_value(&serde_json::json!({ "error": "aborted" })),
             Some("interrupted"),
-            None,
         )
         .await;
         orch.record_tool_denial_kind(&id, "user-rejected").await;
@@ -458,7 +456,6 @@ mod tool_frame_ordering_tests {
             &projection_string("out"),
             &projection_from_value(&serde_json::json!({"stdout": "out"})),
             Some("interrupted"),
-            None,
         )
         .await;
         orch.record_tool_use_result(
@@ -658,6 +655,7 @@ async fn discarded_result_cleanup_removes_only_its_queued_attachments() {
     drop(queued);
 
     let accepted_result = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: accepted.clone(),

@@ -26,8 +26,8 @@
 pub mod blocklist;
 pub mod cache;
 mod markdown;
-mod source;
 pub mod persist;
+mod source;
 #[cfg(test)]
 mod testsupport;
 pub mod url_safety;

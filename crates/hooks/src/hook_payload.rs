@@ -1958,10 +1958,8 @@ pub fn parse_response_projection(
     }
 
     // The binary never reads a bare top-level `permissionDecision`.
-    if expected_event != "PermissionRequest" {
-        if obj.get_property("reason").is_some() {
-            resp.reason = ExactHookText::from_json_projection(projection, "/reason");
-        }
+    if expected_event != "PermissionRequest" && obj.get_property("reason").is_some() {
+        resp.reason = ExactHookText::from_json_projection(projection, "/reason");
     }
 
     if let Some(hs) = obj.get_property("hookSpecificOutput") {
@@ -2153,13 +2151,13 @@ pub fn parse_response_projection(
                 }
             }
         }
-        if expected_event != "PermissionRequest" {
-            if hs.get_property("permissionDecisionReason").is_some() {
-                resp.reason = ExactHookText::from_json_projection(
-                    projection,
-                    "/hookSpecificOutput/permissionDecisionReason",
-                );
-            }
+        if expected_event != "PermissionRequest"
+            && hs.get_property("permissionDecisionReason").is_some()
+        {
+            resp.reason = ExactHookText::from_json_projection(
+                projection,
+                "/hookSpecificOutput/permissionDecisionReason",
+            );
         }
 
         if let Some(action) = hs.get_property("action").and_then(|value| value.as_str()) {
@@ -2195,13 +2193,11 @@ pub fn parse_response_projection(
                 resp.suppress_original_prompt = suppress;
             }
         }
-        if expected_event == "MessageDisplay" {
-            if hs.get_property("displayContent").is_some() {
-                resp.display_content = ExactHookText::from_json_projection(
-                    projection,
-                    "/hookSpecificOutput/displayContent",
-                );
-            }
+        if expected_event == "MessageDisplay" && hs.get_property("displayContent").is_some() {
+            resp.display_content = ExactHookText::from_json_projection(
+                projection,
+                "/hookSpecificOutput/displayContent",
+            );
         }
         if let Some(paths) = hs.get_property("watchPaths") {
             let length = paths

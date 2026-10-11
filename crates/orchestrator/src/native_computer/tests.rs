@@ -906,7 +906,7 @@ impl Fixture {
     ) -> Result<crate::turn_loop::DeferredToolDispatch, OrchestratorError> {
         let response_id = blocks.iter().find_map(|block| match block {
             ContentBlock::ProviderContent { value, .. }
-                if value.string_at("/type").as_deref() == Some("lingxi_computer_binding") =>
+                if value.string_at("/type") == Some("lingxi_computer_binding") =>
             {
                 value.string_at("/provider_response_id")
             }
@@ -926,9 +926,9 @@ impl Fixture {
                             if content.iter().any(|block| matches!(
                                 block,
                                 ContentBlock::ProviderContent { value, .. }
-                                    if value.string_at("/type").as_deref()
+                                    if value.string_at("/type")
                                         == Some("lingxi_computer_binding")
-                                        && value.string_at("/provider_response_id").as_deref()
+                                        && value.string_at("/provider_response_id")
                                     == Some(*response_id)
                             ))
                     )
@@ -1112,7 +1112,6 @@ fn claude_screenshot() -> llm_runtime::HistoryResponse {
         NativeComputerProvider::Anthropic,
         vec![
             llm_runtime::ContentBlock::ToolCall {
-                input_projection: None,
                 id: "call-1".into(),
                 name: "screenshot".into(),
                 input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
@@ -1144,7 +1143,6 @@ async fn ordinary_batch_images_use_the_existing_turn_driver_and_final_hook_outpu
         let request = response(
             NativeComputerProvider::OpenAi,
             vec![llm_runtime::ContentBlock::ToolCall {
-                input_projection: None,
                 id: "batch-1".into(),
                 name: "computer".into(),
                 input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
@@ -1226,6 +1224,155 @@ async fn ordinary_batch_images_use_the_existing_turn_driver_and_final_hook_outpu
             "ordinary audit retains the raw wrapper, including after hook removal"
         );
     }
+}
+
+fn native_binding_projection_mut(message: &mut ConversationMessage) -> &mut Utf16JsonProjection {
+    let ConversationMessage::Assistant { content, .. } = message else {
+        panic!("native binding is part of the assistant response");
+    };
+    content
+        .iter_mut()
+        .find_map(|block| match block {
+            ContentBlock::ProviderContent { value, .. }
+                if value.string_at("/type") == Some("lingxi_computer_binding") =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+        .expect("native response has a binding marker")
+}
+
+async fn assert_native_binding_mismatch(
+    fixture: &Fixture,
+    message: &ConversationMessage,
+    response: &llm_runtime::HistoryResponse,
+) {
+    let error = persist_native_assistant(&fixture.orch, message, response, None, fixture.fence())
+        .await
+        .expect_err("a changed source value or identity must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("append hook changed a native response binding"),
+        "expected the native binding guard to reject the mutation, got {error}"
+    );
+}
+
+#[tokio::test]
+async fn native_binding_canonical_source_json_normalizes_values_and_preserves_identity() {
+    let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    fixture.native().await;
+    let response = openai(json!([
+        {"type":"click","x":0.0,"y":0.0,"button":"left"},
+        {"type":"type","text":"\u{fffd}"}
+    ]));
+    let provider_value = match &response.content[0] {
+        llm_runtime::ContentBlock::ProviderContent { value, .. } => value,
+        _ => panic!("fixture retains its native provider value"),
+    };
+    let raw_call = provider_value
+        .payload_at("/block/value/data")
+        .expect("native call has its raw data payload");
+    assert!(raw_call.as_json_source().contains("\"x\":0.0"));
+
+    let blocks = fixture.bind(&response).await.unwrap();
+    let message = ConversationMessage::Assistant {
+        per_turn_effort: None,
+        id: MessageId::new(),
+        content: blocks,
+        stop_reason: response.stop_reason.clone(),
+        resumable: None,
+    };
+
+    let mut changed_coordinate = message.clone();
+    native_binding_projection_mut(&mut changed_coordinate)
+        .replace_pointer_projection(
+            "/original_blocks/0/value/data/actions/0/x",
+            Utf16JsonProjection::parse("1").unwrap(),
+        )
+        .unwrap();
+    assert_native_binding_mismatch(&fixture, &changed_coordinate, &response).await;
+
+    // JavaScript stringification normalizes integer-index key order.
+    let numeric_keys =
+        Utf16JsonProjection::parse(r#"{"10":"ten","2":"two","label":"value"}"#).unwrap();
+    assert_eq!(
+        numeric_keys.to_json_string().unwrap(),
+        r#"{"2":"two","10":"ten","label":"value"}"#
+    );
+
+    let mut changed_object_order = message.clone();
+    let binding = native_binding_projection_mut(&mut changed_object_order);
+    let action_pointer = "/original_blocks/0/value/data/actions/1";
+    let action = binding.subprojection(action_pointer).unwrap();
+    let entries = action.object_entries().unwrap();
+    assert!(entries.iter().any(|entry| entry.display_key == "text"));
+    assert!(entries.iter().any(|entry| entry.display_key == "type"));
+    let mut fields = entries
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.code_units.to_vec(),
+                action
+                    .subprojection_property_units(entry.code_units)
+                    .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(fields.len() > 1);
+    fields.reverse();
+    let reordered_action = Utf16JsonProjection::object_units(fields).unwrap();
+    binding
+        .replace_pointer_projection(action_pointer, reordered_action)
+        .unwrap();
+    assert_native_binding_mismatch(&fixture, &changed_object_order, &response).await;
+
+    let mut changed_array_order = message.clone();
+    let binding = native_binding_projection_mut(&mut changed_array_order);
+    let actions_pointer = "/original_blocks/0/value/data/actions";
+    let actions = binding.subprojection(actions_pointer).unwrap();
+    let length = actions.array_len("").unwrap();
+    assert_eq!(length, 2);
+    let mut items = (0..length)
+        .map(|index| actions.subprojection(&format!("/{index}")).unwrap())
+        .collect::<Vec<_>>();
+    items.reverse();
+    binding
+        .replace_pointer_projection(actions_pointer, Utf16JsonProjection::array(items).unwrap())
+        .unwrap();
+    assert_native_binding_mismatch(&fixture, &changed_array_order, &response).await;
+
+    let mut changed_source_units = message.clone();
+    let binding = native_binding_projection_mut(&mut changed_source_units);
+    let text_pointer = "/original_blocks/0/value/data/actions/1/text";
+    assert_eq!(binding.string_at(text_pointer), Some("\u{fffd}"));
+    binding.set_string_units(text_pointer, &[0xd800]).unwrap();
+    assert_eq!(binding.string_at(text_pointer), Some("\u{fffd}"));
+    assert_eq!(binding.string_units(text_pointer), Some(vec![0xd800]));
+    assert_native_binding_mismatch(&fixture, &changed_source_units, &response).await;
+
+    let mut changed_call_id = message.clone();
+    native_binding_projection_mut(&mut changed_call_id)
+        .set_string_units(
+            "/call/context/call_id",
+            &"call-2".encode_utf16().collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_native_binding_mismatch(&fixture, &changed_call_id, &response).await;
+
+    let mut changed_response_id = message.clone();
+    native_binding_projection_mut(&mut changed_response_id)
+        .set_string_units(
+            "/provider_response_id",
+            &"other-response".encode_utf16().collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_native_binding_mismatch(&fixture, &changed_response_id, &response).await;
+
+    persist_native_assistant(&fixture.orch, &message, &response, None, fixture.fence())
+        .await
+        .expect("0.0 and its canonical source value 0 retain the same native binding");
 }
 
 #[tokio::test]
@@ -1661,7 +1808,7 @@ async fn live_unfinished_native_outputs_abandon_the_old_call_without_replaying_i
                 ConversationMessage::User { content, .. } | ConversationMessage::Assistant { content, .. } => content.as_slice(),
                 ConversationMessage::System { .. } => &[],
             }).any(|b| matches!(b,
-                ContentBlock::ProviderContent { value, .. } if value.string_at("/type").as_deref() == Some("lingxi_computer_abandoned"))));
+                ContentBlock::ProviderContent { value, .. } if value.string_at("/type") == Some("lingxi_computer_abandoned"))));
             let invalidations = fixture.computer.invalidations.load(Ordering::SeqCst);
             assert_eq!(invalidations, 1);
             let messages = llm_runtime::convert::to_llm_messages(
@@ -1695,7 +1842,6 @@ async fn live_unfinished_native_outputs_abandon_the_old_call_without_replaying_i
             // old unfinished audit facts cannot continually revoke it.
             let observed = fixture
                 .dispatch(vec![ContentBlock::ToolUse {
-                    input_projection: None,
                     id: ToolUseId::new(),
                     name: "computer".into(),
                     input: core_source!({"action":"screenshot"}),
@@ -1749,7 +1895,6 @@ async fn native_members_keep_their_position_among_ordinary_calls() {
     response.content.insert(
         0,
         llm_runtime::ContentBlock::ToolCall {
-            input_projection: None,
             id: "click-1".into(),
             name: "left_click".into(),
             input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
@@ -1910,7 +2055,6 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
         .is_none());
     let function = fixture
         .dispatch(vec![ContentBlock::ToolUse {
-            input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: core_source!({"action":"request_access"}),
@@ -1932,7 +2076,6 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
         .unwrap();
     blocks.extend(
         ["Read", "mcp__computer-use__click"].map(|name| ContentBlock::ToolUse {
-            input_projection: None,
             id: ToolUseId::new(),
             name: name.into(),
             input: core_source!({}),
@@ -2007,7 +2150,6 @@ async fn partial_backend_keeps_working_function_tools_without_native_declaration
         .unwrap();
     let dispatched = fixture
         .dispatch(vec![ContentBlock::ToolUse {
-            input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: core_source!({"action":"screenshot"}),
@@ -2249,7 +2391,7 @@ async fn fresh_owner_does_not_append_completed_rows_after_a_retained_successor_b
     fixture.orch.session.lock().await.history.retain(|message| !matches!(message,
         ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block,
             ContentBlock::ToolResult { .. }) || matches!(block,
-            ContentBlock::ProviderContent { value, .. } if value.string_at("/type").as_deref() == Some("lingxi_computer_receipt")))));
+            ContentBlock::ProviderContent { value, .. } if value.string_at("/type") == Some("lingxi_computer_receipt")))));
     let retained = serde_json::to_value(&fixture.orch.session.lock().await.history).unwrap();
     let transcript_before = std::fs::read(&fixture.transcript_path).unwrap();
     fixture.forget_runtime().await;
@@ -2301,7 +2443,6 @@ async fn old_unknown_call_id_does_not_invalidate_a_new_successful_response_scope
 
     let observed = fixture
         .dispatch(vec![ContentBlock::ToolUse {
-            input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: core_source!({"action":"screenshot"}),
@@ -2404,7 +2545,6 @@ async fn compacted_unknown_input_uses_its_durable_binding_without_replaying_or_r
     )));
     let observed = fixture
         .dispatch(vec![ContentBlock::ToolUse {
-            input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: core_source!({"action":"screenshot"}),
@@ -2662,7 +2802,7 @@ async fn recovered_receipt_is_in_the_actual_turn_request_before_submission() {
             };
             !content.iter().any(|block| {
                 matches!(block,
-            ContentBlock::ProviderContent {value,..} if value.string_at("/type").as_deref()==Some("lingxi_computer_receipt"))
+            ContentBlock::ProviderContent {value,..} if value.string_at("/type")==Some("lingxi_computer_receipt"))
             })
         });
         fixture
@@ -2830,7 +2970,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 }
                 let origin_id = fixture.orch.session.lock().await.history.iter().find(|message| matches!(message,
                 ConversationMessage::Assistant {content,..} if content.iter().any(|block| matches!(block,
-                    ContentBlock::ProviderContent {value,..} if value.string_at("/type").as_deref()==Some("lingxi_computer_binding"))))).unwrap().id();
+                    ContentBlock::ProviderContent {value,..} if value.string_at("/type")==Some("lingxi_computer_binding"))))).unwrap().id();
                 let later = ConversationMessage::user(
                     MessageId::new(),
                     "continue after the receipt".into(),

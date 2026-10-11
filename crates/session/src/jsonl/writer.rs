@@ -8,8 +8,7 @@ use crate::jsonl::durable_writer::{
     DurableTranscriptWriter, TranscriptAppendOutcome, TranscriptWriterError,
 };
 use crate::jsonl::exact_json::{
-    native_message_bytes, native_message_projection, parse_exact_json, stringify_projection,
-    to_vec_with_overrides, ExactJsonError, Utf16Overrides,
+    native_message_bytes, native_message_projection, parse_exact_json, ExactJsonError,
 };
 use crate::jsonl::message_identity::{self, IdentityLogStore, SessionMessageIdentitySnapshot};
 use crate::jsonl::re_append::{
@@ -1149,7 +1148,7 @@ impl JsonlWriter {
                         parent,
                         &identity,
                         &relative,
-                        serde_json::from_str(&operation_payload).map_err(|error| {
+                        Utf16JsonProjection::parse(&operation_payload).map_err(|error| {
                             TranscriptWriterError::Fs(FsError::Io(error.to_string()))
                         })?,
                     ) {
@@ -2347,25 +2346,47 @@ impl JsonlWriter {
         self.append_side_record(&value).await
     }
 
-    /// Physically remove a rejected attempt, as cc 2.1.263
-    /// `performRemoveByUuid` does. Preserve untouched rows byte for byte;
-    /// repair children because this writer persists streamed blocks eagerly.
-    /// Returns the surviving chain tail for the next append.
+    /// Physically remove a rejected attempt by its message or row identities,
+    /// as cc 2.1.263 does for each tombstoned assistant message. Preserve
+    /// untouched rows byte for byte and repair children after removing the
+    /// eagerly persisted streamed rows. Returns the surviving chain tail.
     pub async fn remove_retry_attempt(
         &self,
         message_id: &str,
+    ) -> Result<Option<String>, WriterError> {
+        self.remove_retry_attempt_rows(&[message_id.to_owned()])
+            .await
+    }
+
+    /// Remove all transcript rows belonging to one rejected attempt.
+    ///
+    /// The identifiers may contain the logical assistant identity, streamed
+    /// row UUIDs, or provider message IDs. Streaming rows have their own UUIDs,
+    /// so callers pass every row UUID rather than assuming the logical turn ID
+    /// is the persisted row ID.
+    pub async fn remove_retry_attempt_rows(
+        &self,
+        message_ids: &[String],
     ) -> Result<Option<String>, WriterError> {
         let _guard = self.lock.lock().await;
         let path = self.active_path();
         let source = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| FsError::Io(e.to_string()))?;
+        let message_ids = message_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
         let mut removed = std::collections::HashMap::new();
         for line in source.lines() {
             if let Ok(row) = Utf16JsonProjection::parse(line) {
                 if row.string_at("/type") == Some("assistant")
-                    && (row.string_at("/uuid") == Some(message_id)
-                        || row.string_at("/message/id") == Some(message_id))
+                    && (row
+                        .string_at("/uuid")
+                        .is_some_and(|id| message_ids.contains(id))
+                        || row
+                            .string_at("/message/id")
+                            .is_some_and(|id| message_ids.contains(id)))
                 {
                     if let Some(id) = row.string_at("/uuid") {
                         removed.insert(
@@ -2800,6 +2821,15 @@ impl JsonlWriter {
 
 #[cfg(test)]
 mod tests {
+    fn read_message(value: serde_json::Value) -> JsonlMessage {
+        let source = serde_json::to_string(&value).unwrap();
+        crate::jsonl::reader::route_lines(&source)
+            .messages_in_order
+            .into_iter()
+            .next()
+            .expect("message row")
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -2839,7 +2869,6 @@ mod tests {
 
     #[test]
     fn queue_drain_restores_unfinished_records_before_concurrent_arrivals() {
-        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
         let source: QueueOperationBuffer = Default::default();
         let mut drain = QueueOperationDrain {
             source: source.clone(),
@@ -3072,7 +3101,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), native);
         let loaded = crate::jsonl::reader::route_lines(native);
         assert_eq!(
-            loaded.by_uuid["native-user"].message["content"], "updated",
+            loaded.by_uuid["native-user"].message.string_at("/content"),
+            Some("updated"),
             "Native JSONL keeps last-write-wins content while Host identity keeps first index"
         );
         writer
@@ -3391,16 +3421,12 @@ mod tests {
         let loaded = crate::jsonl::reader::route_lines(&raw);
         assert_eq!(loaded.malformed_line_count, 0);
         assert_eq!(loaded.messages_in_order.len(), 4);
-        assert_eq!(
-            loaded.messages_in_order[0]
-                .extra
-                .string_units("/origin/body"),
-            Some(vec![0xd83d])
-        );
-        assert_eq!(
-            loaded.messages_in_order[0].extra.string_at("/origin/kind"),
-            Some("peer")
-        );
+        let origin = loaded.messages_in_order[0]
+            .origin_projection
+            .as_ref()
+            .unwrap();
+        assert_eq!(origin.string_units("/body"), Some(vec![0xd83d]));
+        assert_eq!(origin.string_at("/kind"), Some("peer"));
     }
 
     #[tokio::test]

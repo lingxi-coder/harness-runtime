@@ -177,18 +177,20 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
     let batched = Arc::new(MockApiClient::new(Vec::new()));
 
-    let orch = ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
-        batched,
-        api,
-        registry_with_three(),
-        orchestrator::test_support::noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
-        Arc::new(StaticMemoryProvider::empty()),
-        PathBuf::from("/tmp"),
-    )
-    .with_jsonl_writer(writer);
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            batched,
+            api,
+            registry_with_three(),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_jsonl_writer(writer),
+    );
 
     let _ = orch
         .run_turn_streaming("call three tools")

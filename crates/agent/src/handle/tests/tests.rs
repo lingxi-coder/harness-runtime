@@ -101,9 +101,9 @@ impl ToolInvoker for ModeReportingInvoker {
     async fn invoke(
         &self,
         name: &str,
-        input: Value,
+        input: Utf16JsonProjection,
         context: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
         DummyInvoker.invoke(name, input, context).await
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -936,9 +936,6 @@ async fn observer_receives_resolved_type_and_ordered_terminal_event() {
     let spawner = test_spawner(pool)
         .with_api_client(api)
         .with_spawn_observer(observer.clone());
-    let statistics =
-        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
-    let token = statistics.prepare_spawn("general-purpose".into(), Some(false), false, 1);
     let mut request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
         "subagent_type": "unknown-agent-type",
         "prompt": "finish"
@@ -1251,6 +1248,9 @@ async fn persistent_stop_flushes_cancelled_transcript_before_deallocation() {
         .with_transcript_fs(fs);
     let mut request = minimal_spawn_request("go");
     request.run_in_background = true;
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    let token = statistics.prepare_spawn("general-purpose".into(), Some(true), true, 1);
     request.agent_spawn_token = Some(token);
     let (agent_id, mut events) = spawner
         .spawn_persistent(request, dummy_inherit())
@@ -1352,7 +1352,7 @@ async fn dropped_spawn_future_lets_runner_reach_cancelled_before_hard_abort() {
     let statistics =
         Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
     request.agent_spawn_token =
-        Some(statistics.prepare_spawn("general-purpose".into(), None, false, 1));
+        Some(statistics.prepare_spawn("general-purpose".into(), Some(true), true, 1));
 
     let spawn_result = tokio::time::timeout(
         std::time::Duration::from_millis(50),
@@ -1664,7 +1664,7 @@ async fn handback_spawn_keeps_registered_sender_separate_from_anonymous_type_dis
         assert!(ctx
             .tool_schemas
             .iter()
-            .any(|tool| tool["name"] == lingxi_core::host::handback::HANDBACK_TOOL_NAME));
+            .any(|tool| tool.name == lingxi_core::host::handback::HANDBACK_TOOL_NAME));
     }
     // A definition fallback is not an immediate-parent permission carrier.
     let spawner = spawner
@@ -2511,7 +2511,7 @@ async fn an_unwired_hook_link_lets_the_spawn_through() {
     let spawner = test_spawner(pool);
 
     let rewritten = spawner
-        .apply_agent_spawn_hook(&minimal_spawn_request("do the thing"), None)
+        .apply_agent_spawn_hook(&minimal_spawn_request("do the thing"), None, None)
         .await
         .expect("an unwired hook executor must not refuse the spawn");
     assert!(rewritten.is_none(), "nothing rewrote the request");
@@ -2535,7 +2535,7 @@ async fn a_released_hook_link_refuses_the_spawn_rather_than_running_it_unhooked(
 
     // Wired: the hook runs, and this registry has nothing to say about it.
     assert!(spawner
-        .apply_agent_spawn_hook(&minimal_spawn_request("before drain"), None)
+        .apply_agent_spawn_hook(&minimal_spawn_request("before drain"), None, None)
         .await
         .expect("a wired executor with no matching hook allows the spawn")
         .is_none());
@@ -2544,7 +2544,7 @@ async fn a_released_hook_link_refuses_the_spawn_rather_than_running_it_unhooked(
     assert!(spawner.hook_executor_handle().is_sealed());
 
     let refused = spawner
-        .apply_agent_spawn_hook(&minimal_spawn_request("after drain"), None)
+        .apply_agent_spawn_hook(&minimal_spawn_request("after drain"), None, None)
         .await;
     let Err(SubagentSpawnError::Runtime(message)) = refused else {
         panic!(
@@ -3357,11 +3357,18 @@ async fn resolve_definition_user_defined_explore_keeps_its_own_model() {
 async fn resolve_definition_without_default_model_leaves_model_raw() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
-    // No default model wired (legacy/tests): the alias is NOT resolved — the
-    // runner's resolve_model then emits it raw (back-compat).
-    let spawner = test_spawner(pool);
+    // No default model wired: a custom alias remains the source preference
+    // until a parent route is available to resolve it.
+    let custom = AgentDefinition {
+        agent_type: "custom-alias".into(),
+        model: AgentModel::Alias("sonnet".into()),
+        ..agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        })
+    };
+    let spawner = test_spawner(pool).with_agent_catalog(Arc::new(RwLock::new(vec![custom])));
     let def = spawner
-        .resolve_definition("statusline-setup", None)
+        .resolve_definition("custom-alias", None)
         .await
         .unwrap();
     assert!(matches!(&def.model, AgentModel::Alias(m) if m == "sonnet"));
@@ -3450,7 +3457,7 @@ async fn provider_qualified_live_selection_drives_spawn_and_explore_metadata() {
             )))
         }));
 
-    let selected = spawner.resolve_selection("Explore", None).await;
+    let selected = spawner.resolve_selection("Explore", None, None).await;
     assert_eq!(selected.resolved_model, "deepseek-flash");
 
     let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
@@ -3791,10 +3798,19 @@ async fn qualified_child_model_changes_profile_with_duplicate_models() {
         4,
     ));
     let spawner = multi_profile_spawner(pool, "parent-a", "a");
-    let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "b/shared-balanced" })).unwrap();
-    let context = build_test_spawn(&spawner, &request).await.unwrap();
-    assert_eq!(crate::runner::resolve_model(&context), "shared-balanced");
-    assert_eq!(context.model_profile.as_deref(), Some("b"));
+    for (qualified_model, expected_profile) in
+        [("a/shared-balanced", "a"), ("b/shared-balanced", "b")]
+    {
+        let request = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "inspect",
+            "model": qualified_model,
+        }))
+        .unwrap();
+        let context = build_test_spawn(&spawner, &request).await.unwrap();
+        assert_eq!(crate::runner::resolve_model(&context), "shared-balanced");
+        assert_eq!(context.model_profile.as_deref(), Some(expected_profile));
+    }
 }
 
 #[tokio::test]
@@ -3814,8 +3830,13 @@ async fn child_tool_prompts_follow_admitted_route_instead_of_parent_defaults() {
         assert_eq!(crate::runner::resolve_model(&context), "shared-balanced");
         assert_eq!(context.model_profile.as_deref(), Some(profile));
         assert_eq!(
-            context.tool_schemas[0]["description"],
-            format!("model=Some(\"shared-balanced\"), profile=Some(\"{profile}\")")
+            context.tool_schemas[0]
+                .description
+                .string_at("")
+                .map(str::to_owned),
+            Some(format!(
+                "model=Some(\"shared-balanced\"), profile=Some(\"{profile}\")"
+            ))
         );
     }
 }
@@ -3833,8 +3854,8 @@ async fn direct_tool_resolver_uses_current_default_route_for_inherited_model() {
     });
     let (schemas, _) = spawner.resolve_tools(&definition, 0, &[]).await.unwrap();
     assert_eq!(
-        schemas[0]["description"],
-        "model=Some(\"parent-b\"), profile=Some(\"b\")"
+        schemas[0].description.string_at(""),
+        Some("model=Some(\"parent-b\"), profile=Some(\"b\")")
     );
 }
 
@@ -3972,7 +3993,10 @@ async fn spawn_hook_changes_child_model_and_profile_before_resolution() {
     ));
     let spawner = multi_profile_spawner(pool, "parent-a", "a");
     let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "parent-a", "model_profile": "a", "parent_model_override": "parent-a", "parent_model_profile_override": "a" })).unwrap();
-    let rewritten = apply_spawn_rewrite(&request, Some(&serde_json::json!({ "model": "shared-balanced", "model_profile": "b", "parent_model_profile_override": "b" }))).unwrap().unwrap();
+    let modified = Utf16JsonProjection::from_serde_value(&serde_json::json!({ "model": "shared-balanced", "model_profile": "b", "parent_model_profile_override": "b" })).unwrap();
+    let rewritten = apply_spawn_rewrite(&request, Some(&modified))
+        .unwrap()
+        .unwrap();
     assert_eq!(
         rewritten.parent_model_profile_override.as_deref(),
         Some("a")
@@ -5510,7 +5534,7 @@ async fn build_subagent_context_trusted_parent_mode_replaces_root_dispatch_mode(
                 context
                     .tool_schemas
                     .iter()
-                    .any(|tool| tool["name"] == write_tool),
+                    .any(|tool| tool.name == write_tool),
                 parent_mode.is_none()
             );
         }
@@ -5552,10 +5576,7 @@ async fn build_subagent_context_trusted_auto_parent_suppresses_definition_plan_n
         AgentPermissionMode::Bubble
     );
     assert!(context.allowed_tools.contains(&"Write".into()));
-    assert!(context
-        .tool_schemas
-        .iter()
-        .any(|tool| tool["name"] == "Write"));
+    assert!(context.tool_schemas.iter().any(|tool| tool.name == "Write"));
 }
 
 #[tokio::test]
@@ -5586,7 +5607,10 @@ async fn build_subagent_context_fork_preserves_trusted_parent_mode_and_exact_too
     assert_eq!(context.permission_mode_override.as_deref(), Some("plan"));
     assert!(context.allowed_tools.contains(&"Write".into()));
     assert_eq!(
-        context.rendered_system_prompt.as_deref(),
+        context
+            .rendered_system_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.string_at("")),
         Some("parent prompt")
     );
 }
@@ -6779,10 +6803,29 @@ async fn resolve_selection_builtin_is_built_in_and_source() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     let spawner = test_spawner(pool);
-    let meta = spawner.resolve_selection("Explore", None).await;
+    let meta = spawner.resolve_selection("Explore", None, None).await;
     assert_eq!(meta.agent_type, "Explore");
     assert_eq!(meta.source, "built-in");
     assert!(meta.is_built_in);
+}
+
+#[tokio::test]
+async fn resolve_selection_uses_explicit_profile_for_model_aliases() {
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let pool = Arc::new(StateMachinePool::new(runtime, 4));
+    let spawner = multi_profile_spawner(pool, "parent-a", "a");
+    let concrete = spawner
+        .resolve_selection("general-purpose", Some("gpt-model"), Some("openai"))
+        .await;
+    assert_eq!(concrete.resolved_model, "gpt-model");
+
+    let unsupported_alias = spawner
+        .resolve_selection("general-purpose", Some("sonnet"), Some("openai"))
+        .await;
+    assert_eq!(
+        unsupported_alias.resolved_model, "",
+        "an explicit profile with no Sonnet route must not silently use the parent's profile"
+    );
 }
 
 #[tokio::test]
@@ -6797,7 +6840,7 @@ async fn resolve_selection_catalog_project_source_mapped() {
     def.color = Some("green".into());
     let catalog = Arc::new(RwLock::new(vec![def]));
     let spawner = test_spawner(pool).with_agent_catalog(catalog);
-    let meta = spawner.resolve_selection("proj-agent", None).await;
+    let meta = spawner.resolve_selection("proj-agent", None, None).await;
     assert_eq!(meta.source, "projectSettings");
     assert!(!meta.is_built_in);
     assert_eq!(meta.color.as_deref(), Some("green"));
@@ -6834,13 +6877,13 @@ async fn resolve_selection_surfaces_only_valid_observer_specs() {
     let catalog = Arc::new(RwLock::new(vec![reviewer, worker, invalid]));
     let spawner = test_spawner(pool).with_agent_catalog(catalog);
 
-    let valid = spawner.resolve_selection("worker", None).await;
+    let valid = spawner.resolve_selection("worker", None, None).await;
     assert_eq!(
         valid.observer.as_ref().map(|spec| spec.agent.as_str()),
         Some("reviewer")
     );
 
-    let invalid = spawner.resolve_selection("invalid", None).await;
+    let invalid = spawner.resolve_selection("invalid", None, None).await;
     assert!(
         invalid.observer.is_none(),
         "invalid observer graphs must fail closed before spawn metadata"
@@ -7071,7 +7114,7 @@ async fn resolve_selection_strips_observer_when_experimental_gate_is_off() {
     let catalog = Arc::new(RwLock::new(vec![reviewer, worker]));
     let spawner = test_spawner(pool).with_agent_catalog(catalog);
 
-    let meta = spawner.resolve_selection("worker", None).await;
+    let meta = spawner.resolve_selection("worker", None, None).await;
     assert!(
         meta.observer.is_none(),
         "observer declarations stay parsed but must not arm by default"
@@ -7090,7 +7133,9 @@ async fn resolve_selection_surfaces_definition_isolation() {
     let catalog = Arc::new(RwLock::new(vec![def]));
     let spawner = test_spawner(pool).with_agent_catalog(catalog);
 
-    let meta = spawner.resolve_selection("isolated-agent", None).await;
+    let meta = spawner
+        .resolve_selection("isolated-agent", None, None)
+        .await;
 
     assert_eq!(meta.isolation.as_deref(), Some("worktree"));
 }

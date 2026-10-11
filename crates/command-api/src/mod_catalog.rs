@@ -11,20 +11,20 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-type UJP = Utf16JsonProjection;
+type Ujp = Utf16JsonProjection;
 
-fn string_projection(value: &str) -> UJP {
-    UJP::root_string(value.to_owned(), value.encode_utf16().collect())
+fn string_projection(value: &str) -> Ujp {
+    Ujp::root_string(value.to_owned(), value.encode_utf16().collect())
         .expect("Rust string is representable as a source projection")
 }
 
-fn projection_from_units(units: Vec<u16>) -> UJP {
-    UJP::root_string(String::from_utf16_lossy(&units), units)
+fn projection_from_units(units: Vec<u16>) -> Ujp {
+    Ujp::root_string(String::from_utf16_lossy(&units), units)
         .expect("display projection is derived from the same UTF-16 units")
 }
 
-fn object_projection(fields: Vec<(&str, UJP)>) -> UJP {
-    UJP::object(
+fn object_projection(fields: Vec<(&str, Ujp)>) -> Ujp {
+    Ujp::object(
         fields
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value))
@@ -33,7 +33,7 @@ fn object_projection(fields: Vec<(&str, UJP)>) -> UJP {
     .expect("fixed command response members are unique")
 }
 
-fn split_projection_name(name: &UJP) -> Option<(Vec<u16>, Vec<u16>)> {
+fn split_projection_name(name: &Ujp) -> Option<(Vec<u16>, Vec<u16>)> {
     let units = name.string_units("")?;
     let separator = b':' as u16;
     let index = units.iter().position(|unit| *unit == separator)?;
@@ -70,7 +70,7 @@ impl Default for ModCommandRunContext {
 
 tokio::task_local! {
     static COMMAND_RUN_CONTEXT: ModCommandRunContext;
-    static COMMAND_RUN_SETTLEMENT: Arc<std::sync::Mutex<Option<UJP>>>;
+    static COMMAND_RUN_SETTLEMENT: Arc<std::sync::Mutex<Option<Ujp>>>;
 }
 
 /// Scope a host-supplied command origin and presentation to one dispatch.
@@ -86,7 +86,7 @@ pub async fn with_mod_command_context<F: Future>(
 pub async fn with_mod_command_capture<F: Future>(
     context: ModCommandRunContext,
     dispatch: F,
-) -> (F::Output, Option<UJP>) {
+) -> (F::Output, Option<Ujp>) {
     let settlement = Arc::new(std::sync::Mutex::new(None));
     let output = COMMAND_RUN_SETTLEMENT
         .scope(
@@ -102,7 +102,7 @@ pub async fn with_mod_command_capture<F: Future>(
 }
 
 /// Record the unprefixed API result for the queued command's waiter.
-pub fn record_mod_command_settlement(result: UJP) {
+pub fn record_mod_command_settlement(result: Ujp) {
     let _ = COMMAND_RUN_SETTLEMENT.try_with(|settlement| {
         *settlement
             .lock()
@@ -464,8 +464,8 @@ mod tests {
     use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
     use lingxi_core::types::PluginId;
 
-    fn source_json(value: &Value) -> UJP {
-        UJP::from_serde_value(value).expect("test fixture is JSON")
+    fn source_json(value: &Value) -> Ujp {
+        Ujp::from_serde_value(value).expect("test fixture is JSON")
     }
 
     struct EchoExecutor;
@@ -477,10 +477,10 @@ mod tests {
         async fn run(
             &self,
             _plugin: &str,
-            _command: &UJP,
-            args: &UJP,
+            _command: &Ujp,
+            args: &Ujp,
             context: ModCommandRunContext,
-        ) -> Result<UJP, UJP> {
+        ) -> Result<Ujp, Ujp> {
             let args = args.string_at("").unwrap_or_default();
             Ok(format!(
                 "{}:{}:{}:{args}",
@@ -500,16 +500,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ModCommandQueue for PromptRecordingQueue {
-        async fn enqueue(&self, _: &str, _: UJP, _: UJP) -> Result<UJP, UJP> {
+        async fn enqueue(&self, _: &str, _: Ujp, _: Ujp) -> Result<Ujp, Ujp> {
             unreachable!("prompt fixture never queues a command")
         }
 
         async fn enqueue_prompt(
             &self,
             plugin: &str,
-            text: UJP,
+            text: Ujp,
             as_user: bool,
-        ) -> Result<UJP, String> {
+        ) -> Result<Ujp, String> {
             let text = text
                 .string_at("")
                 .ok_or_else(|| "expected prompt string".to_owned())?;
@@ -523,13 +523,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ModCommandQueue for RecordingQueue {
-        async fn enqueue(&self, plugin: &str, command: UJP, args: UJP) -> Result<UJP, UJP> {
+        async fn enqueue(&self, plugin: &str, command: Ujp, args: Ujp) -> Result<Ujp, Ujp> {
             let command = command
                 .string_at("")
-                .ok_or_else(|| UJP::from("expected command string"))?;
+                .ok_or_else(|| Ujp::from("expected command string"))?;
             let args = args
                 .string_at("")
-                .ok_or_else(|| UJP::from("expected args string"))?;
+                .ok_or_else(|| Ujp::from("expected args string"))?;
             self.0
                 .lock()
                 .unwrap()
@@ -546,10 +546,10 @@ mod tests {
         async fn run(
             &self,
             plugin: &str,
-            command: &UJP,
-            args: &UJP,
+            command: &Ujp,
+            args: &Ujp,
             _context: ModCommandRunContext,
-        ) -> Result<UJP, UJP> {
+        ) -> Result<Ujp, Ujp> {
             let command = command.string_at("").unwrap_or_default();
             let args = args.string_at("").unwrap_or_default();
             Ok(format!("{plugin}:{command}:{args}").into())

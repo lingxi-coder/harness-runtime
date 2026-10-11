@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-type UJP = Utf16JsonProjection;
+type Ujp = Utf16JsonProjection;
 
 /// Selected model identity supplied by the owning session for bundled prompts.
 pub type BundledPromptModelProvider = Arc<
@@ -1044,7 +1044,7 @@ fn split_mcp_prompt_arguments(raw_args: &Utf16JsonProjection) -> Vec<Utf16JsonPr
 fn bind_mcp_prompt_arguments(
     declarations: &[lingxi_core::host::McpPromptArgumentDto],
     positional: &[Utf16JsonProjection],
-) -> Result<UJP, String> {
+) -> Result<Ujp, String> {
     let mut fields = Vec::with_capacity(declarations.len().min(positional.len()));
     for (index, declaration) in declarations.iter().enumerate() {
         match positional.get(index) {
@@ -1061,10 +1061,10 @@ fn bind_mcp_prompt_arguments(
             None => {}
         }
     }
-    UJP::object_units(fields).map_err(|error| error.to_string())
+    Ujp::object_units(fields).map_err(|error| error.to_string())
 }
 
-fn render_mcp_prompt_result(result: &UJP) -> Result<UJP, String> {
+fn render_mcp_prompt_result(result: &Ujp) -> Result<Ujp, String> {
     let messages = result
         .at_pointer("")
         .and_then(|root| root.get_property("messages"))
@@ -1111,9 +1111,9 @@ fn render_mcp_prompt_result(result: &UJP) -> Result<UJP, String> {
 
 /// Render MCP prompt content without converting its source strings through a
 /// recursive `serde_json::Value`. Array traversal is iterative and flat.
-fn render_mcp_prompt_content(content: &UJP) -> Result<UJP, String> {
+fn render_mcp_prompt_content(content: &Ujp) -> Result<Ujp, String> {
     enum Work {
-        Projection(UJP),
+        Projection(Ujp),
         Newline,
     }
 
@@ -1174,7 +1174,7 @@ fn render_mcp_prompt_content(content: &UJP) -> Result<UJP, String> {
                 ));
             } else {
                 output.extend(
-                    UJP::from(resource.to_json_string().map_err(|e| e.to_string())?)
+                    Ujp::from(resource.to_json_string().map_err(|e| e.to_string())?)
                         .string_units("")
                         .unwrap_or_default(),
                 );
@@ -1183,7 +1183,7 @@ fn render_mcp_prompt_content(content: &UJP) -> Result<UJP, String> {
         }
 
         output.extend(
-            UJP::from(source.to_json_string().map_err(|error| error.to_string())?)
+            Ujp::from(source.to_json_string().map_err(|error| error.to_string())?)
                 .string_units("")
                 .unwrap_or_default(),
         );
@@ -1191,22 +1191,22 @@ fn render_mcp_prompt_content(content: &UJP) -> Result<UJP, String> {
     Ok(projection_from_units(output))
 }
 
-fn projection_from_units(units: Vec<u16>) -> UJP {
+fn projection_from_units(units: Vec<u16>) -> Ujp {
     let display = String::from_utf16_lossy(&units);
-    UJP::root_string(display, units)
+    Ujp::root_string(display, units)
         .expect("display projection is derived from the same UTF-16 units")
 }
 
-fn source_text(value: &UJP) -> Option<&str> {
+fn source_text(value: &Ujp) -> Option<&str> {
     value.string_at("")
 }
 
 /// Convert to the safe display form only for UI/log/error output.
-fn source_display(value: &UJP) -> String {
+fn source_display(value: &Ujp) -> String {
     value.string_at("").unwrap_or_default().to_owned()
 }
 
-fn command_source_message(name: &UJP, suffix: &str) -> UJP {
+fn command_source_message(name: &Ujp, suffix: &str) -> Ujp {
     crate::model::source_concat([
         crate::model::PromptPart::Source(name),
         crate::model::PromptPart::Text(suffix),
@@ -1238,7 +1238,7 @@ mod tests {
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
 
         for text in ["/", "/  \t", "/\u{2003}", "/ (MCP)"] {
-            let raw = UJP::from(text);
+            let raw = Ujp::from(text);
             assert_eq!(
                 dispatcher.dispatch(raw.clone()).await,
                 SlashDispatchResult::ParseFailure { input: raw },
@@ -1252,7 +1252,7 @@ mod tests {
         let dispatcher =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
         assert_eq!(
-            dispatcher.dispatch(UJP::from(" /not-a-command")).await,
+            dispatcher.dispatch(Ujp::from(" /not-a-command")).await,
             SlashDispatchResult::NotASlashCommand
         );
     }
@@ -1262,7 +1262,7 @@ mod tests {
         let dispatcher =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
         let units = vec![b'/' as u16, 0xd800, b' ' as u16, b'x' as u16];
-        let raw = UJP::root_string(String::from_utf16_lossy(&units), units).unwrap();
+        let raw = Ujp::root_string(String::from_utf16_lossy(&units), units).unwrap();
         assert_eq!(
             dispatcher.dispatch(raw.clone()).await,
             SlashDispatchResult::RunAsTurn { prompt: raw }
@@ -1274,9 +1274,9 @@ mod tests {
         let dispatcher =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
         assert_eq!(
-            dispatcher.dispatch(UJP::from("/missing-command")).await,
+            dispatcher.dispatch(Ujp::from("/missing-command")).await,
             SlashDispatchResult::Unknown {
-                name: UJP::from("missing-command"),
+                name: Ujp::from("missing-command"),
                 display: "Unknown command: /missing-command".into(),
             }
         );
@@ -1284,7 +1284,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_routes_exact_command_and_raw_prompt_utf16_units() {
-        let name = UJP::root_string(
+        let name = Ujp::root_string(
             "custom�".into(),
             vec![
                 b'c' as u16,
@@ -1301,7 +1301,7 @@ mod tests {
         raw_units.extend(name.string_units("").unwrap());
         raw_units.push(b' ' as u16);
         raw_units.extend([b'x' as u16, 0xdfff]);
-        let raw = UJP::root_string(String::from_utf16_lossy(&raw_units), raw_units).unwrap();
+        let raw = Ujp::root_string(String::from_utf16_lossy(&raw_units), raw_units).unwrap();
 
         let mut registry = CommandRegistry::new();
         registry.register_command(crate::model::SlashCommand {
@@ -1333,7 +1333,7 @@ mod tests {
         ]
         .concat();
         let name =
-            UJP::root_string(String::from_utf16_lossy(&name_units), name_units.clone()).unwrap();
+            Ujp::root_string(String::from_utf16_lossy(&name_units), name_units.clone()).unwrap();
         let command = SlashCommand {
             name,
             description: "review".into(),
@@ -1350,14 +1350,21 @@ mod tests {
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
 
         let raw_units = [
-            vec![0xfeff, b' ' as u16, b'/' as u16],
+            vec![b'/' as u16],
             "team\u{2003}review".encode_utf16().collect(),
             vec![0xd800],
             " arg".encode_utf16().collect(),
             vec![0xdfff],
         ]
         .concat();
-        let raw = UJP::root_string(String::from_utf16_lossy(&raw_units), raw_units).unwrap();
+        let prefixed_units = [vec![0xfeff, b' ' as u16], raw_units.clone()].concat();
+        let prefixed =
+            Ujp::root_string(String::from_utf16_lossy(&prefixed_units), prefixed_units).unwrap();
+        assert!(matches!(
+            dispatcher.dispatch_without_mod_hooks(&prefixed).await,
+            SlashDispatchResult::NotASlashCommand
+        ));
+        let raw = Ujp::root_string(String::from_utf16_lossy(&raw_units), raw_units).unwrap();
         let SlashDispatchResult::RunAsTurn { prompt } =
             dispatcher.dispatch_without_mod_hooks(&raw).await
         else {
@@ -1784,7 +1791,7 @@ mod tests {
     #[tokio::test]
     async fn just_slash_is_a_parse_failure() {
         let d = seeded_dispatcher();
-        let raw = UJP::from("/");
+        let raw = Ujp::from("/");
         assert_eq!(
             d.dispatch(raw.clone()).await,
             SlashDispatchResult::ParseFailure { input: raw }

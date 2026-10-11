@@ -41,7 +41,6 @@
 
 use crate::definition::{AgentDefinition, AgentPermissionMode, AgentToolPolicy};
 use crate::model_resolution::ResolvedModelSelection;
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashSet;
 use std::sync::Arc;
 use thiserror::Error;
@@ -543,6 +542,7 @@ mod tests {
     use super::*;
     use crate::definition::{AgentModel, AgentSource};
     use async_trait::async_trait;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use serde_json::Value;
     use tool_api::context::ToolUseContext;
     use tool_api::progress::ToolProgressSender;

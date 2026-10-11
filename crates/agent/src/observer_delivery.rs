@@ -536,6 +536,7 @@ mod projection_tests {
                 .expect("test provider content is valid JSON"),
             }],
             stop_reason: None,
+            per_turn_effort: None,
             resumable: None,
         };
 

@@ -2083,7 +2083,7 @@ impl TaskRegistry {
             }
         }
         running_teammates.sort();
-        background_agents.sort_by(|left, right| left.string_units("").cmp(&right.string_units("")));
+        background_agents.sort_by_key(|agent| agent.string_units(""));
         lingxi_core::host::task_registry::TaskNotFoundRosters {
             running_teammates,
             background_agents,
@@ -7288,23 +7288,29 @@ mod adopted_workflow_scope_test {
             .unwrap();
         let shell = registry.get("bevent002").await.unwrap();
         events.try_recv().unwrap();
-        let mut value = serde_json::to_value(shell.base()).unwrap();
-        let object = value.as_object_mut().unwrap();
-        object.insert("id".into(), serde_json::json!("aobserver"));
-        object.insert("task_type".into(), serde_json::json!("LocalAgent"));
-        object.insert(
-            "agent_id".into(),
-            serde_json::json!(lingxi_core::types::AgentId::new()),
-        );
-        object.insert("is_observer".into(), serde_json::json!(true));
-        object.insert(
-            "prompt".into(),
-            serde_json::json!("private observer prompt"),
-        );
-        object.insert("messages".into(), serde_json::json!([]));
-        object.insert("pending_messages".into(), serde_json::json!([]));
-        object.insert("is_backgrounded".into(), serde_json::json!(true));
-        let observer: crate::state::LocalAgentTaskState = serde_json::from_value(value).unwrap();
+        let mut base = shell.base().clone();
+        base.id = "aobserver".into();
+        base.task_type = TaskType::LocalAgent;
+        let observer = crate::state::LocalAgentTaskState {
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
+            handback: None,
+            handback_history: Vec::new(),
+            is_parked: false,
+            is_observer: true,
+            observed_agent_id: None,
+            base,
+            agent_id: lingxi_core::types::AgentId::new(),
+            subagent_type: String::new(),
+            prompt: Utf16JsonProjection::from("private observer prompt"),
+            error: None,
+            messages: Vec::new(),
+            pending_messages: Vec::new(),
+            is_backgrounded: true,
+            forked_skill_name: None,
+            outcome: Default::default(),
+        };
         registry
             .tasks
             .write()

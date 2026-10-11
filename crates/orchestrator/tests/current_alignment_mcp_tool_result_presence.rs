@@ -1,3 +1,5 @@
+//! Compare MCP tool-result presence, model-request bytes, and session persistence with Native 2.1.295 fixtures.
+
 mod common;
 
 use bytes::Bytes;
@@ -26,8 +28,7 @@ use tool_api::registry::ToolRegistry;
 use tool_api::tool_trait::Tool;
 use tool_mcp::MCPTool;
 
-const MCP_PRESENCE_NATIVE_DIR: &str =
-    "../../docs/parity/current-alignment/fixtures/tool-result-presence-295/native-baseline/2.1.295/mcp-three-iserror-cases";
+const MCP_PRESENCE_NATIVE_DIR: &str = "../../docs/parity/current-alignment/fixtures/tool-result-presence-295/native-baseline/2.1.295/mcp-three-iserror-cases";
 const MCP_PRESENCE_INITIALIZE_DIR: &str =
     "../../docs/parity/current-alignment/fixtures/mcp-mime-295/native-baseline/2.1.295/mcp-jsonrpc";
 const MCP_PRESENCE_SESSION_ID: &str = "00000000-0000-4000-8000-000000002300";
@@ -127,9 +128,10 @@ fn raw_member_span(bytes: &[u8], start: usize, wanted: &str) -> (usize, usize) {
         "expected JSON object at {start}"
     );
     let mut position = raw_skip_space(bytes, start + 1);
-    if bytes.get(position) == Some(&b'}') {
-        panic!("missing JSON object property {wanted}");
-    }
+    assert!(
+        bytes.get(position) != Some(&b'}'),
+        "missing JSON object property {wanted}"
+    );
     loop {
         let key_start = position;
         let key_end = raw_string_end(bytes, key_start);
@@ -159,9 +161,10 @@ fn raw_element_span(bytes: &[u8], start: usize, wanted: usize) -> (usize, usize)
         "expected JSON array at {start}"
     );
     let mut position = raw_skip_space(bytes, start + 1);
-    if bytes.get(position) == Some(&b']') {
-        panic!("missing JSON array index {wanted}");
-    }
+    assert!(
+        bytes.get(position) != Some(&b']'),
+        "missing JSON array index {wanted}"
+    );
     let mut index = 0;
     loop {
         let value_start = position;
@@ -527,9 +530,49 @@ async fn native_mcp_iserror_presence_round_trips_as_exact_model_tool_result_byte
             .unwrap_or_else(|| panic!("SDK requests contain tool_result for {name} ({use_id})"));
         let native = read_fixture(&native_dir, native_filename);
         assert_eq!(
-            candidate,
-            native,
+            candidate, native,
             "full raw SDK model tool_result must match the Native 2.1.295 bytes for {name}; no field stripping or reserialization",
         );
     }
+
+    let candidate_session =
+        std::fs::read_to_string(&session_path).expect("candidate MCP session JSONL");
+    let candidate_error_row = candidate_session
+        .lines()
+        .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+        .find(|row| {
+            row.string_at("/type") == Some("user")
+                && row.string_at("/message/content/0/type") == Some("tool_result")
+                && row.string_at("/message/content/0/tool_use_id")
+                    == Some("toolu_native_iserror_true_295")
+        })
+        .expect("candidate session persists the Native MCP failure result");
+    let native_session = read_fixture(&native_dir, "native-session.raw.jsonl");
+    let native_error_row = std::str::from_utf8(&native_session)
+        .expect("Native session JSONL is UTF-8")
+        .lines()
+        .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+        .find(|row| {
+            row.string_at("/type") == Some("user")
+                && row.string_at("/message/content/0/type") == Some("tool_result")
+                && row.string_at("/message/content/0/tool_use_id")
+                    == Some("toolu_native_iserror_true_295")
+        })
+        .expect("Native session contains the MCP failure result");
+    assert_eq!(
+        candidate_error_row.string_units("/message/content/0/content"),
+        native_error_row.string_units("/message/content/0/content"),
+        "model-facing content is the bare MCP server detail"
+    );
+    assert_eq!(
+        candidate_error_row
+            .at_pointer("/message/content/0/is_error")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        candidate_error_row.string_units("/toolUseResult"),
+        native_error_row.string_units("/toolUseResult"),
+        "UI toolUseResult keeps Native's separate Error: prefix"
+    );
 }

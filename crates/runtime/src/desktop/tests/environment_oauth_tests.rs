@@ -159,10 +159,24 @@ async fn environment_oauth_worker() {
                 "anthropic",
             )
             .with_credential_id("anthropic-oauth");
+            let credential_at_capture = provider.load(&scope).await.unwrap();
+            assert!(
+                matches!(credential_at_capture, Credential::AnthropicOAuth {ref access_token, ..} if access_token == expected["access_token"].as_str().unwrap()),
+                "the fixture OAuth source is selected before environment rotation"
+            );
             std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "changed-after-capture");
+            let live_access_token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+                .expect("test installed the post-capture OAuth token");
+            assert!(
+                expected["access_token"]
+                    .as_str()
+                    .is_some_and(|captured| captured != live_access_token.as_str()),
+                "fixture must rotate the OAuth token after provider capture"
+            );
             let credential = provider.load(&scope).await.unwrap();
             assert!(
-                matches!(credential, Credential::AnthropicOAuth {ref access_token, ..} if access_token == expected["access_token"].as_str().unwrap())
+                matches!(credential, Credential::AnthropicOAuth {ref access_token, ..} if access_token == live_access_token.as_str()),
+                "environment-backed provider must resolve the current token at load time"
             );
             assert!(provider
                 .refresh(&scope, &credential)

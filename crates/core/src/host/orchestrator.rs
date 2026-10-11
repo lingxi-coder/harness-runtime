@@ -4067,7 +4067,13 @@ pub trait OutputStream: Send + Sync {
     }
 
     /// Emit a transcript-only synthetic summary after its compact boundary.
-    async fn emit_compact_summary(&self, _summary_uuid: &str, _summary: &str) {}
+    /// `summary` retains the exact source UTF-16 units used by the transcript.
+    async fn emit_compact_summary(
+        &self,
+        _summary_uuid: &str,
+        _summary: &crate::types::utf16_json::Utf16JsonProjection,
+    ) {
+    }
 
     /// Emit a compaction-completed event, its size delta, and the summary that
     /// transcript UIs reveal in verbose mode.

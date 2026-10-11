@@ -423,6 +423,14 @@ pub struct SettingsWatcher {
     paths: SettingsPaths,
     firer: Arc<dyn ConfigChangeFirer>,
     permission_gate: Option<Arc<dyn PermissionGate>>,
+    classifier_auto_mode_refresh: Option<ClassifierAutoModeRefresh>,
+}
+
+#[derive(Clone)]
+struct ClassifierAutoModeRefresh {
+    include_user_settings: bool,
+    flag_settings_configured: bool,
+    flag_settings_source: Option<String>,
 }
 
 impl SettingsWatcher {
@@ -434,12 +442,30 @@ impl SettingsWatcher {
             paths: SettingsPaths::resolve(lingxi_home, cwd),
             firer,
             permission_gate: None,
+            classifier_auto_mode_refresh: None,
         }
     }
 
     #[must_use]
     pub fn with_permission_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
         self.permission_gate = Some(gate);
+        self
+    }
+
+    /// Configure the immutable trusted CLI tier and trusted source scope used
+    /// to recompute classifier AutoMode arrays after live user/policy edits.
+    #[must_use]
+    pub fn with_classifier_auto_mode_sources(
+        mut self,
+        include_user_settings: bool,
+        flag_settings_configured: bool,
+        flag_settings_source: Option<String>,
+    ) -> Self {
+        self.classifier_auto_mode_refresh = Some(ClassifierAutoModeRefresh {
+            include_user_settings,
+            flag_settings_configured,
+            flag_settings_source,
+        });
         self
     }
 
@@ -462,6 +488,7 @@ impl SettingsWatcher {
             paths,
             firer,
             permission_gate,
+            classifier_auto_mode_refresh,
         } = self;
         // Own each task before awaiting the next watch setup. Cancellation of
         // construction must abort prior loops even before a handle is returned.
@@ -481,6 +508,7 @@ impl SettingsWatcher {
             let paths = paths.clone();
             let firer = firer.clone();
             let permission_gate = permission_gate.clone();
+            let classifier_auto_mode_refresh = classifier_auto_mode_refresh.clone();
             let mut state = handle
                 .owner
                 .state
@@ -490,7 +518,14 @@ impl SettingsWatcher {
                 unreachable!("construction has not published the watcher handle");
             };
             tasks.push(tokio::spawn(async move {
-                run_watch_loop_with_permission_gate(stream, paths, firer, permission_gate).await;
+                run_watch_loop_with_settings_refresh(
+                    stream,
+                    paths,
+                    firer,
+                    permission_gate,
+                    classifier_auto_mode_refresh,
+                )
+                .await;
             }));
         }
         handle
@@ -510,17 +545,28 @@ pub async fn run_watch_loop(
 /// Drive one directory's change stream and apply managed policy changes after
 /// the ConfigChange hook has completed.
 pub async fn run_watch_loop_with_permission_gate(
-    mut stream: std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>,
+    stream: std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>,
     paths: SettingsPaths,
     firer: Arc<dyn ConfigChangeFirer>,
     permission_gate: Option<Arc<dyn PermissionGate>>,
 ) {
+    run_watch_loop_with_settings_refresh(stream, paths, firer, permission_gate, None).await;
+}
+
+async fn run_watch_loop_with_settings_refresh(
+    mut stream: std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>,
+    paths: SettingsPaths,
+    firer: Arc<dyn ConfigChangeFirer>,
+    permission_gate: Option<Arc<dyn PermissionGate>>,
+    classifier_auto_mode_refresh: Option<ClassifierAutoModeRefresh>,
+) {
     while let Some(event) = stream.next().await {
-        handle_event_with_permission_gate(
+        handle_event_with_settings_refresh(
             &event,
             &paths,
             firer.as_ref(),
             permission_gate.as_deref(),
+            classifier_auto_mode_refresh.as_ref(),
         )
         .await;
     }
@@ -540,6 +586,16 @@ pub async fn handle_event_with_permission_gate(
     firer: &dyn ConfigChangeFirer,
     permission_gate: Option<&dyn PermissionGate>,
 ) {
+    handle_event_with_settings_refresh(event, paths, firer, permission_gate, None).await;
+}
+
+async fn handle_event_with_settings_refresh(
+    event: &FileEvent,
+    paths: &SettingsPaths,
+    firer: &dyn ConfigChangeFirer,
+    permission_gate: Option<&dyn PermissionGate>,
+    classifier_auto_mode_refresh: Option<&ClassifierAutoModeRefresh>,
+) {
     let Some(source) = paths.classify(&event.path) else {
         return;
     };
@@ -553,6 +609,21 @@ pub async fn handle_event_with_permission_gate(
         if let Some(gate) = permission_gate {
             let tiers = managed_settings_raw_tiers().await;
             gate.update_auto_mode_disabled(auto_mode_disabled_from_managed_tiers(&tiers));
+        }
+    }
+    if matches!(
+        source,
+        ConfigChangeSource::UserSettings | ConfigChangeSource::PolicySettings
+    ) {
+        if let (Some(gate), Some(refresh)) = (permission_gate, classifier_auto_mode_refresh) {
+            let settings = super::permission_config::reload_classifier_auto_mode_settings(
+                &paths.user_settings,
+                refresh.include_user_settings,
+                refresh.flag_settings_configured,
+                refresh.flag_settings_source.as_deref(),
+            )
+            .await;
+            gate.update_classifier_auto_mode_settings(settings);
         }
     }
 }
@@ -729,6 +800,7 @@ mod tests {
             },
             firer,
             permission_gate: None,
+            classifier_auto_mode_refresh: None,
         };
         let task_fs = fs.clone();
         let construction = tokio::spawn(async move { watcher.spawn(task_fs).await });
@@ -781,6 +853,145 @@ mod tests {
             path: PathBuf::from(path),
             kind: FileEventKind::Modified,
         }
+    }
+
+    #[derive(Default)]
+    struct ClassifierSettingsGate {
+        updates: Mutex<
+            Vec<Option<lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings>>,
+        >,
+    }
+
+    #[async_trait]
+    impl PermissionGate for ClassifierSettingsGate {
+        async fn check(
+            &self,
+            _: &str,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> lingxi_core::host::PermissionDecision {
+            lingxi_core::host::PermissionDecision::Allow
+        }
+
+        fn update_classifier_auto_mode_settings(
+            &self,
+            settings: Option<
+                lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings,
+            >,
+        ) {
+            self.updates.lock().unwrap().push(settings);
+        }
+    }
+
+    #[tokio::test]
+    async fn trusted_auto_mode_settings_refresh_after_user_and_policy_changes() {
+        let _managed_env = crate::desktop::tests::MANAGED_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var_os(MANAGED_DIR_ENV);
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("user");
+        let cwd = root.path().join("project");
+        let managed = root.path().join("managed");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        std::fs::create_dir_all(&managed).unwrap();
+        std::env::set_var(MANAGED_DIR_ENV, &managed);
+        struct RestoreManagedDir(Option<std::ffi::OsString>);
+        impl Drop for RestoreManagedDir {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var(MANAGED_DIR_ENV, value);
+                } else {
+                    std::env::remove_var(MANAGED_DIR_ENV);
+                }
+            }
+        }
+        let _restore = RestoreManagedDir(previous);
+
+        let user_settings = home.join("settings.json");
+        let policy_settings = managed.join("managed-settings.json");
+        std::fs::write(
+            &user_settings,
+            r#"{"autoMode":{"allow":["user-before"],"soft_deny":["user-soft"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"autoMode":{"allow":["project-must-not-appear"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &policy_settings,
+            r#"{"autoMode":{"allow":["policy-before"],"environment":["policy-env"]}}"#,
+        )
+        .unwrap();
+
+        let paths = SettingsPaths::resolve(&home, &cwd);
+        let firer = RecordingFirer::default();
+        let gate = ClassifierSettingsGate::default();
+        let refresh = ClassifierAutoModeRefresh {
+            include_user_settings: true,
+            flag_settings_configured: false,
+            flag_settings_source: None,
+        };
+        handle_event_with_settings_refresh(
+            &ev(user_settings.to_str().unwrap()),
+            &paths,
+            &firer,
+            Some(&gate),
+            Some(&refresh),
+        )
+        .await;
+        let first = gate.updates.lock().unwrap()[0].clone().unwrap();
+        assert_eq!(
+            first
+                .allow
+                .iter()
+                .map(|value| value.to_json_string().unwrap())
+                .collect::<Vec<_>>(),
+            ["\"user-before\"", "\"policy-before\""]
+        );
+        assert_eq!(
+            first
+                .soft_deny
+                .iter()
+                .map(|value| value.to_json_string().unwrap())
+                .collect::<Vec<_>>(),
+            ["\"user-soft\""]
+        );
+
+        std::fs::write(&user_settings, r#"{"autoMode":{"allow":["user-after"]}}"#).unwrap();
+        std::fs::write(
+            &policy_settings,
+            r#"{"autoMode":{"allow":["policy-after"],"hard_deny":["policy-hard"]}}"#,
+        )
+        .unwrap();
+        handle_event_with_settings_refresh(
+            &ev(policy_settings.to_str().unwrap()),
+            &paths,
+            &firer,
+            Some(&gate),
+            Some(&refresh),
+        )
+        .await;
+        let updates = gate.updates.lock().unwrap();
+        let second = updates.last().unwrap().as_ref().unwrap();
+        assert_eq!(
+            second
+                .allow
+                .iter()
+                .map(|value| value.to_json_string().unwrap())
+                .collect::<Vec<_>>(),
+            ["\"user-after\"", "\"policy-after\""]
+        );
+        assert_eq!(
+            second
+                .hard_deny
+                .iter()
+                .map(|value| value.to_json_string().unwrap())
+                .collect::<Vec<_>>(),
+            ["\"policy-hard\""]
+        );
     }
 
     #[test]

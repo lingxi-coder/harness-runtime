@@ -105,7 +105,7 @@ impl HistoryResponse {
         let source = self
             .provider_metadata
             .payload_at("/llm_client/per_turn_effort")?;
-        serde_json::from_str(source.as_json_source()).ok()
+        Utf16JsonProjection::parse(source.as_json_source()).ok()
     }
 
     /// Record only the admitted effort that produced this provider response.

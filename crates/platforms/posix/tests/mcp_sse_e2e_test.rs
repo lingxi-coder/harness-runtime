@@ -18,13 +18,13 @@
 //! before the first reply can race past it.
 
 use axum::{
-    Json, Router,
     extract::State,
     response::sse::{Event, Sse},
     routing::{get, post},
+    Json, Router,
 };
-use futures::{Stream, StreamExt, stream};
-use serde_json::{Value, json};
+use futures::{stream, Stream, StreamExt};
+use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::broadcast;

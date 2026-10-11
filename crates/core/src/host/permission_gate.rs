@@ -17,7 +17,7 @@ use crate::host::McpPermissionCeiling;
 use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::{ContentBlock, ConversationMessage};
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// One tool call refused by the permission layer, as reported in the
 /// `--output-format stream-json` `result` frame's `permission_denials`.
@@ -798,6 +798,120 @@ pub struct PermissionToolCheckRule {
     pub source: PermissionToolCheckRuleSource,
 }
 
+/// One exact rule in a live policy snapshot. The rule is retained as its
+/// original UTF-16 projection and the source is the current wire token (for
+/// example, `userSettings` or `session`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPolicyRuleFact {
+    /// Exact `Tool` / `Tool(content)` rule string.
+    pub rule: Utf16JsonProjection,
+    /// Exact permission source token associated with this rule.
+    pub source: String,
+}
+
+/// One source-specific root used to resolve permission rule paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPolicyRuleRoot {
+    /// Exact rule-root key, in Native's `rule_roots` vocabulary.
+    pub source: String,
+    /// Filesystem path used for that root.
+    pub path: PathBuf,
+}
+
+/// One live additional working directory and its exact contributor token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPolicyWorkingDirectory {
+    /// Directory path.
+    pub path: PathBuf,
+    /// Permission source that contributed this directory.
+    pub source: String,
+}
+
+/// Host-owned filesystem and session capabilities used by Native classifier context.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionClassifierHostCapabilities {
+    /// The current workspace itself is remote according to the session host.
+    pub remote_workspace: bool,
+    /// The host explicitly launched this session without local disk access.
+    pub diskless: bool,
+    /// Network directories trusted by the host before ordinary working-directory filters.
+    pub trusted_network_directories: Vec<PathBuf>,
+}
+
+/// Effective AutoMode settings from only trusted classifier-policy sources.
+///
+/// Each rule remains a root JSON-string projection so isolated UTF-16 units and
+/// source order survive composition. Project/local settings are intentionally
+/// excluded by the host tier merger before this value is attached to the gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionClassifierAutoModeSettings {
+    /// Effective `autoMode.allow`, concatenated by trusted source order.
+    pub allow: Vec<Utf16JsonProjection>,
+    /// Effective `autoMode.soft_deny`, concatenated by trusted source order.
+    pub soft_deny: Vec<Utf16JsonProjection>,
+    /// Effective `autoMode.hard_deny`, concatenated by trusted source order.
+    pub hard_deny: Vec<Utf16JsonProjection>,
+    /// Effective `autoMode.environment`, concatenated by trusted source order.
+    pub environment: Vec<Utf16JsonProjection>,
+    /// Trusted-source OR of `autoMode.classifyAllShell === true`.
+    pub classify_all_shell: bool,
+}
+
+/// Source-preserving facts from a gate that owns a live declarative policy.
+///
+/// Unknown facts stay absent (`None`) rather than being reconstructed from
+/// unrelated defaults. The host composes this policy-only snapshot with its
+/// other trusted session facts before deciding whether to emit a Native
+/// server-classifier context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPolicySnapshot {
+    /// Effective live permission mode (`default`, `plan`, `auto`, etc.).
+    pub permission_mode: String,
+    /// Current allow rules, ordered by source precedence and then insertion
+    /// order within each source.
+    pub allow_rules: Vec<PermissionPolicyRuleFact>,
+    /// Current deny rules, including current user-input command denies.
+    pub deny_rules: Vec<PermissionPolicyRuleFact>,
+    /// Current ask rules.
+    pub ask_rules: Vec<PermissionPolicyRuleFact>,
+    /// The ordered source roots, absent when this gate has no filesystem roots.
+    pub rule_roots: Option<Vec<PermissionPolicyRuleRoot>>,
+    /// Home directory, absent when the policy has no filesystem roots or no
+    /// home path was configured.
+    pub home_directory: Option<PathBuf>,
+    /// Original session working directory, absent when roots are unavailable.
+    pub working_directory: Option<PathBuf>,
+    /// Current additional working directories, preserving insertion order and
+    /// source provenance.
+    pub additional_working_directories: Vec<PermissionPolicyWorkingDirectory>,
+    /// Whether reads outside allowed working directories are blocked.
+    pub block_reads_outside_working_directories: bool,
+    /// Whether this policy is running in restricted mode.
+    pub restricted: bool,
+    /// Whether every shell command is sent through the Auto classifier.
+    pub classify_all_shell: bool,
+    /// Trusted-source AutoMode arrays and classify-all-shell setting. `None`
+    /// means the host could not resolve the complete source set; callers must
+    /// not replace it with empty arrays or defaults.
+    pub classifier_auto_mode_settings: Option<PermissionClassifierAutoModeSettings>,
+    /// Host-reported workspace/disk capabilities and trusted network roots.
+    pub classifier_host_capabilities: PermissionClassifierHostCapabilities,
+    /// Current administrator-managed Auto-mode kill switch.
+    pub auto_mode_disabled: bool,
+    /// Whether the session was launched with bypass permission availability.
+    pub bypass_permissions_available: bool,
+    /// Whether configuration disables bypass permissions.
+    pub bypass_killswitch_active: bool,
+    /// Whether this session has an explicit live bypass acknowledgement.
+    pub bypass_permissions_confirmed: bool,
+    /// Current consecutive Auto-classifier denial count.
+    pub consecutive_denials: u32,
+    /// Current total Auto-classifier denial count.
+    pub total_denials: u32,
+    /// Whether either denial limit has tripped the circuit breaker.
+    pub denial_circuit_broken: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionToolCheckBehavior {
     Allow,
@@ -1543,6 +1657,16 @@ pub trait PermissionGate: Send + Sync {
         let _ = disabled;
     }
 
+    /// Replace the live, source-folded AutoMode categories used by Native
+    /// classifier requests after a trusted settings tier changes. Rule-free
+    /// transports do not own these settings, so the default is a no-op.
+    fn update_classifier_auto_mode_settings(
+        &self,
+        settings: Option<PermissionClassifierAutoModeSettings>,
+    ) {
+        let _ = settings;
+    }
+
     /// Whether the host may present `bypassPermissions` as a selectable mode.
     /// A policy gate keeps this false when an administrator/settings killswitch
     /// disables the mode; a host-side risk acknowledgement can still be needed
@@ -1595,6 +1719,13 @@ pub trait PermissionGate: Send + Sync {
     /// the CLI/config default. Only [`PolicyPermissionGate`] overrides this;
     /// additive DEFAULTED (frozen-trait safe), returning `None`.
     fn permission_mode(&self) -> Option<String> {
+        None
+    }
+
+    /// Return live facts from a gate that owns a declarative permission policy.
+    /// Prompt-only and no-op gates return `None`; callers must not infer policy
+    /// state from their permission decisions.
+    fn permission_policy_snapshot(&self) -> Option<PermissionPolicySnapshot> {
         None
     }
 }

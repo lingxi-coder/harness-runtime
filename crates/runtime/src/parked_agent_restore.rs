@@ -284,6 +284,44 @@ fn exact_source_row(
     Ok(row)
 }
 
+/// Reconstruct how typed exact-UTF-16 text appears after Native transcript
+/// serialization and parsing. The transcript stores every text block as a
+/// regular `text` block; only ill-formed UTF-16 needs the exact sidecar to
+/// recover `TextJsUtf16`. A well-formed carrier is equivalent to its decoded
+/// scalar text when its display projection agrees.
+fn native_transcript_roundtrip_message(
+    message: &lingxi_core::types::ConversationMessage,
+) -> lingxi_core::types::ConversationMessage {
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+    let mut message = message.clone();
+    let content = match &mut message {
+        ConversationMessage::User { content, .. }
+        | ConversationMessage::Assistant { content, .. } => content,
+        ConversationMessage::System { .. } => return message,
+    };
+    for block in content {
+        let replacement = match block {
+            ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations,
+            } => String::from_utf16(utf16_code_units)
+                .ok()
+                .filter(|decoded| decoded.as_str() == text.as_str())
+                .map(|decoded| ContentBlock::Text {
+                    text: decoded,
+                    citations: citations.clone(),
+                }),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *block = replacement;
+        }
+    }
+    message
+}
+
 fn exact_source_attachment_marker(
     message_id: lingxi_core::types::MessageId,
     attachment: &lingxi_core::types::utf16_json::Utf16JsonProjection,
@@ -327,10 +365,11 @@ async fn read_restored_transcript(
         }) {
             use lingxi_core::host::handback::{HandbackEnvelope, HandbackRecipient};
             let attachment = attachment.unwrap();
-            let envelope: HandbackEnvelope =
-                serde_json::from_value(attachment.get("envelope").cloned().ok_or_else(|| {
-                    "peer report transcript row is missing its envelope".to_string()
-                })?)
+            let envelope_source = row_projection
+                .subprojection("/attachment/envelope")
+                .and_then(|envelope| envelope.to_json_string())
+                .map_err(|error| format!("invalid peer report transcript envelope: {error}"))?;
+            let envelope: HandbackEnvelope = serde_json::from_str(&envelope_source)
                 .map_err(|error| format!("invalid peer report transcript envelope: {error}"))?;
             let expected = envelope.model_message();
             let message = value
@@ -350,7 +389,7 @@ async fn read_restored_transcript(
                 && value.get("uuid")
                     == Some(&serde_json::to_value(envelope.receipt.message_id).unwrap())
                 && value.get("agent_id") == Some(&serde_json::to_value(agent_id).unwrap())
-                && message == expected
+                && message == native_transcript_roundtrip_message(&expected)
                 && decoded.utf16_overrides == envelope.transcript_utf16_overrides();
             if !valid {
                 return Err("peer report transcript row lost its recipient, scope, identity, or Peer authority".into());
@@ -378,8 +417,8 @@ async fn read_restored_transcript(
                 ));
             }
         }
-        if value.get("type").and_then(serde_json::Value::as_str) == Some("attachment") {
-            if let Some(attachment) = value.get("attachment").filter(|attachment| {
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("attachment")
+            && value.get("attachment").is_some_and(|attachment| {
                 matches!(
                     attachment.get("type").and_then(serde_json::Value::as_str),
                     Some(
@@ -390,11 +429,11 @@ async fn read_restored_transcript(
                             | "prompt_snapshot"
                     )
                 )
-            }) {
-                announcement_history.push(row_projection.subprojection("/attachment").map_err(
-                    |error| format!("agent transcript source attachment is invalid: {error}"),
-                )?);
-            }
+            })
+        {
+            announcement_history.push(row_projection.subprojection("/attachment").map_err(
+                |error| format!("agent transcript source attachment is invalid: {error}"),
+            )?);
         }
         if let Some(model) = value
             .get("model")
@@ -649,6 +688,7 @@ mod tests {
             // Restoring an existing parked agent is not a fresh Agent-tool
             // admission and must not create a second spawn-statistics receipt.
             agent_spawn_token: None,
+            stop_hook_scope: Default::default(),
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
             subagent_type: "general-purpose".into(),
@@ -682,6 +722,7 @@ mod tests {
             depth: 1,
             origin_session_id: None,
             parent_model_override: None,
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -721,7 +762,12 @@ mod tests {
         async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
             vec![]
         }
-        async fn resolve_selection(&self, t: &str, _m: Option<&str>) -> SelectedAgentMeta {
+        async fn resolve_selection(
+            &self,
+            t: &str,
+            _m: Option<&str>,
+            _p: Option<&str>,
+        ) -> SelectedAgentMeta {
             SelectedAgentMeta {
                 agent_type: t.to_string(),
                 ..Default::default()
@@ -950,7 +996,7 @@ mod tests {
             &content.string_units("").unwrap(),
         )
         .unwrap();
-        let message_id = message.id().to_string();
+        let message_id = message.id().as_uuid().to_string();
         assert_eq!(source.string_at("/messageId"), Some(message_id.as_str()));
         assert_eq!(
             source.subprojection("/attachment").unwrap(),
@@ -1107,7 +1153,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let announcements = vec![
+        let announcements = [
             json!({"type":"prompt_snapshot","systemPrompt":["captured static prompt"],"contextRendering":"inline"}),
             json!({"type":"instructions","files":[{"path":"/repo/AGENTS.md","type":"Project","content":"previous instructions"}]}),
             json!({"type":"date","date":"2026-09-30"}),
@@ -1532,10 +1578,10 @@ mod tests {
         for mutation in [
             "valid",
             "utf16-valid",
-            "utf16-forged",
+            "utf16-display-forged",
             "utf16-escaped-body-forged",
             "utf16-escaped-message-forged",
-            "utf16-sidecar-only",
+            "utf16-sidecar-lossy-scalar",
             "human-message",
             "human-origin",
             "wrong-recipient",
@@ -1587,17 +1633,54 @@ mod tests {
                 .unwrap();
             }
             let message = envelope.model_message();
+            let mut transcript_message = message.clone();
+            if let lingxi_core::types::ConversationMessage::User { content, .. } =
+                &mut transcript_message
+            {
+                for content_block in content {
+                    let replacement = match content_block {
+                        lingxi_core::types::ContentBlock::TextJsUtf16 {
+                            text, citations, ..
+                        } => Some(lingxi_core::types::ContentBlock::Text {
+                            text: text.clone(),
+                            citations: citations.clone(),
+                        }),
+                        _ => None,
+                    };
+                    if let Some(replacement) = replacement {
+                        *content_block = replacement;
+                    }
+                }
+            }
+            // `serde_json::Value` cannot represent a lone surrogate. Build its
+            // ordinary display tree from safe message/envelope clones, then let
+            // the exact JSON writer restore the original strings.
+            let mut display_envelope = envelope.clone();
+            let body_units = display_envelope.body.string_units("").unwrap();
+            let display_body = String::from_utf16_lossy(&body_units);
+            display_envelope.body =
+                lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                    display_body.clone(),
+                    display_body.encode_utf16().collect(),
+                )
+                .unwrap();
+            let sanitized_message = display_envelope.model_message();
             let mut value = serde_json::json!({
                 "type":"attachment", "agent_id":id, "uuid":envelope.receipt.message_id,
-                "message":message, "attachment":{"type":"subagent_handback", "envelope":envelope},
+                "message":transcript_message,
+                "attachment":{"type":"subagent_handback", "envelope":display_envelope},
             });
             let mut exact_overrides = envelope.transcript_utf16_overrides();
             match mutation {
-                "utf16-forged" => {
-                    let units = value["message"]["content"][0]["utf16_code_units"]
-                        .as_array_mut()
-                        .unwrap();
-                    *units.last_mut().unwrap() = serde_json::json!(0xD801u16);
+                "utf16-display-forged" => {
+                    let original = value["message"]["content"][0]["text"]
+                        .as_str()
+                        .expect("display projection keeps ordinary text")
+                        .to_owned();
+                    let forged = original.replacen('\u{FFFD}', "\u{FFFC}", 1);
+                    assert_ne!(original, forged, "fixture must display the lone surrogate");
+                    value["message"]["content"][0]["text"] = forged.into();
+                    assert!(exact_overrides.remove("/message/content/0/text").is_some());
                 }
                 "utf16-escaped-body-forged" => {
                     *exact_overrides
@@ -1610,7 +1693,7 @@ mod tests {
                     let units = exact_overrides.get_mut("/message/content/0/text").unwrap();
                     *units.iter_mut().find(|unit| **unit == 0xD800).unwrap() = 0xD801;
                 }
-                "utf16-sidecar-only" => exact_overrides.clear(),
+                "utf16-sidecar-lossy-scalar" => exact_overrides.clear(),
                 "human-message" => value["message"]["is_meta"] = false.into(),
                 "human-origin" => {
                     value["attachment"]["envelope"]["origin"]["kind"] = "human".into()
@@ -1645,12 +1728,38 @@ mod tests {
             let spawner = RecordingSpawner::default();
             let outcomes =
                 restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit(), None).await;
-            if mutation == "valid" || mutation == "utf16-valid" {
-                assert!(matches!(outcomes[0].1, RestoreOutcome::Restored(_)));
+            if mutation == "valid"
+                || mutation == "utf16-valid"
+                || mutation == "utf16-sidecar-lossy-scalar"
+            {
+                assert!(
+                    matches!(outcomes[0].1, RestoreOutcome::Restored(_)),
+                    "{mutation}: {:?}",
+                    outcomes[0].1
+                );
                 let requests = spawner.seen.lock().unwrap();
+                let expected_message = if mutation == "utf16-sidecar-lossy-scalar" {
+                    let lingxi_core::types::ConversationMessage::User { content, .. } =
+                        &sanitized_message
+                    else {
+                        panic!("sanitized handback remains a user message");
+                    };
+                    let Some(lingxi_core::types::ContentBlock::TextJsUtf16 {
+                        utf16_code_units,
+                        ..
+                    }) = content.first()
+                    else {
+                        panic!("sanitized handback retains its UTF-16 display carrier");
+                    };
+                    assert!(utf16_code_units.contains(&0xfffd));
+                    assert!(!utf16_code_units.contains(&0xd800));
+                    &sanitized_message
+                } else {
+                    &message
+                };
                 assert_eq!(
                     requests[0].resumed_history.as_ref().unwrap().last(),
-                    Some(&message)
+                    Some(expected_message)
                 );
                 assert!(requests[0]
                     .instruction_context

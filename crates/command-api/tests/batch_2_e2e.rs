@@ -218,13 +218,16 @@ async fn agents_dispatch() {
     let r = d.dispatch("/agents".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
         // cc 2.1.198 removed the interactive /agents wizard (M4): the command
-        // now emits static guidance regardless of registered agents. Byte-locked
-        // against agents.rs::agents_removed_message (`.lingxi/` = accepted
-        // branding divergence).
-        assert_eq!(
-            display,
-            "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  \u{2022} .lingxi/agents/       (this project)\n  \u{2022} ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents".into()
+        // now emits static product guidance regardless of registered agents.
+        // Keep the message byte-exact while applying the current LingXi brand
+        // and .lingxi paths; the Claude-specific documentation link is omitted.
+        let expected = format!(
+            "The /agents wizard has been removed.\n\nAsk {} to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  \u{2022} {}/agents/       (this project)\n  \u{2022} ~/{}/agents/     (all projects)",
+            branding::PRODUCT_NAME,
+            branding::DOT_DIR,
+            branding::DOT_DIR,
         );
+        assert_eq!(display, expected.into());
     } else {
         panic!("{r:?}");
     }

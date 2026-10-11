@@ -195,6 +195,10 @@ pub(super) struct BootPermissionTiers {
     /// when ANY tier sets `autoMode.classifyAllShell === true`. Set on the boot
     /// policy so every `Bash`/`PowerShell` allow rule is suspended in auto mode.
     pub(super) classify_all_shell: bool,
+    /// Trusted-source AutoMode merge for classifier context. `None` means at
+    /// least one contributing trusted source was unavailable or invalid.
+    pub(super) classifier_auto_mode_settings:
+        Option<lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings>,
     /// Union of every tier's `permissions.additionalDirectories` (raw paths;
     /// `authorize` resolves them against the policy roots via `expand_path`).
     pub(super) additional_working_dirs: permission::working_dirs::AdditionalWorkingDirs,
@@ -235,12 +239,81 @@ pub(super) struct BootPermissionTiers {
 ///   rules are retained — "User, project, local, and CLI argument permission
 ///   rules are ignored." (Scalar folds are NOT affected; the schema scopes the
 ///   lockdown to permission RULES.)
+fn merge_trusted_auto_mode_settings(
+    trusted_raw_tiers: &[String],
+) -> Option<lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings> {
+    use lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    let mut merged = PermissionClassifierAutoModeSettings::default();
+    for raw in trusted_raw_tiers {
+        let source = Utf16JsonProjection::parse(raw).ok()?;
+        let Some(auto_mode) = source.get_property("autoMode") else {
+            continue;
+        };
+        if auto_mode.object_entries().is_none() {
+            return None;
+        }
+        let auto_mode = source.subprojection("/autoMode").ok()?;
+        for (key, destination) in [
+            ("allow", &mut merged.allow),
+            ("soft_deny", &mut merged.soft_deny),
+            ("hard_deny", &mut merged.hard_deny),
+            ("environment", &mut merged.environment),
+        ] {
+            let Some(values) = auto_mode.get_property(key) else {
+                continue;
+            };
+            let count = values.array_len()?;
+            for index in 0..count {
+                let value = values.get_index(index)?;
+                if value.code_units().is_none() {
+                    return None;
+                }
+                destination.push(auto_mode.subprojection(&format!("/{key}/{index}")).ok()?);
+            }
+        }
+        if let Some(value) = auto_mode.get_property("classifyAllShell") {
+            merged.classify_all_shell |= value.as_bool()?;
+        }
+    }
+    Some(merged)
+}
+
+/// Reload just the trusted sources that feed Native's classifier AutoMode
+/// settings after the settings watcher observes a live user or policy write.
+/// Project/local settings remain excluded. A configured CLI flag tier without
+/// its original source text stays unknown because the typed settings model
+/// drops the raw `autoMode` block.
+pub(super) async fn reload_classifier_auto_mode_settings(
+    user_settings_path: &std::path::Path,
+    include_user_settings: bool,
+    flag_settings_configured: bool,
+    flag_settings_source: Option<&str>,
+) -> Option<lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings> {
+    if flag_settings_configured && flag_settings_source.is_none() {
+        return None;
+    }
+
+    let mut trusted_raw_tiers = Vec::new();
+    if include_user_settings {
+        if let Ok(raw) = tokio::fs::read_to_string(user_settings_path).await {
+            trusted_raw_tiers.push(raw);
+        }
+    }
+    if let Some(raw) = flag_settings_source {
+        trusted_raw_tiers.push(raw.to_owned());
+    }
+    trusted_raw_tiers.extend(super::settings_watch::managed_settings_raw_tiers().await);
+    merge_trusted_auto_mode_settings(&trusted_raw_tiers)
+}
+
 pub(super) async fn load_boot_permission_tiers(
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
     setting_source_scope: (bool, bool),
 ) -> BootPermissionTiers {
-    load_boot_permission_tiers_with_flag(lingxi_home, cwd, setting_source_scope, None).await
+    load_boot_permission_tiers_with_flag(lingxi_home, cwd, setting_source_scope, None, None).await
 }
 
 pub(super) async fn load_boot_permission_tiers_with_flag(
@@ -248,6 +321,7 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
     cwd: &std::path::Path,
     setting_source_scope: (bool, bool),
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
+    flag_settings_source: Option<&str>,
 ) -> BootPermissionTiers {
     let mut rules = Vec::new();
     // With no explicit setting, new sessions start in Auto.  The resolved
@@ -262,6 +336,11 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
     // Retain each tier's raw text (in ascending priority) so the
     // sandbox-auto-allow config can be derived from the SAME settings.
     let mut raw_tiers: Vec<String> = Vec::new();
+    // Native classifier policy reads only trusted user/flag/managed sources.
+    // Keep this order independent from the broader user/project/local policy fold.
+    let mut trusted_auto_mode_raw_tiers: Vec<String> = Vec::new();
+    let trusted_auto_mode_sources_complete =
+        flag_settings.is_none() || flag_settings_source.is_some();
     let (incl_user_settings, incl_project_settings) = setting_source_scope;
     for (path, source, included) in [
         (
@@ -343,8 +422,18 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
             if permission::block_reads_outside_working_directories_from_settings_json(&raw) {
                 block_reads_outside_working_directories = true; // sticky: any tier arming wins
             }
+            if source
+                == permission::PermissionRuleSource::Settings(
+                    lingxi_core::types::SettingsScope::User,
+                )
+            {
+                trusted_auto_mode_raw_tiers.push(raw.clone());
+            }
             raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
         }
+    }
+    if let Some(raw_source) = flag_settings_source {
+        trusted_auto_mode_raw_tiers.push(raw_source.to_owned());
     }
     if let Some(raw) = flag_settings.and_then(|settings| serde_json::to_string(settings).ok()) {
         let source = permission::PermissionRuleSource::FlagSettings;
@@ -400,6 +489,7 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
     // NOT gated by `--setting-sources` (see the doc comment above).
     let managed_tiers = crate::desktop::settings_watch::managed_settings_raw_tiers().await;
     for raw in &managed_tiers {
+        trusted_auto_mode_raw_tiers.push(raw.clone());
         match permission::permission_rules_from_settings_json(
             raw,
             permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
@@ -459,6 +549,11 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
             .and_then(|raw| permission::default_mode_from_settings_json(&raw))
             .is_none();
     raw_tiers.extend(managed_tiers);
+    let classifier_auto_mode_settings = if trusted_auto_mode_sources_complete {
+        merge_trusted_auto_mode_settings(&trusted_auto_mode_raw_tiers)
+    } else {
+        None
+    };
     BootPermissionTiers {
         rules,
         mode,
@@ -466,6 +561,7 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
         bypass_disabled,
         auto_mode_disabled,
         classify_all_shell,
+        classifier_auto_mode_settings,
         additional_working_dirs,
         block_reads_outside_working_directories,
         raw_tiers,

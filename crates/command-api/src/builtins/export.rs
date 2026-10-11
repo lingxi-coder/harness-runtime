@@ -363,7 +363,6 @@ mod tests {
                     citations: None,
                 },
                 ContentBlock::ToolUse {
-                    input_projection: None,
                     id: lingxi_core::types::ToolUseId::new(),
                     name: "Read".into(),
                     input: Utf16JsonProjection::from_serde_value(

@@ -6,7 +6,6 @@ use client::adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
 use command_api::{parse_slash_command, CommandRegistry, RegistrySlashDispatcher};
 use cost::CostHydrator;
-use lingxi_core::host::json_schema_validator::{JsonSchemaValidator, JsonSchemaValidatorSession};
 use lingxi_core::host::{McpTransport, OrchestratorHandle, OutputStream};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::model::user_agent::UserAgentEnv;
@@ -2029,6 +2028,7 @@ pub async fn build_with_credential_stack(
             bypass_disabled,
             auto_mode_disabled,
             classify_all_shell,
+            classifier_auto_mode_settings,
             mut additional_working_dirs,
             block_reads_outside_working_directories,
             raw_tiers,
@@ -2038,6 +2038,7 @@ pub async fn build_with_credential_stack(
             &cwd,
             cfg.setting_source_scope,
             cfg.flag_settings.as_ref(),
+            cfg.flag_settings_source.as_deref(),
         )
         .await;
         // (2.1.263 `bs(Rn)`) All three clamp inputs exist here: `ey()` is this
@@ -2249,6 +2250,14 @@ pub async fn build_with_credential_stack(
         // (the concrete handle is only reachable pre-coercion); it is filled once
         // the orchestrator exists (below).
         let enforcing = permission::PolicyPermissionGate::new(policy, perms);
+        enforcing.set_classifier_auto_mode_settings(classifier_auto_mode_settings);
+        enforcing.set_classifier_host_capabilities(
+            lingxi_core::host::permission_gate::PermissionClassifierHostCapabilities {
+                remote_workspace: cfg.remote_workspace,
+                diskless: cfg.diskless,
+                trusted_network_directories: cfg.trusted_network_directories.clone(),
+            },
+        );
         live_model_provider_cell = Some(enforcing.live_model_provider_handle());
         loop_classifier_cell = Some(enforcing.loop_classifier_handle());
         Arc::new(enforcing)
@@ -2552,8 +2561,8 @@ pub async fn build_with_credential_stack(
     let mcp_additional_roots = mcp::new_shared_roots(mcp_roots_seed);
     let mcp_registry = Arc::new(
         mcp::McpRegistry::with_raw_conn(
-            mcp_transport.clone() as Arc<dyn McpTransport>,
-            mcp_transport as Arc<dyn mcp::RawConnectionProvider>,
+            mcp_services.transport.clone(),
+            mcp_services.raw_connections.clone(),
         )
         .with_projects_session_host(projects_session_host)
         .with_json_schema_validator(json_schema_validator.clone())
@@ -4504,17 +4513,6 @@ pub async fn build_with_credential_stack(
             .filter_map(|h| h.matcher().cloned())
             .collect()
     };
-    let file_changed_matcher_strings = file_changed_matchers
-        .iter()
-        .filter_map(|matcher| {
-            let units = matcher.string_units("")?;
-            String::from_utf16(&units).ok()
-        })
-        .collect::<Vec<_>>();
-    let file_changed_matcher_refs = file_changed_matcher_strings
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     // Build the `FileChanged` firer over the SAME `Arc<HookExecutorImpl>` the
     // orchestrator is about to take ownership of (mirrors the `cwd_changed_firer`
     // built from `hooks.clone()` at (5.5)). Captured BEFORE `hooks` is moved into
@@ -5894,6 +5892,11 @@ pub async fn build_with_credential_stack(
     let settings_watcher =
         settings_watch::SettingsWatcher::new(&cfg.lingxi_home, &watch_cwd, firer)
             .with_permission_gate(settings_permission_gate)
+            .with_classifier_auto_mode_sources(
+                cfg.setting_source_scope.0,
+                cfg.flag_settings.is_some(),
+                cfg.flag_settings_source.clone(),
+            )
             .spawn(watch_fs)
             .await;
 
@@ -5918,7 +5921,7 @@ pub async fn build_with_credential_stack(
     //       An empty matcher set starts an idle supervisor with zero OS watch
     //       handles; its control channel remains available for hot reload.
     let watcher = file_changed_watch::FileChangedWatcher::new(
-        &file_changed_matcher_refs,
+        &file_changed_matchers,
         &watch_cwd,
         file_changed_firer,
     );

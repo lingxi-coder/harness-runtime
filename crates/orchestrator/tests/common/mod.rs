@@ -221,25 +221,3 @@ pub(crate) fn assert_fixed_usage(fixture_dir: &Path, name: &str) {
         "fixed Native usage remains part of the roundtrip oracle"
     );
 }
-
-pub(crate) fn find_tool_result(
-    request: &Utf16JsonProjection,
-    tool_use_id: &str,
-) -> Option<Utf16JsonProjection> {
-    let messages = request.array_len("/messages")?;
-    for message_index in 0..messages {
-        let content = format!("/messages/{message_index}/content");
-        let Some(blocks) = request.array_len(&content) else {
-            continue;
-        };
-        for block_index in 0..blocks {
-            let base = format!("{content}/{block_index}");
-            if request.string_at(&format!("{base}/type")) == Some("tool_result")
-                && request.string_at(&format!("{base}/tool_use_id")) == Some(tool_use_id)
-            {
-                return request.subprojection(&base).ok();
-            }
-        }
-    }
-    None
-}

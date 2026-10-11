@@ -216,23 +216,41 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
     let rows = read_rows(&path);
     assert_eq!(rows.len(), 1);
     assert_eq!(inputs[0]["uuid"], rows[0].uuid);
-    let disk_content = rows[0].message["content"]
-        .as_array()
-        .expect("assistant content array");
-    assert_eq!(disk_content[0]["text"], "merged-edited");
-    assert_eq!(disk_content[1]["text"], "merged-added");
-    assert_eq!(disk_content[2], serde_json::to_value(image).unwrap());
-    assert_eq!(disk_content[3], serde_json::to_value(document).unwrap());
-    assert_eq!(disk_content[4]["id"], tool_use_id.to_string());
-    assert_eq!(disk_content[4]["provider_id"], "toolu_source");
-    assert_eq!(disk_content[4]["name"], "Read");
+    let disk_content = rows[0]
+        .message
+        .subprojection("/content")
+        .expect("assistant content projection");
+    assert_eq!(disk_content.string_at("/0/text"), Some("merged-edited"));
+    assert_eq!(disk_content.string_at("/1/text"), Some("merged-added"));
+    assert!(disk_content
+        .subprojection("/2")
+        .unwrap()
+        .semantically_eq(&generated_source(&serde_json::to_value(&image).unwrap())));
+    assert!(disk_content
+        .subprojection("/3")
+        .unwrap()
+        .semantically_eq(&generated_source(&serde_json::to_value(&document).unwrap())));
+    let tool_use_wire_id = tool_use_id.to_string();
     assert_eq!(
-        disk_content[4]["input"],
-        serde_json::json!({"file_path":"source.txt"})
+        disk_content.string_at("/4/id"),
+        Some(tool_use_wire_id.as_str())
     );
-    assert!(!disk_content
-        .iter()
-        .any(|block| block["text"] == "remove this text"));
+    assert_eq!(
+        disk_content.string_at("/4/provider_id"),
+        Some("toolu_source")
+    );
+    assert_eq!(disk_content.string_at("/4/name"), Some("Read"));
+    assert!(disk_content
+        .subprojection("/4/input")
+        .unwrap()
+        .semantically_eq(&generated_source(
+            &serde_json::json!({"file_path":"source.txt"})
+        )));
+    assert!(
+        (0..disk_content.array_len("").expect("content array"))
+            .all(|index| disk_content.string_at(&format!("/{index}/text"))
+                != Some("remove this text"))
+    );
 
     let result = ConversationMessage::User {
         api_message_override: None,

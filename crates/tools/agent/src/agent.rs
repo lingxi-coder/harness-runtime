@@ -999,29 +999,40 @@ fn spawn_model_profile(parsed: &AgentToolInput, is_fork: bool) -> Option<String>
     }
 }
 
-fn model_profile_after_hook(
-    input: &Value,
+fn optional_mod_string(
+    input: &Utf16JsonProjection,
+    field: &str,
     previous: Option<String>,
 ) -> Result<Option<String>, ToolError> {
-    match input.get("model_profile") {
+    match input.get_property(field) {
         None => Ok(previous),
-        Some(Value::Null) => Ok(None),
-        Some(Value::String(profile)) => Ok(Some(profile.clone())),
-        Some(_) => Err(ToolError::InvalidInput(
-            "agent.spawn: model_profile must be a string or null".into(),
-        )),
+        Some(value) if value.is_null() => Ok(None),
+        Some(value) => value.as_str().map(str::to_owned).map(Some).ok_or_else(|| {
+            ToolError::InvalidInput(format!("agent.spawn: {field} must be a string or null").into())
+        }),
     }
 }
 
-fn model_after_hook(input: &Value, previous: Option<String>) -> Result<Option<String>, ToolError> {
-    match input.get("model") {
-        None => Ok(previous),
-        Some(Value::Null) => Ok(None),
-        Some(Value::String(model)) => Ok(Some(model.clone())),
-        Some(_) => Err(ToolError::InvalidInput(
-            "agent.spawn: model must be a string or null".into(),
-        )),
+fn apply_mod_model_selection(
+    input: &Utf16JsonProjection,
+    parsed: &mut AgentToolInput,
+    overrides_forced: bool,
+    is_fork: bool,
+) -> Result<(), ToolError> {
+    if overrides_forced || is_fork {
+        clear_model_overrides_when_forced(parsed, true);
+        return Ok(());
     }
+
+    parsed.model = optional_mod_string(input, "model", parsed.model.take())?;
+    parsed.model_profile =
+        optional_mod_string(input, "model_profile", parsed.model_profile.take())?;
+    if parsed.model_profile.is_some() && parsed.model.is_none() {
+        return Err(ToolError::InvalidInput(
+            "Agent: model_profile requires an explicit model".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Format the M3-05 byte-locked budget-exceeded denial string.
@@ -4355,27 +4366,6 @@ impl Tool for AgentTool {
             .then_some(parsed.run_in_background)
             .flatten();
 
-        let inherited_statistics = match (self.ctx.task_registry.as_ref(), ctx.agent_id) {
-            (Some(registry), Some(agent_id)) => {
-                registry.agent_statistics_for_parent(agent_id).await
-            }
-            _ => None,
-        };
-        let statistics = match inherited_statistics {
-            Some(statistics) => Some(statistics),
-            None => match (
-                self.ctx.task_registry.as_ref(),
-                Self::origin_session_id(&ctx).await,
-            ) {
-                (Some(registry), Some(session_id)) => registry.agent_session_statistics(session_id),
-                _ => None,
-            },
-        };
-        let requested_background = self
-            .advertise_run_in_background
-            .then_some(parsed.run_in_background)
-            .flatten();
-
         // Model and profile are one selection: forced inheritance clears both.
         // Keep this policy for Mod rewrites as well as the original call.
         let model_overrides_forced = subagent_model_forced()
@@ -4641,7 +4631,11 @@ impl Tool for AgentTool {
                 invoker = invoker.with_gate(gate);
             }
             let mut selected = spawner
-                .resolve_selection(kind, parsed.model.as_deref())
+                .resolve_selection(
+                    kind,
+                    parsed.model.as_deref(),
+                    parsed.model_profile.as_deref(),
+                )
                 .await;
             let inherited_mode = self
                 .ctx
@@ -4683,6 +4677,9 @@ impl Tool for AgentTool {
             }
             if let Some(model) = parsed.model.as_deref() {
                 named_spawn_input["model"] = json!(model);
+            }
+            if let Some(model_profile) = parsed.model_profile.as_deref() {
+                named_spawn_input["model_profile"] = json!(model_profile);
             }
 
             let mut named_spawn_start: Option<Box<dyn AgentSpawnStart>> = None;
@@ -4806,13 +4803,21 @@ impl Tool for AgentTool {
                         .and_then(|value| value.as_str())
                         .map(str::to_owned)
                         .or(parsed.name);
-                    parsed.model = input
-                        .get_property("model")
-                        .and_then(|value| value.as_str())
-                        .map(str::to_owned)
-                        .or(parsed.model);
+                    if let Err(error) = apply_mod_model_selection(
+                        &input,
+                        &mut parsed,
+                        model_overrides_forced,
+                        false,
+                    ) {
+                        start.failed("agent.spawn: invalid model selection rewrite".into());
+                        return Err(error);
+                    }
                     selected = spawner
-                        .resolve_selection(kind, parsed.model.as_deref())
+                        .resolve_selection(
+                            kind,
+                            parsed.model.as_deref(),
+                            parsed.model_profile.as_deref(),
+                        )
                         .await;
                     named_spawn_start = Some(start);
                 }
@@ -4823,11 +4828,13 @@ impl Tool for AgentTool {
                 }
             }
 
-            let resolved_model = if selected.resolved_model.is_empty() {
-                parsed.model.clone()
-            } else {
-                Some(selected.resolved_model.clone())
-            };
+            // Keep an explicit caller preference intact so the child resolver
+            // can honor a qualified `profile/model` selection. Only materialize
+            // the selected concrete model when this spawn inherits the agent
+            // definition's default.
+            let model_preference = parsed.model.clone().or_else(|| {
+                (!selected.resolved_model.is_empty()).then(|| selected.resolved_model.clone())
+            });
 
             let request = SubagentSpawnRequest {
                 instruction_context: ctx.instruction_context.clone(),
@@ -4835,7 +4842,8 @@ impl Tool for AgentTool {
                 prompt: prompt_source.clone(),
                 description: Some(description_source.clone()),
                 name: parsed.name.clone(),
-                model: resolved_model,
+                model: model_preference,
+                model_profile: parsed.model_profile.clone(),
                 agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
                 // The obsolete input mode never overrides the live parent mode.
                 mode: Some(inherited_mode),
@@ -5163,7 +5171,19 @@ impl Tool for AgentTool {
         };
 
         let mut selected = spawner
-            .resolve_selection(&effective_type, parsed.model.as_deref())
+            .resolve_selection(
+                &effective_type,
+                if is_fork {
+                    None
+                } else {
+                    parsed.model.as_deref()
+                },
+                if is_fork {
+                    None
+                } else {
+                    parsed.model_profile.as_deref()
+                },
+            )
             .await;
         if caller_is_in_process_teammate && selected.background {
             return Err(ToolError::InvalidInput(format!(
@@ -5452,6 +5472,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
             if let Some(model) = parsed.model.as_deref() {
                 spawn_input["model"] = json!(model);
             }
+            if let Some(model_profile) = parsed.model_profile.as_deref() {
+                spawn_input["model_profile"] = json!(model_profile);
+            }
         }
         if let Some(cwd) = parsed.cwd.as_deref() {
             spawn_input["cwd"] = json!(cwd);
@@ -5475,12 +5498,20 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
             Ok(AgentSpawnAdmission::Forwarded { input, start }) => {
                 let rewritten = input != original_spawn_input;
+                let previous_model = parsed.model.clone();
+                let previous_model_profile = parsed.model_profile.clone();
                 let next_type = input
                     .get_property("subagentType")
                     .and_then(|value| value.as_str())
                     .ok_or_else(|| {
                         ToolError::InvalidInput("agent.spawn has no subagentType".into())
                     })?;
+                if let Err(error) =
+                    apply_mod_model_selection(&input, &mut parsed, model_overrides_forced, is_fork)
+                {
+                    self.release_spawn_reservation();
+                    return Err(error);
+                }
                 if next_type != effective_type {
                     let exists = !is_fork
                         && spawner
@@ -5516,7 +5547,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     selected = spawner
                         .resolve_selection(
                             next_type,
-                            input.get_property("model").and_then(|value| value.as_str()),
+                            parsed.model.as_deref(),
+                            parsed.model_profile.as_deref(),
                         )
                         .await;
                     effective_type = next_type.to_owned();
@@ -5547,22 +5579,18 @@ Use /mcp to configure and authenticate the required MCP servers.",
                         .string_units("")
                         .expect("description source is a root string"),
                 );
-                parsed.model = input
-                    .get_property("model")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_owned);
                 parsed.cwd = input
                     .get_property("cwd")
                     .and_then(|value| value.as_str())
                     .map(str::to_owned);
-                if parsed.model
-                    != original_spawn_input
-                        .get_property("model")
-                        .and_then(|value| value.as_str())
-                        .map(str::to_owned)
+                if parsed.model != previous_model || parsed.model_profile != previous_model_profile
                 {
                     selected = spawner
-                        .resolve_selection(&effective_type, parsed.model.as_deref())
+                        .resolve_selection(
+                            &effective_type,
+                            parsed.model.as_deref(),
+                            parsed.model_profile.as_deref(),
+                        )
                         .await;
                 }
                 let background = input
@@ -5641,6 +5669,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                             "prompt": "",
                             "description": parsed.description,
                             "model": parsed.model,
+                            "model_profile": parsed.model_profile,
                             "run_in_background": run_in_background,
                             "cwd": parsed.cwd,
                         }));

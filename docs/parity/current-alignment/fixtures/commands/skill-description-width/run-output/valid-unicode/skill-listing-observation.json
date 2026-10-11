@@ -1,0 +1,19 @@
+{
+  "skill_name_found_in_system": false,
+  "system_occurrences": 0,
+  "request_occurrences": 1,
+  "string_matches": [
+    {
+      "json_path": "$.messages[0].content[3].text",
+      "decoded_excerpt": "- native-width-probe: \u0301\ud83d\udc69\u200d\ud83d\udcbb\ufffdaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "excerpt_code_points": 277,
+      "ascii_a_count": 251,
+      "max_ascii_a_run": 250,
+      "replacement_character_count": 1,
+      "ellipsis_present": false
+    }
+  ],
+  "source_description_literal_present_in_request": true,
+  "250_ascii_tail_present_in_request": true,
+  "system_blocks": 3
+}

@@ -147,4 +147,8 @@
 /// agent summaries and compaction summaries. These existing fields now carry
 /// `ClientTextDto`; JSON remains string-valued while UniFFI layouts change.
 /// Current hosts and generated native consumers must use the same contract.
-pub const CLIENT_PROTOCOL_VERSION: &str = "22.0.0";
+///
+/// Bumped to 23.0.0 because `SkillAdminCommandDto.target` now carries
+/// `Option<ClientTextDto>` instead of `Option<String>`. The optional JSON value
+/// remains string-shaped, but the generated UniFFI record layout changes.
+pub const CLIENT_PROTOCOL_VERSION: &str = "23.0.0";

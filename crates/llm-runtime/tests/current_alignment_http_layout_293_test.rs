@@ -10,8 +10,8 @@ use lingxi_llm_client::providers::anthropic::{
 use llm_runtime::history::{HistoryContentDelta, HistoryEvent};
 use llm_runtime::model::user_agent::UserAgentEnv;
 use llm_runtime::{
-    ApiService, AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmRequest,
-    ModelRuntime, ProtocolFamily, ProviderId, RequestMetadata, SubscriberState,
+    ApiService, ClientConfig, LlmRequest, ModelRuntime, ProtocolFamily, ProviderId,
+    RequestMetadata, SubscriberState,
 };
 use serde_json::{json, Value};
 use std::{
@@ -329,6 +329,7 @@ async fn capture_anthropic(
             Some("repl_main_thread"),
             None,
             Vec::new(),
+            None,
             None,
         ),
     )

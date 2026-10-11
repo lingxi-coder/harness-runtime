@@ -98,7 +98,12 @@ impl sidequery::SideQueryClient for MemoryRouteClient {
             .push((request.model, request.profile));
         Ok(sidequery::SideQueryResponse {
             text: None,
-            structured: Some(serde_json::json!({ "filenames": ["guide.md"] })),
+            structured: Some(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({ "filenames": ["guide.md"] }),
+                )
+                .expect("generated memory result is representable"),
+            ),
             tool_calls: Vec::new(),
             usage: Default::default(),
             stop_reason: Some("end_turn".into()),
@@ -110,7 +115,8 @@ impl sidequery::SideQueryClient for MemoryRouteClient {
 #[tokio::test]
 async fn memory_prefetch_follows_live_model_and_profile_switches() {
     let dir = tempfile::tempdir().unwrap();
-    let roots = memory::memdir::paths::memdir_roots_at(dir.path(), std::path::Path::new("/work"), false);
+    let roots =
+        memory::memdir::paths::memdir_roots_at(dir.path(), std::path::Path::new("/work"), false);
     std::fs::create_dir_all(&roots.user_memdir).unwrap();
     std::fs::write(roots.user_memdir.join("guide.md"), "USE RG").unwrap();
     let client = Arc::new(MemoryRouteClient::default());

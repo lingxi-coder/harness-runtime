@@ -330,9 +330,9 @@ async fn native_refusal_results_and_source_stop_details_reach_real_host_output_a
             .clone();
         assert!(
             !request_shapes.is_empty()
-                && request_shapes
-                    .iter()
-                    .all(|shape| shape.model.as_deref() == Some(MODEL) && shape.stream == Some(true)),
+                && request_shapes.iter().all(
+                    |shape| shape.model.as_deref() == Some(MODEL) && shape.stream == Some(true)
+                ),
             "the production adapter must replay the fixed Native streaming refusal: {case}: {request_shapes:?}"
         );
 
@@ -398,7 +398,7 @@ async fn native_refusal_results_and_source_stop_details_reach_real_host_output_a
         } else {
             assert!(
                 assistant_rows.iter().any(|row| {
-                    row.message.string_at("/stop_details/category").as_deref() == Some(category)
+                    row.message.string_at("/stop_details/category") == Some(category)
                 }),
                 "Native refusal category must survive persistence: {case}"
             );

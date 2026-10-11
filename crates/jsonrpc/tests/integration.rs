@@ -13,8 +13,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use jsonrpc::{
-    Connection, InboundHandler, JsonPayload, LineCodec, LspCodec, Notification, Request,
-    Response, RouterError,
+    Connection, InboundHandler, JsonPayload, LineCodec, LspCodec, Notification, Request, Response,
+    RouterError,
 };
 use serde_json::json;
 use tokio::sync::mpsc;

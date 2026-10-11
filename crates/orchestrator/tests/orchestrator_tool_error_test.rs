@@ -132,7 +132,10 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
     let tools = Arc::new(registry);
 
     let orch = ConversationOrchestrator::new(
-        OrchestratorConfig::default(),
+        OrchestratorConfig {
+            context_rendering: lingxi_core::host::instructions::InstructionRendering::Inline,
+            ..OrchestratorConfig::default()
+        },
         api.clone(),
         tools,
         hooks,
@@ -182,10 +185,10 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
                     ..
                 } => {
                     assert_eq!(*id, tool_use_id);
-                    assert!(
-                        text.string_at("")
-                            .is_some_and(|source| source.starts_with("Error: ")),
-                        "byte-locked prefix: {text:?}"
+                    assert_eq!(
+                        text.string_at(""),
+                        Some("disk on fire"),
+                        "Native main tool_result content is the bare thrown error.message"
                     );
                     assert!(
                         text.string_at("")

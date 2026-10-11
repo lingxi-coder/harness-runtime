@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":3,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list","params":"bad"}}}}

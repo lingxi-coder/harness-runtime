@@ -2310,54 +2310,63 @@ fn declared_wire_tags(source_file: &str, enum_name: &str) -> BTreeSet<String> {
         .join("src/protocol")
         .join(source_file);
     let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let header = format!("pub enum {enum_name} {{");
-    let start = src
-        .find(&header)
-        .unwrap_or_else(|| panic!("`{header}` not found in {source_file}"));
+    let syntax = syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let macro_name = match enum_name {
+        "ClientCommand" => "define_client_command",
+        "ClientEvent" => "define_client_event",
+        _ => panic!("no protocol macro registered for {enum_name}"),
+    };
+    let invocation = syntax
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Macro(item) if item.mac.path.is_ident(macro_name) => Some(&item.mac),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("`{macro_name}!` invocation not found in {source_file}"));
+    let enum_source = format!("enum {enum_name} {{ {} }}", invocation.tokens);
+    let parsed: syn::ItemEnum = syn::parse_str(&enum_source)
+        .unwrap_or_else(|e| panic!("parse {enum_name} variants from {source_file}: {e}"));
 
-    let mut tags = BTreeSet::new();
-    let mut depth = 0_i32;
-    let mut renamed_tag = None;
-    for line in src[start..].lines() {
-        let trimmed = line.trim_start();
-        // Doc comments legitimately contain unbalanced-looking braces; skip
-        // them before counting, and never read a variant name out of one.
-        if !trimmed.starts_with("//") {
-            if depth == 1 {
-                if let Some(tag) = trimmed
-                    .strip_prefix("#[serde(rename = \"")
-                    .and_then(|value| value.strip_suffix("\")]"))
-                {
-                    renamed_tag = Some(tag.to_string());
-                } else {
-                    assert!(
-                        !(trimmed.starts_with("#[") && trimmed.contains("rename")),
-                        "unsupported serde rename syntax in {enum_name}"
-                    );
-                }
-                if let Some(name) = line
-                    .strip_prefix("    ")
-                    .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
-                {
-                    let name: String = name
-                        .chars()
-                        .take_while(char::is_ascii_alphanumeric)
-                        .collect();
-                    tags.insert(renamed_tag.take().unwrap_or_else(|| to_snake_case(&name)));
-                }
-            }
-            depth += i32::try_from(line.matches('{').count()).expect("brace count fits i32");
-            depth -= i32::try_from(line.matches('}').count()).expect("brace count fits i32");
-        }
-        if depth == 0 && !tags.is_empty() {
-            break;
-        }
-    }
+    let tags: BTreeSet<String> = parsed
+        .variants
+        .iter()
+        .map(|variant| {
+            serde_variant_rename(&variant.attrs)
+                .unwrap_or_else(|| to_snake_case(&variant.ident.to_string()))
+        })
+        .collect();
     assert!(
         !tags.is_empty(),
-        "no variants parsed out of {enum_name} — the extractor is broken, not the enum"
+        "no variants parsed out of {enum_name} — the macro extractor is broken, not the enum"
     );
     tags
+}
+
+fn serde_variant_rename(attrs: &[syn::Attribute]) -> Option<String> {
+    use syn::{Expr, Lit, Meta};
+
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
+        let entries = attr
+            .parse_args_with(syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+            .expect("serde variant attributes use valid metadata syntax");
+        for entry in entries {
+            let Meta::NameValue(name_value) = entry else {
+                continue;
+            };
+            if !name_value.path.is_ident("rename") {
+                continue;
+            }
+            if let Expr::Lit(syn::ExprLit {
+                lit: Lit::Str(value),
+                ..
+            }) = name_value.value
+            {
+                return Some(value.value());
+            }
+        }
+    }
+    None
 }
 
 /// serde's `rename_all = "snake_case"` rule: lowercase, `_` before each

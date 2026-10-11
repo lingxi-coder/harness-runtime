@@ -367,11 +367,7 @@ mod tests {
         let tool = StructuredOutputTool::new(schema, compiled, slot.clone());
         let (tx, _) = tool_api::progress::progress_channel();
         let result = tool
-            .call(
-                input.clone(),
-                ToolUseContext::model_seed("test".into(), None),
-                tx,
-            )
+            .call(input.clone(), ToolUseContext::model_seed("test".into()), tx)
             .await
             .expect("valid output is accepted");
 
@@ -399,7 +395,7 @@ mod tests {
         let error = tool
             .call(
                 parse(r#"{}"#),
-                ToolUseContext::model_seed("test".into(), None),
+                ToolUseContext::model_seed("test".into()),
                 tx,
             )
             .await

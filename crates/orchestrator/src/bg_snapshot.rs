@@ -39,12 +39,43 @@
 
 use lingxi_core::host::bg_session_forker::BgSessionSnapshot;
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
-use lingxi_core::types::ConversationMessage;
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use session::JsonlMessage;
 
 fn source<T: serde::Serialize + ?Sized>(value: &T) -> Source {
     Source::parse(&serde_json::to_string(value).expect("typed transcript value"))
         .expect("valid transcript source")
+}
+
+fn source_content_blocks(content: &[ContentBlock]) -> Source {
+    let blocks = content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations,
+            } => {
+                // JSONL stores the native text block and carries exact UTF-16
+                // units in the row's private override map; do not persist the
+                // in-memory `text_js_utf16` carrier as a different wire block.
+                let text = Source::root_string(text.clone(), utf16_code_units.clone())
+                    .expect("text block has a valid UTF-16 display projection");
+                let mut projection = object(vec![("type", "text".into()), ("text", text)]);
+                if let Some(citations) = citations {
+                    let citations = citations
+                        .clone()
+                        .unwrap_or_else(|| Source::parse("null").expect("JSON null"));
+                    projection
+                        .set_field("citations", citations)
+                        .expect("text block object");
+                }
+                projection
+            }
+            _ => source(block),
+        })
+        .collect();
+    Source::array(blocks).expect("content blocks form a JSON array")
 }
 
 fn object(fields: Vec<(&str, Source)>) -> Source {
@@ -118,7 +149,10 @@ pub fn history_to_jsonl_lines(
                 }
                 (
                     "user",
-                    object(vec![("role", "user".into()), ("content", source(content))]),
+                    object(vec![
+                        ("role", "user".into()),
+                        ("content", source_content_blocks(content)),
+                    ]),
                 )
             }
             ConversationMessage::Assistant {
@@ -129,7 +163,7 @@ pub fn history_to_jsonl_lines(
             } => {
                 let mut inner = object(vec![
                     ("role", "assistant".into()),
-                    ("content", source(content)),
+                    ("content", source_content_blocks(content)),
                 ]);
                 if !model.is_empty() {
                     inner

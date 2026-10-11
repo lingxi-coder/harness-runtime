@@ -343,9 +343,9 @@ mod tests {
                 api_output_config: None,
                 role: "user".to_string(),
                 content: vec![ContentBlock::ToolResult {
-                    output_projection: None,
                     tool_call_id: "call-1".to_string(),
-                    output,
+                    output: lingxi_llm_client::protocol::JsonPayload::from_generated_value(&output)
+                        .expect("test tool result is valid JSON"),
                     is_error: Some(false),
                     cache_control: None,
                     cache_reference: None,
@@ -411,7 +411,6 @@ mod tests {
                         citations: None,
                     },
                     ContentBlock::ToolCall {
-                        input_projection: None,
                         id: "call-1".to_string(),
                         name: "lookup".to_string(),
                         input: lingxi_llm_client::protocol::JsonPayload::parse(
@@ -420,7 +419,6 @@ mod tests {
                         .unwrap(),
                     },
                     ContentBlock::ToolResult {
-                        output_projection: None,
                         tool_call_id: "call-1".to_string(),
                         output: lingxi_llm_client::protocol::JsonPayload::parse(
                             r#"{"temperature":18,"unit":"celsius"}"#,

@@ -33,17 +33,13 @@ fn registry_routes_every_curated_anthropic_model() {
 /// A configured default that routes to anthropic is registered BARE.
 #[test]
 fn qualified_anthropic_default_registers_bare_id() {
-    assert!(
-        ids("anthropic/claude-opus-4-5-20251101")
-            .iter()
-            .any(|id| id == "claude-opus-4-5-20251101")
-    );
+    assert!(ids("anthropic/claude-opus-4-5-20251101")
+        .iter()
+        .any(|id| id == "claude-opus-4-5-20251101"));
     // An unqualified custom id still routes to anthropic (legacy behavior).
-    assert!(
-        ids("my-proxy-model")
-            .iter()
-            .any(|id| id == "my-proxy-model")
-    );
+    assert!(ids("my-proxy-model")
+        .iter()
+        .any(|id| id == "my-proxy-model"));
 }
 
 /// Regression (iOS "DeepSeek V4 Flash under ANTHROPIC"): a default qualified

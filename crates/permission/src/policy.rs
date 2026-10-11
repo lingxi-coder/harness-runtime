@@ -20,7 +20,9 @@ use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource};
 use crate::shell_command;
 use crate::working_dirs::AdditionalWorkingDirs;
 use crate::workspace_lease;
-use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+#[cfg(test)]
+use lingxi_core::types::utf16_json::JsonValueView;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -89,7 +91,9 @@ struct ShellCommandAnalysis {
 /// its general Ask path. `TextFallback` keeps the existing feature-off text
 /// splitter behavior, but is not claimed as a Native parser path.
 enum ShellReasonTree {
+    #[cfg_attr(not(feature = "bash-ast"), allow(dead_code))]
     Pipeline(Vec<String>),
+    #[cfg_attr(not(feature = "bash-ast"), allow(dead_code))]
     Ast(Vec<String>),
     #[cfg(not(feature = "bash-ast"))]
     TextFallback(Vec<String>),
@@ -158,11 +162,11 @@ fn analyze_shell_command(tool_name: &str, input: &Utf16JsonProjection) -> ShellC
                 (Vec::new(), None)
             }
         };
-        return ShellCommandAnalysis {
+        ShellCommandAnalysis {
             bash_ast: Some(bash_ast),
             rule_candidates,
             reason_tree,
-        };
+        }
     }
 
     #[cfg(not(feature = "bash-ast"))]
@@ -192,6 +196,7 @@ fn result_reason(result: &PermissionResult) -> &PermissionDecisionReason {
 
 /// The Native `Ast` Mod projection selects the first same-behavior child rule
 /// in insertion order.
+#[cfg(any(test, not(feature = "bash-ast")))]
 fn first_rule_for_behavior(
     reason: &PermissionDecisionReason,
     behavior: PermissionBehavior,
@@ -4386,6 +4391,7 @@ fn rule_uses_glob(rule: &PermissionRule) -> bool {
 /// both sides trimmed, or `None` when there is no `:`, the `:` is at position 0,
 /// or either side is empty after trimming.
 #[must_use]
+#[cfg(test)]
 fn split_field_pattern(content: &str) -> Option<(&str, &str)> {
     let idx = content.find(':')?;
     if idx == 0 {
@@ -4434,6 +4440,7 @@ fn tool_rule_content_field(tool_name: &str) -> Option<&'static str> {
 /// claude-code `L1g`: strings pass through, numbers/booleans stringify, and any
 /// non-primitive (null/array/object) yields `None` (no match).
 #[must_use]
+#[cfg(test)]
 fn stringify_primitive(value: JsonValueView<'_>) -> Option<String> {
     crate::source_input::stringify_primitive(value)
 }
@@ -4829,7 +4836,7 @@ fn deny_with_rule_content(
         // `Agent(type)`) surface the matched `ruleContent`; a tool-wide rule
         // (`rule_content == None`) falls through to the bare generic message.
         rule.value.rule_content.as_ref().map(|content| {
-            let suffix = format!(" has been denied.");
+            let suffix = " has been denied.".to_string();
             crate::source_input::joined_text(&[
                 crate::source_input::TextPart::Generated("Permission to use "),
                 crate::source_input::TextPart::Generated(tool_name),

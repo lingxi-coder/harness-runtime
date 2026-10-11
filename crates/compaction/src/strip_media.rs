@@ -193,7 +193,7 @@ mod tests {
             panic!("tool result");
         };
         assert_eq!(tool_use_id, &id);
-        assert_eq!(content.string_at("").as_deref(), Some("read result"));
+        assert_eq!(content.string_at(""), Some("read result"));
         assert_eq!(provider_tool_use_id.as_deref(), Some("provider-read"));
         let content_blocks = content_blocks.as_ref().unwrap();
         assert_eq!(content_blocks.array_len(""), Some(3));

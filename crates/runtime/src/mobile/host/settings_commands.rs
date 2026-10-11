@@ -415,11 +415,9 @@ mod tests {
         })
         .unwrap();
         prepare_mobile_mcp_storage(root.path()).unwrap();
-        assert!(
-            !migrations::global_config::read_map(&path)
-                .unwrap()
-                .contains_key("mcpServers")
-        );
+        assert!(!migrations::global_config::read_map(&path)
+            .unwrap()
+            .contains_key("mcpServers"));
         assert_eq!(
             std::fs::read_to_string(root.path().join("settings.json")).unwrap(),
             original

@@ -5,18 +5,18 @@ use lingxi_core::host::location::LocationError;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::PermissionResult;
-use serde_json::{Value, json};
-use tool_api::BuiltinToolContext;
+use serde_json::json;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
+use tool_api::BuiltinToolContext;
 
 use crate::device_support::{
-    EmptyInput, ask, execute, failure, generated_projection, generated_schema_repair, invalid,
-    parse,
+    ask, execute, failure, generated_projection, generated_schema_repair, invalid, parse,
+    EmptyInput,
 };
 
 /// Canonical model-facing tool name.

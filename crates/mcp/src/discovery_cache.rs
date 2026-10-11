@@ -158,7 +158,6 @@ use lingxi_core::host::{
     McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
     ServerCapabilitiesDto,
 };
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use sha2::{Digest, Sha256};
 
 /// Fixed byte-level compatibility domain used when reproducing Claude Code's
@@ -1594,6 +1593,7 @@ impl DiscoveryCacheStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
     fn http_spec(url: &str, headers_helper: Option<&str>) -> McpTransportSpec {
         McpTransportSpec::Http {

@@ -205,7 +205,7 @@ pub(super) async fn handle_malformed_tool_use(
         MessageId::new(),
         MALFORMED_TOOL_USE_RETRY_NUDGE.to_string(),
     );
-    orch.discard_retry_attempt(assistant_id).await;
+    orch.discard_retry_attempt(assistant_id, &[]).await;
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
@@ -229,7 +229,7 @@ pub(super) async fn handle_thinking_only(
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     let nudge_msg =
         ConversationMessage::user_meta(MessageId::new(), THINKING_ONLY_NUDGE.to_string());
-    orch.discard_retry_attempt(assistant_id).await;
+    orch.discard_retry_attempt(assistant_id, &[]).await;
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());

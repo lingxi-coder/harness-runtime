@@ -236,7 +236,6 @@ fn join_tokens<'a>(tokens: impl Iterator<Item = &'a Vec<u16>>) -> Utf16JsonProje
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     fn build_display(args: &str) -> String {
         CodeReviewPromptFn

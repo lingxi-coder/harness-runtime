@@ -828,7 +828,7 @@ fn rewrite_append_message(
             is_compact_summary: *is_compact_summary,
             is_visible_in_transcript_only: *is_visible_in_transcript_only,
             turn_companion: *turn_companion,
-            usage_limit_note: usage_limit_note.clone(),
+            usage_limit_note: *usage_limit_note,
             origin: origin.clone(),
             turn_origin: turn_origin.clone(),
         },
@@ -2672,6 +2672,7 @@ mod tests {
         message_units.push(0xd800);
         let message = ConversationMessage::User {
             id: MessageId::new(),
+            api_message_override: None,
             content: vec![
                 ContentBlock::TextJsUtf16 {
                     text: String::from_utf16_lossy(&message_units),
@@ -2790,6 +2791,7 @@ mod tests {
                     citations: None,
                 }],
                 stop_reason: None,
+                per_turn_effort: None,
 
                 resumable: None,
             };
@@ -3173,6 +3175,7 @@ mod tests {
                 },
             ],
             stop_reason: Some("end_turn".into()),
+            per_turn_effort: None,
 
             resumable: None,
         };

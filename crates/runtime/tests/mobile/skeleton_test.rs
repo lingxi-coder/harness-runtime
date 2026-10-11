@@ -184,6 +184,147 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
     });
 }
 
+/// The public mobile `RunSlashCommand` entry must carry an isolated UTF-16
+/// surrogate through the live dispatcher, bundled prompt expansion, model
+/// request, and durable session transcript.
+#[test]
+fn submit_run_slash_command_preserves_lone_surrogate_in_streamed_and_durable_prompt() {
+    use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = MobileConfig {
+        cwd: tmp.path().to_path_buf(),
+        lingxi_home: tmp.path().join(".lingxi"),
+        inline_visualization: true,
+        ..MobileConfig::default()
+    };
+    cfg.api_key = "test-key".into();
+
+    let response = vec![
+        message_start("mobile-slash-source", "claude-sonnet-4-20250514"),
+        content_block_start_text(0),
+        text_delta(0, "done"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![response]));
+    let streaming_api: Arc<dyn StreamingApiClient> = streaming.clone();
+    let platform = Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+    let listener = Arc::new(FakeListener::default());
+    let handle = new_engine_with_streaming(
+        cfg.clone(),
+        platform,
+        listener.clone(),
+        Arc::new(CollectingPermissionSink::default()),
+        Some(streaming_api),
+    )
+    .expect("build mobile engine with visualization enabled");
+
+    let raw_argument: Vec<u16> = "left"
+        .encode_utf16()
+        .chain([0xd800])
+        .chain("right".encode_utf16())
+        .collect();
+    let raw_command = "/visualize "
+        .encode_utf16()
+        .chain(raw_argument.iter().copied())
+        .collect();
+
+    handle.runtime().block_on(async {
+        start_new_session(&handle).await;
+        let session_id = listener
+            .received
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            })
+            .expect("NewSession emits the transcript id");
+
+        handle
+            .submit(ClientCommand::RunSlashCommand {
+                raw: ClientTextDto::from_code_units(raw_command),
+                turn_id: Some(7),
+            })
+            .await
+            .expect("submit RunSlashCommand through mobile dispatcher");
+
+        for _ in 0..2_000 {
+            if listener
+                .received
+                .lock()
+                .await
+                .iter()
+                .any(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let events = listener.received.lock().await.clone();
+        let captured_call_count = streaming.captured_calls().await.len();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ClientEvent::TurnEnded { .. })),
+            "the dispatched visualization prompt must reach a terminal model turn; captured_call_count={captured_call_count}, events={events:?}"
+        );
+
+        let calls = streaming.captured_calls().await;
+        assert_eq!(calls.len(), 1, "one slash dispatch makes one model request");
+        let request_prompt = calls[0]
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                ConversationMessage::User { content, .. } => content.iter().find_map(|block| {
+                    match block {
+                        ContentBlock::TextJsUtf16 {
+                            utf16_code_units, ..
+                        } => Some(utf16_code_units.clone()),
+                        _ => None,
+                    }
+                }),
+                _ => None,
+            })
+            .expect("the expanded user prompt is source-backed");
+        assert!(
+            request_prompt
+                .windows(raw_argument.len())
+                .any(|units| units == raw_argument.as_slice()),
+            "the model request must retain the lone surrogate between the slash argument sentinels: {request_prompt:?}"
+        );
+
+        let transcript_path = session::jsonl::session_path(
+            &cfg.lingxi_home,
+            &cfg.cwd.to_string_lossy(),
+            &session_id,
+        );
+        let transcript = std::fs::read_to_string(&transcript_path)
+            .expect("mobile turn writes the durable session transcript");
+        let transcript_has_exact_argument = transcript.lines().any(|line| {
+            let Ok(row) = Utf16JsonProjection::parse(line) else {
+                return false;
+            };
+            row.string_at("/type") == Some("user")
+                && row
+                    .string_units("/message/content/0/text")
+                    .is_some_and(|units| {
+                        units
+                            .windows(raw_argument.len())
+                            .any(|window| window == raw_argument.as_slice())
+                    })
+        });
+        assert!(
+            transcript_has_exact_argument,
+            "the durable user row must retain the isolated surrogate source units"
+        );
+    });
+}
+
 #[test]
 fn completed_mobile_turns_are_persisted_and_listed_per_session() {
     let tmp = tempfile::tempdir().expect("tempdir");

@@ -80,21 +80,21 @@ impl ConversationOrchestrator {
         &self,
         order: LoopGuardOrder,
         state: &mut TurnLoopState,
-    ) -> GuardVerdict {
+    ) -> Result<GuardVerdict, OrchestratorError> {
         if order.drains() {
             // Before the limits on purpose, so a message that arrived during the
             // previous step is not dropped by `max_turns` or the budget.
-            self.drain_mid_turn_input().await;
+            self.drain_mid_turn_input().await?;
         }
         {
             let session = self.session.lock().await;
             state.structured_output_retry.observe(&session.history);
         }
         if self.config.max_turns != 0 && state.turn_count >= self.config.max_turns {
-            return GuardVerdict::MaxTurns;
+            return Ok(GuardVerdict::MaxTurns);
         }
         if self.over_budget().await {
-            return GuardVerdict::OverBudget;
+            return Ok(GuardVerdict::OverBudget);
         }
         state.turn_count = state.turn_count.saturating_add(1);
         self.note_turn_count(state.turn_count);
@@ -105,9 +105,9 @@ impl ConversationOrchestrator {
             let cost = self.snapshot_cost_real().await;
             self.emit_turn_terminal("structured_output_retry_exhausted", &cost)
                 .await;
-            return GuardVerdict::StructuredOutputRetries(error);
+            return Ok(GuardVerdict::StructuredOutputRetries(error));
         }
-        GuardVerdict::Proceed
+        Ok(GuardVerdict::Proceed)
     }
 }
 

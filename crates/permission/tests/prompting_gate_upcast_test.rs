@@ -45,10 +45,13 @@ async fn check_typing_y_returns_allow() {
 
     // The upcast must consult the tool-default table — Bash is DenyByDefault,
     // so the bracket suffix is `[y/N]`.
-    let expected = b"Claude needs your permission to use Bash\n[y/N] ";
+    let expected = format!(
+        "{} needs your permission to use Bash\n[y/N] ",
+        branding::PRODUCT_NAME
+    );
     let mut printed = vec![0u8; expected.len()];
     stderr_reader.read_exact(&mut printed).await.unwrap();
-    assert_eq!(printed.as_slice(), expected.as_slice());
+    assert_eq!(printed.as_slice(), expected.as_bytes());
 }
 
 #[tokio::test]
@@ -106,10 +109,13 @@ async fn check_unknown_tool_falls_back_to_deny_default() {
 
     writer_handle.await.unwrap();
 
-    let expected = b"Claude needs your permission to use DoesNotExist\n[y/N] ";
+    let expected = format!(
+        "{} needs your permission to use DoesNotExist\n[y/N] ",
+        branding::PRODUCT_NAME
+    );
     let mut printed = vec![0u8; expected.len()];
     stderr_reader.read_exact(&mut printed).await.unwrap();
-    assert_eq!(printed.as_slice(), expected.as_slice());
+    assert_eq!(printed.as_slice(), expected.as_bytes());
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ use llm_runtime::{Credential, CredentialConfig, CredentialProvider, CredentialSc
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::{MobileConfig, MobileEngineError, lower_model_details};
+use super::{lower_model_details, MobileConfig, MobileEngineError};
 
 /// Non-secret result of testing one provider endpoint from the mobile engine.
 ///

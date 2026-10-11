@@ -1,0 +1,48 @@
+{
+  "argv": [
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "--bare",
+    "--print",
+    "--output-format",
+    "json",
+    "--model",
+    "claude-sonnet-4-5",
+    "--system-prompt",
+    "You are a local deterministic headless fixture.",
+    "--tools",
+    "",
+    "--permission-mode",
+    "dontAsk",
+    "--permission-prompts",
+    "none",
+    "--session-id",
+    "00000000-0000-4000-8000-000000029508",
+    "Return the fixed Native HTTP 422 error-copy probe."
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-print-http422-error-copy-295/attempt-01/runtime/cwd",
+  "env": {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "HOME": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-print-http422-error-copy-295/attempt-01/runtime/home",
+    "TMPDIR": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-print-http422-error-copy-295/attempt-01/runtime/tmp",
+    "LANG": "C.UTF-8",
+    "TZ": "UTC",
+    "TERM": "xterm-256color",
+    "CLAUDE_CONFIG_DIR": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-print-http422-error-copy-295/attempt-01/runtime/config",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:59031",
+    "ANTHROPIC_API_KEY": "<fixed-dummy>",
+    "ANTHROPIC_MAX_RETRIES": "0",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1",
+    "DISABLE_AUTOUPDATER": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"
+  },
+  "inherited_environment": false,
+  "session_id": "00000000-0000-4000-8000-000000029508",
+  "prompt": "Return the fixed Native HTTP 422 error-copy probe.",
+  "base_url": "http://127.0.0.1:59031",
+  "native_process_launches_allowed": 1,
+  "client_retry_environment": {
+    "ANTHROPIC_MAX_RETRIES": "0"
+  }
+}

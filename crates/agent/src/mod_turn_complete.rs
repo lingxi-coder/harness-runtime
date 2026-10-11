@@ -453,6 +453,7 @@ mod tests {
     fn turn_start_text_keeps_lone_utf16_units_from_user_history() {
         let history = vec![ConversationMessage::User {
             id: MessageId::new(),
+            api_message_override: None,
             content: vec![HostContentBlock::TextJsUtf16 {
                 text: "�".into(),
                 utf16_code_units: vec![0xd800],

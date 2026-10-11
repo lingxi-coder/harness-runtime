@@ -476,6 +476,7 @@ pub(super) async fn apply_tool_result_persistence(
 /// The full `result.data` object still flows to the TUI (`emit_tool_result`)
 /// and the `PostToolUse` hook unchanged; only the model-facing string is derived
 /// here.
+#[cfg(test)]
 pub(super) fn tool_result_to_model_text(data: &Utf16JsonProjection) -> Utf16JsonProjection {
     if data.string_units("").is_some() {
         return data.clone();
@@ -496,31 +497,6 @@ pub(super) fn tool_result_to_model_text(data: &Utf16JsonProjection) -> Utf16Json
     }
 }
 
-/// Map ToolSearch's matched names to Anthropic `tool_reference` blocks. Empty
-/// results stay on the text path (`model_content` carries the upstream copy).
-pub(super) fn tool_search_reference_blocks(
-    data: &Utf16JsonProjection,
-) -> Option<Vec<Utf16JsonProjection>> {
-    let count = data.array_len("/matches")?;
-    if count == 0 {
-        return None;
-    }
-    let blocks: Vec<Utf16JsonProjection> = (0..count)
-        .filter_map(|index| {
-            let name = data.subprojection(&format!("/matches/{index}")).ok()?;
-            name.string_units("")?;
-            Some(
-                Utf16JsonProjection::object(vec![
-                    ("type".into(), "tool_reference".into()),
-                    ("tool_name".into(), name),
-                ])
-                .expect("ToolSearch reference is a JSON object"),
-            )
-        })
-        .collect();
-    (!blocks.is_empty()).then_some(blocks)
-}
-
 /// The binary result-mapper's `case "image"` (`mapToolResultToToolResultBlockParam`):
 /// a `{type:"image", file:{base64, type, …}}` result — Read on an image file, or a
 /// rendered PDF page (`tbo`) — becomes a tool_result whose content is the image
@@ -533,6 +509,7 @@ pub(super) fn tool_search_reference_blocks(
 /// runner needs the identical answer, and it is in another crate. This stays a
 /// named function so the call chain above and the oracle note it carries are
 /// untouched.
+#[cfg(test)]
 pub(super) fn image_tool_result_blocks(
     data: &Utf16JsonProjection,
 ) -> Option<Vec<Utf16JsonProjection>> {
@@ -547,6 +524,7 @@ pub(super) fn image_tool_result_blocks(
 /// match on `/^data:([^;]+);base64,(.+)$/`, undecodable base64, unrecognized
 /// magic) returns `None` — the tool_result falls back to the text `content`,
 /// exactly the binary's `if(g)` fall-through.
+#[cfg(test)]
 pub(super) fn bash_image_tool_result_blocks(
     data: &Utf16JsonProjection,
 ) -> Option<Vec<Utf16JsonProjection>> {

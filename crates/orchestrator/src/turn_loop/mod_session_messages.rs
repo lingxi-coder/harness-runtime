@@ -4,8 +4,8 @@ use base64::Engine as _;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage};
 use llm_runtime::history::ContentBlock as ModelBlock;
-use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -35,9 +35,10 @@ fn projection_string(value: impl Into<String>) -> Utf16JsonProjection {
 }
 
 fn projection_value(value: &Value) -> Utf16JsonProjection {
-    Utf16JsonProjection::from_serde_value(value).expect("test-generated message JSON is valid")
+    Utf16JsonProjection::from_serde_value(value).expect("generated message JSON is valid")
 }
 
+#[cfg(test)]
 fn projection_to_value(projection: &Utf16JsonProjection) -> Value {
     serde_json::from_str(
         &projection
@@ -45,13 +46,6 @@ fn projection_to_value(projection: &Utf16JsonProjection) -> Value {
             .expect("session.messages projection stringifies"),
     )
     .expect("test assertions use JSON-compatible strings")
-}
-
-fn text_of(block: &ContentBlock) -> Option<&str> {
-    match block {
-        ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => Some(text),
-        _ => None,
-    }
 }
 
 fn exact_text_projection(blocks: &[ContentBlock]) -> Utf16JsonProjection {
@@ -500,6 +494,7 @@ pub(super) async fn hydrate_results(path: &Path, rows: &mut Utf16JsonProjection)
 mod tests {
     use super::*;
     use lingxi_core::types::{ImageSource, MessageId, ToolUseId};
+    use serde_json::json;
 
     fn user(content: Vec<ContentBlock>, is_meta: bool) -> ConversationMessage {
         ConversationMessage::User {
@@ -512,6 +507,7 @@ mod tests {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -553,6 +549,7 @@ mod tests {
                 ],
                 stop_reason: None,
                 resumable: None,
+                per_turn_effort: None,
             },
             user(
                 vec![ContentBlock::ToolResult {
@@ -626,6 +623,7 @@ mod tests {
                 ],
                 stop_reason: None,
                 resumable: None,
+                per_turn_effort: None,
             },
             user(
                 vec![ContentBlock::ToolResult {
@@ -687,6 +685,7 @@ mod tests {
                 }],
                 stop_reason: None,
                 resumable: None,
+                per_turn_effort: None,
             },
             user(
                 vec![ContentBlock::ToolResult {
@@ -741,6 +740,7 @@ mod tests {
                 }],
                 stop_reason: None,
                 resumable: None,
+                per_turn_effort: None,
             },
             user(
                 vec![ContentBlock::ToolResult {
@@ -760,6 +760,7 @@ mod tests {
                 }],
                 stop_reason: None,
                 resumable: None,
+                per_turn_effort: None,
             },
             user(
                 vec![ContentBlock::Text {
@@ -781,6 +782,7 @@ mod tests {
                     content,
                     stop_reason: None,
                     resumable: None,
+                    per_turn_effort: None,
                 });
             } else {
                 history.push(user(content, false));
@@ -852,6 +854,7 @@ mod tests {
                 }],
                 stop_reason: None,
                 resumable: None,
+                per_turn_effort: None,
             },
             user(
                 vec![ContentBlock::ToolResult {

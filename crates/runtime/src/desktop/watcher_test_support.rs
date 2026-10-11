@@ -136,8 +136,11 @@ async fn desktop_test_watchers_start_and_drain_real_lifecycle() {
     .await;
     let settings_count = fs.live.load(Ordering::SeqCst);
     assert!(settings_count > 0);
+    let mut matcher_builder = lingxi_core::types::utf16_json::Utf16JsonBuilder::new();
+    let matcher_root = matcher_builder.push_string("watched.txt");
+    let matcher = matcher_builder.finish(matcher_root).unwrap();
     let changed = crate::desktop::file_changed_watch::FileChangedWatcher::new(
-        &["watched.txt"],
+        &[matcher],
         root.path(),
         Arc::new(Firer),
     )

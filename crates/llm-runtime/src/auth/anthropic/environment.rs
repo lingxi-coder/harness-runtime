@@ -49,6 +49,16 @@ impl std::fmt::Debug for EnvironmentLookup {
     }
 }
 
+/// Match the host's Native OAuth environment-token parsing before the shared
+/// selector receives its already-parsed token input.
+fn environment_oauth_token(lookup: &EnvironmentLookup) -> Option<String> {
+    lookup.get("CLAUDE_CODE_OAUTH_TOKEN").map(|value| {
+        value
+            .trim_matches(lingxi_core::host::effort::javascript_whitespace)
+            .to_owned()
+    })
+}
+
 pub struct EnvironmentOAuthCredentialProvider {
     pub(crate) credential: Credential,
     pub subscription_type: Option<String>,
@@ -72,17 +82,14 @@ impl EnvironmentOAuthCredentialProvider {
     pub fn capture_with_lookup(lookup: EnvironmentLookup) -> Option<Self> {
         Some(Self {
             credential: {
-                let descriptor = if lookup
-                    .get("CLAUDE_CODE_OAUTH_TOKEN")
-                    .is_some_and(|token| !token.is_empty())
-                {
+                let has_environment_token =
+                    environment_oauth_token(&lookup).is_some_and(|token| !token.is_empty());
+                let descriptor = if has_environment_token {
                     None
                 } else {
                     (lookup.descriptor)()
                 };
-                if !lookup
-                    .get("CLAUDE_CODE_OAUTH_TOKEN")
-                    .is_some_and(|token| !token.is_empty())
+                if !has_environment_token
                     && descriptor
                         .as_ref()
                         .is_some_and(|value| value.from_background_snapshot && !value.host_managed)
@@ -118,10 +125,9 @@ impl EnvironmentOAuthCredentialProvider {
             });
         }
         if let Some(lookup) = &self.lookup {
-            let descriptor = if lookup
-                .get("CLAUDE_CODE_OAUTH_TOKEN")
-                .is_some_and(|token| !token.is_empty())
-            {
+            let has_environment_token =
+                environment_oauth_token(lookup).is_some_and(|token| !token.is_empty());
+            let descriptor = if has_environment_token {
                 None
             } else {
                 (lookup.descriptor)()
@@ -129,11 +135,7 @@ impl EnvironmentOAuthCredentialProvider {
             let defer_descriptor = descriptor
                 .as_ref()
                 .is_some_and(|value| value.from_background_snapshot && !value.host_managed);
-            if !defer_descriptor
-                || lookup
-                    .get("CLAUDE_CODE_OAUTH_TOKEN")
-                    .is_some_and(|value| !value.is_empty())
-            {
+            if !defer_descriptor || has_environment_token {
                 if let Some(credential) =
                     credential_from_sources_with_descriptor(lookup, None, descriptor.as_ref())
                 {
@@ -215,10 +217,7 @@ impl CredentialProvider for EnvironmentOAuthCredentialProvider {
                 return Ok(None);
             }
             if let Some(lookup) = &self.lookup {
-                if lookup
-                    .get("CLAUDE_CODE_OAUTH_TOKEN")
-                    .is_some_and(|token| !token.is_empty())
-                {
+                if environment_oauth_token(lookup).is_some_and(|token| !token.is_empty()) {
                     return Ok(None);
                 }
                 if (lookup.descriptor)().is_some_and(|value| {
@@ -250,7 +249,7 @@ fn credential_from_sources_with_descriptor(
     use lingxi_llm_client::providers::anthropic::oauth_source::{
         select_oauth_source, OAuthSourceInputs,
     };
-    let token = lookup.get("CLAUDE_CODE_OAUTH_TOKEN");
+    let token = environment_oauth_token(lookup);
     let scopes = lookup.get("CLAUDE_CODE_OAUTH_SCOPES");
     let stored = match stored {
         Some(Credential::AnthropicOAuth {

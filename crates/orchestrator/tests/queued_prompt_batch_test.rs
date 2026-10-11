@@ -286,7 +286,10 @@ async fn prompt_submit_mod_screens_each_batch_entry_before_persistence() {
         .contains("rewritten bridge"));
     assert_eq!(records[1].message_type, "attachment");
     assert_eq!(
-        records[1].extra.string_at("/attachment/hookName"),
+        records[1]
+            .attachment_projection
+            .as_ref()
+            .and_then(|attachment| attachment.string_at("/hookName")),
         Some("prompt.submit")
     );
     assert_eq!(records[2].message_type, "user");

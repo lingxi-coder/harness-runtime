@@ -56,7 +56,8 @@ fn anthropic_error_envelope_maps_to_taxonomy() {
                 "authentication_error",
                 "invalid x-api-key"
             ))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::Authentication { .. }
     ));
     assert!(matches!(
@@ -66,17 +67,19 @@ fn anthropic_error_envelope_maps_to_taxonomy() {
                 "invalid_request_error",
                 "prompt is too long: 250000 tokens"
             ))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::ContextOverflow { .. }
     ));
     assert!(matches!(
-        codec.decode_response(anthropic_error(400, "invalid_request_error", "messages: roles must alternate")).unwrap_err(),
+        codec.decode_response(anthropic_error(400, "invalid_request_error", "messages: roles must alternate")).unwrap_err().classification_source(),
         LlmError::InvalidRequest { message } if message.contains("roles must alternate")
     ));
     assert!(matches!(
         codec
             .decode_response(anthropic_error(529, "overloaded_error", "Overloaded"))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::Overloaded { .. }
     ));
 }
@@ -90,8 +93,8 @@ fn anthropic_rate_limit_carries_retry_after_with_ms_precedence() {
         .headers
         .insert("Retry-After".to_string(), "7".to_string());
     assert!(matches!(
-        codec.decode_response(seconds_only).unwrap_err(),
-        LlmError::RateLimited { retry_after: Some(after), .. } if after == Duration::from_secs(7)
+        codec.decode_response(seconds_only).unwrap_err().classification_source(),
+        LlmError::RateLimited { retry_after: Some(after), .. } if *after == Duration::from_secs(7)
     ));
 
     let mut with_ms = anthropic_error(429, "rate_limit_error", "slow down");
@@ -102,8 +105,8 @@ fn anthropic_rate_limit_carries_retry_after_with_ms_precedence() {
         .headers
         .insert("retry-after-ms".to_string(), "250".to_string());
     assert!(matches!(
-        codec.decode_response(with_ms).unwrap_err(),
-        LlmError::RateLimited { retry_after: Some(after), .. } if after == Duration::from_millis(250)
+        codec.decode_response(with_ms).unwrap_err().classification_source(),
+        LlmError::RateLimited { retry_after: Some(after), .. } if *after == Duration::from_millis(250)
     ));
 }
 
@@ -118,7 +121,8 @@ fn openai_error_envelope_maps_to_taxonomy() {
                 "invalid_api_key",
                 "Incorrect API key provided"
             ))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::Authentication { .. }
     ));
     assert!(matches!(
@@ -128,7 +132,8 @@ fn openai_error_envelope_maps_to_taxonomy() {
                 "insufficient_quota",
                 "You exceeded your current quota"
             ))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::QuotaExceeded
     ));
     assert!(matches!(
@@ -138,7 +143,8 @@ fn openai_error_envelope_maps_to_taxonomy() {
                 "rate_limit_exceeded",
                 "Rate limit reached"
             ))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::RateLimited { .. }
     ));
     assert!(matches!(
@@ -148,17 +154,19 @@ fn openai_error_envelope_maps_to_taxonomy() {
                 "context_length_exceeded",
                 "This model's maximum context length is exceeded"
             ))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::ContextOverflow { .. }
     ));
     assert!(matches!(
-        codec.decode_response(openai_error(400, "invalid_value", "Invalid value for tool_choice")).unwrap_err(),
+        codec.decode_response(openai_error(400, "invalid_value", "Invalid value for tool_choice")).unwrap_err().classification_source(),
         LlmError::InvalidRequest { message } if message.contains("tool_choice")
     ));
     assert!(matches!(
         codec
             .decode_response(openai_error(500, "server_error", "The server had an error"))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::ProviderInternal
     ));
 }
@@ -168,37 +176,42 @@ fn gemini_error_envelope_maps_to_taxonomy() {
     let codec = gemini_codec();
 
     assert!(matches!(
-        codec.decode_response(gemini_error(400, "INVALID_ARGUMENT", "Invalid JSON payload")).unwrap_err(),
+        codec.decode_response(gemini_error(400, "INVALID_ARGUMENT", "Invalid JSON payload")).unwrap_err().classification_source(),
         LlmError::InvalidRequest { message } if message.contains("Invalid JSON payload")
     ));
     assert!(matches!(
         codec
             .decode_response(gemini_error(401, "UNAUTHENTICATED", "API key not valid"))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::Authentication { .. }
     ));
     assert!(matches!(
         codec
             .decode_response(gemini_error(403, "PERMISSION_DENIED", "no access"))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::PermissionDenied { .. }
     ));
     assert!(matches!(
         codec
             .decode_response(gemini_error(404, "NOT_FOUND", "model not found"))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::ModelUnavailable
     ));
     assert!(matches!(
         codec
             .decode_response(gemini_error(429, "RESOURCE_EXHAUSTED", "quota exceeded"))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::RateLimited { .. }
     ));
     assert!(matches!(
         codec
             .decode_response(gemini_error(503, "UNAVAILABLE", "service overloaded"))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::Overloaded { .. }
     ));
 }
@@ -208,7 +221,8 @@ fn error_status_without_envelope_falls_back_to_status_mapping() {
     assert!(matches!(
         anthropic_codec()
             .decode_response(ProviderResponse::json(401, serde_json::Value::Null))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::Authentication { .. }
     ));
     assert!(matches!(
@@ -217,13 +231,15 @@ fn error_status_without_envelope_falls_back_to_status_mapping() {
                 502,
                 serde_json::json!("bad gateway")
             ))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::ProviderInternal
     ));
     assert!(matches!(
         gemini_codec()
             .decode_response(ProviderResponse::json(429, serde_json::Value::Null))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::RateLimited { .. }
     ));
 }
@@ -243,7 +259,10 @@ fn ptl_context_overflow_carries_token_gap() {
         ))
         .unwrap_err();
     assert!(
-        matches!(err, LlmError::ContextOverflow { token_gap: 1 }),
+        matches!(
+            err.classification_source(),
+            LlmError::ContextOverflow { token_gap: 1 }
+        ),
         "gap should be 1; got {err:?}"
     );
 
@@ -256,7 +275,10 @@ fn ptl_context_overflow_carries_token_gap() {
         ))
         .unwrap_err();
     assert!(
-        matches!(err2, LlmError::ContextOverflow { token_gap: 50000 }),
+        matches!(
+            err2.classification_source(),
+            LlmError::ContextOverflow { token_gap: 50000 }
+        ),
         "gap should be 50000; got {err2:?}"
     );
 
@@ -269,7 +291,10 @@ fn ptl_context_overflow_carries_token_gap() {
         ))
         .unwrap_err();
     assert!(
-        matches!(err3, LlmError::ContextOverflow { token_gap: 0 }),
+        matches!(
+            err3.classification_source(),
+            LlmError::ContextOverflow { token_gap: 0 }
+        ),
         "gap should be 0 (no counts); got {err3:?}"
     );
 
@@ -283,7 +308,7 @@ fn ptl_context_overflow_carries_token_gap() {
         ))
         .unwrap_err();
     assert!(
-        matches!(err4, LlmError::RequestTooLarge),
+        matches!(err4.classification_source(), LlmError::RequestTooLarge),
         "request_too_large (no context window) should be RequestTooLarge; got {err4:?}"
     );
 
@@ -297,7 +322,10 @@ fn ptl_context_overflow_carries_token_gap() {
         ))
         .unwrap_err();
     assert!(
-        matches!(err5, LlmError::ContextOverflow { token_gap: 0 }),
+        matches!(
+            err5.classification_source(),
+            LlmError::ContextOverflow { token_gap: 0 }
+        ),
         "413 mentioning context window should be ContextOverflow; got {err5:?}"
     );
 }
@@ -309,19 +337,22 @@ fn overloaded_maps_to_dedicated_variant() {
     assert!(matches!(
         codec
             .decode_response(anthropic_error(529, "overloaded_error", "Overloaded"))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::Overloaded { repeated: false }
     ));
     assert!(matches!(
         anthropic_codec()
             .decode_response(ProviderResponse::json(529, serde_json::Value::Null))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::Overloaded { repeated: false }
     ));
     assert!(matches!(
         codec
             .decode_response(anthropic_error(500, "api_error", "boom"))
-            .unwrap_err(),
+            .unwrap_err()
+            .classification_source(),
         LlmError::ProviderInternal
     ));
 }

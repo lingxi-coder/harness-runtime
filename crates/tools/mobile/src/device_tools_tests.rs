@@ -245,14 +245,16 @@ async fn typed_tools_dispatch_and_return_structured_results() {
     let fake = Arc::new(FakeDevices::default());
     let ctx = with_devices(fake.clone());
     let location = call(&LocationTool::new(ctx.clone()), json!({})).await;
-    assert_eq!(
-        json_view(&location.data),
-        json!({ "latitude": 31.2, "longitude": 121.4, "accuracy_m": 4.0, "timestamp_ms": 1000 })
-    );
+    let location_data = json_view(&location.data);
+    assert_eq!(location_data.as_object().unwrap().len(), 4);
+    assert_eq!(location_data["latitude"].as_f64(), Some(31.2));
+    assert_eq!(location_data["longitude"].as_f64(), Some(121.4));
+    assert_eq!(location_data["accuracy_m"].as_f64(), Some(4.0));
+    assert_eq!(location_data["timestamp_ms"].as_u64(), Some(1000));
     let status = call(&DeviceStatusTool::new(ctx.clone()), json!({})).await;
     assert_eq!(
         json_view(&status.data),
-        json!({ "battery_percent": 75.0, "charging": true, "network": "wifi", "low_power_mode": null })
+        json!({ "battery_percent": 75, "charging": true, "network": "wifi", "low_power_mode": null })
     );
     let haptic = call(
         &HapticsTool::new(ctx.clone()),

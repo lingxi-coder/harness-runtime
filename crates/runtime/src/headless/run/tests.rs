@@ -1,7 +1,7 @@
 use super::*;
 use super::{fusion::*, lifecycle::*};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
 #[test]
 fn stream_compact_recognition_preserves_focus_without_matching_other_commands() {
     assert_eq!(compact_command_instructions("/compact"), Some(""));
@@ -88,23 +88,27 @@ fn turn_terminal_lifecycle_matches_njo_call_site() {
     };
 
     // Clean turn → `completed` (reason "completed", not aborted).
-    emit_turn_terminal_lifecycle(&lifecycle, Some("u-ok"), &Ok(TurnOutcome::EndTurn), false);
+    emit_turn_terminal_lifecycle(&lifecycle, Some("u-ok"), &Ok(TurnOutcome::EndTurn), false)
+        .unwrap();
     let f = next(&mut rx);
     assert_eq!(f["type"], "command_lifecycle");
     assert_eq!(f["command_uuid"], "u-ok");
     assert_eq!(f["state"], "completed");
 
     // `max_turns` is one of `Bxs`'s `return!1` arms — still `completed`.
-    emit_turn_terminal_lifecycle(&lifecycle, Some("u-max"), &Ok(TurnOutcome::MaxTurns), false);
+    emit_turn_terminal_lifecycle(&lifecycle, Some("u-max"), &Ok(TurnOutcome::MaxTurns), false)
+        .unwrap();
     assert_eq!(next(&mut rx)["state"], "completed");
 
     // Interrupted turn: `aborted_streaming` (Wpt) AND the abort flag.
-    emit_turn_terminal_lifecycle(&lifecycle, Some("u-int"), &Ok(TurnOutcome::Cancelled), true);
+    emit_turn_terminal_lifecycle(&lifecycle, Some("u-int"), &Ok(TurnOutcome::Cancelled), true)
+        .unwrap();
     assert_eq!(next(&mut rx)["state"], "cancelled");
 
     // Abort flag alone (`Njo`'s `t||…`) forces `cancelled` even on a turn
     // that otherwise ended naturally.
-    emit_turn_terminal_lifecycle(&lifecycle, Some("u-ab"), &Ok(TurnOutcome::EndTurn), true);
+    emit_turn_terminal_lifecycle(&lifecycle, Some("u-ab"), &Ok(TurnOutcome::EndTurn), true)
+        .unwrap();
     assert_eq!(next(&mut rx)["state"], "cancelled");
 
     // Hard failure — the `rn!==null?"cancelled"` arm. STREAM-1: this
@@ -116,15 +120,31 @@ fn turn_terminal_lifecycle_matches_njo_call_site() {
         },
         OrchestratorError::Internal("boom".to_string()),
     ] {
-        emit_turn_terminal_lifecycle(&lifecycle, Some("u-err"), &Err(err), false);
+        emit_turn_terminal_lifecycle(&lifecycle, Some("u-err"), &Err(err), false).unwrap();
         let f = next(&mut rx);
         assert_eq!(f["command_uuid"], "u-err");
         assert_eq!(f["state"], "cancelled");
     }
 
     // An unstamped frame is not lifecycle-tracked — no frame at all.
-    emit_turn_terminal_lifecycle(&lifecycle, None, &Ok(TurnOutcome::EndTurn), false);
+    emit_turn_terminal_lifecycle(&lifecycle, None, &Ok(TurnOutcome::EndTurn), false).unwrap();
     assert!(rx.try_recv().is_err(), "no uuid ⇒ no lifecycle frame");
+
+    // A closed single-writer channel must reach the production turn-boundary
+    // caller so it can fail the run instead of silently losing the terminal.
+    let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(closed_rx);
+    let closed_lifecycle =
+        QueueLifecycle::new(std::sync::Arc::new(closed_tx), "sess-closed".into());
+    assert_eq!(
+        emit_turn_terminal_lifecycle(
+            &closed_lifecycle,
+            Some("u-closed"),
+            &Ok(TurnOutcome::EndTurn),
+            false,
+        ),
+        Err(crate::headless::stream_json_input::InputError::DeliveryFailed)
+    );
 }
 
 /// Every lifecycle-tracked uuid reaches EXACTLY ONE terminal. The resume
@@ -139,14 +159,14 @@ fn resume_dedup_skip_emits_its_own_terminal() {
     let lifecycle = QueueLifecycle::new(std::sync::Arc::new(tx), "sess-dedup".to_string());
 
     // Router: uuid enters the queue.
-    lifecycle.command_queued("u-dup");
+    lifecycle.command_queued("u-dup").unwrap();
     let queued: serde_json::Value =
         serde_json::from_str(&outbound_line(rx.try_recv().expect("queued"))).unwrap();
     assert_eq!(queued["state"], "queued");
 
     // Turn loop: dequeue (not cancel-pending), then the dedup skip.
     assert!(lifecycle.queued.on_dequeued("u-dup"));
-    emit_dedup_skip_terminal(&lifecycle, "u-dup");
+    emit_dedup_skip_terminal(&lifecycle, "u-dup").unwrap();
     let terminal: serde_json::Value =
         serde_json::from_str(&outbound_line(rx.try_recv().expect("terminal"))).unwrap();
     assert_eq!(terminal["command_uuid"], "u-dup");
@@ -156,7 +176,7 @@ fn resume_dedup_skip_emits_its_own_terminal() {
     // A uuid that never reached the turn loop IS still reachable, and gets
     // `discarded` (binary `Hkm`) — the contrast that makes the skip's own
     // terminal load-bearing.
-    lifecycle.command_queued("u-resident");
+    lifecycle.command_queued("u-resident").unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&outbound_line(rx.try_recv().expect("queued")))
             .unwrap()["state"],
@@ -169,7 +189,9 @@ fn resume_dedup_skip_emits_its_own_terminal() {
         "a dequeued uuid is unreachable from the teardown discard sweep"
     );
     for uuid in &survivors {
-        lifecycle.emit(uuid, crate::headless::queued_commands::LIFECYCLE_DISCARDED);
+        lifecycle
+            .emit(uuid, crate::headless::queued_commands::LIFECYCLE_DISCARDED)
+            .unwrap();
     }
     let discarded: serde_json::Value =
         serde_json::from_str(&outbound_line(rx.try_recv().expect("discarded"))).unwrap();
@@ -250,7 +272,7 @@ fn fusion_state(
             id: "ftest0001".to_string(),
             task_type: tasks::id::TaskType::LocalFusion,
             status,
-            description: "Fusion quality same: review".to_string(),
+            description: "Fusion quality same: review".into(),
             tool_use_id: None,
             start_time: std::time::SystemTime::now(),
             end_time: None,
@@ -324,14 +346,17 @@ fn pending_local_fusion_task_id_recognizes_the_fusion_done_display() {
 fn local_fusion_task_id_to_await_requires_the_dispatched_command_to_be_fusion() {
     // The real /fusion shape: recovered.
     assert_eq!(
-        local_fusion_task_id_to_await("/fusion review this", "f1a2b3c4d  quality  same-provider"),
+        local_fusion_task_id_to_await(
+            &Utf16JsonProjection::from("/fusion review this"),
+            "f1a2b3c4d  quality  same-provider"
+        ),
         Some("f1a2b3c4d")
     );
     // A DIFFERENT command's Handled display that collides with the
     // f+8 shape must NOT be mistaken for a fusion task id.
     assert_eq!(
         local_fusion_task_id_to_await(
-            "/btw which commit fixed the panel cap?",
+            &Utf16JsonProjection::from("/btw which commit fixed the panel cap?"),
             "f3ac93bac fixed it in the panel bar"
         ),
         None,
@@ -339,13 +364,19 @@ fn local_fusion_task_id_to_await_requires_the_dispatched_command_to_be_fusion() 
          fusion task id, even when it happens to have the f+8 shape"
     );
     assert_eq!(
-        local_fusion_task_id_to_await("/recap", "following up on yesterday's investigation"),
+        local_fusion_task_id_to_await(
+            &Utf16JsonProjection::from("/recap"),
+            "following up on yesterday's investigation"
+        ),
         None
     );
     // A command whose NAME merely starts with "fusion" must not match
     // either — only the exact command name counts.
     assert_eq!(
-        local_fusion_task_id_to_await("/fusionx review this", "f1a2b3c4d  quality  same-provider"),
+        local_fusion_task_id_to_await(
+            &Utf16JsonProjection::from("/fusionx review this"),
+            "f1a2b3c4d  quality  same-provider"
+        ),
         None
     );
 }
@@ -363,20 +394,25 @@ fn local_fusion_task_id_to_await_requires_the_dispatched_command_to_be_fusion() 
 fn fusion_spawn_failure_exits_non_zero_but_usage_rejection_does_not() {
     assert_eq!(
         fusion_spawn_failure_exit_code(
-            "/fusion review this",
+            &Utf16JsonProjection::from("/fusion review this"),
             "fusion failed to start: too few models"
         ),
         exit_codes::RUNTIME_ERROR,
         "a /fusion that never started a task must not exit 0"
     );
     assert_eq!(
-        fusion_spawn_failure_exit_code("/fusion", "Usage: /fusion [--quality|--fast] ... PROMPT"),
+        fusion_spawn_failure_exit_code(
+            &Utf16JsonProjection::from("/fusion"),
+            "Usage: /fusion [--quality|--fast] ... PROMPT"
+        ),
         exit_codes::SUCCESS,
         "a usage/flag rejection is the pre-existing CLI-wide convention, not this fix's concern"
     );
     assert_eq!(
         fusion_spawn_failure_exit_code(
-            "/fusion --retry-publication fu_0123456789abcdef0123456789abcdef",
+            &Utf16JsonProjection::from(
+                "/fusion --retry-publication fu_0123456789abcdef0123456789abcdef",
+            ),
             "fusion publication retry failed: durable outbox write failed"
         ),
         exit_codes::RUNTIME_ERROR,
@@ -386,7 +422,7 @@ fn fusion_spawn_failure_exits_non_zero_but_usage_rejection_does_not() {
     // their display happens to start with the same text.
     assert_eq!(
         fusion_spawn_failure_exit_code(
-            "/btw did fusion fail to start?",
+            &Utf16JsonProjection::from("/btw did fusion fail to start?"),
             "fusion failed to start: unrelated collision"
         ),
         exit_codes::SUCCESS

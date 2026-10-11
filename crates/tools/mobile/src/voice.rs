@@ -485,7 +485,6 @@ mod tests {
         AudioReadinessState, AudioRecordingHandle, AudioService, AudioStatus,
     };
     use lingxi_core::host::VoiceRecording;
-    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;

@@ -32,7 +32,7 @@ use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
@@ -1030,6 +1030,25 @@ fn source_prompt(input: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
+    use serde_json::Value;
 
     /// Latest 2.1.270 `aIn(true)` with Monitor disabled; no path normalization.
     #[test]
@@ -1120,7 +1139,7 @@ mod tests {
     fn rejects_six_field_with_seconds() {
         let r = reject_six_field("0 */5 9-17 * * 1-5");
         let err = r.unwrap_err();
-        assert!(format!("{err}").contains("6-field cron"));
+        assert!(source_text(&err.model_facing_message()).contains("6-field cron"));
     }
 
     #[test]
@@ -1520,7 +1539,8 @@ mod tests {
             .call(input, call_ctx, fresh_tx())
             .await
             .expect_err("call must enforce the boundary without pre-validation too");
-        assert!(format!("{error}").contains("durable crons are not supported for teammates"));
+        assert!(source_text(&error.model_facing_message())
+            .contains("durable crons are not supported for teammates"));
         assert!(!cron::tasks_file::session_scheduled_tasks_path(tmp.path()).exists());
     }
 
@@ -1536,9 +1556,8 @@ mod tests {
             )
             .await
             .expect_err("garbage");
-        assert!(
-            format!("{err}").contains("Invalid cron expression 'not a cron'. Expected 5 fields")
-        );
+        assert!(source_text(&err.model_facing_message())
+            .contains("Invalid cron expression 'not a cron'. Expected 5 fields"));
     }
 
     #[tokio::test]
@@ -1556,8 +1575,8 @@ mod tests {
             )
             .await
             .expect_err("must reject");
-        assert!(format!("{err}").contains("Invalid cron expression"));
-        assert!(format!("{err}").contains("Expected 5 fields"));
+        assert!(source_text(&err.model_facing_message()).contains("Invalid cron expression"));
+        assert!(source_text(&err.model_facing_message()).contains("Expected 5 fields"));
     }
 
     #[tokio::test]

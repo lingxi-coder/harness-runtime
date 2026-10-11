@@ -368,6 +368,7 @@ pub struct SubagentSpawnRequest {
     /// (claude-code `DBp.getSystemPrompt => xBp`). `None` ⇒ use the definition's own body.
     #[serde(
         default,
+        skip_serializing_if = "Option::is_none",
         serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
         deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
     )]
@@ -378,6 +379,7 @@ pub struct SubagentSpawnRequest {
     /// (claude-code's appended NOTE for workflow-context agents). `None` ⇒ no addendum.
     #[serde(
         default,
+        skip_serializing_if = "Option::is_none",
         serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
         deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
     )]
@@ -1536,13 +1538,13 @@ pub trait SubagentSpawner: Send + Sync {
     /// flag — surfaced WITHOUT a second catalog lookup or a spawn.
     ///
     /// Defaulted to a minimal meta (the `subagent_type` echoed, everything else
-    /// empty/false) so existing impls/tests need no change (frozen-crate rule);
-    /// the production [`SubagentSpawner`] overrides it. `model` is the caller's
-    /// optional model-family override (claude `model` schema field).
+    /// empty/false); the production [`SubagentSpawner`] overrides it. `model`
+    /// and `model_profile` are the caller's optional model selection pair.
     async fn resolve_selection(
         &self,
         subagent_type: &str,
         _model: Option<&str>,
+        _model_profile: Option<&str>,
     ) -> SelectedAgentMeta {
         SelectedAgentMeta {
             agent_type: subagent_type.to_string(),

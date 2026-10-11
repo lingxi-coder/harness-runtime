@@ -614,18 +614,17 @@ impl ConversationOrchestrator {
         } else {
             session_model
         };
-        if input.get_property("options").is_some() {
-            if input
+        if input.get_property("options").is_some()
+            && input
                 .get_property("options")
                 .and_then(|options| options.get_property("model"))
                 .is_some()
-            {
-                model = mod_projection_display(&input, "/options/model").ok_or_else(|| {
-                    hooks::mods::ModError::Native(format!(
-                        "{plugin}: $.model.classify: model must be a string"
-                    ))
-                })?;
-            }
+        {
+            model = mod_projection_display(&input, "/options/model").ok_or_else(|| {
+                hooks::mods::ModError::Native(format!(
+                    "{plugin}: $.model.classify: model must be a string"
+                ))
+            })?;
         }
         // Native JSON.stringify(labels[i]) runs before the label reaches the
         // classifier system prompt. Serialize each exact UTF-16 label through
@@ -1257,21 +1256,6 @@ impl ConversationOrchestrator {
             .swap(now_ms, Ordering::SeqCst);
         // `prev < 0` is the `-1` sentinel = no prior call → OMIT the field.
         (prev >= 0).then(|| (now_ms - prev).max(0) as u64)
-    }
-
-    /// Drop a recorded kind whose block never reaches persistence.
-    ///
-    /// Needed because `take_tool_denial_kind` REMOVES on read: when the
-    /// streaming executor substitutes a synthetic result for a tool that
-    /// already recorded a kind at dispatch, the recorded kind must either be
-    /// rewritten to the synthetic's own kind or dropped, or it would both stamp
-    /// the wrong provenance and leak an entry for the rest of the session.
-    pub(crate) async fn remove_tool_denial_kind(&self, id: &lingxi_core::types::ToolUseId) {
-        self.transcript
-            .tool_denial_kinds
-            .lock()
-            .await
-            .remove(&id.to_string());
     }
 
     /// Record the ASSISTANT line uuid that carried this `tool_use` block —

@@ -63,9 +63,12 @@ async fn help_dispatch() {
             let text = display.string_at("").unwrap();
             assert!(text.starts_with("Commands:\n"));
             // (M4 cc2.1.198) /agents carries the removed-wizard description.
-            assert!(text.contains(
-                "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
-            ));
+            let agents_description = format!(
+                "(removed) Ask {} to create/manage subagents, or edit {}/agents/",
+                branding::PRODUCT_NAME,
+                branding::DOT_DIR
+            );
+            assert!(text.contains(agents_description.as_str()));
             // 80 newlines (header + 79 visible command lines); hidden and
             // disabled commands remain filtered out. SLASH-06 made `bug`
             // visible and stopped counting `share` (it is `bug`'s alias);

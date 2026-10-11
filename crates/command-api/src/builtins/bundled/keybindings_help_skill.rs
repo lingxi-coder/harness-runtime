@@ -136,7 +136,7 @@ impl BundledPromptFn for KeybindingsHelpPromptFn {
         &self,
         args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
-        let mut sections = vec![
+        let sections = [
             KEYBINDINGS_HELP_BODY.to_string(),
             format!("## Reserved Shortcuts\n\n{}", reserved_shortcuts()),
             format!("## Available Contexts\n\n{}", contexts_table()),
@@ -154,7 +154,6 @@ impl BundledPromptFn for KeybindingsHelpPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     #[test]
     fn the_body_is_branded() {
@@ -169,6 +168,7 @@ mod tests {
     #[test]
     fn the_tables_are_generated_from_the_live_keybinding_data() {
         let out = KeybindingsHelpPromptFn.build(&"".into());
+        let out = out.string_at("").expect("keybindings prompt is text");
         for context in KEYBINDING_CONTEXTS {
             assert!(
                 out.contains(&format!("`{context}`")),

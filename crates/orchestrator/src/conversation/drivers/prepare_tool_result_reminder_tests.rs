@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 fn tool_result_message(tool_use_id: &str, text: &str) -> ConversationMessage {
     ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
             tool_use_id: ToolUseId::from(tool_use_id),
@@ -44,6 +45,7 @@ fn cold_replayed_sidecars_rebuild_multiple_suffixes_for_a_later_request() {
         tool_result_message("toolu_first", "first result"),
         total_tokens_reminder(first_reminder_id, first_body),
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: Vec::new(),
             stop_reason: Some("end_turn".into()),
@@ -101,8 +103,16 @@ fn cold_replayed_sidecars_rebuild_multiple_suffixes_for_a_later_request() {
         })
         .collect::<Vec<_>>();
     assert_eq!(targeted_outputs.len(), 2);
-    assert!(targeted_outputs[0].1.unwrap().ends_with(first_body));
-    assert!(targeted_outputs[1].1.unwrap().ends_with(second_body));
+    let first_reminder_source = format!("<system-reminder>\n{first_body}\n</system-reminder>");
+    let second_reminder_source = format!("<system-reminder>\n{second_body}\n</system-reminder>");
+    assert!(targeted_outputs[0]
+        .1
+        .unwrap()
+        .ends_with(first_reminder_source.as_str()));
+    assert!(targeted_outputs[1]
+        .1
+        .unwrap()
+        .ends_with(second_reminder_source.as_str()));
     assert_eq!(
         snapshot
             .iter()

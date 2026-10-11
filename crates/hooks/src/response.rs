@@ -53,7 +53,7 @@ mod raw_hook_json_array {
 
 mod raw_exact_hook_text {
     use super::{ExactHookText, HookJson};
-    use serde::de::Error as DeError;
+    use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serializer};
     use serde_json::value::RawValue;
 
@@ -131,7 +131,6 @@ mod raw_exact_hook_text {
 
 mod raw_exact_hook_text_array {
     use super::{ExactHookText, HookJson};
-    use serde::de::Error as DeError;
     use serde::{Deserialize, Deserializer, Serializer};
     use serde_json::value::RawValue;
 
@@ -143,14 +142,6 @@ mod raw_exact_hook_text_array {
             HookJson::array(values.iter().map(ExactHookText::json_projection).collect())
                 .map_err(serde::ser::Error::custom)?;
         lingxi_core::types::utf16_json::raw_json_serde::serialize(&projection, serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ExactHookText>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = Box::<RawValue>::deserialize(deserializer)?;
-        parse::<D::Error>(raw.get())
     }
 
     pub fn serialize_option<S>(

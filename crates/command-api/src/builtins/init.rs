@@ -66,7 +66,7 @@ mod tests {
         };
         match h.handle(&args).await {
             CommandResult::InjectMessage { content } => {
-                assert_eq!(content, INIT_PROMPT.into());
+                assert_eq!(content, INIT_PROMPT.as_str().into());
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }

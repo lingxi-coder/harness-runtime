@@ -732,6 +732,8 @@ impl Transport for ProviderTransport {
             )
             .map_err(classifier_query_error)?;
         let len = query.blocks.len();
+        let latest_history_checkpoint = len.checked_sub(4).filter(|index| *index > 0);
+        let current_action_checkpoint = len.checked_sub(3);
         let mut messages = vec![llm_runtime::Message {
             api_output_config: None,
             role: "user".into(),
@@ -742,11 +744,16 @@ impl Transport for ProviderTransport {
                 .map(|(index, source)| {
                     let text = source.string_at("").unwrap_or_default().to_owned();
                     let utf16_code_units = source.string_units("").unwrap_or_default();
+                    // Native marks the last history block and current action in both
+                    // classifier stages. Keep those boundaries; the optional config
+                    // message is already in their cached prefix and gets no third
+                    // content marker alongside the SDK's system/final-message points.
+                    let cache_boundary = Some(index) == current_action_checkpoint
+                        || Some(index) == latest_history_checkpoint;
                     llm_runtime::ContentBlock::TextJsUtf16 {
                         text,
                         utf16_code_units,
-                        // Last history and current-action blocks are separate cache boundaries.
-                        cache_control: (index > 0 && index + 2 < len)
+                        cache_control: cache_boundary
                             .then_some(llm_runtime::CacheControl::Ephemeral),
                         citations: None,
                     }
@@ -765,7 +772,7 @@ impl Transport for ProviderTransport {
                     role: "user".into(),
                     content: vec![llm_runtime::ContentBlock::Text {
                         text: body,
-                        cache_control: Some(llm_runtime::CacheControl::Ephemeral),
+                        cache_control: None,
                         citations: None,
                     }],
                 },
@@ -806,6 +813,8 @@ impl Transport for ProviderTransport {
 }
 
 fn classifier_query_error(error: llm_runtime::LlmError) -> QueryError {
+    #[cfg(test)]
+    eprintln!("classifier provider source error: {error:?}");
     let classification = error.classification_source();
     if matches!(
         classification,
@@ -908,13 +917,22 @@ mod tests {
             request: &'a llm_runtime::ProviderRequest,
         ) -> llm_runtime::BoxFuture<'a, Result<llm_runtime::ProviderResponse, llm_runtime::LlmError>>
         {
-            self.seen.lock().unwrap().push(request.clone());
-            Box::pin(async {
+            let request_index = {
+                let mut seen = self.seen.lock().unwrap();
+                seen.push(request.clone());
+                seen.len()
+            };
+            let text = if request_index % 2 == 1 {
+                "<block>yes"
+            } else {
+                "<thinking>user authorized it</thinking><block>no</block>"
+            };
+            Box::pin(async move {
                 Ok(llm_runtime::ProviderResponse::json(
                     200,
                     json!({
                         "id":"report-review", "model":"claude-sonnet-4-5",
-                        "content":[{"type":"text","text":"<block>no"}],
+                        "content":[{"type":"text","text":text}],
                         "stop_reason":"end_turn", "usage":{"input_tokens":20,"output_tokens":4}
                     }),
                 ))
@@ -934,6 +952,81 @@ mod tests {
         }
     }
     llm_runtime::impl_fixture_transport!(ReportQueryTransport);
+
+    fn cache_marked_texts(body: &str) -> Vec<String> {
+        fn collect(value: &serde_json::Value, marked: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if object.contains_key("cache_control") {
+                        if let Some(text) = object.get("text").and_then(serde_json::Value::as_str) {
+                            marked.push(text.to_owned());
+                        }
+                    }
+                    for value in object.values() {
+                        collect(value, marked);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        collect(value, marked);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let body: serde_json::Value = serde_json::from_str(body).expect("provider request is JSON");
+        let mut marked = Vec::new();
+        collect(&body["system"], &mut marked);
+        collect(&body["messages"], &mut marked);
+        marked
+    }
+
+    fn assert_classifier_cache_layout(
+        body: &str,
+        has_user_configuration: bool,
+        stage_suffix: &str,
+    ) -> Vec<String> {
+        let marked = cache_marked_texts(body);
+        assert_eq!(
+            marked.len(),
+            4,
+            "provider limit applies to emitted markers: {marked:?}"
+        );
+        assert!(
+            !marked.iter().any(|text| text.contains("<user_claude_md>")),
+            "the optional config has no standalone marker: {marked:?}"
+        );
+        assert_eq!(
+            body.contains("<user_claude_md>"),
+            has_user_configuration,
+            "configuration content remains present when configured"
+        );
+        let latest_history = marked
+            .iter()
+            .position(|text| text.contains("child-operation --actual"));
+        let current_action = marked
+            .iter()
+            .position(|text| text.contains("full child report"));
+        let final_message = marked.iter().position(|text| text.contains(stage_suffix));
+        let latest_history = latest_history.expect("Native history boundary is retained");
+        let current_action = current_action.expect("current action remains a cache boundary");
+        let final_message = final_message.expect("SDK final-message boundary is emitted");
+        assert!(
+            latest_history < current_action,
+            "history boundary precedes action: {marked:?}"
+        );
+        assert!(
+            current_action < final_message,
+            "action boundary precedes stage suffix: {marked:?}"
+        );
+        assert_eq!(
+            final_message,
+            marked.len() - 1,
+            "final-message marker is last: {marked:?}"
+        );
+        marked
+    }
 
     #[tokio::test]
     async fn report_review_dispatches_child_transcript_and_native_action_through_provider() {
@@ -990,19 +1083,29 @@ mod tests {
             None,
             None,
         ));
-        let orch = Arc::new(ConversationOrchestrator::new(
-            crate::OrchestratorConfig {
-                model: "claude-sonnet-4-5".into(),
-                ..Default::default()
-            },
-            Arc::new(MockApiClient::new(Vec::new())),
-            Arc::new(tool_api::registry::ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            std::env::temp_dir(),
-        ));
+        let config_home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            config_home.path().join(branding::MEMORY_FILE),
+            "Fixture-only user configuration for the classifier cache boundary.",
+        )
+        .unwrap();
+        let orch = Arc::new(
+            ConversationOrchestrator::new(
+                crate::OrchestratorConfig {
+                    model: "claude-sonnet-4-5".into(),
+                    ..Default::default()
+                },
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            )
+            .with_config_home(config_home.path().to_path_buf()),
+        );
+        orch.session.lock().await.model_profile = Some("report-fixture".into());
         orch.session
             .lock()
             .await
@@ -1046,37 +1149,73 @@ mod tests {
             action: lingxi_core::host::handback::handback_classifier_input(report),
         };
         let classifier = SessionLoopClassifier::new(&orch, service);
-        assert_eq!(
-            classifier.classify_report(&request, &[]).await,
-            Some(ReportReview::Passed)
-        );
+        let review = classifier.classify_report(&request, &[]).await;
+        assert_eq!(review, Some(ReportReview::Passed));
+        {
+            let captured = seen.lock().unwrap();
+            assert_eq!(
+                captured.len(),
+                2,
+                "stage one and stage two reach the provider"
+            );
+            let stage_one = captured[0].body_json.as_json_source().to_owned();
+            let stage_two = captured[1].body_json.as_json_source().to_owned();
+            for body in [&stage_one, &stage_two] {
+                assert!(body.contains("actual child instructions"), "{body}");
+                assert!(body.contains("child-operation --actual"), "{body}");
+                assert!(!body.contains("MAIN HISTORY MUST NEVER"), "{body}");
+                assert!(
+                    body.contains("hand-back to the agent that spawned this one"),
+                    "{body}"
+                );
+                assert!(
+                    !body.contains(permission::loop_llm::HANDOFF_INSTRUCTION),
+                    "{body}"
+                );
+                assert_eq!(body.matches("full child report").count(), 1);
+                assert!(body.contains("[/transcript>"));
+            }
+            let fast_markers =
+                assert_classifier_cache_layout(&stage_one, true, permission::loop_llm::FAST_SUFFIX);
+            let thinking_markers = assert_classifier_cache_layout(
+                &stage_two,
+                true,
+                permission::loop_llm::THINKING_SUFFIX,
+            );
+            for boundary in ["child-operation --actual", "full child report"] {
+                assert_eq!(
+                    fast_markers.iter().find(|text| text.contains(boundary)),
+                    thinking_markers.iter().find(|text| text.contains(boundary)),
+                    "Native cache boundaries survive stage-one/stage-two reuse: {boundary}"
+                );
+            }
+        }
+
+        std::fs::remove_file(config_home.path().join(branding::MEMORY_FILE)).unwrap();
+        let review_without_configuration = classifier.classify_report(&request, &[]).await;
+        assert_eq!(review_without_configuration, Some(ReportReview::Passed));
         let captured = seen.lock().unwrap();
         assert_eq!(
             captured.len(),
-            1,
-            "must execute the real provider request pipeline"
+            4,
+            "both classifier stages reach the provider per run"
         );
-        let body = captured[0].body_json.as_json_source().to_owned();
-        assert!(body.contains("actual child instructions"), "{body}");
-        assert!(body.contains("child-operation --actual"), "{body}");
-        assert!(!body.contains("MAIN HISTORY MUST NEVER"), "{body}");
-        assert!(
-            body.contains("hand-back to the agent that spawned this one"),
-            "{body}"
+        let stage_one = captured[2].body_json.as_json_source().to_owned();
+        let stage_two = captured[3].body_json.as_json_source().to_owned();
+        let fast_markers =
+            assert_classifier_cache_layout(&stage_one, false, permission::loop_llm::FAST_SUFFIX);
+        let thinking_markers = assert_classifier_cache_layout(
+            &stage_two,
+            false,
+            permission::loop_llm::THINKING_SUFFIX,
         );
-        assert!(
-            !body.contains(permission::loop_llm::HANDOFF_INSTRUCTION),
-            "{body}"
-        );
-        assert_eq!(
-            body.matches("full child report").count(),
-            1,
-            "current action appears once"
-        );
-        assert!(
-            body.contains("[/transcript>"),
-            "report cannot forge classifier control tags"
-        );
+        for boundary in ["child-operation --actual", "full child report"] {
+            assert_eq!(
+                fast_markers.iter().find(|text| text.contains(boundary)),
+                thinking_markers.iter().find(|text| text.contains(boundary)),
+                "Native cache boundaries survive stage-one/stage-two reuse: {boundary}"
+            );
+        }
     }
 
     #[test]

@@ -359,7 +359,6 @@ mod tests {
         AudioOperationReadiness, AudioReadinessState, AudioService,
     };
     use lingxi_core::host::{SttTranscript, TtsAudio, VoiceRecording};
-    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 

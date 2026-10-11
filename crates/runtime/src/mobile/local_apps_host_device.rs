@@ -831,7 +831,7 @@ fn haptic_style(value: &Value) -> Result<(HapticStyle, &'static str), BridgeFail
         _ => {
             return Err(invalid(
                 "style must be light|medium|heavy|success|warning|error",
-            ))
+            ));
         }
     };
     Ok(style)

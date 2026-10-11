@@ -35,7 +35,16 @@ fn agents_eager_modes_order_and_dedup_match_executed_286_hooks() {
                 );
             }
         }
-        let mode = InstructionFilesMode::from_options(&case["options"]);
+        // This checked-in 2.1.286 capture predates the current LingXi option
+        // names. Translate its input token only at this test boundary; production
+        // accepts only the current option spelling.
+        let mut current_options = case["options"].clone();
+        if current_options["instructionFiles"] == "claude-md-and-agents-md" {
+            current_options["instructionFiles"] = json!("lingxi-md-and-agents-md");
+        } else if current_options["instructionFiles"] == "claude-md" {
+            current_options["instructionFiles"] = json!("lingxi-md");
+        }
+        let mode = InstructionFilesMode::from_options(&current_options);
         let home = root.join("home");
         let files = load_memory_files_at_with_user_config_dir(
             &cwd,
@@ -187,8 +196,8 @@ async fn actual_main_request_uses_agents_with_telemetry_disabled_and_frozen_fork
         .contains("AGENTS_ACTUAL_REQUEST"));
     write(&cwd.join("AGENTS.md"), "CHANGED_AFTER_PARENT_DISPATCH");
     let snapshot = orch.instruction_context_snapshot().await;
-    assert!(snapshot.user_context["claudeMd"].contains("AGENTS_ACTUAL_REQUEST"));
-    assert!(!snapshot.user_context["claudeMd"].contains("CHANGED_AFTER_PARENT_DISPATCH"));
+    assert!(snapshot.user_context["instructions"].contains("AGENTS_ACTUAL_REQUEST"));
+    assert!(!snapshot.user_context["instructions"].contains("CHANGED_AFTER_PARENT_DISPATCH"));
 }
 
 #[tokio::test]
@@ -264,15 +273,15 @@ async fn managed_only_retains_policy_and_empty_injection_never_discovers_disk() 
         .load(&cwd, InstructionScope::ManagedOnly)
         .await
         .unwrap();
-    assert!(managed.user_context["claudeMd"].contains("POLICY"));
-    assert!(!managed.user_context["claudeMd"].contains("PROJECT"));
+    assert!(managed.user_context["instructions"].contains("POLICY"));
+    assert!(!managed.user_context["instructions"].contains("PROJECT"));
     let (empty, _empty_owner) = root_provider(
         Arc::new(crate::test_support::StaticMemoryProvider::empty()),
         &cwd,
     );
     let mut context = empty.load(&cwd, InstructionScope::Full).await.unwrap();
     assert_eq!(context.eager_instructions, Some(Vec::new()));
-    assert_eq!(context.user_context["claudeMd"], "");
+    assert_eq!(context.user_context["instructions"], "");
     assert_eq!(
         context.user_context["currentDate"],
         format!(
@@ -306,7 +315,7 @@ async fn child_read_context_separates_legacy_reminders_from_agents_hook_frames()
         Arc::new(FixtureProvider {
             home: root.join("home"),
             managed: root.join("managed"),
-            mode: InstructionFilesMode::ClaudeMdAndAgentsMd,
+            mode: InstructionFilesMode::LingxiMdAndAgentsMd,
         }),
         &cwd,
     );
@@ -490,7 +499,7 @@ fn read_fixture_orchestrator(
         Arc::new(FixtureProvider {
             home: root.to_path_buf(),
             managed: root.join("managed"),
-            mode: InstructionFilesMode::ClaudeMdAndAgentsMd,
+            mode: InstructionFilesMode::LingxiMdAndAgentsMd,
         }),
         root.join("repo"),
     )
@@ -551,7 +560,7 @@ async fn successful_read_agents_context_survives_requests_and_cold_replay() {
             .collect();
         let attachments: Vec<_> = rows
             .iter()
-            .filter_map(|row| row.extra.subprojection("/attachment").ok())
+            .filter_map(|row| row.attachment_projection.as_ref())
             .filter(|attachment| attachment.string_at("/hookName") == Some("tool.call"))
             .collect();
         let expected_attachment = hooks::additional_context_attachment(

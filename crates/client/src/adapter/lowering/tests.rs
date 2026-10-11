@@ -544,7 +544,7 @@ mod regressions {
 
     #[test]
     fn lower_transcript_restores_the_original_cron_slash_line_from_legacy_history() {
-        use lingxi_core::types::{ContentBlock, MessageId};
+        use lingxi_core::types::MessageId;
 
         let legacy_prompt = concat!(
             "The user explicitly invoked `/cron` to manage scheduled prompts. ",
@@ -1097,12 +1097,19 @@ mod regressions {
 #[cfg(test)]
 #[test]
 fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
-    let message = ConversationMessage::System { api_system: None,
+    let message = ConversationMessage::System {
+        api_system: None,
         id: lingxi_core::types::MessageId::new(),
         content: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
-            &serde_json::json!({"message":"任意文案", "companion":"healthy", "streak":2, "since_ms":123}),
-        ).expect("generated system metadata is valid"),
-        subtype: Some("scheduled_task_fire".into()), compact_metadata: None, model_fallback: None, refusal_fallback: None,
+            &serde_json::json!(
+                r#"{"message":"任意文案","companion":"healthy","streak":2,"since_ms":123}"#
+            ),
+        )
+        .expect("generated system metadata is valid"),
+        subtype: Some("scheduled_task_fire".into()),
+        compact_metadata: None,
+        model_fallback: None,
+        refusal_fallback: None,
     };
     let dto = lower_conversation_message(&message);
     assert!(dto.blocks.is_empty());

@@ -17,6 +17,24 @@ fn source_text<'a>(value: &'a Utf16JsonProjection, pointer: &str) -> Option<&'a 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn checked_source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use lingxi_core::types::{AgentId, SessionId};
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, StubProcess};
@@ -224,7 +242,7 @@ mod tests {
             .call(source_json!({"skill": "absent"}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("unknown");
-        assert!(format!("{err}").contains("Unknown skill: absent"));
+        assert!(checked_source_text(&err.model_facing_message()).contains("Unknown skill: absent"));
     }
 
     #[tokio::test]
@@ -241,7 +259,7 @@ mod tests {
             .call(source_json!({"skill": "locked"}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("disabled");
-        assert!(format!("{err}").contains(
+        assert!(checked_source_text(&err.model_facing_message()).contains(
             "Skill locked cannot be used with Skill tool due to disable-model-invocation"
         ));
     }
@@ -264,7 +282,7 @@ mod tests {
             )
             .await
             .expect_err("non-prompt");
-        assert!(format!("{err}").contains(
+        assert!(checked_source_text(&err.model_facing_message()).contains(
             "local-cmd is a built-in CLI command, not a skill. Ask the user to run /local-cmd themselves — it cannot be invoked via the Skill tool."
         ));
     }
@@ -965,7 +983,7 @@ mod tests {
             .call(source_json!({"skill": "   "}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("blank");
-        assert!(format!("{err}").contains("Invalid skill format"));
+        assert!(checked_source_text(&err.model_facing_message()).contains("Invalid skill format"));
     }
 
     #[tokio::test]
@@ -975,7 +993,8 @@ mod tests {
             .call(source_json!({}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing");
-        assert!(format!("{err}").contains("missing or non-string skill"));
+        assert!(checked_source_text(&err.model_facing_message())
+            .contains("missing or non-string skill"));
     }
 
     #[tokio::test]

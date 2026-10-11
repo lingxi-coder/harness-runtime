@@ -122,6 +122,18 @@ impl SdkInputQueue {
         }
         turns
     }
+
+    async fn restore_prompts_front(&self, turns: Vec<UserTurn>) {
+        let uuids = turns
+            .iter()
+            .filter_map(|turn| turn.uuid.clone())
+            .collect::<Vec<_>>();
+        self.lifecycle.queued.restore_queued_front(&uuids);
+        let mut state = self.state.lock().await;
+        for turn in turns.into_iter().rev() {
+            state.pending.push_front(StreamInput::User(turn));
+        }
+    }
 }
 
 #[async_trait]
@@ -134,10 +146,13 @@ impl MidTurnInputSource for SdkInputQueue {
         None
     }
 
-    async fn take_mid_turn_batch(&self) -> Option<Vec<MidTurnInput>> {
-        let orchestrator = self.orchestrator.upgrade()?;
+    async fn take_mid_turn_batch(&self) -> Result<Option<Vec<MidTurnInput>>, String> {
+        let Some(orchestrator) = self.orchestrator.upgrade() else {
+            return Ok(None);
+        };
         let mut accepted = Vec::new();
-        for turn in self.take_prompts().await {
+        let mut turns = self.take_prompts().await.into_iter();
+        while let Some(turn) = turns.next() {
             if let Some(uuid) = turn.uuid.as_deref() {
                 if orchestrator.session_contains_message_uuid(uuid).await {
                     if !self.lifecycle.queued.on_duplicate_dequeued(uuid) {
@@ -150,7 +165,18 @@ impl MidTurnInputSource for SdkInputQueue {
                             &self.session_id,
                         );
                     }
-                    super::super::run::emit_dedup_skip_terminal(&self.lifecycle, uuid);
+                    if let Err(error) =
+                        super::super::run::emit_dedup_skip_terminal(&self.lifecycle, uuid)
+                    {
+                        // The snapshot was drained before its required terminal
+                        // delivery failed. Restore accepted, failing, and later
+                        // turns ahead of arrivals that came after the snapshot.
+                        let mut restore = accepted;
+                        restore.push(turn);
+                        restore.extend(turns);
+                        self.restore_prompts_front(restore).await;
+                        return Err(error.to_string());
+                    }
                     continue;
                 }
             }
@@ -164,7 +190,7 @@ impl MidTurnInputSource for SdkInputQueue {
             accepted.push(turn);
         }
         if accepted.is_empty() {
-            return None;
+            return Ok(None);
         }
         let inputs = accepted
             .iter()
@@ -181,11 +207,13 @@ impl MidTurnInputSource for SdkInputQueue {
             })
             .collect();
         self.state.lock().await.folded.extend(accepted);
-        Some(inputs)
+        Ok(Some(inputs))
     }
 
     async fn input_consumed(&self, inputs: &[MidTurnInput]) -> Result<(), String> {
-        let turns = std::mem::take(&mut self.state.lock().await.folded);
+        let mut state = self.state.lock().await;
+        let turns = std::mem::take(&mut state.folded);
+        drop(state);
         for turn in &turns {
             if self.replay {
                 emit_replay_ack_projected_queued(
@@ -336,6 +364,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_terminal_delivery_failure_restores_snapshot_in_fifo_order() {
+        let (source, tx, _api, orch) = setup(vec![]).await;
+        let first = "00000000-0000-4000-8000-000000000053";
+        let duplicate = "00000000-0000-4000-8000-000000000054";
+        let last = "00000000-0000-4000-8000-000000000055";
+        let message_id = lingxi_core::types::MessageId::parse_prefixed(duplicate).unwrap();
+        orch.append_external_history_message(ConversationMessage::user(
+            message_id,
+            "already present".into(),
+        ))
+        .await;
+        for id in [first, duplicate, last] {
+            source.lifecycle.queued.on_queued(id);
+        }
+        tx.send(user(first, "accepted before failure"))
+            .await
+            .expect("queue first input");
+        tx.send(user(duplicate, "duplicate"))
+            .await
+            .expect("queue duplicate input");
+        tx.send(user(last, "remaining snapshot input"))
+            .await
+            .expect("queue remaining input");
+
+        // Closing the stream's single writer makes the duplicate's required
+        // terminal delivery fail in take_mid_turn_batch.
+        source.stream.finish().await.unwrap();
+        let error = source
+            .take_mid_turn_batch()
+            .await
+            .expect_err("failed terminal delivery must propagate directly");
+        assert!(error.contains("delivering headless output"), "{error}");
+        assert!(
+            source.lifecycle.queued.take_current_turn_uuids().is_empty(),
+            "restored input must not be reported as consumed by the failed fold"
+        );
+        assert_eq!(
+            source.lifecycle.queued.still_queued(),
+            [first, duplicate, last],
+            "restored queue IDs must retain their snapshot FIFO order"
+        );
+        for expected in [first, duplicate, last] {
+            assert!(
+                matches!(source.recv().await, Some(StreamInput::User(turn)) if turn.uuid.as_deref() == Some(expected))
+            );
+        }
+        assert_eq!(
+            source.lifecycle.queued.still_queued(),
+            [first, duplicate, last]
+        );
+    }
+
+    #[tokio::test]
     async fn ordinary_completion_keeps_the_next_human_for_a_distinct_query() {
         let (source, tx, api, orch) = setup(vec![text_response()]).await;
         let id = "00000000-0000-4000-8000-000000000032";
@@ -410,7 +491,7 @@ mod tests {
         };
         assert_eq!(*content, api_message.content);
         assert!(
-            matches!(&content[0], ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } if text.starts_with("The user sent a new message while you were working:\nHEADLESS_MIDTOOL_B\n\nThis is how Claude Code"))
+            matches!(&content[0], ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } if text.starts_with("The user sent a new message while you were working:\nHEADLESS_MIDTOOL_B\n\nThis is how LingXi"))
         );
         assert!(calls[1].messages[..index].iter().any(|message| matches!(message,
             ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block, ContentBlock::ToolResult { .. })))));
@@ -419,7 +500,7 @@ mod tests {
             source.lifecycle.queued.take_current_turn_uuids(),
             ["primary", id]
         );
-        assert!(source.take_mid_turn_batch().await.is_none());
+        assert!(source.take_mid_turn_batch().await.unwrap().is_none());
         let result = source
             .stream
             .build_result_success_frame(
@@ -539,7 +620,7 @@ mod tests {
         .await
         .unwrap();
         tx.send(user("later", "retain")).await.unwrap();
-        assert!(source.take_mid_turn_batch().await.is_none());
+        assert!(source.take_mid_turn_batch().await.unwrap().is_none());
         assert!(matches!(source.recv().await, Some(StreamInput::Bash(_))));
         assert!(
             matches!(source.recv().await, Some(StreamInput::User(turn)) if turn.uuid.as_deref()==Some("later"))
@@ -615,7 +696,20 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("missing queued attachment: {raw}"));
         assert_eq!(saved["attachment"], *attachment);
-        assert_eq!(saved["rendered"], native["rendered"]);
+        // The sole allowed rendered-text difference is the product brand.
+        // Keep the Native fixture and actual persisted output unchanged.
+        let mut expected_rendered = native["rendered"].clone();
+        let content = expected_rendered[0]["content"].as_str().unwrap();
+        assert_eq!(
+            content.matches("This is how Claude Code surfaces").count(),
+            1
+        );
+        expected_rendered[0]["content"] = serde_json::Value::String(content.replacen(
+            "This is how Claude Code surfaces",
+            &format!("This is how {} surfaces", branding::PRODUCT_NAME),
+            1,
+        ));
+        assert_eq!(saved["rendered"], expected_rendered);
         assert_eq!(saved["renderedRole"], native["renderedRole"]);
         assert!(!rows
             .iter()
@@ -741,8 +835,10 @@ mod tests {
         async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
             None
         }
-        async fn take_mid_turn_batch(&self) -> Option<Vec<MidTurnInput>> {
-            let batch = self.source.take_mid_turn_batch().await?;
+        async fn take_mid_turn_batch(&self) -> Result<Option<Vec<MidTurnInput>>, String> {
+            let Some(batch) = self.source.take_mid_turn_batch().await? else {
+                return Ok(None);
+            };
             let late = self.late.lock().unwrap().take();
             if let Some(input) = late {
                 let pending = self.source.state.lock().await.reader_pending.clone();
@@ -757,7 +853,7 @@ mod tests {
                 .await
                 .unwrap();
             }
-            Some(batch)
+            Ok(Some(batch))
         }
         async fn input_consumed(&self, inputs: &[MidTurnInput]) -> Result<(), String> {
             self.source.input_consumed(inputs).await

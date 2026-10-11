@@ -2,6 +2,9 @@
 //! accepted output admits the terminal cycle, and exhaustion stops before the
 //! next provider call. Native 2.1.293 captures pin these continuation semantics.
 
+use lingxi_core::host::json_schema_validator::{
+    CompiledJsonSchema, JsonSchemaValidation, SchemaWorkerError,
+};
 use lingxi_core::types::{
     utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, ToolUseId,
 };
@@ -18,6 +21,75 @@ use orchestrator::{
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tool_api::registry::ToolRegistry;
+
+// This test-local adapter compiles a real schema to exercise the Orchestrator
+// continuation consumer. Production uses BunCompiledJsonSchema; this fixture
+// is not evidence for Native schema-validation bytes or behavior.
+struct BoonCompiledSchema {
+    schemas: boon::Schemas,
+    index: boon::SchemaIndex,
+}
+
+#[async_trait::async_trait]
+impl CompiledJsonSchema for BoonCompiledSchema {
+    async fn validate(
+        &self,
+        input: &Utf16JsonProjection,
+    ) -> Result<JsonSchemaValidation, SchemaWorkerError> {
+        let encoded = input
+            .to_json_string()
+            .map_err(|error| SchemaWorkerError::Protocol(error.to_string()))?;
+        let value: Value = serde_json::from_str(&encoded)
+            .map_err(|error| SchemaWorkerError::Protocol(error.to_string()))?;
+        match self.schemas.validate(&value, self.index) {
+            Ok(()) => Ok(JsonSchemaValidation::Valid),
+            Err(error) => {
+                // Boon nests property failures under a schema wrapper. This
+                // adapter supplies the validator detail consumed by the query;
+                // the production Bun validator has its own byte-level tests.
+                fn type_detail(error: &boon::ValidationError<'_, '_>) -> Option<String> {
+                    if let boon::ErrorKind::Type { want, .. } = &error.kind {
+                        let expected = want
+                            .iter()
+                            .map(|kind| kind.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" or ");
+                        return Some(format!(
+                            "Output does not match required schema: {}: must be {expected}",
+                            error.instance_location
+                        ));
+                    }
+                    error.causes.iter().find_map(type_detail)
+                }
+                let detail = type_detail(&error)
+                    .expect("this continuation fixture supplies a property type failure");
+                Ok(JsonSchemaValidation::Invalid {
+                    detail: Utf16JsonProjection::from(detail),
+                    keywords: Vec::new(),
+                })
+            }
+        }
+    }
+}
+
+fn structured_output_tool(schema: Value, slot: StructuredOutputSlot) -> StructuredOutputTool {
+    const SCHEMA_URL: &str = "mem://structured-output-retry-source-test";
+    let mut compiler = boon::Compiler::new();
+    compiler
+        .add_resource(SCHEMA_URL, schema.clone())
+        .expect("generated structured output schema is valid JSON");
+    let mut schemas = boon::Schemas::new();
+    let index = compiler
+        .compile(SCHEMA_URL, &mut schemas)
+        .expect("generated structured output schema compiles");
+    let source_schema = Utf16JsonProjection::from_serde_value(&schema)
+        .expect("generated structured output schema converts to a source projection");
+    StructuredOutputTool::new(
+        source_schema,
+        Arc::new(BoonCompiledSchema { schemas, index }),
+        slot,
+    )
+}
 
 fn response(input: Value) -> llm_runtime::HistoryResponse {
     mock_message_response(
@@ -54,7 +126,8 @@ fn orchestrator_with_hooks(
     max_structured_output_retries: i64,
 ) -> ConversationOrchestrator {
     let mut registry = ToolRegistry::new();
-    registry.register_builtin(Arc::new(StructuredOutputTool::new(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}})),
+    registry.register_builtin(Arc::new(structured_output_tool(
+        json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}),
         slot,
     )));
     let config = OrchestratorConfig {
@@ -87,10 +160,8 @@ async fn absent_schema_finishes_one_call_even_with_an_unrelated_registered_tool_
     // tool: catalog presence alone must never require a schema for this query.
     let slot: StructuredOutputSlot = Arc::new(Mutex::new(None));
     let mut registry = ToolRegistry::new();
-    registry.register_builtin(Arc::new(StructuredOutputTool::new(
-        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
-            json!({"type":"object","additionalProperties":true}),
-        ),
+    registry.register_builtin(Arc::new(structured_output_tool(
+        json!({"type":"object","additionalProperties":true}),
         slot.clone(),
     )));
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -140,9 +211,21 @@ fn assert_native_retry_continuation(messages: &[ConversationMessage]) {
     assert_eq!(
         user_blocks
             .iter()
-            .filter(
-                |block| matches!(block, ContentBlock::Text { text, .. } if text == "original prompt")
-            )
+            .filter(|block| match block {
+                ContentBlock::Text { text, .. } => text == "original prompt",
+                ContentBlock::TextJsUtf16 {
+                    text,
+                    utf16_code_units,
+                    ..
+                } => {
+                    text == "original prompt"
+                        && utf16_code_units
+                            .iter()
+                            .copied()
+                            .eq("original prompt".encode_utf16())
+                }
+                _ => false,
+            })
             .count(),
         1,
         "retry retains the original query's user message"
@@ -242,7 +325,8 @@ async fn streaming_retry_preserves_the_query_for_success_and_exhaustion() {
             streaming_response(second),
         ]));
         let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(StructuredOutputTool::new(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}})),
+        registry.register_builtin(Arc::new(structured_output_tool(
+            json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}),
             slot.clone(),
         )));
         let orch =
@@ -379,6 +463,7 @@ async fn missing_tool_gets_one_meta_reminder_without_resubmitting_the_prompt() {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
     let mut hooks =
         hooks::HookExecutorImpl::new(registry, Arc::new(UnusedHookHost), Arc::new(UnusedHookHost));

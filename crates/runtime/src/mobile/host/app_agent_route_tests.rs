@@ -74,7 +74,7 @@ async fn app_agent_restored_history_keeps_the_admitted_boot_profile_for_shared_m
                 return Err(ModelResolutionError::AmbiguousRoute {
                     model: model.into(),
                     profiles: vec!["profile-a".into(), "profile-b".into()],
-                })
+                });
             }
         };
         lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -143,7 +143,7 @@ async fn app_agent_restored_history_keeps_the_admitted_boot_profile_for_shared_m
     let names: Vec<&str> = calls[0]
         .tools
         .iter()
-        .filter_map(|tool| tool["name"].as_str())
+        .map(|tool| tool.name.as_str())
         .collect();
     assert!(!names.is_empty(), "the app owns its actual MCP catalog");
     assert!(names.iter().all(|name| name.starts_with("mcp__")));

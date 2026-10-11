@@ -18,8 +18,8 @@ fn source_json(value: &Value) -> SourceJson {
 }
 
 fn attachment_source(row: &session::JsonlMessage) -> SourceJson {
-    row.extra
-        .subprojection("/attachment")
+    row.attachment_projection
+        .clone()
         .expect("attachment row has a source payload")
 }
 
@@ -208,15 +208,24 @@ fn nested_rows(rows: &[session::JsonlMessage]) -> Vec<&session::JsonlMessage> {
     rows.iter()
         .filter(|row| {
             row.message_type == "attachment"
-                && row.extra.string_at("/attachment/type") == Some("nested_memory")
+                && row
+                    .attachment_projection
+                    .as_ref()
+                    .is_some_and(|attachment| {
+                        attachment.string_at("/type") == Some("nested_memory")
+                    })
         })
         .collect()
 }
 
-fn attachment_for<'a>(rows: &'a [session::JsonlMessage], path: &Path) -> SourceJson {
+fn attachment_for(rows: &[session::JsonlMessage], path: &Path) -> SourceJson {
     let row = nested_rows(rows)
         .into_iter()
-        .find(|row| row.extra.string_at("/attachment/path") == path.to_str())
+        .find(|row| {
+            row.attachment_projection
+                .as_ref()
+                .is_some_and(|attachment| attachment.string_at("/path") == path.to_str())
+        })
         .expect("one persisted attachment per acquired file");
     attachment_source(row)
 }
@@ -230,8 +239,13 @@ fn assert_restored_file_row<'a>(
         .iter()
         .filter(|row| {
             row.message_type == "attachment"
-                && row.extra.string_at("/attachment/type") == Some("file")
-                && row.extra.string_at("/attachment/filename") == fixture.memory.to_str()
+                && row
+                    .attachment_projection
+                    .as_ref()
+                    .is_some_and(|attachment| {
+                        attachment.string_at("/type") == Some("file")
+                            && attachment.string_at("/filename") == fixture.memory.to_str()
+                    })
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -440,7 +454,10 @@ async fn changed_body_after_cold_or_hot_resume_emits_new_raw_body_once() {
             .at_pointer("")
             .is_some_and(|value| value.is_null()));
         assert_eq!(
-            rows[1].extra.string_at("/attachment/content/content"),
+            rows[1]
+                .attachment_projection
+                .as_ref()
+                .and_then(|attachment| attachment.string_at("/content/content")),
             Some(changed)
         );
 
@@ -469,6 +486,7 @@ async fn compact(root: &ConversationOrchestrator, messages_to_preserve: Vec<Conv
         consecutive_rapid_refills: 0,
         compaction_usage: None,
         compaction_model: None,
+        compaction_profile: None,
     };
     assert!(root
         .apply_post_compact(
@@ -637,7 +655,10 @@ async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold
             .at_pointer("")
             .is_some_and(|value| value.is_null()));
         assert_eq!(
-            raw[0].extra.string_at("/attachment/content/content"),
+            raw[0]
+                .attachment_projection
+                .as_ref()
+                .and_then(|attachment| attachment.string_at("/content/content")),
             Some(body)
         );
 

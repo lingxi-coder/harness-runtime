@@ -8,7 +8,6 @@ use crate::types::utf16_json::Utf16JsonProjection;
 use serde::de::{DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -19,22 +18,6 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer).map(Some)
-}
-
-fn deserialize_present_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    bool::deserialize(deserializer).map(Some)
-}
-
-fn deserialize_present_nullable_value<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<Value>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<Value>::deserialize(deserializer).map(Some)
 }
 
 fn serialize_json_projection<S>(
@@ -75,31 +58,6 @@ where
         None | Some(None) => serializer.serialize_none(),
         Some(Some(projection)) => serialize_json_projection(projection, serializer),
     }
-}
-
-fn deserialize_present_nullable_projection<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<Utf16JsonProjection>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = Box::<RawValue>::deserialize(deserializer)?;
-    if raw.get().trim() == "null" {
-        Ok(Some(None))
-    } else {
-        Utf16JsonProjection::parse(raw.get())
-            .map(Some)
-            .map(Some)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-fn deserialize_json_projection<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = Box::<RawValue>::deserialize(deserializer)?;
-    Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)
 }
 
 fn serialize_root_string_projection<S>(
@@ -339,19 +297,6 @@ where
     Ok(Some(projection))
 }
 
-fn raw_projection_array_or_empty<E>(
-    fields: &mut HashMap<String, Box<RawValue>>,
-    name: &'static str,
-) -> Result<Utf16JsonProjection, E>
-where
-    E: serde::de::Error,
-{
-    match raw_projection_array_optional(fields, name)? {
-        Some(projection) => Ok(projection),
-        None => Utf16JsonProjection::parse("[]").map_err(E::custom),
-    }
-}
-
 fn raw_string_projection<E>(
     fields: &mut HashMap<String, Box<RawValue>>,
     name: &'static str,
@@ -371,24 +316,6 @@ where
     Ok((display, units))
 }
 
-fn raw_present_nullable<T, E>(
-    fields: &mut HashMap<String, Box<RawValue>>,
-    name: &'static str,
-) -> Result<Option<Option<T>>, E>
-where
-    T: DeserializeOwned,
-    E: serde::de::Error,
-{
-    match fields.remove(name) {
-        None => Ok(None),
-        Some(raw) if raw.get().trim() == "null" => Ok(Some(None)),
-        Some(raw) => serde_json::from_str(raw.get())
-            .map(Some)
-            .map(Some)
-            .map_err(E::custom),
-    }
-}
-
 fn raw_present_nullable_projection<E>(
     fields: &mut HashMap<String, Box<RawValue>>,
     name: &'static str,
@@ -406,7 +333,7 @@ where
     }
 }
 
-fn raw_content_blocks<E>(raw: Box<RawValue>) -> Result<Vec<ContentBlock>, E>
+fn raw_content_blocks<E>(raw: &RawValue) -> Result<Vec<ContentBlock>, E>
 where
     E: serde::de::Error,
 {
@@ -502,7 +429,6 @@ pub enum ContentBlock {
         #[serde(
             default,
             serialize_with = "serialize_present_nullable_projection",
-            deserialize_with = "deserialize_present_nullable_projection",
             skip_serializing_if = "Option::is_none"
         )]
         citations: Option<Option<Utf16JsonProjection>>,
@@ -522,7 +448,6 @@ pub enum ContentBlock {
         #[serde(
             default,
             serialize_with = "serialize_present_nullable_projection",
-            deserialize_with = "deserialize_present_nullable_projection",
             skip_serializing_if = "Option::is_none"
         )]
         citations: Option<Option<Utf16JsonProjection>>,
@@ -534,10 +459,7 @@ pub enum ContentBlock {
         /// Tool name (e.g. `"Read"`, `"Bash"`).
         name: String,
         /// Tool-specific exact JSON input.
-        #[serde(
-            serialize_with = "serialize_json_projection",
-            deserialize_with = "deserialize_json_projection"
-        )]
+        #[serde(serialize_with = "serialize_json_projection")]
         input: Utf16JsonProjection,
         /// Verbatim provider-issued tool-call id (e.g. Anthropic `"toolu_01…"`,
         /// `OpenAI` `"call_…"`). `ToolUseId` is a UUID newtype and cannot hold a
@@ -558,11 +480,7 @@ pub enum ContentBlock {
         content: Utf16JsonProjection,
         /// Whether the tool reported failure. `None` also preserves the native
         /// omission of this optional field; `Some(false)` remains explicit.
-        #[serde(
-            default,
-            deserialize_with = "deserialize_present_bool",
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
         /// Verbatim provider id of the `ToolUse` this answers — copied from the
         /// paired [`ContentBlock::ToolUse::provider_id`] so the egress
@@ -579,10 +497,7 @@ pub enum ContentBlock {
         /// stringified [`content`]. Every non-MCP tool leaves this `None`, so its
         /// wire form is unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[serde(
-            serialize_with = "serialize_optional_projection",
-            deserialize_with = "deserialize_json_projection"
-        )]
+        #[serde(serialize_with = "serialize_optional_projection")]
         content_blocks: Option<Utf16JsonProjection>,
     },
     /// Extended-thinking reasoning trace.
@@ -625,8 +540,7 @@ pub enum ContentBlock {
         /// Tool input arguments (provider-specific JSON shape).
         #[serde(
             default = "null_json_projection",
-            serialize_with = "serialize_json_projection",
-            deserialize_with = "deserialize_json_projection"
+            serialize_with = "serialize_json_projection"
         )]
         input: Utf16JsonProjection,
     },
@@ -651,10 +565,7 @@ pub enum ContentBlock {
         tool_use_id: String,
         /// Tool result content (provider-specific JSON shape).
         #[serde(default)]
-        #[serde(
-            serialize_with = "serialize_json_projection",
-            deserialize_with = "deserialize_json_projection"
-        )]
+        #[serde(serialize_with = "serialize_json_projection")]
         content: Utf16JsonProjection,
         /// Whether the tool reported an error.
         #[serde(default)]
@@ -1255,7 +1166,7 @@ impl<'de> Deserialize<'de> for ConversationMessage {
                     .ok_or_else(|| serde::de::Error::missing_field("content"))?;
                 Ok(Self::User {
                     id: raw_required(&mut fields, "id")?,
-                    content: raw_content_blocks::<D::Error>(raw_content)?,
+                    content: raw_content_blocks::<D::Error>(raw_content.as_ref())?,
                     is_meta: raw_optional(&mut fields, "is_meta")?.unwrap_or(false),
                     is_compact_summary: raw_optional(&mut fields, "isCompactSummary")?
                         .unwrap_or(false),
@@ -1280,7 +1191,7 @@ impl<'de> Deserialize<'de> for ConversationMessage {
                     .ok_or_else(|| serde::de::Error::missing_field("content"))?;
                 Ok(Self::Assistant {
                     id: raw_required(&mut fields, "id")?,
-                    content: raw_content_blocks::<D::Error>(raw_content)?,
+                    content: raw_content_blocks::<D::Error>(raw_content.as_ref())?,
                     stop_reason: raw_optional_string(&mut fields, "stop_reason")?,
                     resumable: raw_optional_projection(&mut fields, "resumable")?,
                     per_turn_effort: raw_optional_root_string_projection(
@@ -1860,6 +1771,7 @@ pub use crate::types::scope::MemoryEntryTier;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn projection(value: Value) -> Utf16JsonProjection {
         Utf16JsonProjection::from_serde_value(&value).unwrap()

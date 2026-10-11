@@ -686,8 +686,10 @@ mod tests {
         let duplicate = issue_selector_capability(root.path(), app_id, run_id);
         assert_eq!(
             duplicate,
-            Err("selector_capability_exists: create run already has a selector capability"
-                .to_string()),
+            Err(
+                "selector_capability_exists: create run already has a selector capability"
+                    .to_string()
+            ),
             "an UNverified duplicate call must still fail closed on a live token, got {duplicate:?}"
         );
 

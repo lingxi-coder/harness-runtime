@@ -308,7 +308,7 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
         input_schema_projection: None,
         name: "computer".to_string(),
         description: String::new().into(),
-        input_schema: json_payload(serde_json::Value::Null),
+        input_schema: json_payload(serde_json::json!({})),
         tool_type: Some("computer_use_20250124".to_string()),
         extra,
         strict: false,
@@ -368,7 +368,6 @@ fn encode_request_maps_image_and_tool_result_blocks() {
                 bytes: vec![1, 2, 3],
             },
             ContentBlock::ToolResult {
-                output_projection: None,
                 tool_call_id: "tool-1".to_string(),
                 output: super::json_payload(serde_json::json!({"ok": true})),
                 is_error: Some(false),
@@ -425,7 +424,7 @@ fn encode_request_passes_tool_result_content_block_array_verbatim() {
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
-        content: vec![ContentBlock::ToolResult { output_projection: None,
+        content: vec![ContentBlock::ToolResult {
             tool_call_id: "tool-1".to_string(),
             output: super::json_payload(serde_json::json!([
                 { "type": "text", "text": "see image:" },
@@ -460,7 +459,6 @@ fn encode_request_emits_cache_edits_and_cache_reference() {
         role: "user".to_string(),
         content: vec![
             ContentBlock::ToolResult {
-                output_projection: None,
                 tool_call_id: "toolu_abc".to_string(),
                 output: super::json_payload(serde_json::json!("body")),
                 is_error: Some(false),
@@ -501,7 +499,6 @@ fn encode_request_omits_cache_reference_when_absent() {
         api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
-            output_projection: None,
             tool_call_id: "toolu_abc".to_string(),
             output: super::json_payload(serde_json::json!("body")),
             is_error: Some(false),
@@ -780,7 +777,6 @@ fn encode_tool_result_error_flag() {
         role: "user".to_string(),
         content: vec![
             ContentBlock::ToolResult {
-                output_projection: None,
                 tool_call_id: "tool-1".to_string(),
                 output: super::json_payload(serde_json::json!("boom")),
                 is_error: Some(true),
@@ -788,7 +784,6 @@ fn encode_tool_result_error_flag() {
                 cache_reference: None,
             },
             ContentBlock::ToolResult {
-                output_projection: None,
                 tool_call_id: "tool-2".to_string(),
                 output: super::json_payload(serde_json::json!("fine")),
                 is_error: Some(false),
@@ -1016,7 +1011,7 @@ fn stream_error_events_map_to_error_taxonomy() {
             br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#
                 .to_vec(),
         )),
-        Err(llm_runtime::LlmError::Overloaded { .. })
+        Err(err) if matches!(err.classification_source(), llm_runtime::LlmError::Overloaded { .. })
     ));
     let mut decoder = codec.stream_decoder();
     assert!(matches!(
@@ -1024,7 +1019,7 @@ fn stream_error_events_map_to_error_taxonomy() {
             br#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#
                 .to_vec(),
         )),
-        Err(llm_runtime::LlmError::RateLimited { .. })
+        Err(err) if matches!(err.classification_source(), llm_runtime::LlmError::RateLimited { .. })
     ));
     let mut decoder = codec.stream_decoder();
     assert!(matches!(
@@ -1032,14 +1027,14 @@ fn stream_error_events_map_to_error_taxonomy() {
             br#"{"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#
                 .to_vec(),
         )),
-        Err(llm_runtime::LlmError::Authentication { .. })
+        Err(err) if matches!(err.classification_source(), llm_runtime::LlmError::Authentication { .. })
     ));
     let mut decoder = codec.stream_decoder();
     assert!(matches!(
         decoder.decode_frame(llm_runtime::RawStreamFrame::new(
             br#"{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}"#.to_vec(),
         )),
-        Err(llm_runtime::LlmError::InvalidRequest { message }) if message.contains("bad request")
+        Err(err) if matches!(err.classification_source(), llm_runtime::LlmError::InvalidRequest { message } if message.contains("bad request"))
     ));
 }
 
@@ -1141,7 +1136,6 @@ fn encode_system_blocks_and_cache_control() {
                 citations: None,
             },
             ContentBlock::ToolResult {
-                output_projection: None,
                 tool_call_id: "tool-1".to_string(),
                 output: super::json_payload(serde_json::json!("ok")),
                 is_error: Some(false),
@@ -1277,5 +1271,8 @@ fn count_tokens_error_status_maps_through_taxonomy() {
         ))
         .unwrap_err();
 
-    assert!(matches!(err, llm_runtime::LlmError::Authentication { .. }));
+    assert!(matches!(
+        err.classification_source(),
+        llm_runtime::LlmError::Authentication { .. }
+    ));
 }

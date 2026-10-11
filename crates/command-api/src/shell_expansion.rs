@@ -36,7 +36,7 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::fmt;
 use std::sync::Arc;
 
-type UJP = Utf16JsonProjection;
+type Ujp = Utf16JsonProjection;
 
 /// Output of a single embedded shell command.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub struct ShellOut {
 pub enum ShellExpansionError {
     /// Permission denied, execution failure, or interruption — the message is
     /// pre-formatted to match the TS `MalformedCommandError` text.
-    Malformed(UJP),
+    Malformed(Ujp),
 }
 
 impl fmt::Display for ShellExpansionError {
@@ -73,7 +73,7 @@ impl std::error::Error for ShellExpansionError {}
 impl ShellExpansionError {
     /// Exact source diagnostic; display formatting is reserved for UI/log sinks.
     #[must_use]
-    pub fn source_message(&self) -> UJP {
+    pub fn source_message(&self) -> Ujp {
         match self {
             Self::Malformed(message) => message.clone(),
         }
@@ -90,7 +90,7 @@ pub enum ShellPermissionDecision {
     /// The command is denied; the optional message is folded into the error.
     Deny {
         /// Human-readable reason (TS `permissionResult.message`).
-        message: Option<UJP>,
+        message: Option<Ujp>,
     },
 }
 
@@ -99,7 +99,7 @@ pub enum ShellPermissionDecision {
 /// { command }, …)` call.
 pub trait ShellPermissionGate: Send + Sync {
     /// Decide whether `command` (routed through `shell`) may execute.
-    fn check(&self, command: &UJP, shell: Option<FrontmatterShell>) -> ShellPermissionDecision;
+    fn check(&self, command: &Ujp, shell: Option<FrontmatterShell>) -> ShellPermissionDecision;
 }
 
 /// Runs a single shell command. Injected so the crate stays leaf (no `BashTool`
@@ -116,7 +116,7 @@ pub trait ShellRunner: Send + Sync {
     /// status when known.
     async fn run(
         &self,
-        command: &UJP,
+        command: &Ujp,
         shell: Option<FrontmatterShell>,
     ) -> Result<ShellOut, ShellRunError>;
 }
@@ -180,7 +180,7 @@ struct ExtractedCommand {
     /// The matched substring (`match[0]`), used as the literal replacement key.
     full: Vec<u16>,
     /// The trimmed exact source command (`match[1]?.trim()`).
-    command: UJP,
+    command: Ujp,
 }
 
 /// Format combined stdout/stderr exactly like TS `formatBashOutput`.
@@ -227,11 +227,11 @@ fn format_bash_error(err: &ShellRunError, pattern: &[u16]) -> ShellExpansionErro
 /// command text in exact UTF-16 units. Only the injected process runner crosses
 /// the host OS command-string boundary.
 pub async fn execute_shell_commands_in_prompt(
-    text: &UJP,
+    text: &Ujp,
     ctx: &ShellExpansionCtx,
-    slash_command_name: &UJP,
+    slash_command_name: &Ujp,
     shell: Option<FrontmatterShell>,
-) -> Result<UJP, ShellExpansionError> {
+) -> Result<Ujp, ShellExpansionError> {
     let source_units = text
         .string_units("")
         .expect("shell expansion input must be a root-string projection");
@@ -258,7 +258,7 @@ pub async fn execute_shell_commands_in_prompt(
             ShellPermissionDecision::Allow => {}
             ShellPermissionDecision::Deny { message } => {
                 let _ = slash_command_name; // mirrors TS debug log; no-op here.
-                let reason = message.unwrap_or_else(|| UJP::from("Permission denied"));
+                let reason = message.unwrap_or_else(|| Ujp::from("Permission denied"));
                 return Err(malformed_with_pattern_and_source(
                     "Shell command permission check failed for pattern \"",
                     &command.full,
@@ -269,7 +269,7 @@ pub async fn execute_shell_commands_in_prompt(
         }
 
         let output = match ctx.runner.run(&command.command, shell).await {
-            Ok(data) => UJP::from(format_bash_output(&data.stdout, &data.stderr, false)),
+            Ok(data) => Ujp::from(format_bash_output(&data.stdout, &data.stderr, false)),
             Err(error) => return Err(format_bash_error(&error, &command.full)),
         };
         result = replace_first_units(
@@ -299,18 +299,18 @@ fn replace_first_units(haystack: &[u16], needle: &[u16], replacement: &[u16]) ->
     output
 }
 
-fn projection_from_units(units: Vec<u16>) -> UJP {
+fn projection_from_units(units: Vec<u16>) -> Ujp {
     let display = String::from_utf16_lossy(&units);
-    UJP::root_string(display, units)
+    Ujp::root_string(display, units)
         .expect("display projection is derived from the same UTF-16 units")
 }
 
-fn source_from_units(units: Vec<u16>) -> UJP {
+fn source_from_units(units: Vec<u16>) -> Ujp {
     projection_from_units(units)
 }
 
 fn malformed_text(text: &str) -> ShellExpansionError {
-    ShellExpansionError::Malformed(UJP::from(text))
+    ShellExpansionError::Malformed(Ujp::from(text))
 }
 
 fn malformed_with_pattern(prefix: &str, pattern: &[u16], suffix: &str) -> ShellExpansionError {
@@ -343,7 +343,7 @@ fn malformed_with_pattern_and_source(
     prefix: &str,
     pattern: &[u16],
     middle: &str,
-    suffix: &UJP,
+    suffix: &Ujp,
 ) -> ShellExpansionError {
     let units = [
         prefix.encode_utf16().collect::<Vec<_>>(),
@@ -456,7 +456,7 @@ mod tests {
     use std::sync::Mutex;
 
     struct ScriptRunner {
-        calls: Mutex<Vec<UJP>>,
+        calls: Mutex<Vec<Ujp>>,
     }
 
     impl ScriptRunner {
@@ -471,7 +471,7 @@ mod tests {
     impl ShellRunner for ScriptRunner {
         async fn run(
             &self,
-            command: &UJP,
+            command: &Ujp,
             _shell: Option<FrontmatterShell>,
         ) -> Result<ShellOut, ShellRunError> {
             self.calls.lock().unwrap().push(command.clone());
@@ -484,14 +484,14 @@ mod tests {
     }
 
     struct FixedRunner {
-        calls: Mutex<Vec<UJP>>,
+        calls: Mutex<Vec<Ujp>>,
     }
 
     #[async_trait]
     impl ShellRunner for FixedRunner {
         async fn run(
             &self,
-            command: &UJP,
+            command: &Ujp,
             _shell: Option<FrontmatterShell>,
         ) -> Result<ShellOut, ShellRunError> {
             self.calls.lock().unwrap().push(command.clone());
@@ -507,18 +507,18 @@ mod tests {
     impl ShellPermissionGate for AllowAll {
         fn check(
             &self,
-            _command: &UJP,
+            _command: &Ujp,
             _shell: Option<FrontmatterShell>,
         ) -> ShellPermissionDecision {
             ShellPermissionDecision::Allow
         }
     }
 
-    struct DenyAll(Option<UJP>);
+    struct DenyAll(Option<Ujp>);
     impl ShellPermissionGate for DenyAll {
         fn check(
             &self,
-            _command: &UJP,
+            _command: &Ujp,
             _shell: Option<FrontmatterShell>,
         ) -> ShellPermissionDecision {
             ShellPermissionDecision::Deny {
@@ -537,8 +537,8 @@ mod tests {
         }
     }
 
-    async fn expand(text: &str, ctx: &ShellExpansionCtx) -> Result<UJP, ShellExpansionError> {
-        execute_shell_commands_in_prompt(&UJP::from(text), ctx, &UJP::from("/x"), None).await
+    async fn expand(text: &str, ctx: &ShellExpansionCtx) -> Result<Ujp, ShellExpansionError> {
+        execute_shell_commands_in_prompt(&Ujp::from(text), ctx, &Ujp::from("/x"), None).await
     }
 
     #[test]
@@ -579,7 +579,7 @@ mod tests {
             " suffix".encode_utf16().collect(),
         ]
         .concat();
-        let text = UJP::root_string(String::from_utf16_lossy(&units), units.clone()).unwrap();
+        let text = Ujp::root_string(String::from_utf16_lossy(&units), units.clone()).unwrap();
         let output = execute_shell_commands_in_prompt(&text, &ctx, &"/x".into(), None)
             .await
             .unwrap();
@@ -639,7 +639,7 @@ mod tests {
             vec![0xd800],
         ]
         .concat();
-        let text = UJP::root_string(String::from_utf16_lossy(&units), units.clone()).unwrap();
+        let text = Ujp::root_string(String::from_utf16_lossy(&units), units.clone()).unwrap();
         let output = execute_shell_commands_in_prompt(&text, &ctx, &"/exact�".into(), None)
             .await
             .unwrap();
@@ -680,8 +680,10 @@ mod tests {
             vec![b'`' as u16],
         ]
         .concat();
-        let reason = UJP::root_string("reason�".into(), vec![b'r' as u16, 0xdfff]).unwrap();
-        let text = UJP::root_string(
+        let reason_units = ["reason".encode_utf16().collect::<Vec<_>>(), vec![0xdfff]].concat();
+        let reason =
+            Ujp::root_string(String::from_utf16_lossy(&reason_units), reason_units).unwrap();
+        let text = Ujp::root_string(
             String::from_utf16_lossy(&command_units),
             command_units.clone(),
         )
@@ -713,7 +715,7 @@ mod tests {
         impl ShellRunner for FailRunner {
             async fn run(
                 &self,
-                _command: &UJP,
+                _command: &Ujp,
                 _shell: Option<FrontmatterShell>,
             ) -> Result<ShellOut, ShellRunError> {
                 Err(ShellRunError {
@@ -736,7 +738,7 @@ mod tests {
         impl ShellRunner for StderrRunner {
             async fn run(
                 &self,
-                _command: &UJP,
+                _command: &Ujp,
                 _shell: Option<FrontmatterShell>,
             ) -> Result<ShellOut, ShellRunError> {
                 Ok(ShellOut {

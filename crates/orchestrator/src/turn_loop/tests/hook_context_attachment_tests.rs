@@ -3,7 +3,6 @@ use super::{
     ConversationOrchestrator, PostToolBatchDispatch,
 };
 use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
-use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use hooks::attachment::HookPublicationGuard;
@@ -49,11 +48,10 @@ impl Tool for EchoTool {
     fn output_schema(&self) -> Option<&lingxi_core::types::utf16_json::Utf16JsonProjection> {
         static OUT: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
             once_cell::sync::Lazy::new(|| {
-                tool_api::tool_trait::generated_builtin_result(&json!({
-                    "type": "object",
-                    "properties": { "out": { "type": "string" } },
-                    "required": ["out"]
-                }))
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"type":"object","properties":{"out":{"type":"string"},"\ud800":{"type":"string"}},"required":["out"]}"#,
+                )
+                .expect("test output schema preserves its lone-surrogate property key")
             });
         Some(&OUT)
     }
@@ -269,8 +267,11 @@ impl Tool for FailedAgentTool {
     fn name(&self) -> &str {
         "Agent"
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         EchoTool.input_schema()
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        EchoTool.input_repair_metadata()
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -278,28 +279,38 @@ impl Tool for FailedAgentTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn check_permissions(
         &self,
-        input: &serde_json::Value,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> permission::PermissionResult {
         EchoTool.check_permissions(input, ctx).await
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "Failure lifecycle fixture".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -334,8 +345,8 @@ impl BuiltinHookHandler for RecordingSubagentLifecycle {
         self.0.lock().unwrap().push((event.clone(), ctx.clone()));
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -375,6 +386,7 @@ async fn failed_agent_dispatch_consumes_its_child_route_and_admission_failure_ha
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
         let mut executor = HookExecutorImpl::new(
             Arc::new(tokio::sync::RwLock::new(hook_registry)),
@@ -432,13 +444,17 @@ async fn failed_agent_dispatch_consumes_its_child_route_and_admission_failure_ha
         let uses = vec![(
             ToolUseId::new(),
             "Agent".into(),
-            json!({"subagent_type":"general-purpose"}),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"subagent_type":"general-purpose"}"#,
+            )
+            .expect("valid fixture input"),
             None,
         )];
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .expect("dispatch");
-        let expected_content = format!("Error: {reason}");
+        let expected_content =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from(reason.to_owned());
         assert!(
             matches!(&results[0], ContentBlock::ToolResult { is_error: Some(true), content, .. }
             if content == &expected_content)
@@ -838,7 +854,7 @@ fn post_tool_batch_stopped_continuation_matches_the_oracle_shape() {
         "the batch attachment carries a synthetic `hook-<uuid>` id, got {id}"
     );
     assert_eq!(
-        serde_json::to_string(&attachment).unwrap(),
+        attachment.to_json_string().unwrap(),
         format!(
             r#"{{"type":"hook_stopped_continuation","message":"Execution stopped by PostToolBatch hook","hookName":"PostToolBatch","toolUseID":"{id}","hookEvent":"PostToolBatch"}}"#
         )
@@ -1641,9 +1657,23 @@ async fn schema_mismatch_notice_is_an_attachment_the_model_never_sees() {
     });
     let uses = uses();
     let id = uses[0].0.clone();
-    let (_results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+    let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
         .await
         .expect("dispatch");
+    let ContentBlock::ToolResult {
+        content,
+        is_error: None,
+        ..
+    } = &results[0]
+    else {
+        panic!("invalid hook replacement preserves the successful original ToolResult");
+    };
+    assert!(
+        content
+            .string_at("")
+            .is_some_and(|text| text.contains("ECHOED-OUTPUT")),
+        "the model-facing result remains the original tool output: {content:?}"
+    );
     assert!(
         !injected
             .iter()
@@ -1669,6 +1699,57 @@ async fn schema_mismatch_notice_is_an_attachment_the_model_never_sees() {
         .string_at("/content")
         .expect("string content")
         .contains("does not match Echo's output shape"));
+}
+
+#[tokio::test]
+async fn schema_mismatch_attachment_restores_lone_surrogate_property_path() {
+    let replacement = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+        r#"{"out":"replacement","\ud800":1}"#,
+    )
+    .expect("hook replacement preserves its lone-surrogate property key");
+    let orch = orch_with_post_hook(HookResponse {
+        updated_tool_output: Some(replacement),
+        ..HookResponse::default()
+    });
+    let uses = uses();
+    let id = uses[0].0.clone();
+    let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+        .await
+        .expect("dispatch");
+    let ContentBlock::ToolResult {
+        content,
+        is_error: None,
+        ..
+    } = &results[0]
+    else {
+        panic!("invalid hook replacement preserves the successful original ToolResult");
+    };
+    assert!(
+        content
+            .string_at("")
+            .is_some_and(|text| text.contains("ECHOED-OUTPUT")),
+        "the model-facing result remains the original tool output: {content:?}"
+    );
+    assert!(
+        !injected
+            .iter()
+            .any(|(message, _)| message.text_content().contains("does not match")),
+        "schema diagnostics remain a transcript attachment: {injected:?}"
+    );
+    let queued = orch.take_queued_hook_attachments(&id).await;
+    assert_eq!(queued.len(), 1);
+    let detail = queued[0]
+        .0
+        .string_units("/content")
+        .expect("hook attachment content has source units");
+    assert!(
+        detail.contains(&0xd800),
+        "the diagnostic path restores the original lone surrogate: {detail:?}"
+    );
+    assert!(
+        !detail.contains(&0xe000),
+        "the validator's temporary private-use placeholder must not escape: {detail:?}"
+    );
 }
 
 /// Build an orchestrator whose only hook is a PreToolUse hook returning
@@ -1838,7 +1919,7 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         observed: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     });
     let pre_tool_started = Arc::new(tokio::sync::Notify::new());
-    let (orch, mod_registry) = orch_with_pre_hook_and_output(
+    let (mut orch, mod_registry) = orch_with_pre_hook_and_output(
         HookResponse {
             decision: Some(hooks::response::HookDecision::Defer),
             ..HookResponse::default()
@@ -1847,6 +1928,7 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         output.clone(),
         Some(pre_tool_started.clone()),
     );
+    orch.config.interactive_permissions = false;
     let orch = ConversationOrchestrator::into_shared(orch.with_hook_registry(mod_registry.clone()));
     mod_registry.write().await.set_mod_host(mod_host);
 
@@ -1872,6 +1954,7 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         stop_reason: Some("tool_use".into()),
 
         resumable: None,
+        per_turn_effort: None,
     };
     orch.session.lock().await.history.push(assistant.clone());
 
@@ -1965,7 +2048,10 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[1].message_type, "attachment");
     assert_eq!(
-        rows[1].extra.string_at("/attachment/type"),
+        rows[1]
+            .attachment_projection
+            .as_ref()
+            .and_then(|attachment| attachment.string_at("/type")),
         Some("hook_deferred_tool")
     );
     assert_eq!(rows[2].message_type, "assistant");

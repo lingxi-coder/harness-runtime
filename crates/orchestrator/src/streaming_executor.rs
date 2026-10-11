@@ -5,7 +5,7 @@
 
 use crate::autonomous_tool_scheduler::{
     CompletedDispatch, OwnedToolCall, ReadyToolMeta, SchedulerStopped, Status as SchedulerStatus,
-    ToolDispatch, ToolDispatchPayload, ToolOutcome, ToolScheduler,
+    ToolDispatch, ToolDispatchPayload, ToolScheduler,
 };
 use crate::conversation::ConversationOrchestrator;
 use lingxi_core::host::tool_invoker::ToolInvocationContextModifier;
@@ -54,6 +54,10 @@ pub(crate) enum AbortReason {
     /// queued tool whose `interrupt_behavior()==Cancel` (TS `getAbortReason`
     /// 'user_interrupted'). The synthetic result is the bare `REJECT_MESSAGE`.
     UserInterrupted,
+    /// Production fallback resets the whole generation. This variant remains
+    /// only for the synthetic-result unit oracle, not as evidence of a live
+    /// Native streaming-fallback completion route.
+    #[cfg(test)]
     StreamingFallback,
 }
 
@@ -70,6 +74,7 @@ pub(crate) enum AbortReason {
 pub(crate) fn synthetic_tool_use_result(reason: AbortReason) -> Utf16JsonProjection {
     Utf16JsonProjection::from(match reason {
         AbortReason::UserInterrupted => "User rejected tool use",
+        #[cfg(test)]
         AbortReason::StreamingFallback => "Streaming fallback - tool execution discarded",
     })
 }
@@ -98,6 +103,7 @@ fn synthetic_error_block_for_tool(
     is_mcp: bool,
 ) -> ContentBlock {
     let content = match reason {
+        #[cfg(test)]
         AbortReason::StreamingFallback => {
             "<tool_use_error>Error: Streaming fallback - tool execution discarded</tool_use_error>"
                 .to_string()
@@ -170,6 +176,7 @@ pub(crate) struct TrackedTool {
 ///
 /// `executing_safe_flags` is a slice of the `is_concurrency_safe` flags for
 /// every tool currently in the `Executing` state.
+#[cfg(test)]
 pub(crate) fn can_execute(executing_safe_flags: &[bool], candidate_safe: bool) -> bool {
     executing_safe_flags.is_empty() || (candidate_safe && executing_safe_flags.iter().all(|&s| s))
 }
@@ -540,28 +547,6 @@ impl<'a> StreamingToolExecutor<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) async fn add_tool_with_context(
-        &mut self,
-        id: ToolUseId,
-        name: String,
-        input: Utf16JsonProjection,
-        provider_id: Option<String>,
-        assistant_id: MessageId,
-        dispatch_facts: crate::turn_loop::ToolUseDispatchFacts,
-    ) {
-        self.add_tool_with_context_owned(
-            id,
-            name,
-            input,
-            provider_id,
-            assistant_id,
-            dispatch_facts,
-        )
-        .await
-        .expect("test tool admission reaches the owned scheduler");
-    }
-
-    #[cfg(test)]
     pub(crate) fn inflight_is_empty(&self) -> bool {
         !self
             .tools
@@ -833,6 +818,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 } else {
                     "user-rejected".to_owned()
                 }),
+                #[cfg(test)]
                 AbortReason::StreamingFallback => None,
             };
             let tool_use_result = synthetic_tool_use_result_for_tool(reason, is_mcp);
@@ -1532,7 +1518,6 @@ mod synthetic_denial_kind_tests {
     use lingxi_core::types::MessageId;
     use serde_json::json;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tool_api::context::ToolUseContext;
     use tool_api::progress::ToolProgressSender;

@@ -192,7 +192,8 @@ mod tests {
     #[tokio::test]
     async fn response_pump_resolves_sdk_request_before_desktop_exists() {
         let (mut prepared, mut peer, stream, _cancel) = prepare().await;
-        let (request_id, response) = prepared.plane.send_request(Utf16JsonProjection::plain(json!({"subtype":"mcp_message","server_name":"injected-sdk","message":{"jsonrpc":"2.0","id":1,"method":"initialize"}})), None).await;
+        let request = Utf16JsonProjection::from_serde_value(&json!({"subtype":"mcp_message","server_name":"injected-sdk","message":{"jsonrpc":"2.0","id":1,"method":"initialize"}})).unwrap();
+        let (request_id, response) = prepared.plane.send_request(request, None).await;
         let line = json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":{"message":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}}}}).to_string();
         peer.write_all(format!("{line}\n").as_bytes())
             .await
@@ -203,8 +204,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            resolved.value["message"]["result"]["protocolVersion"],
-            "2024-11-05"
+            resolved.string_at("/message/result/protocolVersion"),
+            Some("2024-11-05")
         );
         prepared.shutdown("startup test complete").await.unwrap();
         assert!(prepared.auxiliary_tasks.is_empty());
@@ -271,7 +272,7 @@ mod tests {
         let (_, pending) = prepared
             .plane
             .send_request(
-                Utf16JsonProjection::plain(json!({"subtype":"mcp_message"})),
+                Utf16JsonProjection::from_serde_value(&json!({"subtype":"mcp_message"})).unwrap(),
                 None,
             )
             .await;

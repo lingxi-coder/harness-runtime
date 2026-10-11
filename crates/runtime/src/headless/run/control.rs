@@ -1260,7 +1260,9 @@ async fn rollback_cd_after_launch_identity_failure(
                 "background launch identity refresh failed and transcript rollback failed: {refresh_error}; rollback: {rollback_error}"
             ));
             tracing::error!(%refresh_error, %rollback_error, "failed to roll back /cd after background launch identity refresh failure; job disabled");
-            format!("Could not change directory: {refresh_error}; background session disabled because transcript rollback failed: {rollback_error}")
+            format!(
+                "Could not change directory: {refresh_error}; background session disabled because transcript rollback failed: {rollback_error}"
+            )
         }
     }
 }
@@ -1433,7 +1435,7 @@ mod tests {
         let (_, _, viewport) = super::validate_ui_attach(&request).unwrap();
         assert_eq!(
             viewport.unwrap(),
-            serde_json::json!({"columns":80.0,"rows":24,"isFullscreen":false})
+            serde_json::json!({"columns":80.0,"rows":24.0,"isFullscreen":false})
         );
         let request = projection_from_value(
             &serde_json::json!({"surface":"mobile","client_id":"phone","viewport":{"columns":80.5,"rows":24}}),
@@ -1456,7 +1458,10 @@ mod tests {
         let Some(crate::headless::stream_json::OutboundMsg::Line(line)) = rx.recv().await else {
             panic!("expected reply");
         };
-        assert_eq!(line, "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"\\ud800\",\"error\":\"unsupported\"}}\n");
+        assert_eq!(
+            line,
+            "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"\\ud800\",\"error\":\"unsupported\"}}\n"
+        );
     }
 
     fn apply(field: Option<serde_json::Value>) -> Option<String> {

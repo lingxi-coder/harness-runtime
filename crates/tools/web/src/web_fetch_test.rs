@@ -6,6 +6,25 @@ use super::*;
 mod tests {
 
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
+    use serde_json::Value;
 
     fn assert_source_text(source: &crate::source::Source, pointer: &str, expected: &str) {
         assert_eq!(
@@ -595,7 +614,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("500 must be Ok(result), not Err");
-        assert_source_number(&result.data, "/code", 500 as f64);
+        assert_source_number(&result.data, "/code", 500.0);
         assert_source_text(&result.data, "/codeText", "Internal Server Error");
         assert_source_number(&result.data, "/bytes", 0 as f64);
         assert_source_text(
@@ -636,7 +655,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("429 must be Ok(result)");
-        assert_source_number(&result.data, "/code", 429 as f64);
+        assert_source_number(&result.data, "/code", 429.0);
         assert_source_text(&result.data, "/codeText", "Too Many Requests");
         assert_source_text(
             &result.data,
@@ -720,7 +739,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("ok response");
-        assert_source_number(&res.data, "/code", 200 as f64);
+        assert_source_number(&res.data, "/code", 200.0);
         assert_source_text(&res.data, "/result", "hello world");
         // claude-code result schema: codeText (reason phrase) + durationMs present,
         // and NO LingXi-internal `truncated` field.
@@ -794,7 +813,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .await
             .expect_err("file:// must be rejected");
         assert!(matches!(err, ToolError::InvalidInput(_)));
-        assert!(format!("{err}").contains("URL hostname is not publicly resolvable"));
+        assert!(source_text(&err.model_facing_message())
+            .contains("URL hostname is not publicly resolvable"));
     }
 
     // ---- validateInput parity (WebFetchTool.ts:191-204) --------------------
@@ -811,10 +831,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect_err("unparseable URL must be rejected");
-        // `ValidationError`'s Display prepends `invalid tool input: `; the message
-        // bytes must match the TS string exactly.
+        // `ValidationError` Display is a fixed label; `.0` carries the exact
+        // model-facing source and UTF-16 units.
         assert!(
-            err.to_string().contains(
+            source_text(&err.0).contains(
                 "Error: Invalid URL \"not a url\". The URL provided could not be parsed."
             ),
             "unexpected error: {err}"
@@ -835,7 +855,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect_err("schemeless URL must be rejected");
-        assert!(err.to_string().contains(
+        assert!(source_text(&err.0).contains(
             "Error: Invalid URL \"example.com/path\". The URL provided could not be parsed."
         ));
     }
@@ -927,7 +947,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .await
             .expect("second fetch ok (from cache)");
         assert_source_text(&second.data, "/result", "cached body");
-        assert_source_number(&second.data, "/code", 200 as f64);
+        assert_source_number(&second.data, "/code", 200.0);
         assert_source_number(&second.data, "/bytes", "cached body".len() as f64);
 
         // First call: preflight + fetch. Second call: cache hit, zero requests.
@@ -1401,7 +1421,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         let res = res.expect("cross-host redirect must return Ok with the notice");
 
-        assert_source_number(&res.data, "/code", 301 as f64);
+        assert_source_number(&res.data, "/code", 301.0);
         assert_source_text(&res.data, "/codeText", "Moved Permanently");
         let content = res.data.string_at("/result").unwrap();
         assert!(
@@ -1458,7 +1478,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         let res = res.expect("permitted redirect must be followed to the final body");
 
-        assert_source_number(&res.data, "/code", 200 as f64);
+        assert_source_number(&res.data, "/code", 200.0);
         assert_source_text(&res.data, "/result", "final body");
         // Two `request_no_follow` calls (start + final), zero plain `request`.
         assert_eq!(
@@ -1498,7 +1518,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         let res = res.expect("303 must be detected as a redirect and return Ok with the notice");
 
-        assert_source_number(&res.data, "/code", 303 as f64);
+        assert_source_number(&res.data, "/code", 303.0);
         assert_source_text(&res.data, "/codeText", "See Other");
         let content = res.data.string_at("/result").unwrap();
         assert!(
@@ -1538,7 +1558,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .await
             .expect("redirect-without-Location must be Ok(http_error result), not Err");
 
-        assert_source_number(&res.data, "/code", 301 as f64);
+        assert_source_number(&res.data, "/code", 301.0);
         assert_source_text(&res.data, "/codeText", "Moved Permanently");
         assert_source_number(&res.data, "/bytes", 0 as f64);
         assert_eq!(
@@ -1730,7 +1750,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             );
             assert_eq!(side_query.calls.load(Ordering::SeqCst), 1);
 
-            let serialized = serde_json::to_vec(&fusion_hit.data).expect("valid JSON");
+            let serialized = fusion_hit.data.to_json_string().expect("valid JSON");
             assert!(serialized.len() <= FUSION_WEBFETCH_RESULT_MAX_BYTES);
         }
 
@@ -1750,7 +1770,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 123,
             );
             let data = data.expect("bounded Fusion result");
-            let serialized = serde_json::to_vec(&data).expect("valid JSON");
+            let serialized = data.to_json_string().expect("valid JSON");
             assert!(serialized.len() <= FUSION_WEBFETCH_RESULT_MAX_BYTES);
             assert_eq!(
                 data.at_pointer("/truncated")

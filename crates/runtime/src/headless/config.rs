@@ -5,50 +5,82 @@ pub use lingxi_core::types::utf16_json::Utf16JsonProjection;
 pub use lingxi_core::types::ImageSource;
 pub use permission::PermissionMode;
 
+/// Complete runtime and invocation configuration for one headless session.
 pub struct HeadlessConfig {
+    /// Desktop runtime settings and dependencies used to assemble the session.
     pub desktop: DesktopConfig,
+    /// Output, input, prompt, and execution options for this invocation.
     pub options: HeadlessOptions,
+    /// Whether to start new, resume a selected session, or continue the latest one.
     pub session_start: SessionStart,
 }
 
+/// Wire format used to write the assistant's output.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OutputFormat {
+    /// Print user-facing text.
     #[default]
     Text,
+    /// Write one JSON response object.
     Json,
+    /// Write newline-delimited JSON output records.
     Ndjson,
+    /// Write the streaming JSON event protocol.
     StreamJson,
 }
 
+/// Format accepted from the headless input stream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputFormat {
+    /// Treat the supplied prompt as plain text.
     #[default]
     Text,
+    /// Read newline-delimited JSON input frames.
     StreamJson,
 }
 
+/// Per-invocation options for headless input, output, and request construction.
 #[derive(Clone, Debug)]
 pub struct HeadlessOptions {
+    /// Optional text prompt supplied to the session.
     pub prompt: Option<String>,
+    /// Images attached to the initial prompt.
     pub prompt_images: Vec<ImageSource>,
+    /// Format used for assistant output.
     pub output_format: OutputFormat,
+    /// Format read from the input stream.
     pub input_format: InputFormat,
     /// Use the batched provider request path for a one-shot prompt.
     pub no_stream: bool,
+    /// Include diagnostic details in output formats that support them.
     pub verbose: bool,
+    /// Whether this invocation was explicitly requested in print mode.
     pub explicit_print: bool,
+    /// Replay accepted user messages as stream-json output frames.
     pub replay_user_messages: bool,
+    /// Include partial assistant messages in stream-json output.
     pub include_partial_messages: bool,
+    /// Include hook event frames in stream-json output.
     pub include_hook_events: bool,
+    /// Forward subagent text into the headless output stream.
     pub forward_subagent_text: bool,
+    /// Optional Native thinking-display selection for the request.
     pub thinking_display: Option<String>,
+    /// Optional settings string supplied by the headless caller.
     pub settings: Option<String>,
+    /// Optional provider beta values requested for this invocation.
     pub betas: Option<Vec<String>>,
+    /// Optional maximum spend in US dollars for this invocation.
     pub max_budget_usd: Option<f64>,
+    /// Optional source-preserving JSON schema for structured output.
     pub json_schema: Option<Utf16JsonProjection>,
+    /// Whether to include prompt suggestions in eligible output.
     pub prompt_suggestions: bool,
+    /// Maximum number of retries for structured-output validation failures.
     pub max_structured_output_retries: i64,
+    /// Disable interactive permission prompts for this invocation.
     pub permission_prompts_none: bool,
+    /// Optional user-message ID at which to restore file state when resuming.
     pub rewind_files: Option<String>,
 }
 
@@ -119,6 +151,7 @@ impl HeadlessOptions {
         None
     }
 
+    /// Returns whether this invocation requests prompt suggestions.
     pub fn prompt_suggestions_enabled(&self) -> bool {
         self.prompt_suggestions
     }

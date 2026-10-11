@@ -1289,13 +1289,16 @@ async fn bedrock_claude_prepare_e2e_sigv4_headers() {
         "body must contain anthropic_version=bedrock-2023-05-31"
     );
 
-    // No anthropic-version header.
-    assert!(
-        !prepared
+    // Bedrock keeps the common Messages SDK version header; its body uses
+    // the separate Bedrock API version asserted above.
+    assert_eq!(
+        prepared
             .provider_request
             .headers
-            .contains_key("anthropic-version"),
-        "anthropic-version header must NOT be present for Bedrock"
+            .get("anthropic-version")
+            .map(String::as_str),
+        Some("2023-06-01"),
+        "Bedrock retains the common SDK version header"
     );
 }
 
@@ -1445,13 +1448,16 @@ async fn vertex_claude_prepare_e2e_bearer_header() {
         "body must contain anthropic_version=vertex-2023-10-16"
     );
 
-    // No anthropic-version header.
-    assert!(
-        !prepared
+    // Vertex adds its provider-specific body version and retains the common
+    // Messages SDK version header.
+    assert_eq!(
+        prepared
             .provider_request
             .headers
-            .contains_key("anthropic-version"),
-        "anthropic-version header must NOT be present for VertexClaude"
+            .get("anthropic-version")
+            .map(String::as_str),
+        Some("2023-06-01"),
+        "Vertex retains the common SDK version header"
     );
 }
 

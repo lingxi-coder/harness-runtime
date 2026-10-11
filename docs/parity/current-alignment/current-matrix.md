@@ -9,21 +9,151 @@ evidence is reusable only for the exact behavior/source it covered; old
 `Missing`/`Partial` labels are not current findings. Versions after 2.1.295
 are explicitly out of scope.
 
-## Current integration status — 2026-10-09
+## Current integration status — paused 2026-10-11
 
-- Target: Native 2.1.295 only. Local Apps behavior/acceptance is excluded by the user's latest instruction; only current-build interface adaptation remains.
-- SDK: committed clean `4a54a1de338ee3b5a95c03b5b3800b6fc73543d2`.
-- Harness: `8478dcec2bb05d777e07018e8690df61939b5258`; Product's complete runtime feature union compiles, client raw-text 8/8 and activity 3/3 pass. Six frozen-main Fusion exports are restored and the complete feature union passes again. Native 295 refusal replay passes 1/1 (two cases) with a self-contained 64 MiB test thread and RUST_MIN_STACK unset; the initial default-thread stack overflow and diagnostic 16 MiB rerun are separately retained.
-- Product: `37c119252d6702f363c7e4c13dfa4d22f1e27c22`, frozen-main `20c7801275dfbf468c61b4708f52cfe5997b227d` merge pending. All 39 manifest pins and 73 lock package rows consume Harness8478; canonical locked metadata/source gate pass and all 806 registry pins are unchanged. TUI now compiles; downstream workspace r4 reached CLI host and exposed 149 current-API errors in 15 files (including macro expansions). These are under parallel scoped repair, not a passed Product build.
-- Newly confirmed open semantic gap: ClientCommand prompt/slash String fields and bridge Value parameters cannot carry the lone-surrogate inputs demonstrated by the 295 CLI fixtures. Output-carrier tests do not close this input transport/UniFFI contract.
-- Source ingress batch: prompt/slash commands, bridge request/result/frame and teammate IPC now preserve source units; visualization follow-up and mobile dispatch consume the same carrier. Client protocol is 22.0.0 with regenerated index. Full runtime feature union passes; client contract tests 25/25, permitted-IPC bridge tests 20/20 and teammate serialization tests 3/3 pass. The first bridge run was sandbox-denied and is not source failure or a pass. Native/mobile binding builds and final Product integration remain pending.
-- Further confirmed open source gaps: FileChanged watcher startup/hot reload drops a complete matcher containing an unpaired unit (including valid sibling paths); Skill admin catalog IDs use display text and can alias source identities; per-message compact-summary stream output still crosses `&str`. These require follow-up fixes and scoped evidence; no final alignment claim is made.
-- Remaining whole-workspace tests, other Native candidate replay, platform checks and signed macOS package acceptance remain open. No push or main merge-back is authorized.
+The user requested a pause after the current round. No R30 gate or new capture
+is running. Target remains Native 2.1.295; Local Apps dedicated behavior remains
+excluded. The restart record is `acceptance/COMPACT-CURRENT.md` in the sibling
+integration directory. Earlier batch details below remain candidate-scoped history.
 
-The dated sections below are scoped historical checkpoints. The external
-`acceptance/COMPACT-CURRENT.md` and `acceptance/resume-state-20261009.json`
-identify the active batch; old successful checks are not combined into final
-candidate acceptance.
+- SDK is clean at `fd2de6036cef5e58f451e0eef72eccfbde66134e`. Its current
+  all-features library tests passed 545/545 and Anthropic message controls 18/18.
+  Full default/tokenizers/all-features integration suites have not been rerun on
+  this SHA. Harness canonical manifest/lock now use this SHA; locked/offline
+  metadata and unchanged registry/non-SDK Git source checks passed.
+- R29 executed 18 top-level targets: **7,845 passed, 12 failed, 1 ignored**.
+  No compile errors; two nested child summaries are excluded from the totals.
+  Receipt: `acceptance/harness-batch2-r29-final-results-20261010.json`.
+  HEAD, tracked source, and fixture manifest stayed unchanged. The whole-tree
+  fingerprint changed solely because eight untracked review preimages were
+  mistakenly written under the candidate. The audit reproduced the start hash
+  after excluding those artifacts; they have been moved to the sibling review
+  directory with hashes preserved. This qualification remains in the receipt.
+- R29 passed the Native 2.1.295 MCP omitted/false/true raw model-tool-result
+  comparison, including persisted error text; the new roots dispatch/forwarding
+  replay; structured-output retries; streaming retry removal; midstream tool
+  execution; compact append; and reset wiring. Roots enumeration itself was not
+  validated by the forwarding mock.
+- Remaining R29 failures cover TTY beta admission, classifier holdback/path and
+  explicit-mode fixtures, generic error expectations, the schema/dispatch
+  distinction, typed Glob output-error rendering, two focused conversation-count
+  tests, and one excluded Local Apps failure. Several repairs were applied after
+  R29 and are **not retested**. External command/context-order, cache-prefix, and
+  additional MCP-detail changes are also unfinished.
+- Native capture now includes two fresh roots cases and six fresh MCP error-detail
+  cases; all eight completed once with exit 0 and no forced exit. The six detail
+  captures passed 54 recorded hash checks, 36 header byte checks, and six raw
+  tool-result slice checks. They are Native-only evidence, not Harness acceptance.
+  In particular, resource-link decoding and `error:{toString:null}` require
+  adjustments to the still-unapplied MCP detail patch.
+- The prior 44 print captures and 42 completed TTY lifecycles remain immutable;
+  rows 265/267 retain their original incomplete lifecycle verdicts. No consumed
+  capture was repeated. AFK/MCTC admission, active Auto-to-Plan state, and request
+  context/prompt-cache ordering remain open.
+- Product still has old canonical Harness/SDK pins. Final repinning, full SDK and
+  Harness gates, Product Rust/bridge/Electron checks, and signed Flare macOS
+  package/runtime validation remain open. No final three-repository accepted
+  combination exists. Nothing was pushed or merged into main.
+
+Historical batch detail:
+
+- The earlier complete Harness workspace/all-features test run failed on candidate
+  `a8794df51f02bcff0cafd6c87bf243427987db7ce933f6623e5b6f8a1453c5cd`:
+  19,663 passed, 459 failed, 8 ignored. An additional MCP stdio process was
+  terminated after an unbounded Hook wait. Receipt:
+  `acceptance/harness-workspace-all-features-post-mod-envelope-r3-result-20261010.json`.
+- Batch2 r3 (`6201181419d86dc56456da8e8fb1c819c0588b313d84c3b443fedbc19268cc77`)
+  stopped at a tool-consumer compile failure. Permission passed 1,783/1,783,
+  tool-MCP passed 165/165 plus two 1/1 fixture targets, and scoped
+  orchestrator targets passed. Hooks had one timeout failure and one ignored
+  test; the OAuth wrapper failed one logical gate; the final LLM codec gate
+  did not run. Receipt: `acceptance/harness-batch2-r3-final-results-20261010.json`.
+- Batch2 r4 (`1b0381e3837fda44d89fab6b6e8f9082e9a9d9c88819cb033ced3812aae1ead8`)
+  stopped at a tool-skill test compile failure. The quiet Hooks test passed
+  1/1; session passed 365/365 and JSONL reader 12/12. LLM codec and OAuth
+  gates were unrun. Receipt:
+  `acceptance/harness-batch2-r4-final-results-20261010.json`.
+- Batch2 r5 (`0f907be42d8567268c6c515d051b72274671ee4b5a275612ba6eaebcd729dbe4`)
+  completed with failures: LLM runtime had 1,178 passed and 43 failed;
+  streaming had 18 passed and 1 failed; transport-execute 4/4 and failover 6/6
+  passed. The OAuth wrapper passed 1/1. Five tool-package targets had test
+  failures (Agent 3, File 4, Task 6, UI 6, Web 1); the other six targets
+  passed. Receipt: `acceptance/harness-batch2-r5-final-results-20261010.json`.
+- A separate permitted-local-IPC queue passed 31/31 invocations: 30 OAuth
+  callback/login tests and the SendMessage live-socket test. These isolated
+  reruns resolve their local IPC execution failures only; they do not replace
+  the original r5 package results. Receipts:
+  `acceptance/r5-local-auth-rerun-results.json` and
+  `acceptance/r5-tool-ui-local-socket-rerun.log`.
+- The five r5 UI structured-message assertion failures came from the test
+  observer reading a root object projection as a string. The test-only fix now
+  reads the recorded Source projection and preserves the payload assertions;
+  the original r5 `tool-ui` result remains historical at 151 passed, 6 failed.
+  The same package target passed 157/157 in r6; the separately permitted local
+  socket rerun remains a distinct result. The r3 OAuth wrapper/worker are one
+  logical test; r5 passed that wrapper once.
+- Batch2 r6 (`51e51b9f837ca3cfe240fce5a9406e331e126f85b379122420406c511af0a8dd`)
+  completed selected gates with failures. Seven cron/tool package targets
+  passed 1,425/1,425 total, and the runtime factory/MCP integration passed
+  1/1. The LLM runtime library had 1,216 passed and 5 failed; its three
+  transport/failover targets passed 6/6, 4/4 and 19/19. Receipt:
+  `acceptance/harness-batch2-r6-final-results-20261010.json`.
+- Batch2 r7 (`2275374566272ec4780de644240c81faee96834d136dea7813df2bf56a8ffd41`)
+  stopped at a test compile error in `llm-runtime/src/service_test.rs` (`E0433`,
+  unavailable `crate::branding`); zero tests ran. Receipt:
+  `acceptance/harness-batch2-r7-final-results-20261010.json`.
+- Batch2 r8 (`95cd0aa953b8141637d8bccc5f0ea47f790fede325afb5a288e4668f941a06a3`)
+  passed `cargo check --workspace --all-targets --all-features` with zero
+  errors. The LLM runtime library had 1,220 passed and 1 failed in the
+  historical 2.1.287 beta oracle: for first-party Sonnet with `env:{}`, the
+  `default_main` expected header omitted per-turn-control while the candidate
+  header included it. This was not a disabled-beta case. The workspace check
+  is compile evidence, not a full test pass. Receipt:
+  `acceptance/harness-batch2-r8-final-results-20261010.json`.
+- Batch2 r9 (`666a56d53d4e217e40cf2bd4dc11956d366b482cb409160a227b04c6b2212b95`)
+  stopped at `E0716` in `runtime/src/headless/run/stdio_lifecycle_tests.rs`
+  before tests ran. The r10 candidate
+  (`ad96fdb24d85455d153d9c7e2cad9fc3172f65a022af13d60205b5a5a659e50f`)
+  includes the bound-`Argv` repair, but its all-target workspace check stopped
+  at a test-only `E0277` in `llm-runtime/src/service_test.rs:10050` (comparing
+  `Vec<Value>` to `Value`); no r10 tests ran. Batch2 r11 candidate fingerprint
+  `4af3a80b6cb3294b24ef3b8c24427ab366046fdf0eb0dc99f119b258f02db599`
+  (untracked-manifest SHA-256
+  `37a27eb5e757653164c21d1d8c8f4fc91c312b29078129ed84dc4cfa6357f3e6`)
+  passed the all-target/all-features workspace compile check. Its 2.1.295
+  44-header comparison failed on four disabled-beta rows, and the prepared
+  eight-row comparison failed at row 266 on a per-message effort marker.
+  These are separate current-target failures; they do not change the r6/r8
+  historical 2.1.287 `env:{}` result. The r11 gate sequence is incomplete.
+  Receipts:
+  `acceptance/harness-batch2-r9-final-results-20261010.json`,
+  `acceptance/batch2-r10-workspace-all-targets-20261010.log`,
+  `acceptance/harness-batch2-r11-candidate-20261010.json`,
+  `acceptance/batch2-r11-gates-progress-20261010.json`.
+- The user-approved CU canonical JSON binding comparison passed its 28-test
+  module on batch2 r2; this does not establish complete CU acceptance.
+- The prior standalone SDK candidate was clean at `7565251925676a98262d8e9104d10d3f25f283dd`.
+  Its default, `tokenizers-all` and `all-features` test runs each passed all
+  198 target summaries; each doctest run passed 41 with 8 ignored. This is an
+  SDK-only result, not a same-candidate Harness/Product pass. Receipt:
+  `acceptance/sdk-committed-final-tests-final-results-20261010.json`.
+- Native 2.1.295 per-turn-control print capture now covers 44 of 88 matrix
+  tuples: all 44 made one accepted request and exited 0; the per-turn beta and
+  one per-message effort row appear in 40, and both are absent in the four
+  `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=true` cases while top-level effort
+  remains in all 44. This is Native-only evidence. The other 44 public-TTY
+  tuples remain unverified. Capture receipt:
+  `acceptance/per-turn-control-295-capture-plan/capture-manifest.json`.
+- Final three-repository acceptance remains open: Harness has no final commit
+  SHA, Product still pins earlier Harness/SDK sources, and dependency-complete
+  Product, native-binding, platform and signed macOS package checks remain
+  incomplete. The r8/r11 compile checks, selected candidate tests, standalone
+  SDK tests and Native captures are separate evidence and do not form a final
+  candidate pass.
+
+The dated checkpoints and domain inventory below are historical,
+candidate-scoped evidence. The r6-r10 status above does not refresh every
+domain row; do not aggregate these results into a current acceptance pass.
 
 ## Resume checkpoint — 2026-10-09
 
@@ -138,7 +268,11 @@ Historical baseline: Claude Code 2.1.293, SHA-256
 Replay 2.1.293/2.1.294 fixtures only with their version-pinned executables;
 their captures remain historical evidence and must not overwrite baselines.
 
-## Domain inventory
+## Historical domain inventory (candidate-scoped evidence)
+
+These rows preserve prior scoped evidence and acceptance requirements. The
+r6-r10 status above does not collectively refresh every domain row; newer
+results are scoped to the receipts and gates identified there.
 
 | # | Domain | Reusable evidence | Required current acceptance | State |
 |---|---|---|---|---|
@@ -164,9 +298,9 @@ not combine into a candidate pass.
 
 | Gate | Executable contract | Reused evidence / Native capture | Remaining closure and state |
 |---|---|---|---|
-| M2-HTTP-1 | Compare the first physical Native Claude Messages request in headless print-text mode: HTTP/1 request line and query, raw header spelling/order/CRLF/framing, request-body bytes and offered response. | SDK-focused candidate gates now pass: `anthropic_message_controls` 14/14 (including exact Native per-message admission, main request ToolResult shape and current-effort behavior) and `http1_header_layout` 11/11 for raw header ordering, framing, compression and streaming controls. Logs: `/private/tmp/claude-alignment-sdk-anthropic-message-controls-final-20261008.log`, `/private/tmp/claude-alignment-sdk-http1-header-layout-escalated-20261008.log`. The raw fixtures remain the 2.1.293 baseline plus the separate 2.1.295 capture under `fixtures/http-layout-295/native-baseline/2.1.295/`; only the existing nested `/metadata/user_id/device_id` identity value is normalized. The SDK source now has an intermediate local checkpoint at `fe04cb78cb9f7d7f93e9a0199ebdadc2d9399c81`. | The current `crates/llm-runtime/tests/current_alignment_http_layout_293_test.rs` passed both 2.1.293 and 2.1.295 cases (2/2) through public ApiService + built-in HttpTransport + local raw-byte capture; request line, headers, body (applying only the nested `/metadata/user_id/device_id` identity rule), and fixed Native response bytes all matched. The final run required authorized local-loopback access; log `/private/tmp/claude-alignment-llm-runtime-http-layout-293-295-m2-thinking-display-rerun-20261008.log`. Its final body fix preserves Native `thinking.display:"omitted"` for the default headless Native main request. SDK-focused `anthropic_message_controls` passed 14/14 and `http1_header_layout` passed 11/11 (`/private/tmp/claude-alignment-sdk-anthropic-message-controls-final-20261008.log`, `/private/tmp/claude-alignment-sdk-http1-header-layout-escalated-20261008.log`). Earlier pre-fix header/body and sandbox-EPERM snapshots are historical and superseded. This closes the captured 293/295 request-byte gate; complete CLI assembly and uncaptured routes remain separate.
+| M2-HTTP-1 | Compare the first physical Native Claude Messages request in headless print-text mode: HTTP/1 request line and query, raw header spelling/order/CRLF/framing, request-body bytes and offered response. | SDK-focused candidate gates passed: `anthropic_message_controls` 14/14 (including exact Native per-message admission, main request ToolResult shape and current-effort behavior) and `http1_header_layout` 11/11 for raw header ordering, framing, compression and streaming controls. Logs: `/private/tmp/claude-alignment-sdk-anthropic-message-controls-final-20261008.log`, `/private/tmp/claude-alignment-sdk-http1-header-layout-escalated-20261008.log`. The raw fixtures remain the 2.1.293 baseline plus the separate 2.1.295 capture under `fixtures/http-layout-295/native-baseline/2.1.295/`; only the existing nested `/metadata/user_id/device_id` identity value is normalized. These focused gates ran on SDK checkpoint `fe04cb78cb9f7d7f93e9a0199ebdadc2d9399c81`; the historical SDK `7565251925676a98262d8e9104d10d3f25f283dd` and current clean SDK `9ae6ae3dda28df26fe1ff01b7e566639b96ab8d5` both passed their three test modes, but neither receipt reruns this Host request gate. | The `crates/llm-runtime/tests/current_alignment_http_layout_293_test.rs` gate passed both 2.1.293 and 2.1.295 cases (2/2) through public ApiService + built-in HttpTransport + local raw-byte capture; request line, headers, body (applying only the nested `/metadata/user_id/device_id` identity rule), and fixed Native response bytes all matched. The final run required authorized local-loopback access; log `/private/tmp/claude-alignment-llm-runtime-http-layout-293-295-m2-thinking-display-rerun-20261008.log`. Its final body fix preserves Native `thinking.display:"omitted"` for the default headless Native main request. Earlier pre-fix header/body and sandbox-EPERM snapshots are historical and superseded. This closes the captured 293/295 request-byte gate only for that recorded candidate; complete CLI assembly and uncaptured routes remain separate.
 | SDK-ERR-1 | Anthropic HTTP 400 with nested error.message containing one isolated UTF-16 unit, nested message null, and empty response body. Preserve response bytes and Native CLI result text without reserializing captured output. | `fixtures/provider-error/cases.json` fixes status, response body bytes, UTF-16 units, prompt and session IDs. Each Native 2.1.293 case gets one loopback POST; raw stdout preserves escaped JSON and the result parses back to the lone unit. A second isolated public CLI pass enables persistence and captures the original assistant JSONL row: all three `message.content[0].text` values have the `API Error: ` prefix and match the full CLI result code units. | **Scoped candidate pass:** E ran `cargo test --locked --offline -p llm-runtime --test provider_error_source_293_test`; 1/1 passed in 0.19 s over six fixed HTTP 400 calls (three Native bodies × stream/non-stream). That gate covers the SDK source wrapper→Host formatter inner provider text and status 400/no retry only. It does not close Agent/Orchestrator output or CLI envelope. Whole-row equality is not claimed because Native generates IDs/timestamps and records cwd. |
-| HOST-ERR-1 | Replay the captured HTTP error bodies and statuses through production `ApiService → ProviderApiAdapter → ConversationOrchestrator`; compare Native result text at `OutputStream` and persisted assistant rows. | The 2.1.293 target `crates/orchestrator/tests/provider_error_output_293_test.rs` reuses exact Native response bodies, local transport, retry cap 0, prompt/session and real JSONL writer for 400/401/403/404/413/500 through streaming and non-streaming paths. Separate 2.1.295 Native CLI capture is curated under `fixtures/provider-error-295/native-baseline/2.1.295/`; pinned binary SHA and artifact manifest are recorded there. | Candidate target passed 3/3 after the Native-facts-gated 413 decode classification fix: provider error text and JSONL, 404 stream→non-stream fallback and 401/500 explicit retry-header controls all pass. Log `/private/tmp/claude-alignment-provider-error-output-293-final3-20261008.log` and `.stderr`. Native 2.1.295 probe completed 8/8 expected-error exits (`/private/tmp/claude-alignment-native-provider-error-295-20261008.log`); candidate CLI outer-envelope serialization remains pending. |
+| HOST-ERR-1 | Replay captured HTTP error bodies through production `ApiService → ProviderApiAdapter → ConversationOrchestrator`; compare Native result text at `OutputStream` and persisted assistant rows. | The 2.1.293 target reuses exact Native bodies, local transport, retry cap 0, prompt/session and real JSONL writer for 400/401/403/404/413/500 through streaming and non-streaming paths. The separate Native 2.1.295 HTTP 422 capture uses one pinned binary launch and one localhost Messages request; raw request, response, stdout and exit artifacts are audited in `acceptance/native-print-http422-error-copy-295/independent-audit-20261010.md`. | The 2.1.293 candidate target passed 3/3 for provider error text/JSONL, 404 stream-to-non-stream fallback, and explicit 401/500 retry-header controls. On R17, `native_295_http_422_capture_reaches_real_orchestrator_output_and_jsonl` passed 1/1 across streaming and non-streaming output plus JSONL (`acceptance/batch2-r17-native-295-http422-output-jsonl-20261010.log`). This closes only the captured 422 body and result envelope; general 2.1.295 HTTP/body parity and other status behaviors remain open.
 | HOST-ERR-STATUS-1 | Status-specific HTTP presentation for 403, 404, 413, plus separately scoped 401/500 responses with explicit `x-should-retry:false`. | Native 2.1.293 public CLI loopback controls capture 403 auth notice plus raw error, 404 fixed-model access notice, and 413 request-too-large notice. A separate 404 body capture proves the two POSTs are a same-model `stream:true → stream:false` fallback; the only parsed JSON body diff is `/stream`. `run-retry-header-controls.py` separately sends a fixed nested-lone body for 401/500 with only the response retry header; both return after one POST and preserve U+D800. The fixed 500 baseline authority is `127.0.0.1:57288`. | Candidate status/output gate now passes through `provider_error_output_293_test` 3/3, including the typed 413 `image_error` mapping; the 404 same-model fallback is verified. Native JSONL rows for special-status notices were not captured, so their persisted-transcript parity remains unverified. Default 401/500 behavior without the retry header remains unverified: the prior no-header run made seven local POSTs and hit the bounded 45s timeout. Do not generalize the explicit-header control to default retries. |
 | HOST-REFUSAL-1 | Final Native terminal refusal presentation from stop reason/category/explanation, model display label, and interactive mode; compare exact JSON CLI result and persisted source fields. | `fixtures/stop-details/native-baseline/` captures category `cyber` and category-absent responses with the same D800 explanation. Both use `--print --output-format json`, requested model `claude-sonnet-4-5` (Native label `Sonnet 4.5`), and non-interactive mode. Native emits category-specific cyber copy versus generic “can't help” policy copy; neither final result includes the explanation, although both persist it in assistant rows. | Real semantic gap: Native text differs from current `crates/orchestrator/src/turn_loop/error_reporting.rs::terminal_api_error_text` 2.1.206/238-derived text. Candidate test `crates/orchestrator/tests/current_alignment_refusal.rs` now exercises the real SDK→Host→JSONL path, compares the full result including response ID, typed terminal `(None, api_error, refusal)`, and persisted source explanation/category. It is statically aligned to `HistoryStopDetails.explanation: Option<Utf16JsonProjection>` and current `TerminalApiError`; awaiting E. Run `cargo test --locked --offline -p orchestrator --test current_alignment_refusal`. Product CLI outer envelope and Native interactive/no-label variants remain separate pending gates. |
 | CLI-ERR-1 | Replay the same bodies through the exact Native mode `--print --output-format json` and the pinned Product CLI entrypoint; compare raw stdout schema, error/status flags, final result text units, stderr and exit status. | Native provider-error fixture's runner uses `--print --output-format json`; checked-in `native.stdout.raw` and `native.stdout.json.raw` preserve stdout, and the receipt records `is_error:true`, status 400, `terminal_reason:api_error`, one request, and `API Error: 400 …` result units. Product source inspection finds `entrypoint.rs` selects `JsonSink` for this mode and `run_oneshot` calls `run_turn`; `JsonSink::text` emits a JSON text event. The separate `StreamJsonStream` is `stream-json`, not this mode. | No same-candidate Product replay yet because its canonical Harness/SDK pins are not final. Source inspection predicts a real gap: ordinary provider errors return an `Ok` `model_error` turn, while Native's JSON stdout is a `type:result` error envelope; Product `JsonSink::text` currently emits a text event. Verify/fix this on the canonical candidate; do not substitute a stream-json test or hand-build an `API Error: ` prefix. |
@@ -188,6 +322,7 @@ not combine into a candidate pass.
 | SESSION-1 | `session.append` middleware rewrite and raw returned event for user and system messages; preserve source UTF-16 units through Native result and candidate transcript path. | v1647 user-message Native/Harness fixture has two exact same-plugin result matches. Pinned 2.1.293 public plugin test has four scoped cases, including fixed system-message rewrite with U+D800; raw returned event is captured under `fixtures/session-append/native-plugin/native-baseline/system-content-lone-surrogate/`. | Direct production `mods_worker.mjs` dispatch under Bun 1.3.11 was rerun after framed IPC; the Native result and `next` input code units still match, and exact new frames/receipt are in `fixtures/session-append/harness-baseline/system-bun-worker-ipc-v1/` (older captured frames remain separately available under `system-bun-worker/`). `crates/agent/tests/current_alignment_mod_append.rs` adds the same case through `ModHost` plus `AgentTranscriptWriter`, using `Utf16JsonProjection` from Native input through persisted JSONL; run `cargo test --locked --offline -p agent --test current_alignment_mod_append` in E's queue. These cover worker/retained-row seams only, not a full Agent/model turn. Native explicit unload remains unverified. |
 | SESSION-3 | Cold `--resume` distinguishes exact persisted source units from Native's resumed public/API projection. | `fixtures/session-append/native-resume/native-baseline/cold-resume-projection/native-receipt.json` and raw row/request/API-hook captures use pinned Native 2.1.293, fixed session ID, two public CLI processes, isolated config and loopback-only model stub. The JSONL assistant row retains U+D800/U+DC00; the resumed Anthropic request, `$.session.messages()`, and `$.session.messages({as:"api"})` each expose U+FFFD at those positions. | Candidate must retain source units in live/raw JSONL sidecars, while matching Native's replacement projection for cold-resumed messages API and model request. This resolves the contradictory historical test expectation: D800 is not the cold-resume `session.messages()` result. Native-only evidence; candidate path still awaits E's serialized integration gate. |
 | EFFORT-1 | A per-turn effort override survives a cold resume and is projected into the resumed model request without replacing the historical turn's system metadata. | Native 2.1.293 evidence in `fixtures/per-turn-effort/` and final-target 2.1.295 evidence in `fixtures/per-turn-effort/native-baseline/2.1.295/` each contain two public CLI processes with one accepted request apiece: the first uses `low`, then the resumed process uses `high`. The second request retains the historical `low` marker at message index 1 and current `high` marker at index 4; JSONL records `perTurnEffort` as `low` then `high`. The 2.1.295 receipt binds the fixed target SHA and records both request hashes plus the curated marker/JSONL slices; full requests remain in temporary evidence storage. | **Native-only evidence; 2.1.295 candidate not closed.** The production graph still needs a durable `Assistant.per_turn_effort` field plus typed API-system/current-request projection and trusted response-owner assignment. A current-turn tail marker alone does not establish historical cold-resume behavior. Add the same two-process cold-resume case on the integrated candidate and compare the second request and persisted `perTurnEffort` values; do not treat either Native fixture as a candidate pass. |
+| PER-TURN-CONTROL-295 | The default main request includes the `per-turn-control-2026-07-01` beta and a per-message effort row only when the experimental-beta setting permits it, across first-party/Foundry and Sonnet/Fable routes. | Native 2.1.295 public `--print` evidence covers all 44 print tuples in the 88-tuple print/TTY matrix in `acceptance/per-turn-control-295-capture-plan/capture-manifest.json` and `matrix-captures/batches/print-batch-20261010/batch-summary.json`; the capture manifest binds binary SHA `0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70`. Every tuple made one accepted request and exited 0. All 44 retain top-level effort; 40 carry the per-turn beta and one per-message effort row, while the four `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=true` tuples omit both. Default effort is medium for Sonnet and high for Fable. | Native now has 44 print captures and 42 completed TTY lifecycles; rows 265/267 retain qualified main-request evidence and original incomplete verdicts. Remaining39 batch completed 39/39 once. R13 LLM suite passed 1,226 tests, including the print comparator and Foundry two-turn effort history; this remains candidate-scoped evidence. R16 TTY selected-field comparator failed at row265 exact beta bytes: tool-change, dangerous-tool-use and AFK admission need closure. Their effective feature/permission/server-classifier inputs must be matched; do not add synthetic tools or normalize away flags. Full raw HTTP/body parity is not established by these selected-field tests. |
 | SESSION-2 | Direct return, denial, thrown error, subscription removal and plugin/process shutdown. | Native middleware fixture's case named `cancel` returns `{deny: ...}` from `session.append`; it is a denial-result case, not an in-flight CLI/turn interruption probe. The four public plugin-test cases show `next(rewrite)` changes result; direct return, denial and throw keep the original row. A negative Native probe shows a retained `on()` return handle is rejected. | The current `run-harness-worker.mjs` replay uses the shared framed codec and exits 0 under Bun 1.3.11; rewrite/deny/throw result-object bytes match, direct-return differs at the worker dispatch seam. The queued AgentTranscriptWriter gate decides final Host behavior. Native process exit is only a test boundary; explicit unload remains unverified. Process-level SIGINT has its separate scoped gate in TURN-3. |
 | SESSION-4 | JSONL persistence, parallel tail recovery, attachments, crash write, compact boundaries and rollback. | Existing session/loader/compaction tests; five new Native command session files are captured unchanged. Cold resume is scoped separately in SESSION-3. | Replay fixed-session input and compare persisted bytes/order. IDs and timestamps get separate invariants below when not controllable. Pending. |
 | SESSION-5 | Generated session name and prompt-suggestion public scalar APIs when the model's final text contains an unpaired UTF-16 unit. | Current candidate methods return `Result<Option<String>, HandleError>` and their shared `String::from_utf16` projection rejects ill-formed units. A rejected generated-name response becomes `ActionFailed`; prompt suggestion becomes `Ok(None)`. No Native 2.1.293 public result has been captured for either API. | This is explicitly unverified, not an allowed difference or pass. A Native oracle needs a fixed post-turn side-query response containing U+D800 and the public name/suggestion result surface. The current plugin/CLI fixtures do not expose that output cheaply, so do not infer Native behavior from implementation or tests. |
@@ -201,9 +336,9 @@ not combine into a candidate pass.
 | MOD-1 | Public Mods middleware event ordering, `next(e)` rewrite/direct answer/error/deny, module load and unload boundary. | Native `fixtures/mod-middleware/native-receipt.json` records four cases plus the negative on-return probe. `fixtures/mod-middleware/harness-baseline/` compares the same checked-in handler on production worker source under Bun 1.3.11 (binary SHA in receipt), preserves exact dispatch/core frames and result-object byte slices, and records worker unload/reload. | Post-codec direct worker replay under Bun 1.3.11 exits 0: Native/Bun result-object bytes match for rewrite/deny/throw; direct worker output differs at the intermediate dispatch result. The focused Rust IPC frame and real ModHost-worker roundtrip tests passed 1/1 each and are included in the Hooks 800 suite, not additive. New direct-worker frames are in `fixtures/mod-middleware/harness-baseline/worker-codec-v1/`. `crates/agent/tests/current_alignment_mod_append.rs` still awaits E for terminal `AgentTranscriptWriter` row/JSONL; Native explicit unload remains unverified. |
 | MOD-2 | `$.tool.register`, `$.tool.list/call/check`, command and prompt APIs; provider-facing schema/catalog order. | Native `$.tool.register` 2.1.293 `session.start` fixture captures first-request tools and raw schema. Other APIs are inventoried in `claude-mods-contract-matrix-2.1.288.md`. | Replay current methods using the same Native fixture where possible; retain per-event raw results and ordered side effects. Tool-register Native-only; other methods pending. |
 | MOD-3 | ModUI subscriptions, events, resolution/render tree, update/disposal, restart and visible terminal/desktop surfaces. | Existing Mods matrix identifies all current events, API methods, render sites and element contracts; it explicitly has no whole 2.1.288 runtime-byte evidence. | Select a small fixed render fixture per currently wired surface; capture Native lifecycle and compare Harness/TUI output. Unreachable Native UI path remains blocked, not inferred from static source. Pending. |
-| CLIENT-1 | CLI, TUI, desktop, mobile and Local App callers preserve prompt, session, command, cancellation and transcript identity under client protocol 21.0.0. | SDK checkpoint `fe04cb78cb9f7d7f93e9a0199ebdadc2d9399c81` is committed locally. Harness protocol source is 21.0.0; the blessed contract index includes required `TerminalApiError.stop_reason`, source-preserving `ClientTextDto` UI/app-agent fields and appended `UiNotify`. Client `version_guard_test` passed 11/11 during bless and again without BLESS; `version_test` passed 3/3. The checked-in snapshot had omitted the already-defined AppAgent response DTO, so the regenerated index also records its current fields. Product still has previous Harness/SDK source pins; Product UI tests remain scoped evidence only. | The latest full feature-inclusive workspace check, after pinning SDK `fe04cb78…`, exited 101 on only three type mismatches in the new `mod_ui_client_host.rs` UTF-16 assertions. The assertions were corrected to compare owned `Vec<u16>` and the impacted Hooks test passed 1/1 (`/private/tmp/claude-alignment-hooks-client-frame-identity-test-20261008.log`). The full workspace test-compilation was not rerun after this test-only adapter fix; the earlier zero-error check predates the final Harness source snapshot. This WIP checkpoint has scoped compile evidence, not a current whole-workspace test-compile pass. |
+| CLIENT-1 | CLI, TUI, desktop and mobile callers preserve prompt, session, command, cancellation and transcript identity under client protocol 23.0.0; Local Apps dedicated behavior is excluded. | Current SDK `9ae6ae3dda28df26fe1ff01b7e566639b96ab8d5` is committed and clean; default, `tokenizers-all` and all-features suites passed (receipt: `acceptance/sdk-9ae6-final-tests-final-results-20261010.json`). Harness source sets `CLIENT_PROTOCOL_VERSION` to 23.0.0; protocol 22 carries exact prompt/slash/catalog/agent-summary/compaction text, and protocol 23 carries the SkillAdmin target as `ClientTextDto`. Product still has older Harness/SDK pins. | Standalone SDK tests do not establish a same-candidate Harness/Product client pass. Final Harness closure, Product repinning, generated iOS/Android bindings, platform builds and client-surface tests remain pending.
 | RUNTIME-1 | Bun worker startup/restart, filesystem/process/sandbox, env inheritance, cancellation/deadline, stdout/stderr and cleanup. | Existing Bun/platform/process regressions and Native source probes. | Compare bounded loopback/fixture cases on the actual Native public path and integrated worker; do not infer from source strings or unit tests. Pending. |
-| BUILD-1 | Three repositories resolve one candidate; dependency-complete checks, macOS production app and package, required cross-platform checks. | SDK `fe04cb78cb9f7d7f93e9a0199ebdadc2d9399c81` is committed locally. Harness `Cargo.toml` now pins that SHA; Harness changes are an uncommitted WIP checkpoint and intentionally retain the local SDK patch for this integration checkout. Product remains at earlier SDK/Harness pins. Product resolver/locked metadata and Electron/bridge gates passed for their then-current checkpoint, not this source state. | The latest full Harness workspace test-compilation at this pin ended on three Hooks test-only type errors; all were corrected and the impacted Hooks test target passed 1/1. The full feature-inclusive check was not rerun after the mechanical assertion fix, and no tests are claimed from the compile. Product pin/build and final cross-platform acceptance remain pending. |
+| BUILD-1 | Three repositories resolve one candidate; dependency-complete checks, macOS production app and package, and required cross-platform checks. | Current SDK is `9ae6ae3dda28df26fe1ff01b7e566639b96ab8d5`; Harness root `Cargo.toml` pins it. Harness source remains uncommitted at HEAD `4336ec5a461d0f1f200dd1bca9842f128b0d3683`; R16 completed with failures; R18 scoped gates leave the UI render/cancel failure open. Product still pins Harness `4336ec5a461d0f1f200dd1bca9842f128b0d3683` and SDK `4a54a1de338ee3b5a95c03b5b3800b6fc73543d2`. | Final Harness source review/commit and Product repinning/lock/source closure remain open. Product Rust and bridge/client tests, TypeScript/Electron tests/build, generated native-binding/platform checks, and signed Flare package check/launch remain open. No final three-repository pass exists.
 
 | BASH-INPUT-295 | Normalize Bash `tool_input.command_description` and `timeout_ms` aliases before `PreToolUse`, validation, and execution; preserve Native field priority and source units. | `fixtures/bash-input-295/native-baseline/2.1.295/` has five pinned CLI cases, each with two loopback requests, a real `PreToolUse` capture, stdout/stderr, an executed `printf` marker, and per-case receipt. Native moves a string `command_description` to `description` then removes the alias; existing `description` wins, a null alias is removed without creating a value, and U+D800 survives in the alias string. The combined case converts `"timeout_ms":"5000"` to numeric `timeout:5000`, then appends `description`, removing both aliases. The 2.1.295 binary and runner hashes are recorded in the SHA manifest. | Candidate gate `cargo test --locked --offline -p test-harness --test bash_input_validation native_295_bash_aliases_reach_schema_permission_and_execution` passed 1/1 against the real Orchestrator/Bash validation and permission path. Log: `/private/tmp/claude-alignment-bash-input-295-targeted-20261008.log` and `.stderr`. The test uses mock process effects and makes no full SDK-wire claim; malformed `timeout_ms` behavior beyond the five captured cases remains unverified. |
 These gates intentionally describe observable contracts, not every possible

@@ -182,8 +182,9 @@ pub trait MidTurnInputSource: Send + Sync {
 
     /// Preserve individual arrivals and their host-stamped origin before they
     /// are joined for the model. Existing text-only sources use the default.
-    async fn take_mid_turn_batch(&self) -> Option<Vec<MidTurnInput>> {
-        self.take_mid_turn_input().await.map(|text| {
+    /// A source error is propagated before the driver admits model input.
+    async fn take_mid_turn_batch(&self) -> Result<Option<Vec<MidTurnInput>>, String> {
+        Ok(self.take_mid_turn_input().await.map(|text| {
             vec![MidTurnInput {
                 text,
                 origin_kind: None,
@@ -191,7 +192,7 @@ pub trait MidTurnInputSource: Send + Sync {
                 source_message_uuid: None,
                 queue_delivery: None,
             }]
-        })
+        }))
     }
 }
 

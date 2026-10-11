@@ -2068,7 +2068,7 @@ mod tests {
                     messages_after: 7,
                     bytes_saved: 1234,
                     summary
-                } if summary == "Summary:\nkept context"
+                } if summary.string_at("") == Some("Summary:\nkept context")
             ),
             "got: {last:?}"
         );

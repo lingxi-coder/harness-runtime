@@ -259,6 +259,17 @@ fn source_payload(value: &impl Serialize) -> Result<Utf16JsonProjection, Orchest
     Utf16JsonProjection::parse(&source).map_err(internal)
 }
 
+fn source_payload_matches(
+    stored: &Utf16JsonProjection,
+    expected: &impl Serialize,
+) -> Result<bool, OrchestratorError> {
+    let stored = stored.to_json_string().map_err(internal)?;
+    let expected = source_payload(expected)?
+        .to_json_string()
+        .map_err(internal)?;
+    Ok(stored == expected)
+}
+
 fn decode_payload<T: serde::de::DeserializeOwned>(
     value: &Utf16JsonProjection,
 ) -> Result<T, OrchestratorError> {
@@ -1519,19 +1530,22 @@ pub(crate) async fn persist_native_assistant(
                 computer_call_id(block).as_deref() == Some(member.call.context.call_id.as_str())
             })
             .collect::<Vec<_>>();
-            let saved_call = decode_payload_field::<NativeComputerCall>(binding, "/call")?;
+            let saved_call = binding.subprojection("/call").map_err(internal)?;
+            let saved_call_matches = source_payload_matches(&saved_call, member.call.as_ref())?;
             let saved_frame = decode_payload_field::<ComputerFrame>(binding, "/frame")?;
             let saved_binding =
                 decode_payload_field::<NativeContinuationBinding>(binding, "/binding")?;
-            let saved_originals =
-                decode_payload_field::<Vec<wire::ContentBlock>>(binding, "/original_blocks")?;
+            let saved_originals = binding
+                .subprojection("/original_blocks")
+                .map_err(internal)?;
+            let saved_originals_match = source_payload_matches(&saved_originals, &original)?;
             if !observed.insert(id.clone())
                 || !expected.contains(&id)
-                || saved_call != *member.call
+                || !saved_call_matches
                 || saved_frame != member.frame
                 || saved_binding != member.binding
                 || binding.string_at("/provider_response_id") != Some(response.id.as_str())
-                || saved_originals != original
+                || !saved_originals_match
             {
                 return Err(internal("append hook changed a native response binding"));
             }

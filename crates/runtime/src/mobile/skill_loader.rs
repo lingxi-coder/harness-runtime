@@ -630,7 +630,11 @@ mod tests {
             )
             .await
             .expect_err("bare plugin names must suggest an exact retry");
-        assert!(error.to_string().contains(canonical));
+        assert!(error
+            .0
+            .string_at("")
+            .expect("validation message is well-formed source text")
+            .contains(canonical));
         tool.validate_input(
             &Utf16JsonProjection::from_serde_value(&serde_json::json!({ "skill": canonical }))
                 .expect("generated test input is JSON"),
@@ -875,7 +879,11 @@ mod tests {
                 .await;
         }
         let chat_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Chat);
-        assert!(chat_loader.load(&"research".into()).await.unwrap().is_some());
+        assert!(chat_loader
+            .load(&"research".into())
+            .await
+            .unwrap()
+            .is_some());
         // Chat runs Write and Shell, but only behind a per-call prompt: a
         // skill's `allowed-tools` ALLOW rule must not pre-authorize them.
         assert!(super::super::MOBILE_CHAT_TOOL_ALLOWLIST.contains(&"Write"));

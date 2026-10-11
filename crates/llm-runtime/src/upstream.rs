@@ -239,7 +239,7 @@ pub(crate) fn error(error: wire::LlmError) -> LlmError {
         } => LlmError::ProviderErrorText {
             source: Box::new(self::error(*source)),
             text,
-            native_anthropic_facts,
+            native_anthropic_facts: native_anthropic_facts.map(|facts| *facts),
         },
         E::ProviderResponse {
             status,
@@ -249,6 +249,7 @@ pub(crate) fn error(error: wire::LlmError) -> LlmError {
             retry_after,
         } => {
             use wire::LlmErrorKind as K;
+            let body = *body;
             let message = format!(
                 "{status} {}",
                 json!({"error":body.get("error").cloned().unwrap_or_else(|| json!({"message":body.to_string()})),
@@ -395,7 +396,7 @@ mod upgrade_tests {
                 message: text.display().into(),
             }),
             text,
-            native_anthropic_facts: Some(facts.clone()),
+            native_anthropic_facts: Some(Box::new(facts.clone())),
         });
         assert!(matches!(
             translated.classification_source(),
@@ -593,7 +594,6 @@ mod upgrade_tests {
     #[test]
     fn native_programmatic_caller_metadata_survives_transcript_replay() {
         let native = wire::ContentBlock::ToolUse {
-            input_json: None,
             id: wire::ToolUseId::new("tool-1"),
             name: "lookup".into(),
             input: payload(json!({"key":"value"})),
@@ -800,7 +800,6 @@ mod upgrade_tests {
     #[test]
     fn toolset_identity_is_echoed_on_the_matching_host_tool_result() {
         let native = wire::ContentBlock::ToolUse {
-            input_json: None,
             id: wire::ToolUseId::new("call-1"),
             name: "click".into(),
             input: payload(json!({})),
@@ -819,7 +818,6 @@ mod upgrade_tests {
             api_output_config: None,
             role: "user".into(),
             content: vec![ContentBlock::ToolResult {
-                output_projection: None,
                 tool_call_id: "call-1".into(),
                 output: payload(json!("clicked")),
                 is_error: Some(false),
@@ -839,7 +837,6 @@ mod upgrade_tests {
     #[test]
     fn history_cache_breakpoints_follow_filtered_message_and_block_positions() {
         let native = wire::ContentBlock::ToolUse {
-            input_json: None,
             id: wire::ToolUseId::new("call-1"),
             name: "lookup".into(),
             input: payload(json!({})),
@@ -1127,205 +1124,6 @@ mod fallback_billing_mode_inheritance_tests {
         // This consumes the real bundled profile from deps/llm-client at the
         // full revision pinned in the root Cargo.toml
         // (0c6a907d897a54e656700c00cf335d91b10dca0b); it introduces no tariff.
-        let mut host = crate::builtin_presets()
-            .providers
-            .into_iter()
-            .find(|profile| profile.profile_name == "anthropic")
-            .expect("pinned Anthropic provider profile");
-        assert_eq!(host.provider_id, ProviderId::AnthropicFirstParty);
-        let model = host
-            .models
-            .iter()
-            .find(|model| model.request_model == "claude-opus-4-6")
-            .expect("pinned Anthropic model row")
-            .clone();
-        let source = host.wire_profile.as_ref().expect("SDK source snapshot");
-        let source_row = source
-            .models
-            .iter()
-            .find(|row| {
-                row.display_model == model.display_model && row.request_model == model.request_model
-            })
-            .expect("exact source model row");
-        assert_eq!(source.pricing.billing_mode, wire::BillingMode::PerToken);
-        assert_eq!(source_row.billing_mode, None);
-        let source_rates = source_row.pricing.as_ref().expect("real model rates");
-        let expected_total = (1_000.0 * source_rates.input_per_million.unwrap() / 1_000_000.0)
-            + (1_000.0 * source_rates.output_per_million.unwrap() / 1_000_000.0);
-
-        host.pricing.billing_mode = None;
-        let inherited = profile(&host).expect("project user profile with inherited source mode");
-        assert_eq!(inherited.pricing.billing_mode, wire::BillingMode::PerToken);
-        let snapshot =
-            client::FrozenPricing::capture(&inherited, &model.display_model, &model.request_model)
-                .expect("capture exact pinned model row");
-        let quote = snapshot
-            .estimate_anthropic_server_fallback(
-                &fallback_iterations(&model.request_model),
-                Some(&model.request_model),
-                None,
-                &InferenceReport::default(),
-                Submission::Interactive,
-            )
-            .expect("native quote succeeds")
-            .expect("served model enters native quote path");
-        assert_eq!(
-            quote.completeness,
-            client::AnthropicFallbackCostCompleteness::Complete
-        );
-        assert!((quote.total_cost_usd.unwrap() - expected_total).abs() < 1e-12);
-
-        host.pricing.billing_mode = Some(lingxi_core::host::ModelBillingMode::Unknown);
-        let explicit_unknown = profile(&host).expect("project explicit unknown override");
-        assert_eq!(
-            explicit_unknown.pricing.billing_mode,
-            wire::BillingMode::Unknown
-        );
-        let snapshot = client::FrozenPricing::capture(
-            &explicit_unknown,
-            &model.display_model,
-            &model.request_model,
-        )
-        .expect("capture exact pinned model row");
-        let quote = snapshot
-            .estimate_anthropic_server_fallback(
-                &fallback_iterations(&model.request_model),
-                Some(&model.request_model),
-                None,
-                &InferenceReport::default(),
-                Submission::Interactive,
-            )
-            .expect("native quote succeeds")
-            .expect("served model enters native quote path");
-        assert_eq!(
-            quote.completeness,
-            client::AnthropicFallbackCostCompleteness::Incomplete
-        );
-        assert!(quote.total_cost_usd.is_none());
-    }
-
-    #[test]
-    fn cloud_claude_wrappers_without_source_rates_stay_incomplete() {
-        let model = "claude-opus-4-6";
-        let sdk_profiles = client::builtin_providers().expect("pinned SDK catalog");
-        let wrappers = [
-            (
-                "bedrock-claude-user",
-                ProviderId::BedrockClaude,
-                ProtocolFamily::BedrockClaude,
-                "bedrock-claude",
-                "https://bedrock-runtime.us-east-1.amazonaws.com",
-                AuthStrategy::AwsSigV4,
-                Some(SigningConfig {
-                    region: "us-east-1".into(),
-                    service: "bedrock".into(),
-                }),
-            ),
-            (
-                "vertex-claude-user",
-                ProviderId::VertexClaude,
-                ProtocolFamily::VertexClaude,
-                "vertex-claude",
-                "https://vertex.example.com",
-                AuthStrategy::GcpToken,
-                None,
-            ),
-            (
-                "foundry-claude-user",
-                ProviderId::FoundryClaude,
-                ProtocolFamily::FoundryClaude,
-                "foundry-claude",
-                "https://foundry.example.com",
-                AuthStrategy::ApiKey,
-                None,
-            ),
-        ];
-
-        for (profile_name, provider_id, protocol, sdk_id, base_url, auth, signing) in wrappers {
-            assert!(sdk_profiles.iter().all(|source| {
-                source.provider_id.as_str() != sdk_id || source.protocol != protocol
-            }));
-            let host = ProviderProfile {
-                wire_profile: None,
-                regions: lingxi_llm_client::protocol::Region::all(),
-                provider_id,
-                profile_name: profile_name.into(),
-                base_url: base_url.into(),
-                protocol,
-                auth,
-                credential: CredentialConfig::HostManaged {
-                    id: profile_name.into(),
-                },
-                models: vec![ModelProfile {
-                    display_model: model.into(),
-                    request_model: model.into(),
-                    billing_model: model.into(),
-                    aliases: Vec::new(),
-                    description: None,
-                    metadata: Default::default(),
-                    capabilities: Capabilities::default(),
-                }],
-                pricing: PricingConfig::default(),
-                signing,
-                azure: None,
-                supports_websockets: false,
-                supports_websocket_compression: false,
-                websocket_connect_timeout_ms: None,
-                vision_delegate: None,
-                connection: Default::default(),
-            };
-            let projected = profile(&host).expect("project unpriced cloud wrapper");
-            assert_eq!(projected.pricing.billing_mode, wire::BillingMode::Unknown);
-            assert!(projected.models[0].pricing.is_none());
-            let snapshot = client::FrozenPricing::capture(&projected, model, model)
-                .expect("capture configured cloud model identity");
-            let quote = snapshot
-                .estimate_anthropic_server_fallback(
-                    &fallback_iterations(model),
-                    Some(model),
-                    None,
-                    &InferenceReport::default(),
-                    Submission::Interactive,
-                )
-                .expect("cloud quote path succeeds")
-                .expect("served model enters native quote path");
-            assert_eq!(
-                quote.completeness,
-                client::AnthropicFallbackCostCompleteness::Incomplete,
-                "{profile_name} has no exact SDK row or tariff"
-            );
-            assert!(quote.total_cost_usd.is_none());
-        }
-    }
-}
-
-#[cfg(test)]
-mod fallback_billing_mode_inheritance_tests {
-    use super::*;
-    use lingxi_llm_client::protocol::{InferenceReport, Submission};
-    use lingxi_llm_client::providers::anthropic::fallback_response::{
-        UsageIteration, UsageIterations,
-    };
-
-    fn fallback_iterations(model: &str) -> UsageIterations {
-        UsageIterations {
-            served_fallback_model: Some(model.to_string()),
-            entries: vec![UsageIteration {
-                r#type: "fallback_message".into(),
-                model: Some(model.to_string()),
-                input_tokens: 1_000.0,
-                output_tokens: 1_000.0,
-                cache_read_input_tokens: 0.0,
-                cache_creation_input_tokens: 0.0,
-            }],
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn omitted_mode_inherits_pinned_anthropic_row_and_explicit_unknown_does_not() {
-        // This consumes the real bundled profile from the llm-client source
-        // the root Cargo.toml selects; it introduces no tariff.
         let mut host = crate::builtin_presets()
             .providers
             .into_iter()

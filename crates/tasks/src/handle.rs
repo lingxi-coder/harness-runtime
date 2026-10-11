@@ -1820,6 +1820,7 @@ mod tests {
         use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
         let messages = vec![ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::TextJsUtf16 {
                 text: "�".into(),
@@ -1967,12 +1968,7 @@ mod tests {
         let (_dir, registry) = make_registry();
         let task_id = crate::id::generate_task_id(crate::id::TaskType::Monitor);
         let spool = registry.output_manager.allocate(&task_id).await.unwrap();
-        let command_units = vec![b't' as u16, 0xd800, b'l' as u16];
-        let command = Utf16JsonProjection::root_string(
-            String::from_utf16_lossy(&command_units),
-            command_units.clone(),
-        )
-        .unwrap();
+        let command = Utf16JsonProjection::from("wss://monitor.test/events");
         let description_units = vec![b'w' as u16, 0xdfff, b't' as u16];
         let source_description = Utf16JsonProjection::root_string(
             String::from_utf16_lossy(&description_units),
@@ -2014,12 +2010,9 @@ mod tests {
         let handle: &dyn TaskRegistryHandle = registry.as_ref();
         let record = handle.get(&task_id).await.unwrap().unwrap();
         assert_eq!(record.description.string_units(""), Some(description_units));
-        assert_eq!(
-            record
-                .command
-                .as_ref()
-                .and_then(|value| value.string_units("")),
-            Some(command_units)
+        assert!(
+            record.command.is_none(),
+            "a WebSocket monitor endpoint is not exposed as a shell command"
         );
         handle
             .notify_monitor_event(&task_id, source_event, false)

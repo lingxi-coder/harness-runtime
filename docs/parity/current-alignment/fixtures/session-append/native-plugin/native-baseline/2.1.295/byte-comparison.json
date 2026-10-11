@@ -1,0 +1,13 @@
+{
+  "comparison_method": "read_bytes() equality; no JSON parse or reserialization of event payloads",
+  "native_2_1_293_event": "../system-content-lone-surrogate/result-event.raw.json",
+  "native_2_1_295_event": "system-content-lone-surrogate/result-event.raw.json",
+  "byte_equal": true,
+  "first_diff_offset": null,
+  "native_2_1_293_bytes": 376,
+  "native_2_1_295_bytes": 376,
+  "native_2_1_293_sha256": "0de9066c91d31694621a4ff3b524f6c532948a772164e43c082ef1535aac3d5c",
+  "native_2_1_295_sha256": "0de9066c91d31694621a4ff3b524f6c532948a772164e43c082ef1535aac3d5c",
+  "persistence_boundary": "No JSONL file was produced in the isolated plugin-test sandbox.",
+  "native_session_jsonl_files": []
+}

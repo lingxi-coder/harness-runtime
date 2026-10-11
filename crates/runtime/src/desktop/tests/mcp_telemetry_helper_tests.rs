@@ -79,7 +79,7 @@ fn mcp_tools_commands_loaded_uses_utf16_lengths_like_the_oracle_js_strings() {
     assert_eq!(payload.commands_count, 1);
     assert_eq!(
         payload.commands_metadata_length,
-        "srv:emoji".encode_utf16().count() as u32
+        "mcp__srv__emoji".encode_utf16().count() as u32
             + "desc😀".encode_utf16().count() as u32
             + "<旗>".encode_utf16().count() as u32
     );

@@ -1,3 +1,5 @@
+//! Verify exact UTF-16 prompt units reach orchestrator history and model requests through each text-entry API.
+
 use std::sync::Arc;
 
 use lingxi_core::host::OrchestratorHandle;
@@ -48,17 +50,18 @@ async fn source_prompt_reaches_history_and_request_through_every_text_entry() {
             message_delta_stop("end_turn"),
             message_stop(),
         ]]));
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            batched.clone(),
-            streaming.clone(),
-            Arc::new(tool_api::registry::ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            std::env::temp_dir(),
-        );
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                batched.clone(),
+                streaming.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            ));
         match entry {
             0 => {
                 orch.run_turn(&prompt).await.unwrap();
@@ -73,7 +76,7 @@ async fn source_prompt_reaches_history_and_request_through_every_text_entry() {
             }
             _ => {
                 OrchestratorHandle::run_turn_streaming_with_cancel(
-                    &orch,
+                    orch.as_ref(),
                     &prompt,
                     CancellationToken::new(),
                 )

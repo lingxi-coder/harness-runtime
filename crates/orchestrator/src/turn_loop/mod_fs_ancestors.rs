@@ -129,9 +129,15 @@ pub(super) async fn run(
         let home = dirs::home_dir();
         let roots = worktree_roots(&original_cwd);
         let mut processed = HashSet::new();
-        processed.insert(memory::lingxi_md::hierarchy::managed_path().join("LINGXI.md"));
+        processed.insert(
+            memory::lingxi_md::hierarchy::managed_path()
+                .join(memory::lingxi_md::hierarchy::FILE_NAME),
+        );
         if let Some(home) = home.as_deref() {
-            processed.insert(memory::lingxi_md::hierarchy::user_config_dir(home).join("LINGXI.md"));
+            processed.insert(
+                memory::lingxi_md::hierarchy::user_config_dir(home)
+                    .join(memory::lingxi_md::hierarchy::FILE_NAME),
+            );
         }
         let mut directories = Vec::new();
         let mut cursor = start.as_path();

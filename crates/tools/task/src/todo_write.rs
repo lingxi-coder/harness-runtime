@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
-    InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
-    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
+    generated_builtin_schema, source_text_projection, DescriptionOptions, InterruptBehavior,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
 
@@ -268,13 +268,13 @@ pub fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
     for t in todos {
         if t.content
             .string_units("")
-            .map_or(true, |units| units.is_empty())
+            .is_none_or(|units| units.is_empty())
         {
             return Err("Content cannot be empty".into());
         }
         if t.active_form
             .string_units("")
-            .map_or(true, |units| units.is_empty())
+            .is_none_or(|units| units.is_empty())
         {
             return Err("Active form cannot be empty".into());
         }
@@ -630,7 +630,13 @@ impl TodoWriteTool {
         ctx: ToolUseContext,
         progress: ToolProgressSender,
     ) -> Result<TestTodoWriteResult, ToolError> {
-        let result = Tool::call(self, generated_builtin_result(&input), ctx, progress).await?;
+        let result = Tool::call(
+            self,
+            tool_api::tool_trait::generated_builtin_result(&input),
+            ctx,
+            progress,
+        )
+        .await?;
         let data = serde_json::from_str(
             &result
                 .data
@@ -658,12 +664,31 @@ fn invalid_tool_input(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use lingxi_core::types::SessionId;
     use lingxi_core::SessionState;
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tokio::sync::Mutex;
     use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+    use tool_api::tool_trait::generated_builtin_result;
 
     fn todo(id: &str, content: &str, status: TodoState, active_form: &str) -> TodoItem {
         TodoItem {
@@ -870,9 +895,9 @@ mod tests {
         tool.ctx.bus.attach_sink(sink.clone()).await;
         let input = json!({
             "todos": [
-                { "id": "t1", "content": "first",  "status": "pending",     "activeForm": "Doing first"  },
-                { "id": "t2", "content": "second", "status": "in_progress", "activeForm": "Doing second" },
-                { "id": "t3", "content": "third",  "status": "completed",   "activeForm": "Doing third"  }
+                { "content": "first",  "status": "pending",     "activeForm": "Doing first"  },
+                { "content": "second", "status": "in_progress", "activeForm": "Doing second" },
+                { "content": "third",  "status": "completed",   "activeForm": "Doing third"  }
             ]
         });
         let res = tool
@@ -881,7 +906,7 @@ mod tests {
             .expect("happy path");
         let s = session.lock().await;
         assert_eq!(s.todos.len(), 3);
-        assert_eq!(s.todos[0].id, "t1");
+        assert_eq!(s.todos[0].id, "", "TodoWrite input has no per-item id");
         assert_eq!(s.todos[1].status, TodoState::InProgress);
         // `data` is the binary `{oldTodos, newTodos}` schema: oldTodos is the
         // pre-write snapshot (empty here — a fresh session), newTodos is the
@@ -909,16 +934,16 @@ mod tests {
         tool.ctx.bus.attach_sink(sink.clone()).await;
         let input = json!({
             "todos": [
-                { "id": "t1", "content": "x", "status": "done" }
+                { "content": "x", "status": "done", "activeForm": "Doing x" }
             ]
         });
         let err = match tool.call(input, use_ctx, fresh_tx()).await {
             Ok(_) => panic!("unknown variant must fail"),
             Err(error) => error,
         };
-        let msg = format!("{err}");
-        assert!(msg.contains("TodoWrite: invalid todos shape"), "msg: {msg}");
-        assert!(msg.contains("unknown variant"), "msg: {msg}");
+        assert!(matches!(&err, ToolError::InvalidInput(_)));
+        let msg = source_text(&err.model_facing_message());
+        assert_eq!(msg, "TodoWrite: todos[0].status is invalid");
     }
 
     #[tokio::test]
@@ -1022,6 +1047,17 @@ mod tests {
         Tool::call(&tool, first, use_ctx.clone(), fresh_tx())
             .await
             .expect("source todo text is accepted");
+        {
+            let stored = session.lock().await;
+            assert_eq!(
+                stored.todos[0].content.string_units(""),
+                Some(content_units.clone())
+            );
+            assert_eq!(
+                stored.todos[0].active_form.string_units(""),
+                Some(active_units.clone())
+            );
+        }
 
         let next = generated_builtin_result(&json!({
             "todos": [{
@@ -1035,13 +1071,10 @@ mod tests {
             .expect("second source update succeeds");
 
         let stored = session.lock().await;
+        assert_eq!(stored.todos[0].content.string_at(""), Some("next"));
         assert_eq!(
-            stored.todos[0].content.string_units(""),
-            Some(content_units.clone())
-        );
-        assert_eq!(
-            stored.todos[0].active_form.string_units(""),
-            Some(active_units.clone())
+            stored.todos[0].active_form.string_at(""),
+            Some("Doing next")
         );
         assert_eq!(
             result.data.string_units("/oldTodos/0/content"),

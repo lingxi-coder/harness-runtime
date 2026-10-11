@@ -736,18 +736,10 @@ fn truncation_message() -> String {
     )
 }
 
-/// Oracle `rs`: the first `max_chars` JavaScript iterator elements. JS string
-/// iteration is Unicode-scalar-safe, matching Rust's `chars()` here.
-fn truncate_string(content: &str, max_chars: usize) -> String {
-    match content.char_indices().nth(max_chars) {
-        Some((idx, _)) => content[..idx].to_string(),
-        None => content.to_string(),
-    }
-}
-
 /// Oracle `ce`: take a prefix by UTF-16 code-unit budget without retaining a
 /// dangling high surrogate. Rust strings cannot hold an isolated surrogate,
 /// so stopping before the scalar that would cross the budget is equivalent.
+#[cfg(test)]
 fn truncate_string_utf16(content: &str, max_code_units: usize) -> String {
     let mut used = 0usize;
     let mut end = 0usize;

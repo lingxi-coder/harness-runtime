@@ -1023,7 +1023,7 @@ impl Tool for GrepTool {
         string_array(output, "/filenames", TOOL_NAME, "filenames")?;
         if parsed.get_property("mode").is_some()
             && !matches!(
-                parsed.string_at("/mode").as_deref(),
+                parsed.string_at("/mode"),
                 Some("content" | "files_with_matches" | "count")
             )
         {
@@ -1598,6 +1598,24 @@ impl Tool for GrepTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
@@ -1692,10 +1710,7 @@ mod tests {
             "unexpected":"strip me"
         }));
         let parsed = tool.parse_output(&extra).await.unwrap();
-        assert_eq!(
-            parsed.string_at("/mode").as_deref(),
-            Some("files_with_matches")
-        );
+        assert_eq!(parsed.string_at("/mode"), Some("files_with_matches"));
         assert!(parsed.get_property("unexpected").is_none());
         let invalid =
             crate::generated_result(&json!({"numFiles":0,"filenames":[],"mode":"invalid"}));
@@ -2010,8 +2025,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error
-            .to_string()
+        assert!(source_text(&error.model_facing_message())
             .contains("Task output files are read individually"));
         let result = tool
             .call(
@@ -2203,8 +2217,8 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("symlink resolution changed"));
-        assert!(!error.to_string().contains("SECRET_VICTIM_CONTENT"));
+        assert!(source_text(&error.model_facing_message()).contains("symlink resolution changed"));
+        assert!(!source_text(&error.model_facing_message()).contains("SECRET_VICTIM_CONTENT"));
     }
 
     #[cfg(unix)]
@@ -2240,9 +2254,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            error.to_string(),
+            source_text(&error.model_facing_message()),
             format!(
-                "invalid input: Refusing to search {}: its symlink resolution changed after permission was checked",
+                "Refusing to search {}: its symlink resolution changed after permission was checked",
                 tmp.path().join("search-link").display()
             )
         );
@@ -2284,9 +2298,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            error.to_string(),
+            source_text(&error.model_facing_message()),
             format!(
-                "invalid input: Refusing to search {}: a path one of its Read deny rules is written through changed while the search was being prepared. Retry.",
+                "Refusing to search {}: a path one of its Read deny rules is written through changed while the search was being prepared. Retry.",
                 tmp.path().display()
             )
         );
@@ -2830,7 +2844,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("invalid regex"));
+        assert!(source_text(&err.model_facing_message()).contains("invalid regex"));
     }
 
     #[tokio::test]
@@ -2861,8 +2875,7 @@ mod tests {
         assert_eq!(
             tool.search_hint()
                 .as_ref()
-                .and_then(|hint| hint.string_at(""))
-                .as_deref(),
+                .and_then(|hint| hint.string_at("")),
             Some("search file contents with regex (ripgrep)")
         );
     }

@@ -710,17 +710,18 @@ fn streaming_connect_413_recovers_via_reactive_ptl() {
         ));
         // Reactive recovery issues a batched messages_create that SUCCEEDS.
         let batched_mock = Arc::new(MockApiClient::new(vec![batched_response("recovered")]));
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            batched_mock.clone(),
-            streaming_mock.clone(),
-            Arc::new(ToolRegistry::new()),
-            orchestrator::test_support::noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        );
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                batched_mock.clone(),
+                streaming_mock.clone(),
+                Arc::new(ToolRegistry::new()),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ));
         let outcome = orch
             .run_turn_streaming("ping")
             .await

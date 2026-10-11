@@ -219,7 +219,15 @@ async fn tool_call_body_runs_before_stream_end() {
     let timeline: Vec<String> = events
         .iter()
         .filter_map(|e| match e {
-            OutputEvent::Text { text } => Some(format!("text:{text:?}")),
+            OutputEvent::Text { text } => {
+                let visible = text.string_at("").expect("text output is a source string");
+                assert_eq!(
+                    text.string_units(""),
+                    Some(visible.encode_utf16().collect::<Vec<_>>()),
+                    "the scripted stream text must retain its exact source units"
+                );
+                Some(format!("text:{visible}"))
+            }
             OutputEvent::ToolCall { tool, .. } => Some(format!("toolcall:{tool}")),
             _ => None,
         })

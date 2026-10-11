@@ -246,6 +246,7 @@ fn insert_camel_spaces(name: &str) -> String {
 }
 
 /// Whether `c` is a JS `\w` char: `[A-Za-z0-9_]`.
+#[cfg(test)]
 fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
@@ -392,6 +393,7 @@ fn word_boundary_contains_units(haystack: &[u16], needle: &[u16]) -> bool {
 /// A `\b` exists at an index iff the char before and the char after differ in
 /// word-ness (string ends count as non-word).
 #[must_use]
+#[cfg(test)]
 pub(crate) fn word_boundary_contains(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         // `\b\b` matches at any boundary — JS would find one in any non-empty
@@ -1070,6 +1072,24 @@ fn invalid_tool_input(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
@@ -1730,7 +1750,7 @@ mod tests {
             .call(json!({"query": ""}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("empty");
-        assert!(format!("{err}").contains("query is empty"));
+        assert!(source_text(&err.model_facing_message()).contains("query is empty"));
     }
 
     #[test]

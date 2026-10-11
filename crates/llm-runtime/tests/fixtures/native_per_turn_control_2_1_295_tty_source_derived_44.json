@@ -1,0 +1,1126 @@
+{
+  "schema": "lingxi.beta-oracle-source-derived-tty-overlay",
+  "schema_version": 1,
+  "target_native": {
+    "version": "2.1.295",
+    "binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "baseline_fixture": {
+    "path": "crates/llm-runtime/tests/fixtures/betas_2_1_287.json",
+    "version": "2.1.287",
+    "sha256": "750d52ced3ac64704c9009733c606c2a750b799de7bfb63073ecfcd3a8542fe4"
+  },
+  "paired_print_fixture": {
+    "path": "crates/llm-runtime/tests/fixtures/native_per_turn_control_2_1_295_print_44.json",
+    "sha256": "735cdc81badf7fd27f59519d6f04695e58cf86d427df50d7980c689dbefcd515"
+  },
+  "capture_manifest": {
+    "path": "acceptance/per-turn-control-295-capture-plan/capture-manifest.json",
+    "sha256": "a31b695a320ed29fc4f17c0fa8975338ebe588dd9487c7f4832c33e862f9555d"
+  },
+  "scope": {
+    "mode": "public-tty",
+    "interactive": true,
+    "rows": 44,
+    "observed_native_captures": 0,
+    "source_derived_unverified": true
+  },
+  "expected_values_are": "Source-derived unit-test expectations only; not Native public-TTY observations and not a Native acceptance pass.",
+  "derivation": [
+    "For each 2.1.295 public-print case, pair the same provider/model/environment with its interactive=true input in the immutable 2.1.287 fixture and 88-row capture manifest.",
+    "Start with that historical 2.1.287 default_main token order, including its interactive redact-thinking value.",
+    "Add per-turn-control immediately before effort only when the paired 2.1.295 public-print capture records per_turn_control_header_count=1; otherwise leave the 2.1.287 token list unchanged.",
+    "The pinned 2.1.295 IJt(model, canonical) gate has no interactive argument and the xF registry adds per-turn-control when perTurnTiming or IJt is true. The expected TTY value still assumes no mode-specific change to capability/denial state; there is no Native TTY capture, so these values remain unverified."
+  ],
+  "pinned_binary_source_evidence": [
+    {
+      "label": "per-turn-effort gate IJt",
+      "offset": 188835876,
+      "length": 182,
+      "sha256": "921413c13df8ce6a4e0d6be3219c6efc720de3dc53132de7e026d26894be950c",
+      "excerpt": "function IJt(e,n){if(!vh()||!DW(cc(e)))return!1;if(h_(n,\"per_turn_effort\",e)===!1)return!1;if(utn(n,\"per_turn_effort\",e)!==!0&&A_?.(n,e)!==!0)return!1;return Yu?.()!==!0}"
+    },
+    {
+      "label": "per-turn-control beta registry entry",
+      "offset": 189093326,
+      "length": 1049,
+      "sha256": "75fa8cbc479d9c0fab8ea5c6ac775bb62e06a358206abe9a02a91b0474c3038c",
+      "excerpt": "xF=[{beta:dB,when:(e)=>e.perTurnTiming||IJt(e.model,e.canonical)}]"
+    },
+    {
+      "label": "experimental-beta disable gate",
+      "offset": 187091996,
+      "length": 81,
+      "sha256": "48ec91abcbe8b6422c89c8227f49efbca9c08bf419b7e8949330657fa8dcd7dd",
+      "excerpt": "function B6(){return a.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS||b$()}"
+    }
+  ],
+  "cases": [
+    {
+      "matrix_row": 265,
+      "paired_public_print_matrix_row": 264,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {},
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 267,
+      "paired_public_print_matrix_row": 266,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "mid-conversation-system-2026-04-07",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": false,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 269,
+      "paired_public_print_matrix_row": 268,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 271,
+      "paired_public_print_matrix_row": 270,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 273,
+      "paired_public_print_matrix_row": 272,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 275,
+      "paired_public_print_matrix_row": 274,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\ufeffon\ufeff"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 277,
+      "paired_public_print_matrix_row": 276,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\u0085on\u0085"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 279,
+      "paired_public_print_matrix_row": 278,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 281,
+      "paired_public_print_matrix_row": 280,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "false"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 283,
+      "paired_public_print_matrix_row": 282,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 285,
+      "paired_public_print_matrix_row": 284,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 309,
+      "paired_public_print_matrix_row": 308,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {},
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 311,
+      "paired_public_print_matrix_row": 310,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "mid-conversation-system-2026-04-07",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": false,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 313,
+      "paired_public_print_matrix_row": 312,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 315,
+      "paired_public_print_matrix_row": 314,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 317,
+      "paired_public_print_matrix_row": 316,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 319,
+      "paired_public_print_matrix_row": 318,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\ufeffon\ufeff"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 321,
+      "paired_public_print_matrix_row": 320,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\u0085on\u0085"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 323,
+      "paired_public_print_matrix_row": 322,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 325,
+      "paired_public_print_matrix_row": 324,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "false"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 327,
+      "paired_public_print_matrix_row": 326,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 329,
+      "paired_public_print_matrix_row": 328,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 661,
+      "paired_public_print_matrix_row": 660,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {},
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 663,
+      "paired_public_print_matrix_row": 662,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "web-search-2025-03-05",
+        "mid-conversation-system-2026-04-07",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": false,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 665,
+      "paired_public_print_matrix_row": 664,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 667,
+      "paired_public_print_matrix_row": 666,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 669,
+      "paired_public_print_matrix_row": 668,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 671,
+      "paired_public_print_matrix_row": 670,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\ufeffon\ufeff"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 673,
+      "paired_public_print_matrix_row": 672,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\u0085on\u0085"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 675,
+      "paired_public_print_matrix_row": 674,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 677,
+      "paired_public_print_matrix_row": 676,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "false"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 679,
+      "paired_public_print_matrix_row": 678,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 681,
+      "paired_public_print_matrix_row": 680,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 705,
+      "paired_public_print_matrix_row": 704,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {},
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 707,
+      "paired_public_print_matrix_row": 706,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "web-search-2025-03-05",
+        "mid-conversation-system-2026-04-07",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": false,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 709,
+      "paired_public_print_matrix_row": 708,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 711,
+      "paired_public_print_matrix_row": 710,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 713,
+      "paired_public_print_matrix_row": 712,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 715,
+      "paired_public_print_matrix_row": 714,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\ufeffon\ufeff"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 717,
+      "paired_public_print_matrix_row": 716,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\u0085on\u0085"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 719,
+      "paired_public_print_matrix_row": 718,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 721,
+      "paired_public_print_matrix_row": 720,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "false"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 723,
+      "paired_public_print_matrix_row": 722,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "true"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    },
+    {
+      "matrix_row": 725,
+      "paired_public_print_matrix_row": 724,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "wat"
+        },
+        "interactive": true
+      },
+      "expected_default_main_beta_tokens": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "redact-thinking-2026-02-12",
+        "context-management-2025-06-27",
+        "web-search-2025-03-05",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "effort-2025-11-24"
+      ],
+      "per_turn_control_observed_in_paired_print": true,
+      "evidence_class": "source-derived-unverified"
+    }
+  ]
+}

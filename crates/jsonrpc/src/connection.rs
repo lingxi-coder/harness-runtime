@@ -26,7 +26,7 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::broker::{spawn as spawn_broker, BrokerError, BrokerHandle};
 use crate::codec::CodecError;
 use crate::inbound::{BoxedHandler, Dispatcher};
-use crate::messages::{Id, JsonPayload, Message, Notification, Request, Response};
+use crate::messages::{Id, Message, Notification, Request, Response};
 use crate::router::{Router, RouterError, StartedCall, DEFAULT_STARTING_REQUEST_ID};
 
 /// Connection-level error variants — surfaces the broker, router, codec, and
@@ -464,6 +464,7 @@ mod tests {
     use crate::codec::LineCodec;
     use crate::inbound::InboundHandler;
     use crate::messages::{Request, Response};
+    use crate::JsonPayload;
     use async_trait::async_trait;
     use serde_json::json;
 

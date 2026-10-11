@@ -481,7 +481,7 @@ impl LocalAppsHostBroker {
                             None,
                             Some(error.to_string()),
                             false,
-                        )
+                        );
                     }
                 };
             if cancellation_requested {
@@ -1050,7 +1050,7 @@ impl LocalAppsHostBroker {
                 return Err(format!(
                     "background capability {} is not supported",
                     capability.as_str()
-                ))
+                ));
             }
         };
         if let Some(grant) = grant {

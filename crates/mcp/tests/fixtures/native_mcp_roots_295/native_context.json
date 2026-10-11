@@ -1,0 +1,13 @@
+{
+  "native_version": "2.1.295",
+  "cases": {
+    "accepted_meta_string": {
+      "native_cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-mcp-input-required-roots-295-capture/attempt-01/cases/accepted_meta_string/runtime/cwd",
+      "roots_uri_prefix": "file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-mcp-input-required-roots-295-capture/attempt-01/cases/accepted_meta_string/runtime/cwd"
+    },
+    "invalid_params_string": {
+      "native_cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-mcp-input-required-roots-295-capture/attempt-01/cases/invalid_params_string/runtime/cwd",
+      "roots_uri_prefix": "file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-mcp-input-required-roots-295-capture/attempt-01/cases/invalid_params_string/runtime/cwd"
+    }
+  }
+}

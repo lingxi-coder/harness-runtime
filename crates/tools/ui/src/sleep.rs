@@ -7,7 +7,7 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -181,7 +181,26 @@ fn invalid_tool_input(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use mobile_linux_api::ProcessOutput;
+    use serde_json::Value;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn fixture(value: Value) -> Utf16JsonProjection {
@@ -232,7 +251,10 @@ mod tests {
             )
             .await
             .expect_err("too long");
-        assert!(err.to_string().contains("600000"), "got {err}");
+        assert!(
+            source_text(&err.model_facing_message()).contains("600000"),
+            "got {err}"
+        );
     }
 
     #[tokio::test]

@@ -39,22 +39,32 @@ pub const CLAUDE_CODE_REFERENCE_VERSION: &str = "2.1.293";
 /// are installed by the service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeadlessSignal {
+    /// Interrupt the active turn without requiring the host to install an OS signal handler.
     Interrupt,
+    /// Request graceful shutdown of the headless service.
     Shutdown,
     /// The injected output transport has disconnected.
     OutputClosed,
+    /// Report a process-style termination signal from the embedding host.
     Terminate {
+        /// Numeric signal value used to produce the process-style exit status.
         signal: i32,
     },
 }
 
+/// Host-provided lifecycle notifications consumed by a headless run.
+///
+/// This receiver lets an embedding application forward interrupt, shutdown,
+/// termination, and output-closure events without installing process handlers.
 pub struct HeadlessSignals {
     receiver: tokio::sync::mpsc::UnboundedReceiver<HeadlessSignal>,
 }
 impl HeadlessSignals {
+    /// Wrap an existing channel receiver as the run's signal source.
     pub fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<HeadlessSignal>) -> Self {
         Self { receiver }
     }
+    /// Create a signal sender and the corresponding receiver wrapper.
     pub fn channel() -> (tokio::sync::mpsc::UnboundedSender<HeadlessSignal>, Self) {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         (sender, Self::new(receiver))
@@ -66,49 +76,88 @@ impl Default for HeadlessSignals {
     }
 }
 
+/// Top-level cause reported when a headless invocation exits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeadlessExitReason {
+    /// The invocation reached its normal terminal result.
     Completed,
+    /// Configuration or input validation failed before execution could proceed.
     InvalidInput,
+    /// Runtime setup, execution, or shutdown failed.
     RuntimeError,
+    /// The host interrupted the active invocation.
     Interrupted,
-    Terminated { signal: i32 },
+    /// The host reported process-style termination.
+    Terminated {
+        /// Numeric signal value supplied by the embedding host.
+        signal: i32,
+    },
+    /// The output transport could not deliver the final output.
     OutputError,
+    /// The host requested cancellation or service shutdown.
     Cancelled,
 }
 
+/// State of the model/runtime execution, separate from shutdown and delivery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeadlessExecutionStatus {
+    /// Runtime execution did not start.
     NotStarted,
+    /// Runtime execution completed with a successful status.
     Succeeded,
+    /// Runtime execution completed with a failure status.
     Failed,
+    /// Runtime execution was interrupted by the host.
     Interrupted,
-    Terminated { signal: i32 },
+    /// Runtime execution was terminated by a host-reported signal.
+    Terminated {
+        /// Numeric signal value supplied by the embedding host.
+        signal: i32,
+    },
+    /// Runtime execution was cancelled during shutdown.
     Cancelled,
 }
+
+/// State of the runtime's resource shutdown and persistence drain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeadlessShutdownStatus {
+    /// Runtime shutdown was not started.
     NotStarted,
+    /// Shutdown barriers completed successfully.
     Complete,
+    /// At least one shutdown barrier remains incomplete.
     Incomplete,
 }
+
+/// Whether final output was delivered to the injected transport.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeadlessDeliveryStatus {
+    /// Final output and the writer shutdown barrier completed.
     Complete,
+    /// Output delivery failed or was stopped before completion.
     Failed,
 }
 
 /// Internal service outcome; this does not add fields to the native wire.
 #[derive(Clone, Debug)]
 pub struct HeadlessExit {
+    /// Process-style status code selected for the invocation.
     pub code: i32,
+    /// High-level cause for the invocation's exit.
     pub reason: HeadlessExitReason,
+    /// Session identifier when session initialization succeeded.
     pub session_id: Option<String>,
+    /// Configuration, startup, or runtime error messages.
     pub errors: Vec<String>,
+    /// Outcome of model/runtime execution, independent of shutdown.
     pub execution: HeadlessExecutionStatus,
+    /// Outcome of resource shutdown and persistence draining.
     pub shutdown: HeadlessShutdownStatus,
+    /// Outcome of writing final output to the host-provided transport.
     pub delivery: HeadlessDeliveryStatus,
+    /// Errors encountered while shutting down runtime resources.
     pub shutdown_errors: Vec<String>,
+    /// Errors encountered while writing or flushing output.
     pub delivery_errors: Vec<String>,
     /// Present when the initial drain was incomplete. The retained supervisor
     /// continues cleanup even if this diagnostic handle is dropped.

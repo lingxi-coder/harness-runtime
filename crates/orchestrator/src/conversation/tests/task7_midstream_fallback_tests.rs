@@ -266,7 +266,7 @@ for line in sys.stdin:
         })
         .collect();
     assert!(
-        texts.iter().any(|text| *text == "fallback body"),
+        texts.contains(&"fallback body"),
         "(d) output must contain the fallback body; texts={texts:?}"
     );
     // The turn must have ended with end_turn (not an error).

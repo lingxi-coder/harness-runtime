@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -534,6 +534,7 @@ mod tests {
     };
     use mobile_linux_api::ProcessOutput;
     use mobile_linux_api::SandboxBackend;
+    use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};

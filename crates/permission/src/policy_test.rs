@@ -1988,7 +1988,10 @@ mod tests {
             child_for_command(&reasons, "curl https://x"),
             PermissionResult::Ask { .. }
         ));
-        assert_eq!(prompt.message.string_at("").unwrap_or_default(), "This Bash command contains multiple operations. The following part requires approval: curl https://x");
+        assert_eq!(
+            prompt.message.string_at("").unwrap_or_default(),
+            "This Bash command contains multiple operations. The following part requires approval: curl https://x"
+        );
     }
 
     #[test]
@@ -2849,7 +2852,9 @@ mod tests {
             } => {
                 assert_eq!(
                     explanation.as_ref().and_then(|text| text.string_at("")),
-                    Some("Permission to use Bash with command echo x > secrets/keys.txt has been denied.")
+                    Some(
+                        "Permission to use Bash with command echo x > secrets/keys.txt has been denied."
+                    )
                 );
                 assert!(
                     matches!(reason, PermissionDecisionReason::MatchedRule { .. }),
@@ -4531,7 +4536,8 @@ mod tests {
                 behavior: PermissionBehavior::Deny,
                 source: PermissionRuleSource::Session,
             }],
-        );
+        )
+        .with_roots(roots());
         let input =
             lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"{"command":"\ud800"}"#)
                 .unwrap();
@@ -4605,7 +4611,9 @@ mod tests {
         ));
         assert_eq!(
             explanation.as_ref().and_then(|text| text.string_at("")),
-            Some("/etc/passwd is outside /proj; the permissions.blockReadsOutsideWorkingDirectories setting blocks reads outside the working directories. Ask the user to add the directory with /add-dir, or to remove that setting.")
+            Some(
+                "/etc/passwd is outside /proj; the permissions.blockReadsOutsideWorkingDirectories setting blocks reads outside the working directories. Ask the user to add the directory with /add-dir, or to remove that setting."
+            )
         );
         // Inside the working dir is untouched by the block.
         assert!(!matches!(
@@ -4890,7 +4898,9 @@ mod tests {
         ));
         assert_eq!(
             explanation.as_ref().and_then(|text| text.string_at("")),
-            Some("/etc/passwd is outside /proj; --restricted confines the file tools to the working directory.")
+            Some(
+                "/etc/passwd is outside /proj; --restricted confines the file tools to the working directory."
+            )
         );
     }
 
@@ -5083,7 +5093,9 @@ mod tests {
             );
             assert_eq!(
                 prompt.message.string_at("").unwrap_or_default(),
-                format!("{verb} moves later reads to a directory outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting.")
+                format!(
+                    "{verb} moves later reads to a directory outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting."
+                )
             );
         }
         // Inside the working dirs → the `ppo` branch must not fire.
@@ -5099,7 +5111,11 @@ mod tests {
         for cmd in ["pushd /proj/sub && ls", "env -C /proj/sub ls"] {
             if let PermissionResult::Ask { prompt, .. } = blocked().authorize("Bash", &bash(cmd)) {
                 assert!(
-                    !prompt.message.string_at("").unwrap_or_default().contains("moves later reads to a directory outside"),
+                    !prompt
+                        .message
+                        .string_at("")
+                        .unwrap_or_default()
+                        .contains("moves later reads to a directory outside"),
                     "{cmd} is inside the working dirs; the ppo outside-path branch must not fire, got {}",
                     prompt.message.string_at("").unwrap_or_default()
                 );

@@ -1111,7 +1111,6 @@ mod tests {
 
     use mobile_linux_api::ProcessOutput;
 
-    use std::collections::HashMap;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use tool_api::tool_trait::{ToolError, ToolStaticContext};
 
@@ -1121,7 +1120,7 @@ mod tests {
     impl tool_skill::skill::SkillLoader for NoopSkillLoader {
         async fn load(
             &self,
-            _name: &str,
+            _name: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> Result<Option<tool_skill::skill::SkillDescriptor>, ToolError> {
             Ok(None)
         }
@@ -1135,7 +1134,13 @@ mod tests {
             &self,
             questions: &[tool_ui::ask_user_question::Question],
             _non_interactive: bool,
-        ) -> Result<HashMap<String, String>, ToolError> {
+        ) -> Result<
+            Vec<(
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            )>,
+            ToolError,
+        > {
             Ok(questions
                 .iter()
                 .filter_map(|question| {
@@ -1175,14 +1180,16 @@ mod tests {
         assert!(names.contains("Read"));
         assert!(names.contains("WebFetch"));
         assert!(names.contains("AskUserQuestion"));
+        assert!(
+            names.contains("Write"),
+            "Chat exposes Write behind its per-call permission prompt"
+        );
         assert!(names
             .iter()
             .all(|name| MOBILE_CHAT_TOOL_ALLOWLIST.contains(&name.as_str())));
         for denied in [
-            "Write",
             "Edit",
             "NotebookEdit",
-            "Shell",
             "Git",
             "LSP",
             "Workflow",
@@ -1195,6 +1202,10 @@ mod tests {
                 "{denied} must not be reachable in Chat mode"
             );
         }
+        assert!(
+            chat_registry.find_by_name("Shell").is_none(),
+            "shell_test_ctx has no enabled mobile shell runtime to register"
+        );
     }
 
     #[cfg(feature = "mobile")]
@@ -1217,22 +1228,25 @@ mod tests {
             .expect("AskUserQuestion registered");
         let result = ask
             .call(
-                serde_json::json!({
-                    "questions": [{
-                        "question": "Pick one?",
-                        "header": "Choice",
-                        "options": [
-                            { "label": "Alpha", "description": "first" },
-                            { "label": "Beta", "description": "second" }
-                        ]
-                    }]
-                }),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({
+                        "questions": [{
+                            "question": "Pick one?",
+                            "header": "Choice",
+                            "options": [
+                                { "label": "Alpha", "description": "first" },
+                                { "label": "Beta", "description": "second" }
+                            ]
+                        }]
+                    }),
+                )
+                .unwrap(),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("custom resolver should answer");
-        assert_eq!(result.data["answers"]["Pick one?"].as_str(), Some("Alpha"));
+        assert_eq!(result.data.string_at("/answers/Pick one?"), Some("Alpha"));
     }
 
     #[cfg(feature = "mobile")]
@@ -1251,10 +1265,13 @@ mod tests {
 
         task_create
             .call(
-                serde_json::json!({
-                    "subject": "Generate local app",
-                    "description": "Exercise the iOS app-private task store"
-                }),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({
+                        "subject": "Generate local app",
+                        "description": "Exercise the iOS app-private task store"
+                    }),
+                )
+                .unwrap(),
                 fresh_ctx(),
                 fresh_tx(),
             )

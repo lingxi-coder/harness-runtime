@@ -754,35 +754,30 @@ async fn append_live_stream_rows(
     for message in ordered_rows {
         let row_id = message.id();
         if assistant_row_ids.contains(&row_id) {
-            match message {
-                message @ ConversationMessage::Assistant { .. } => {
-                    let history_message = if let Some(row) = assistant_rows
-                        .iter_mut()
-                        .find(|row| row.accepted.id() == row_id)
-                    {
-                        if let Some(writer) = transcript {
-                            if let Err(error) =
-                                writer.persist_assistant_block(row, stop_reason).await
-                            {
-                                tracing::warn!(%error, "could not persist completed assistant block");
-                            }
-                        } else if let Some(stop_reason) = stop_reason {
-                            if let ConversationMessage::Assistant {
-                                stop_reason: row_stop_reason,
-                                ..
-                            } = &mut row.accepted
-                            {
-                                *row_stop_reason = Some(stop_reason.to_string());
-                            }
+            if let message @ ConversationMessage::Assistant { .. } = message {
+                let history_message = if let Some(row) = assistant_rows
+                    .iter_mut()
+                    .find(|row| row.accepted.id() == row_id)
+                {
+                    if let Some(writer) = transcript {
+                        if let Err(error) = writer.persist_assistant_block(row, stop_reason).await {
+                            tracing::warn!(%error, "could not persist completed assistant block");
                         }
-                        row.accepted.clone()
-                    } else {
-                        message
-                    };
-                    append_history.push(history_message.clone());
-                    assistant_history.push(history_message);
-                }
-                _ => {}
+                    } else if let Some(stop_reason) = stop_reason {
+                        if let ConversationMessage::Assistant {
+                            stop_reason: row_stop_reason,
+                            ..
+                        } = &mut row.accepted
+                        {
+                            *row_stop_reason = Some(stop_reason.to_string());
+                        }
+                    }
+                    row.accepted.clone()
+                } else {
+                    message
+                };
+                append_history.push(history_message.clone());
+                assistant_history.push(history_message);
             }
         } else {
             let mut stored = message.clone();
@@ -3226,6 +3221,13 @@ async fn run_subagent_loop(
     ctx.instruction_context = match crate::instructions::resolve(&ctx).await {
         Ok(context) => context,
         Err(error) => {
+            // A resumed child uses its retained transcript instead of seeding
+            // a new prompt. Even though instruction setup fails before the
+            // loop can borrow `live_hook_transcript.messages`, the in-child
+            // SubagentStop hooks still need that retained history.
+            if let Some(resumed) = &ctx.resumed_history {
+                live_hook_transcript.messages.clone_from(resumed);
+            }
             // Native Lv's initial Gv Promise rejects before startup history,
             // transcript writes or a reporting run exists. The dispatcher
             // still performs its usual hook, diagnostic and restore cleanup.
@@ -4035,7 +4037,7 @@ async fn run_subagent_loop(
                         logical_tool_model_profile.clone(),
                         tool_context_state.clone(),
                         &allowed_tools,
-                        force_structured_tool.as_deref(),
+                        force_structured_tool,
                         defer_local_work,
                         &retryable_body,
                         &live_output_started,
@@ -5433,7 +5435,7 @@ async fn run_subagent_loop(
                                 next_logical_tool_profile,
                                 next_tool_context_state,
                                 &next_allowed_tools,
-                                force_structured_tool.as_deref(),
+                                force_structured_tool,
                                 next_defer_local_work,
                                 &next_retryable_body,
                                 &next_live_output_started,

@@ -1829,13 +1829,15 @@ mod tests {
 
         let body = render_resume_md(&doc(&todos, CheckpointTrigger::NearLimit));
         let body_units = body.string_units("").unwrap();
+        let pending_text_units = sanitized_content.string_units("").unwrap();
         let mut pending_line = "- [ ] ".encode_utf16().collect::<Vec<_>>();
-        pending_line.extend(sanitized_content.string_units("").unwrap());
+        pending_line.extend(pending_text_units.iter().copied());
         let mut active_line = "- [>] ".encode_utf16().collect::<Vec<_>>();
         active_line.extend(sanitized_active.string_units("").unwrap());
         active_line.extend("    \u{2190} current step".encode_utf16());
+        assert_eq!(count_units(&body_units, &pending_line), 1);
         assert_eq!(
-            count_units(&body_units, &pending_line),
+            count_units(&body_units, &pending_text_units),
             2,
             "pending text is reused in the list and the What's next body"
         );

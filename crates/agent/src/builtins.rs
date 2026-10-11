@@ -1276,7 +1276,11 @@ mod tests {
         let defs = builtin_agent_definitions_with_gates(false, true, false);
         let statusline = find(&defs, "statusline-setup");
         assert!(matches!(statusline.model, AgentModel::Inherit));
-        let prompt = statusline.system_prompt.as_deref().unwrap();
+        let prompt = statusline
+            .system_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.string_at(""))
+            .unwrap();
         assert!(prompt.contains(&settings.display().to_string()));
         assert!(prompt.contains("custom-status"));
         assert!(prompt.contains(branding::PRODUCT_NAME));

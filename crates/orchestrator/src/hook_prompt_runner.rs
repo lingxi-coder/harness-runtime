@@ -1016,7 +1016,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_user_message_retains_exact_source_units() {
         let api = MockApi::text("claude-haiku-4-5", r#"{"ok": true}"#);
-        let runner = ApiClientHookPromptRunner::new(api.clone());
+        let runner = test_runner(api.clone());
         let mut request = req("safe", None);
         request.prompt = Utf16JsonProjection::parse(r#""safe \ud800""#).unwrap();
 

@@ -102,7 +102,7 @@ async fn initialize_sends_canonical_lsp_params_and_receives_capabilities() {
         assert!(id.is_number() || id.is_string(), "id present");
         let params = &req["params"];
         assert!(params["processId"].is_number());
-        assert_eq!(params["clientInfo"]["name"], "Claude Code");
+        assert_eq!(params["clientInfo"]["name"], branding::PRODUCT_NAME);
         // Derived, not spelled: the oracle reads this from the same build
         // VERSION as the User-Agent and `AI_AGENT` stamps, and a literal here
         // is how the LSP copy drifted behind the constant before 2026-09-10.
@@ -289,16 +289,25 @@ async fn initialize_keeps_raw_initialization_option_strings_on_the_wire() {
             body.contains(r#""initializationOptions":{"probe":"\ud800"}"#),
             "{body}"
         );
-        let request: Value = serde_json::from_slice(&raw).expect("parse initialize request");
-        write_frame(
-            &mut peer_io,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": request["id"],
-                "result": { "capabilities": {} }
-            }),
-        )
-        .await;
+        let request = Utf16JsonProjection::parse(body).expect("project initialize request");
+        assert_eq!(request.string_at("/method"), Some("initialize"));
+        assert_eq!(
+            request.string_units("/params/initializationOptions/probe"),
+            Some(vec![0xd800])
+        );
+        let response = Utf16JsonProjection::object(vec![
+            (
+                "jsonrpc".into(),
+                Utf16JsonProjection::parse(r#""2.0""#).unwrap(),
+            ),
+            ("id".into(), request.subprojection("/id").unwrap()),
+            (
+                "result".into(),
+                Utf16JsonProjection::parse(r#"{"capabilities":{}}"#).unwrap(),
+            ),
+        ])
+        .unwrap();
+        write_raw_frame(&mut peer_io, &response.to_json_string().unwrap()).await;
         let initialized = read_one_frame(&mut peer_io).await;
         assert_eq!(initialized["method"], "initialized");
     });

@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -1839,6 +1839,7 @@ mod tests {
     // crate (§8.1: a command crate may not depend on a tool crate, and the
     // `workflow-authoring` skill reads the same texts).
     use super::*;
+    use lingxi_core::types::utf16_json::JsonValueView;
 
     macro_rules! source_json {
         ($($tokens:tt)*) => {

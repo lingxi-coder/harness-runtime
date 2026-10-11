@@ -150,7 +150,7 @@ async fn current_timeout_limits_bound_requests_and_keep_early_and_provider_timeo
         let result = api.execute_side_query_request(req).await;
         assert!(
             matches!(
-                result,
+                result.as_ref().map_err(LlmError::classification_source),
                 Err(LlmError::TransportTimeout { .. } | LlmError::ProviderTimeout { .. })
             ),
             "{result:?}"

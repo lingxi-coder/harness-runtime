@@ -1766,7 +1766,8 @@ mod tests {
         let drained = mailbox.drain();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].request_id.as_deref(), Some(rid));
-        let body: Value = serde_json::from_str(drained[0].content.string_at("").unwrap()).unwrap();
+        let body: Value =
+            serde_json::from_str(&drained[0].content.to_json_string().unwrap()).unwrap();
         assert_eq!(body["type"], "shutdown_request");
         assert_eq!(body["requestId"], rid);
     }
@@ -2011,7 +2012,8 @@ mod tests {
 
         let drained = leader_mb.drain();
         assert_eq!(drained.len(), 1, "leader received the response");
-        let body: Value = serde_json::from_str(drained[0].content.string_at("").unwrap()).unwrap();
+        let body: Value =
+            serde_json::from_str(&drained[0].content.to_json_string().unwrap()).unwrap();
         assert_eq!(body["type"], "shutdown_approved");
         assert_eq!(body["requestId"], "shutdown-1@worker");
         assert_eq!(body["from"], "worker");
@@ -2137,7 +2139,7 @@ mod tests {
             .unwrap();
         let messages = mailbox.drain();
         let approval: Value =
-            serde_json::from_str(messages[0].content.string_at("").unwrap()).unwrap();
+            serde_json::from_str(&messages[0].content.to_json_string().unwrap()).unwrap();
         assert_eq!(approval["paneId"], "%42");
         assert_eq!(approval["backendType"], "tmux");
         assert_eq!(approval["from"], "worker");
@@ -2336,7 +2338,7 @@ mod tests {
                 "approval delivery must not announce termination"
             );
             let approval: Value =
-                serde_json::from_str(frames[0].content.string_at("").unwrap()).unwrap();
+                serde_json::from_str(&frames[0].content.to_json_string().unwrap()).unwrap();
             assert_eq!(approval["type"], "shutdown_approved");
             tool
         } else {
@@ -2481,7 +2483,7 @@ mod tests {
             tool.call_fixture(json!({"to":"planner","message":{"type":"plan_approval_response","request_id":"plan-1@planner","approve":true,"feedback":"Proceed carefully"}}), fresh_ctx(), fresh_tx()).await.unwrap();
             let delivered = mailbox.drain();
             let body: Value =
-                serde_json::from_str(delivered[0].content.string_at("").unwrap()).unwrap();
+                serde_json::from_str(&delivered[0].content.to_json_string().unwrap()).unwrap();
             assert_eq!(body["permissionMode"], expected);
             assert_eq!(body["feedback"], "Proceed carefully");
             assert_eq!(
@@ -2547,7 +2549,8 @@ mod tests {
 
         let drained = mailbox.drain();
         assert_eq!(drained.len(), 1);
-        let body: Value = serde_json::from_str(drained[0].content.string_at("").unwrap()).unwrap();
+        let body: Value =
+            serde_json::from_str(&drained[0].content.to_json_string().unwrap()).unwrap();
         assert_eq!(body["type"], "plan_approval_response");
         assert_eq!(body["approved"], true);
     }
@@ -2577,7 +2580,8 @@ mod tests {
             .unwrap();
         assert_eq!(result_value(&res)["success"], true);
         let drained = mailbox.drain();
-        let body: Value = serde_json::from_str(drained[0].content.string_at("").unwrap()).unwrap();
+        let body: Value =
+            serde_json::from_str(&drained[0].content.to_json_string().unwrap()).unwrap();
         assert_eq!(body["approved"], false);
         assert_eq!(body["feedback"], "tighten the scope");
     }

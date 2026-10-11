@@ -3334,6 +3334,21 @@ fn sanitize_namespaced_local_app_args(
 mod plugin_args_tests {
     use super::*;
 
+    macro_rules! source_json {
+        ({ $($json:tt)* }) => {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({ $($json)* }))
+                .expect("generated test JSON is representable as a source projection")
+        };
+        ([$($json:tt)*]) => {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!([$($json)*]))
+                .expect("generated test JSON is representable as a source projection")
+        };
+        ($value:expr) => {
+            Utf16JsonProjection::from_serde_value(&$value)
+                .expect("generated test JSON is representable as a source projection")
+        };
+    }
+
     #[test]
     fn terminal_qa_strategy_comes_only_from_authenticated_workflow_args() {
         assert_eq!(
@@ -3499,7 +3514,7 @@ mod plugin_args_tests {
     fn namespaced_local_app_authority_fields_are_host_owned() {
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some("lingxi-local-app:local-app-build".into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "update",
                 "app_id": "aaaa1111",
                 "runtime_profile": {"family": "babylon_3d"},
@@ -3519,14 +3534,8 @@ mod plugin_args_tests {
         };
         sanitize_namespaced_local_app_args(&mut spec, None);
         let object = spec.args.expect("args");
-        assert_eq!(
-            object.get("operation").and_then(Value::as_str),
-            Some("update")
-        );
-        assert_eq!(
-            object.get("app_id").and_then(Value::as_str),
-            Some("aaaa1111")
-        );
+        assert_eq!(object.string_at("/operation"), Some("update"));
+        assert_eq!(object.string_at("/app_id"), Some("aaaa1111"));
         for field in [
             "runtime_profile",
             "host_context",
@@ -3541,7 +3550,7 @@ mod plugin_args_tests {
             "update_ui_impact",
             "staging",
         ] {
-            assert!(object.get(field).is_none(), "{field} must be stripped");
+            assert!(!object.contains_property(field), "{field} must be stripped");
         }
     }
 
@@ -3627,7 +3636,7 @@ mod plugin_args_tests {
     fn namespaced_plugin_rejects_renderer_and_workspace_overrides_at_launch() {
         let spec = tool_workflow::WorkflowLaunchSpec {
             name: Some("lingxi-local-app:local-app-build".into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "create",
                 "app_id": "aaaa1111",
                 "renderer": "canvas",
@@ -3644,7 +3653,7 @@ mod plugin_args_tests {
     fn namespaced_plugin_rejects_authority_override_fields_at_launch() {
         let spec = tool_workflow::WorkflowLaunchSpec {
             name: Some("lingxi-local-app:local-app-build".into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "create",
                 "app_id": "aaaa1111",
                 "validated_selection_handle": "vsel_forged",
@@ -3721,7 +3730,7 @@ mod plugin_args_tests {
                 }
                 let spec = tool_workflow::WorkflowLaunchSpec {
                     name: Some(workflow_id.into()),
-                    args: Some(serde_json::json!({ key: "value" })),
+                    args: Some(source_json!({ key: "value" })),
                     ..Default::default()
                 };
                 validate_namespaced_local_app_external_args(&spec).unwrap_or_else(|error| {
@@ -3757,6 +3766,34 @@ mod run_id_tests {
     use tool_workflow::is_valid_run_id;
 
     use crate::mobile::test_support::FakeListener;
+
+    macro_rules! source_json {
+        ({ $($json:tt)* }) => {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({ $($json)* }),
+            )
+            .expect("generated test JSON is representable as a source projection")
+        };
+        ([$($json:tt)*]) => {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!([$($json)*]),
+            )
+            .expect("generated test JSON is representable as a source projection")
+        };
+        ($value:expr) => {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&$value)
+                .expect("generated test JSON is representable as a source projection")
+        };
+    }
+
+    fn args_field_equals(
+        args: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        pointer: &str,
+        expected: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
+        args.and_then(|args| args.subprojection(pointer).ok())
+            .is_some_and(|actual| actual.semantically_eq(expected))
+    }
 
     fn stamp_profile(
         manifest: &mut local_apps::AppManifest,
@@ -4051,7 +4088,7 @@ mod run_id_tests {
         let script = plugin_build_script();
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "update",
                 "app_id": "demo1234",
                 "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
@@ -4063,17 +4100,14 @@ mod run_id_tests {
         super::apply_materialized_local_app_collections(root.path(), &mut spec, script)
             .expect("manifest collection ids should be authoritative");
 
+        assert!(spec.args.as_ref().is_some_and(|args| {
+            args.subprojection("/expected_writable_collections")
+                .is_ok_and(|actual| actual.semantically_eq(&source_json!(["items"])))
+        }));
         assert_eq!(
             spec.args
                 .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!(["items"]))
-        );
-        assert_eq!(
-            spec.args
-                .as_ref()
-                .and_then(|args| args.pointer("/runtime_profile/family"))
-                .and_then(serde_json::Value::as_str),
+                .and_then(|args| args.string_at("/runtime_profile/family")),
             Some("react_dom")
         );
     }
@@ -4113,7 +4147,7 @@ mod run_id_tests {
         // collection/persistence contract the Host never verified.
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "update",
                 "app_id": "demo1234",
                 "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
@@ -4142,42 +4176,37 @@ mod run_id_tests {
         let injected = spec
             .args
             .as_ref()
-            .and_then(|args| args.get("runtime_profile"))
             .expect("host must inject runtime_profile");
         assert_eq!(
-            injected.get("family").and_then(serde_json::Value::as_str),
+            injected.string_at("/runtime_profile/family"),
             Some(pinned.family.as_str()),
-            "family must equal the app's PINNED family, not merely differ from the caller's: {injected}"
+            "family must equal the app's PINNED family, not merely differ from the caller's: {injected:?}"
         );
         assert_eq!(
-            injected.get("revision").and_then(serde_json::Value::as_u64),
-            Some(u64::from(pinned.revision)),
-            "revision must equal the app's PINNED revision, not merely differ from the caller's: {injected}"
+            injected.number_at("/runtime_profile/revision"),
+            Some(f64::from(pinned.revision)),
+            "revision must equal the app's PINNED revision, not merely differ from the caller's: {injected:?}"
         );
         assert_eq!(
-            injected
-                .get("contract_sha256")
-                .and_then(serde_json::Value::as_str),
+            injected.string_at("/runtime_profile/contract_sha256"),
             Some(pinned.contract_sha256.as_str()),
-            "contract_sha256 must equal the app's PINNED contract, not merely differ from the caller's: {injected}"
+            "contract_sha256 must equal the app's PINNED contract, not merely differ from the caller's: {injected:?}"
         );
 
         // The caller's hostile values must specifically be gone too, not
         // just "replaced by some other value that happens to equal pinned".
         assert_ne!(
-            injected.get("family").and_then(serde_json::Value::as_str),
+            injected.string_at("/runtime_profile/family"),
             Some("three_3d"),
             "caller-supplied family must not survive"
         );
         assert_ne!(
-            injected.get("revision").and_then(serde_json::Value::as_u64),
-            Some(999),
+            injected.number_at("/runtime_profile/revision"),
+            Some(999.0),
             "caller-supplied revision must not survive"
         );
         assert_ne!(
-            injected
-                .get("contract_sha256")
-                .and_then(serde_json::Value::as_str),
+            injected.string_at("/runtime_profile/contract_sha256"),
             Some("attacker-supplied-not-a-real-sha256"),
             "caller-supplied contract_sha256 must not survive"
         );
@@ -4208,7 +4237,7 @@ mod run_id_tests {
         // non-empty caller value loses.
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "update",
                 "app_id": "demo1234",
                 "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
@@ -4224,11 +4253,11 @@ mod run_id_tests {
         )
         .expect("materialized manifest should still resolve through a hostile args block");
 
-        assert_eq!(
-            spec.args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!(["items"])),
+        assert!(
+            spec.args.as_ref().is_some_and(|args| {
+                args.subprojection("/expected_writable_collections")
+                    .is_ok_and(|actual| actual.semantically_eq(&source_json!(["items"])))
+            }),
             "the Host must overwrite the caller's collection list with the manifest's, not merge it"
         );
     }
@@ -4282,7 +4311,7 @@ mod run_id_tests {
         install_active_authoring_contract(&layout, &manifest);
         stamp_record_mirror(&layout, true);
 
-        let caller_args = serde_json::json!({
+        let caller_args = source_json!({
             "operation": "update",
             "app_id": "demo1234",
             "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
@@ -4292,14 +4321,14 @@ mod run_id_tests {
             "model": "a-caller-chosen-model",
         });
         let caller_keys: std::collections::BTreeSet<String> = caller_args
-            .as_object()
+            .object_entries()
             .expect("caller args object")
-            .keys()
-            .cloned()
+            .into_iter()
+            .map(|entry| entry.display_key.to_owned())
             .collect();
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(caller_args),
+            args: Some(caller_args.clone()),
             ..Default::default()
         };
 
@@ -4313,12 +4342,13 @@ mod run_id_tests {
         let after = spec
             .args
             .as_ref()
-            .and_then(serde_json::Value::as_object)
             .expect("args survive the seam as an object");
         let injected: std::collections::BTreeSet<String> = after
-            .keys()
-            .filter(|key| !caller_keys.contains(*key))
-            .cloned()
+            .object_entries()
+            .expect("args remain an object")
+            .into_iter()
+            .map(|entry| entry.display_key.to_owned())
+            .filter(|key| !caller_keys.contains(key))
             .collect();
         let expected: std::collections::BTreeSet<String> = [
             "expected_writable_collections",
@@ -4367,19 +4397,18 @@ mod run_id_tests {
         // `entry().or_insert_with` key comes back holding the sentinel. So a
         // key added to `expected` without an accompanying override test fails
         // here instead of passing quietly.
-        let mut hostile = serde_json::Map::new();
-        for key in caller_keys.iter() {
-            hostile.insert(
-                key.clone(),
-                after.get(key).cloned().expect("caller key survives"),
-            );
-        }
+        let mut hostile = caller_args.clone();
         for key in expected.iter() {
-            hostile.insert(key.clone(), serde_json::json!("caller-sentinel"));
+            hostile
+                .set_field(
+                    key,
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from("caller-sentinel"),
+                )
+                .expect("set hostile caller value");
         }
         let mut hostile_spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::Value::Object(hostile)),
+            args: Some(hostile),
             ..Default::default()
         };
         super::apply_materialized_local_app_collections(
@@ -4391,30 +4420,36 @@ mod run_id_tests {
         let hostile_after = hostile_spec
             .args
             .as_ref()
-            .and_then(serde_json::Value::as_object)
             .expect("args survive the seam as an object");
         for key in expected.iter() {
             if key == "host_context" {
-                let normalize = |value: &serde_json::Value| {
-                    let mut value = value.clone();
-                    value
-                        .as_object_mut()
-                        .expect("host_context is an object")
-                        .remove("invocation_capability");
-                    value
-                };
-                let actual = hostile_after.get(key).expect("host context injected");
+                let mut actual = hostile_after
+                    .subprojection("/host_context")
+                    .expect("host context injected");
+                let mut expected_context = after
+                    .subprojection("/host_context")
+                    .expect("host context injected without hostile caller value");
                 let capability = actual
-                    .get("invocation_capability")
-                    .and_then(serde_json::Value::as_str)
+                    .string_at("/invocation_capability")
                     .expect("host invocation capability");
                 assert!(capability.starts_with("mcpv_"));
-                assert_eq!(normalize(actual), normalize(after.get(key).unwrap()));
+                actual
+                    .remove_field("invocation_capability")
+                    .expect("remove nonce for stable context comparison");
+                expected_context
+                    .remove_field("invocation_capability")
+                    .expect("remove nonce for stable context comparison");
+                assert!(actual.semantically_eq(&expected_context));
                 continue;
             }
-            assert_eq!(
-                hostile_after.get(key),
-                after.get(key),
+            let actual = hostile_after
+                .subprojection(&format!("/{key}"))
+                .expect("host-injected value exists");
+            let expected_value = after
+                .subprojection(&format!("/{key}"))
+                .expect("host-injected value exists in non-hostile baseline");
+            assert!(
+                actual.semantically_eq(&expected_value),
                 "the Host key {key:?} is listed as Host-injected but did not OVERRIDE the \
                  caller's value — it is written with `entry().or_insert_with` (or an \
                  equivalent) instead of `object.insert`, so a caller controls it"
@@ -4424,12 +4459,12 @@ mod run_id_tests {
         // The caller-owned keys are untouched — this gate must not be
         // mistaken for "the Host owns the whole args map".
         assert_eq!(
-            after.get("model").and_then(serde_json::Value::as_str),
+            after.string_at("/model"),
             Some("a-caller-chosen-model"),
             "`model` is a Host default the caller legitimately wins"
         );
         assert_eq!(
-            after.get("strategy").and_then(serde_json::Value::as_str),
+            after.string_at("/strategy"),
             Some("balanced"),
             "`strategy` is caller-owned by design"
         );
@@ -4454,7 +4489,7 @@ mod run_id_tests {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some("persisted-workflow.js".into()),
             resume_from_run_id: Some("wf_resume1".into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "update",
                 "app_id": "demo1234",
                 "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::Canvas2d),
@@ -4471,20 +4506,18 @@ mod run_id_tests {
             false,
         )
         .expect("trusted resumed plugin workflow should use manifest ids");
-        assert_eq!(
-            resumed
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!(["progress"]))
-        );
+        assert!(args_field_equals(
+            resumed.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!(["progress"])
+        ));
 
         let non_local_descriptor = tool_workflow::BUILTIN_WORKFLOWS
             .get("deep-research")
             .expect("deep-research built-in");
         let mut custom = tool_workflow::WorkflowLaunchSpec {
             name: Some("deep-research".into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "expected_writable_collections": [],
             })),
             ..Default::default()
@@ -4495,13 +4528,11 @@ mod run_id_tests {
             non_local_descriptor.script,
         )
         .expect("non-local workflows should not read app manifests");
-        assert_eq!(
-            custom
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!([]))
-        );
+        assert!(args_field_equals(
+            custom.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!([])
+        ));
     }
 
     #[test]
@@ -4509,7 +4540,7 @@ mod run_id_tests {
         let root = tempfile::tempdir().expect("tempdir");
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "update",
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
@@ -4538,7 +4569,7 @@ mod run_id_tests {
 
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "update",
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
@@ -4614,7 +4645,7 @@ mod run_id_tests {
 
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({"operation": "update", "app_id": "demo1234"})),
+            args: Some(source_json!({"operation": "update", "app_id": "demo1234"})),
             ..Default::default()
         };
         let error = super::apply_materialized_local_app_collections(
@@ -4664,7 +4695,7 @@ mod run_id_tests {
 
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({"operation": "update", "app_id": "demo1234"})),
+            args: Some(source_json!({"operation": "update", "app_id": "demo1234"})),
             ..Default::default()
         };
         let error = super::apply_materialized_local_app_collections(
@@ -4701,7 +4732,7 @@ mod run_id_tests {
                 name: Some(
                     crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                 ),
-                args: Some(serde_json::json!({
+                args: Some(source_json!({
                     "operation": "update",
                     "app_id": "demo1234",
                     "authoring_spec": fixture_authoring_spec_value(family),
@@ -4719,8 +4750,7 @@ mod run_id_tests {
             assert_eq!(
                 spec.args
                     .as_ref()
-                    .and_then(|args| args.pointer("/runtime_profile/family"))
-                    .and_then(serde_json::Value::as_str),
+                    .and_then(|args| args.string_at("/runtime_profile/family")),
                 Some(family.as_str()),
                 "runtime profile must remain visible to the routed specialist"
             );
@@ -4743,7 +4773,7 @@ mod run_id_tests {
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script: Some("export const meta = { name: 'custom' }; return 1".into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": ["caller_choice"],
             })),
@@ -4754,12 +4784,11 @@ mod run_id_tests {
         super::apply_materialized_local_app_collections(root.path(), &mut spec, &script)
             .expect("custom inline workflow must not read a missing manifest");
 
-        assert_eq!(
-            spec.args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!(["caller_choice"]))
-        );
+        assert!(args_field_equals(
+            spec.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!(["caller_choice"])
+        ));
 
         let custom_path = root.path().join("custom-local-app.js");
         let custom_path_script = "export const meta = { name: 'local-app-build' };\nreturn 2\n";
@@ -4767,7 +4796,7 @@ mod run_id_tests {
         let mut path_spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(custom_path.to_string_lossy().into_owned()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": ["caller_choice"],
             })),
@@ -4779,13 +4808,11 @@ mod run_id_tests {
             custom_path_script,
         )
         .expect("custom same-meta script path must not read a missing manifest");
-        assert_eq!(
-            path_spec
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!(["caller_choice"]))
-        );
+        assert!(args_field_equals(
+            path_spec.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!(["caller_choice"])
+        ));
     }
 
     /// r4-workflow-runtime-08: a launch with no `args.operation` used to be
@@ -4806,7 +4833,7 @@ mod run_id_tests {
         stamp_record_mirror(&layout, false);
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({ "app_id": "demo1234" })),
+            args: Some(source_json!({ "app_id": "demo1234" })),
             ..Default::default()
         };
         let error = super::apply_materialized_local_app_collections(
@@ -4881,7 +4908,7 @@ mod run_id_tests {
             script_path: Some(script_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(run_id.into()),
             session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "operation": "update",
                 "app_id": "demo1234",
                 "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
@@ -4906,29 +4933,21 @@ mod run_id_tests {
             true,
         )
         .expect("trusted plugin resume should use manifest ids");
-        assert_eq!(
-            trusted
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!(["progress"]))
-        );
+        assert!(args_field_equals(
+            trusted.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!(["progress"])
+        ));
         let trusted_context = trusted
             .args
             .as_ref()
-            .and_then(|args| args.get("host_context"))
             .expect("trusted plugin resume must restore Host-owned workflow context");
         assert_eq!(
-            trusted_context
-                .get("source")
-                .and_then(serde_json::Value::as_str),
+            trusted_context.string_at("/host_context/source"),
             Some("verified_host")
         );
         assert_eq!(
-            trusted_context
-                .get("runtime_profile")
-                .and_then(|profile| profile.get("family"))
-                .and_then(serde_json::Value::as_str),
+            trusted_context.string_at("/host_context/runtime_profile/family"),
             Some("react_dom")
         );
 
@@ -4972,7 +4991,7 @@ mod run_id_tests {
             script_path: Some(custom_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(custom_run_id.into()),
             session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -4985,20 +5004,18 @@ mod run_id_tests {
             false,
         )
         .expect("marker=false custom resume should remain custom");
-        assert_eq!(
-            custom_resume
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!([]))
-        );
+        assert!(args_field_equals(
+            custom_resume.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!([])
+        ));
 
         let mut untrusted = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(script_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(run_id.into()),
             session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -5021,13 +5038,11 @@ mod run_id_tests {
             false,
         )
         .expect("untrusted resume should remain a custom workflow");
-        assert_eq!(
-            untrusted
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!([]))
-        );
+        assert!(args_field_equals(
+            untrusted.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!([])
+        ));
 
         let wrong_path = root.path().join("wrong-path.js");
         std::fs::write(&wrong_path, trusted_script).expect("wrong-path script");
@@ -5042,7 +5057,7 @@ mod run_id_tests {
             script_path: Some(wrong_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(run_id.into()),
             session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -5055,13 +5070,11 @@ mod run_id_tests {
             false,
         )
         .expect("a run id must not authorize a different script path");
-        assert_eq!(
-            wrong_path_spec
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!([]))
-        );
+        assert!(args_field_equals(
+            wrong_path_spec.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!([])
+        ));
 
         let current_path = root.path().join("current-path.js");
         std::fs::write(&current_path, trusted_script).expect("current script");
@@ -5070,7 +5083,7 @@ mod run_id_tests {
             script_path: Some(current_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(run_id.into()),
             session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -5083,13 +5096,11 @@ mod run_id_tests {
             false,
         )
         .expect("exact bytes without provenance remain custom");
-        assert_eq!(
-            exact_bytes_untrusted
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!([]))
-        );
+        assert!(args_field_equals(
+            exact_bytes_untrusted.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!([])
+        ));
     }
 
     #[test]
@@ -5167,7 +5178,7 @@ mod run_id_tests {
             script_path: Some(custom_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(custom_run_id.into()),
             session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -5190,13 +5201,11 @@ mod run_id_tests {
             false,
         )
         .expect("marker=false custom sidecar should remain custom");
-        assert_eq!(
-            custom_spec
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!([]))
-        );
+        assert!(args_field_equals(
+            custom_spec.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!([])
+        ));
 
         let provenance_path = store.provenance_path(session, custom_run_id);
         let mut tampered_value: serde_json::Value = serde_json::from_slice(
@@ -5255,7 +5264,7 @@ mod run_id_tests {
             script_path: Some(different_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(custom_run_id.into()),
             session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -5288,7 +5297,7 @@ mod run_id_tests {
             script_path: Some(ordinary_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some("wf_ordinary1".into()),
             session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
+            args: Some(source_json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": ["caller_choice"],
             })),
@@ -5311,13 +5320,11 @@ mod run_id_tests {
             false,
         )
         .expect("ordinary custom resume should remain unchanged");
-        assert_eq!(
-            ordinary_spec
-                .args
-                .as_ref()
-                .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!(["caller_choice"]))
-        );
+        assert!(args_field_equals(
+            ordinary_spec.args.as_ref(),
+            "/expected_writable_collections",
+            &source_json!(["caller_choice"])
+        ));
     }
 
     /// r3-failure-paths-07: a workflow that FAILS must reach the client with
@@ -5364,7 +5371,9 @@ mod run_id_tests {
         sink.finish_workflow_terminal(
             "w87654321",
             lingxi_core::host::task_registry::WorkflowTerminalOutcome {
-                result: Some("done".to_string()),
+                result: Some(lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                    "done",
+                )),
                 ..Default::default()
             },
             tasks::TaskStatus::Completed,
@@ -6125,7 +6134,7 @@ mod run_id_tests {
                             crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
                                 .into(),
                         ),
-                        args: Some(serde_json::json!({
+                        args: Some(source_json!({
                             "operation": "update",
                             "app_id": app_id,
                             "authoring_spec": fixture_authoring_spec_value(family),
@@ -6157,7 +6166,7 @@ mod run_id_tests {
                 name: Some(
                     crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                 ),
-                args: Some(serde_json::json!({
+                args: Some(source_json!({
                     "operation": "update",
                     "app_id": app_id,
                     "authoring_spec": fixture_authoring_spec_value(family),
@@ -6201,7 +6210,7 @@ mod run_id_tests {
                 name: Some(
                     crate::mobile::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID.into(),
                 ),
-                args: Some(serde_json::json!({
+                args: Some(source_json!({
                     "app_id": app_id,
                     "scope": "acceptance",
                     "scenarios": [],
@@ -6237,7 +6246,7 @@ mod run_id_tests {
                 script: Some(
                     "export const meta = { name: 'local-app-use-test', description: 'Custom lookalike' };\nreturn 1;\n".into(),
                 ),
-                args: Some(serde_json::json!({"app_id": app_id})),
+                args: Some(source_json!({"app_id": app_id})),
                 session_uuid: Some("session-scope".into()),
                 ..Default::default()
             })
@@ -6277,7 +6286,7 @@ mod run_id_tests {
                 name: Some(
                     crate::mobile::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID.into(),
                 ),
-                args: Some(serde_json::json!({
+                args: Some(source_json!({
                     "app_id": app_id,
                     "scope": "acceptance",
                     "scenarios": [],
@@ -6322,7 +6331,7 @@ mod run_id_tests {
                 script: Some(
                     "export const meta = { name: 'local-app-use-test', description: 'Custom lookalike' };\nreturn 1;\n".into(),
                 ),
-                args: Some(serde_json::json!({"app_id": app_id})),
+                args: Some(source_json!({"app_id": app_id})),
                 session_uuid: Some("session-scope".into()),
                 ..Default::default()
             })
@@ -6431,7 +6440,7 @@ mod run_id_tests {
                     name: Some(
                         crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                     ),
-                    args: Some(caller_args),
+                    args: Some(source_json!(caller_args)),
                     session_uuid: Some("session-scope".into()),
                     ..Default::default()
                 })
@@ -6576,7 +6585,7 @@ mod run_id_tests {
                 name: Some(
                     crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                 ),
-                args: Some(serde_json::json!({
+                args: Some(source_json!({
                     "operation": "update",
                     "app_id": app_id,
                     "authoring_spec": spec_value,
@@ -6591,8 +6600,7 @@ mod run_id_tests {
             .expect("verified update launch");
             spec.args
                 .as_ref()
-                .and_then(|args| args.pointer("/host_context/authoring_contract_sha256"))
-                .and_then(serde_json::Value::as_str)
+                .and_then(|args| args.string_at("/host_context/authoring_contract_sha256"))
                 .map(str::to_string)
                 .expect("Host digest")
         };
@@ -6730,7 +6738,7 @@ mod run_id_tests {
                 script_path: (!named).then(|| script_path.to_string_lossy().into_owned()),
                 resume_from_run_id: Some(run_id.into()),
                 session_uuid: Some(session.into()),
-                args: Some(serde_json::json!({
+                args: Some(source_json!({
                     "app_id": app_id,
                     "operation": "update",
                     "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
@@ -6873,7 +6881,7 @@ mod run_id_tests {
                 script_path: Some(script_path.to_string_lossy().into_owned()),
                 resume_from_run_id: Some(run_id.into()),
                 session_uuid: Some(session.into()),
-                args: Some(serde_json::json!({ "app_id": app_id })),
+                args: Some(source_json!({ "app_id": app_id })),
                 ..Default::default()
             };
             let launched = launcher.launch(resume_spec()).await.unwrap_or_else(|error| {
@@ -6977,7 +6985,7 @@ mod run_id_tests {
                     script_path: Some(forged_script_path.to_string_lossy().into_owned()),
                     resume_from_run_id: Some(run_id.into()),
                     session_uuid: Some(session.into()),
-                    args: Some(serde_json::json!({ "app_id": app_id })),
+                    args: Some(source_json!({ "app_id": app_id })),
                     ..Default::default()
                 })
                 .await
@@ -7052,7 +7060,7 @@ mod run_id_tests {
                 // bundled built-in...
                 script: Some(forged_body.into()),
                 // ...and the victim's app id forged into caller args.
-                args: Some(serde_json::json!({ "app_id": "victim12" })),
+                args: Some(source_json!({ "app_id": "victim12" })),
                 session_uuid: Some("session-scope".into()),
                 ..Default::default()
             })
@@ -7062,7 +7070,7 @@ mod run_id_tests {
         let by_path = launcher
             .launch(tool_workflow::WorkflowLaunchSpec {
                 script_path: Some(forged_path.to_string_lossy().into_owned()),
-                args: Some(serde_json::json!({ "app_id": "victim12" })),
+                args: Some(source_json!({ "app_id": "victim12" })),
                 session_uuid: Some("session-scope".into()),
                 ..Default::default()
             })
@@ -7102,7 +7110,7 @@ mod run_id_tests {
                         crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                     ),
                     script: Some(forged_body.into()),
-                    args: Some(serde_json::json!({ "app_id": "victim12" })),
+                    args: Some(source_json!({ "app_id": "victim12" })),
                     ..Default::default()
                 },
             ),
@@ -7110,7 +7118,7 @@ mod run_id_tests {
                 "scriptPath body with a forged meta.name",
                 tool_workflow::WorkflowLaunchSpec {
                     script_path: Some(forged_path.to_string_lossy().into_owned()),
-                    args: Some(serde_json::json!({ "app_id": "victim12" })),
+                    args: Some(source_json!({ "app_id": "victim12" })),
                     ..Default::default()
                 },
             ),
@@ -7410,6 +7418,25 @@ mod workspace_lease_forwarding_tests {
         SubagentInvocationContext, ToolInvoker, ToolInvokerError,
     };
 
+    macro_rules! source_json {
+        ({ $($json:tt)* }) => {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({ $($json)* }),
+            )
+            .expect("generated test JSON is representable as a source projection")
+        };
+        ([$($json:tt)*]) => {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!([$($json)*]),
+            )
+            .expect("generated test JSON is representable as a source projection")
+        };
+        ($value:expr) => {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&$value)
+                .expect("generated test JSON is representable as a source projection")
+        };
+    }
+
     /// Terminal invoker that records the lease token it was dispatched with.
     struct RecordingInvoker {
         seen: Arc<StdMutex<Option<Option<u64>>>>,
@@ -7424,7 +7451,7 @@ mod workspace_lease_forwarding_tests {
         async fn invoke_supplied_detailed(
             &self,
             name: &str,
-            input: serde_json::Value,
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             ctx: SubagentInvocationContext,
             workspace_lease_token: Option<u64>,
             supplied: Arc<dyn std::any::Any + Send + Sync>,
@@ -7446,26 +7473,21 @@ mod workspace_lease_forwarding_tests {
         async fn invoke_detailed(
             &self,
             _name: &str,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
             workspace_lease_token: Option<u64>,
         ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError>
         {
             *self.seen.lock().unwrap() = Some(workspace_lease_token);
             Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
-                mcp_meta_projection: None,
-                model_content_projection: None,
-                data_projection: None,
                 is_error: true,
-                data: serde_json::json!({"error": "contract validation failed"}),
+                data: source_json!({"error": "contract validation failed"}),
                 model_content: Some("contract validation failed".into()),
                 turn_end: None,
                 new_messages: Vec::new(),
                 context_modifier: None,
                 mcp_meta: None,
-                context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
-                    serde_json::Value::Array(Vec::new()),
-                ),
+                context: source_json!([]),
                 context_state: None,
             })
         }
@@ -7473,22 +7495,22 @@ mod workspace_lease_forwarding_tests {
         async fn invoke(
             &self,
             _name: &str,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-        ) -> Result<serde_json::Value, ToolInvokerError> {
+        ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
             *self.seen.lock().unwrap() = Some(None);
-            Ok(serde_json::json!({}))
+            Ok(source_json!({}))
         }
 
         async fn invoke_with_workspace_lease(
             &self,
             _name: &str,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
             workspace_lease_token: Option<u64>,
-        ) -> Result<serde_json::Value, ToolInvokerError> {
+        ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
             *self.seen.lock().unwrap() = Some(workspace_lease_token);
-            Ok(serde_json::json!({}))
+            Ok(source_json!({}))
         }
 
         fn as_any(&self) -> &dyn std::any::Any {
@@ -7502,21 +7524,18 @@ mod workspace_lease_forwarding_tests {
         let deferred = super::DeferredToolInvoker::new();
         deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
         let result = deferred
-            .invoke_detailed(
-                "LocalAppContract",
-                serde_json::json!({}),
-                bare_ctx(),
-                Some(77),
-            )
+            .invoke_detailed("LocalAppContract", source_json!({}), bare_ctx(), Some(77))
             .await
             .unwrap();
         assert!(result.is_error);
+        assert!(result
+            .data
+            .semantically_eq(&source_json!({"error": "contract validation failed"})));
         assert_eq!(
-            result.data,
-            serde_json::json!({"error": "contract validation failed"})
-        );
-        assert_eq!(
-            result.model_content.as_deref(),
+            result
+                .model_content
+                .as_ref()
+                .and_then(|content| content.string_at("")),
             Some("contract validation failed")
         );
         assert_eq!(*seen.lock().unwrap(), Some(Some(77)));
@@ -7531,7 +7550,7 @@ mod workspace_lease_forwarding_tests {
         let result = deferred
             .invoke_supplied_detailed(
                 "SubagentHandback",
-                serde_json::json!({}),
+                source_json!({}),
                 bare_ctx(),
                 Some(91),
                 Arc::new("private child tool".to_string()),
@@ -7590,7 +7609,7 @@ mod workspace_lease_forwarding_tests {
         deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
 
         deferred
-            .invoke_with_workspace_lease("Read", serde_json::json!({}), bare_ctx(), Some(77))
+            .invoke_with_workspace_lease("Read", source_json!({}), bare_ctx(), Some(77))
             .await
             .expect("dispatch");
 

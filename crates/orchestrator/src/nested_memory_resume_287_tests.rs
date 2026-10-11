@@ -153,7 +153,7 @@ async fn persisted_nested_memory_has_identical_hot_and_cold_payload_and_projecti
         .message
         .at_pointer("")
         .is_some_and(|value| value.is_null()));
-    assert_eq!(row.extra.subprojection("/attachment").unwrap(), attachment);
+    assert_eq!(row.attachment_projection.as_ref().unwrap(), &attachment);
     let cold = state_from_messages(session_uuid, std::slice::from_ref(&row));
     assert_eq!(cold.model_context_history(), vec![projection.clone()]);
     let raw_sidecars = model_reminder_attachments_from_messages(std::slice::from_ref(&row));
@@ -177,8 +177,8 @@ async fn persisted_nested_memory_has_identical_hot_and_cold_payload_and_projecti
     assert_eq!(restored[&id], attachment);
     assert_eq!(
         restored[&id].to_json_string().unwrap(),
-        row.extra
-            .subprojection("/attachment")
+        row.attachment_projection
+            .as_ref()
             .unwrap()
             .to_json_string()
             .unwrap()

@@ -1,4 +1,5 @@
 use super::*;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tool_api::tool_trait::BashPrecommitSkills;
 
 fn suggestion(case_name: &str) -> String {
@@ -17,14 +18,37 @@ fn suggestion(case_name: &str) -> String {
         .to_string()
 }
 
-fn description(tools: Vec<serde_json::Value>) -> String {
+fn description_from_projections(tools: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
+    let tool = tools
+        .into_iter()
+        .find(|tool| tool.string_at("/name") == Some("Shell"))
+        .unwrap();
+    let units = tool
+        .string_units("/description")
+        .expect("Shell description is a source string");
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display is derived from the exact source units")
+}
+
+fn description_from_source_tools(
+    tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
+) -> Utf16JsonProjection {
     tools
         .into_iter()
-        .find(|tool| tool["name"] == "Shell")
-        .unwrap()["description"]
-        .as_str()
+        .find(|tool| tool.name == "Shell")
         .unwrap()
-        .to_string()
+        .description
+}
+
+fn source_contains(value: &Utf16JsonProjection, needle: &str) -> bool {
+    let Some(units) = value.string_units("") else {
+        return false;
+    };
+    let needle = needle.encode_utf16().collect::<Vec<_>>();
+    !needle.is_empty()
+        && units
+            .windows(needle.len())
+            .any(|candidate| candidate == needle.as_slice())
 }
 
 #[tokio::test]
@@ -70,10 +94,16 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
         custom
     );
     let expected = suggestion("verify_and_simplify");
-    assert!(description(runtime.orchestrator.mcp_tool_definitions().await).contains(&expected));
+    assert!(source_contains(
+        &description_from_projections(runtime.orchestrator.mcp_tool_definitions().await),
+        &expected
+    ));
 
     assert!(matches!(
-        runtime.dispatcher.dispatch("/reload-skills").await,
+        runtime
+            .dispatcher
+            .dispatch(Utf16JsonProjection::from("/reload-skills"))
+            .await,
         SlashDispatchResult::Handled { .. }
     ));
     assert_eq!(
@@ -86,11 +116,14 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
     for name in ["verify", "simplify"] {
         let descriptor = runtime
             .wired_skill_loader
-            .load(name)
+            .load(&Utf16JsonProjection::from(name))
             .await
             .unwrap()
             .unwrap();
-        assert!(descriptor.body.contains(&format!("Run custom {name}.")));
+        assert!(source_contains(
+            &descriptor.body,
+            &format!("Run custom {name}.")
+        ));
     }
 
     let mut definition = agent::builtins::builtin_agent_definitions()
@@ -108,7 +141,10 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
     )
     .await
     .unwrap();
-    assert!(description(tools).contains(&expected));
+    assert!(source_contains(
+        &description_from_source_tools(tools),
+        &expected
+    ));
     definition.tools = agent::AgentToolPolicy::Except(vec!["Skill".into()]);
     let (tools, _) = agent::resolve_subagent_tools(
         &runtime.mcp_tool_registry,
@@ -121,23 +157,26 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
     )
     .await
     .unwrap();
-    assert!(!description(tools).contains("right before the `commit`"));
+    assert!(!source_contains(
+        &description_from_source_tools(tools),
+        "right before the `commit`"
+    ));
 
     std::fs::write(&settings_path, r#"{"includeCodeReviewSuggestion":true}"#).unwrap();
-    assert!(
-        description(runtime.orchestrator.mcp_tool_definitions().await)
-            .contains(&suggestion("all_three"))
-    );
+    assert!(source_contains(
+        &description_from_projections(runtime.orchestrator.mcp_tool_definitions().await),
+        &suggestion("all_three")
+    ));
 
     runtime
         .slash_registry
         .write()
         .await
         .set_session_skill_allowlist(Some(vec![]));
-    assert!(
-        !description(runtime.orchestrator.mcp_tool_definitions().await)
-            .contains("right before the `commit`")
-    );
+    assert!(!source_contains(
+        &description_from_projections(runtime.orchestrator.mcp_tool_definitions().await),
+        "right before the `commit`"
+    ));
 }
 
 #[test]

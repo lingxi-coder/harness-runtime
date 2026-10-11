@@ -19,7 +19,6 @@
 use crate::manifest::PluginManifest;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use secret::CredentialManager;
-use serde_json::Value;
 use thiserror::Error;
 
 /// Failure modes for [`resolve_user_config`].
@@ -120,6 +119,7 @@ mod tests {
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
     use lingxi_core::types::{PluginId, SecureStorageData};
+    use serde_json::Value;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::SystemTime;

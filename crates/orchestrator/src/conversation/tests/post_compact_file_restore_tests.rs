@@ -20,15 +20,6 @@ fn source_json(value: &serde_json::Value) -> SourceJson {
     SourceJson::from_serde_value(value).expect("test JSON is valid source")
 }
 
-fn assert_source_at_eq(source: &SourceJson, pointer: &str, expected: &serde_json::Value) {
-    assert_eq!(
-        source
-            .subprojection(pointer)
-            .expect("expected source field"),
-        source_json(expected)
-    );
-}
-
 fn stale_entry(content: &str) -> ReadFileEntry {
     ReadFileEntry {
         content: content.to_string(),
@@ -777,7 +768,13 @@ async fn current_native_nested_seeds_restore_one_durable_file_for_kept_and_disca
             .message
             .at_pointer("")
             .is_some_and(|value| value.is_null()));
-        assert_source_at_eq(&rows[1].extra, "/attachment", &expected);
+        assert_eq!(
+            rows[1]
+                .attachment_projection
+                .as_ref()
+                .expect("raw attachment carrier"),
+            &source_json(&expected)
+        );
         let fresh = tool_api::read_file_state::get(&map, &path).unwrap();
         assert_eq!(fresh.content, body);
         assert!(fresh.from_read);
@@ -994,7 +991,7 @@ async fn cancelled_compact_keeps_model_visible_read_state_untouched() {
         compaction_usage: None,
         compaction_model: None,
         compaction_profile: None,
-        raw_summary_text: "test summary".to_string(),
+        raw_summary_text: "test summary".into(),
     };
 
     let applied = orch
@@ -1049,7 +1046,7 @@ async fn apply_post_compact_clears_cached_git_status() {
         compaction_usage: None,
         compaction_model: None,
         compaction_profile: None,
-        raw_summary_text: "test summary".to_string(),
+        raw_summary_text: "test summary".into(),
     };
 
     let applied = orch

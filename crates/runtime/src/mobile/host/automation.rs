@@ -8,10 +8,10 @@ use client::protocol::permission::{
 use lingxi_core::host::{Clock, FileSystem, OrchestratorHandle, Platform};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use super::{MobileConfig, MobileEngineError, MobileEngineHandle, build_mobile_inner};
+use super::{build_mobile_inner, MobileConfig, MobileEngineError, MobileEngineHandle};
 
 /// Per-job wall-clock budget for a fired cron turn. This remains a second
 /// safety limit beneath WorkManager's outer lifecycle budget.

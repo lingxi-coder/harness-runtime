@@ -162,7 +162,6 @@ fn tool_call_block_encodes_top_level_function_call_item() {
                 citations: None,
             },
             ContentBlock::ToolCall {
-                input_projection: None,
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
                 input: super::json_payload(serde_json::json!({"command": "ls"})),
@@ -202,7 +201,6 @@ fn tool_result_block_encodes_function_call_output_item() {
         api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
-            output_projection: None,
             tool_call_id: "call_1".to_string(),
             output: super::json_payload(serde_json::json!("done")),
             is_error: Some(false),
@@ -230,7 +228,6 @@ fn tool_result_non_string_output_is_stringified() {
         api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
-            output_projection: None,
             tool_call_id: "call_2".to_string(),
             output: super::json_payload(serde_json::json!({"exit_code": 0})),
             is_error: Some(false),
@@ -906,7 +903,6 @@ fn decode_response_function_call_becomes_tool_call_with_parsed_arguments() {
     assert_eq!(
         decoded.content,
         vec![ContentBlock::ToolCall {
-            input_projection: None,
             id: "call_7".to_string(),
             name: "Bash".to_string(),
             input: super::json_payload(serde_json::json!({"command": "ls"})),
@@ -944,9 +940,16 @@ fn decode_response_function_call_missing_call_id_errors() {
 fn native_reasoning_and_display_summary_are_both_preserved() {
     let native = serde_json::json!({"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[{"type":"summary_text","text":"first"},{"type":"summary_text","text":"second"}]});
     let response = decode(completed_body(&serde_json::json!([native.clone()])));
-    assert!(
-        matches!(&response.content[0],ContentBlock::ProviderContent { value, .. } if value == &super::json_payload(native.clone()))
-    );
+    assert!(matches!(
+        response.content.as_slice(),
+        [
+            ContentBlock::Reasoning { text: first, .. },
+            ContentBlock::Reasoning { text: second, .. },
+            ContentBlock::ProviderContent { value, .. }
+        ] if first == "first"
+            && second == "second"
+            && value == &super::json_payload(native.clone())
+    ));
     let texts: Vec<_> = response
         .content
         .iter()
@@ -1038,7 +1041,6 @@ fn decode_response_preserves_output_item_order() {
                 citations: None
             },
             ContentBlock::ToolCall {
-                input_projection: None,
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
                 input: super::json_payload(serde_json::json!({})),
@@ -1194,7 +1196,10 @@ fn decode_response_http_429_maps_rate_limited() {
             serde_json::json!({"error": {"message": "slow down", "type": "rate_limit_error"}}),
         ))
         .unwrap_err();
-    assert!(matches!(err, llm_runtime::LlmError::RateLimited { .. }));
+    assert!(matches!(
+        err.classification_source(),
+        llm_runtime::LlmError::RateLimited { .. }
+    ));
 }
 
 #[test]
@@ -1205,7 +1210,10 @@ fn decode_response_http_401_maps_authentication() {
             serde_json::json!({"error": {"message": "bad key", "code": "invalid_api_key"}}),
         ))
         .unwrap_err();
-    assert!(matches!(err, llm_runtime::LlmError::Authentication { .. }));
+    assert!(matches!(
+        err.classification_source(),
+        llm_runtime::LlmError::Authentication { .. }
+    ));
 }
 
 #[test]
@@ -1216,7 +1224,10 @@ fn decode_response_insufficient_quota_maps_quota_exceeded() {
             serde_json::json!({"error": {"message": "quota", "code": "insufficient_quota"}}),
         ))
         .unwrap_err();
-    assert!(matches!(err, llm_runtime::LlmError::QuotaExceeded));
+    assert!(matches!(
+        err.classification_source(),
+        llm_runtime::LlmError::QuotaExceeded
+    ));
 }
 
 #[test]
@@ -1227,14 +1238,20 @@ fn decode_response_http_400_maps_invalid_request_with_message() {
             serde_json::json!({"error": {"message": "bad input", "type": "invalid_request_error"}}),
         ))
         .unwrap_err();
-    // The stored text is the SDK's `makeMessage` form — `${status} ${body}` —
-    // not the bare `error.message` this used to assert. The status prefix is how
-    // claude-code carries HTTP status provenance, and dropping it is what left
-    // the port unable to tell a 422 from a 400 downstream.
-    match err {
-        llm_runtime::LlmError::InvalidRequest { message } => assert_eq!(message, "400 bad input"),
-        other => panic!("expected InvalidRequest, got {other:?}"),
-    }
+    // The wrapper retains the provider-selected wire text separately from the
+    // inner classification message. Keep the exact SDK-facing status prefix.
+    assert!(matches!(
+        err.classification_source(),
+        llm_runtime::LlmError::InvalidRequest { .. }
+    ));
+    let provider_text = err
+        .provider_error_text()
+        .expect("provider HTTP errors retain the SDK-selected text");
+    assert_eq!(provider_text.display(), "400 bad input");
+    assert_eq!(
+        provider_text.utf16_code_units(),
+        &[52, 48, 48, 32, 98, 97, 100, 32, 105, 110, 112, 117, 116]
+    );
 }
 
 // ── stream decoder ────────────────────────────────────────────────────────────
@@ -1412,7 +1429,6 @@ fn stream_function_call_added_starts_tool_block_with_empty_input() {
         HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: ContentBlock::ToolCall {
-                input_projection: None,
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
                 input: super::json_payload(serde_json::Value::Object(serde_json::Map::new())),
@@ -1754,7 +1770,10 @@ fn stream_failed_maps_error_taxonomy() {
         ))
         .unwrap_err();
 
-    assert!(matches!(err, llm_runtime::LlmError::ContextOverflow { .. }));
+    assert!(matches!(
+        err.classification_source(),
+        llm_runtime::LlmError::ContextOverflow { .. }
+    ));
 }
 
 #[test]
@@ -1774,7 +1793,10 @@ fn stream_failed_quota_maps_quota_exceeded() {
         ))
         .unwrap_err();
 
-    assert!(matches!(err, llm_runtime::LlmError::QuotaExceeded));
+    assert!(matches!(
+        err.classification_source(),
+        llm_runtime::LlmError::QuotaExceeded
+    ));
 }
 
 #[test]
@@ -1801,13 +1823,13 @@ fn stream_failed_rate_limit_exceeded_maps_rate_limited() {
         ))
         .unwrap_err();
 
-    match err {
+    match err.classification_source() {
         llm_runtime::LlmError::RateLimited { retry_after, scope } => {
             assert_eq!(
-                retry_after,
+                *retry_after,
                 Some(std::time::Duration::from_secs_f64(11.054))
             );
-            assert_eq!(scope, None);
+            assert_eq!(scope.as_deref(), None);
         }
         other => panic!("expected RateLimited, got: {other:?}"),
     }
@@ -1832,7 +1854,7 @@ fn stream_failed_rate_limit_exceeded_without_delay_text_still_maps_rate_limited(
 
     assert!(
         matches!(
-            err,
+            err.classification_source(),
             llm_runtime::LlmError::RateLimited {
                 retry_after: None,
                 ..
@@ -1858,10 +1880,10 @@ fn websocket_wrapped_rate_limit_error_maps_through_openai_taxonomy() {
         ))
         .unwrap_err();
 
-    match err {
+    match err.classification_source() {
         llm_runtime::LlmError::RateLimited { retry_after, scope } => {
-            assert_eq!(retry_after, Some(std::time::Duration::from_secs(7)));
-            assert_eq!(scope, None);
+            assert_eq!(*retry_after, Some(std::time::Duration::from_secs(7)));
+            assert_eq!(scope.as_deref(), None);
         }
         other => panic!("expected RateLimited, got: {other:?}"),
     }
@@ -1886,12 +1908,16 @@ fn websocket_connection_limit_reached_is_retryable_rate_limit() {
         .unwrap_err();
 
     assert!(matches!(
-        err,
+        err.classification_source(),
         llm_runtime::LlmError::RateLimited {
             retry_after: None,
             scope: None
         }
     ));
+    assert_eq!(
+        err.provider_error_text().map(|text| text.display()),
+        Some("429 too many websocket connections")
+    );
 }
 
 #[test]
@@ -1915,8 +1941,8 @@ fn stream_failed_invalid_prompt_maps_invalid_request() {
 
     assert!(
         matches!(
-            err,
-            llm_runtime::LlmError::InvalidRequest { ref message } if message.contains("prompt was flagged")
+            err.classification_source(),
+            llm_runtime::LlmError::InvalidRequest { message } if message.contains("prompt was flagged")
         ),
         "got: {err:?}"
     );
@@ -1941,9 +1967,17 @@ fn stream_failed_unknown_code_falls_back_to_provider_internal() {
         .unwrap_err();
 
     assert!(
-        matches!(err, llm_runtime::LlmError::ProviderInternal),
+        matches!(
+            err.classification_source(),
+            llm_runtime::LlmError::ProviderInternal
+        ),
         "got: {err:?}"
     );
+    let provider_text = err
+        .provider_error_text()
+        .expect("unknown 5xx retains its provider-selected text");
+    assert_eq!(provider_text.display(), "500 ??");
+    assert_eq!(provider_text.utf16_code_units(), &[53, 48, 48, 32, 63, 63]);
 }
 
 #[test]
@@ -2183,7 +2217,6 @@ fn stream_happy_path_exact_event_sequence() {
             HistoryEvent::ContentBlockStart {
                 index: 1,
                 content_block: ContentBlock::ToolCall {
-                    input_projection: None,
                     id: "call_1".to_string(),
                     name: "Bash".to_string(),
                     input: super::json_payload(serde_json::Value::Object(serde_json::Map::new())),

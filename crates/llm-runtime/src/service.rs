@@ -441,6 +441,8 @@ pub struct MessagesCreateOptions {
     /// Request-local Native token reminder target. Applied only to an
     /// Anthropic API-bound clone; it is never written into conversation history.
     pub tool_result_reminder_suffixes: Vec<crate::convert::AnthropicToolResultReminderSuffix>,
+    /// Trusted Native request facts, outside provider input and persisted history.
+    pub native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
 }
 
 /// Current owned non-streaming main-message request.
@@ -2497,7 +2499,14 @@ impl ApiService {
                         })
                 })
             });
-        let native_per_turn_control = self.native_anthropic_request_selected(prepared)
+        let native_request_facts = (prepared.anthropic_request_kind
+            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            && (self.native_anthropic_request_selected(prepared)
+                || prepared.route.protocol == crate::ProtocolFamily::FoundryClaude))
+            .then_some(prepared.native_anthropic_request_context.as_ref())
+            .flatten();
+        let native_per_turn_control = (self.native_anthropic_request_selected(prepared)
+            || prepared.route.protocol == crate::ProtocolFamily::FoundryClaude)
             && prepared.anthropic_request_kind
                 == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
             && Self::has_native_per_turn_effort_marker(&prepared.provider_request.body_json);
@@ -2539,6 +2548,12 @@ impl ApiService {
             .with_fast_mode(fast_mode)
             .with_effort(automatic_effort)
             .with_per_turn_control(native_per_turn_control)
+            .with_mid_conversation_tool_changes(
+                native_request_facts.is_some_and(|facts| facts.mid_conversation_tool_changes),
+            )
+            .with_dangerous_tool_use(
+                native_request_facts.is_some_and(|facts| facts.server_classifier.is_some()),
+            )
             .with_structured_output(automatic_schema)
             .with_request_kind(prepared.anthropic_request_kind)
             .with_tool_search(has_tool_search)
@@ -2548,6 +2563,32 @@ impl ApiService {
                     &["context_hint"],
                 ),
             )
+    }
+
+    fn append_native_afk_beta_after_display(&self, prepared: &mut crate::PreparedLlmCall) {
+        if Self::extra_replaces_message_betas(prepared)
+            || prepared.anthropic_request_kind
+                != lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+        {
+            return;
+        }
+        let route_admitted = self.native_anthropic_request_selected(prepared)
+            || prepared.route.protocol == crate::ProtocolFamily::FoundryClaude;
+        let admitted = route_admitted
+            && prepared
+                .native_anthropic_request_context
+                .as_ref()
+                .is_some_and(|context| context.afk_mode);
+        let provider = match prepared.route.protocol {
+            crate::ProtocolFamily::FoundryClaude => Provider::Foundry,
+            crate::ProtocolFamily::AnthropicMessages => Provider::Anthropic,
+            _ => return,
+        };
+        crate::model::betas::append_afk_mode_after_thinking_display(
+            &mut prepared.provider_request.headers,
+            provider,
+            admitted,
+        );
     }
 
     fn has_native_per_turn_effort_marker(body: &lingxi_llm_client::protocol::JsonPayload) -> bool {
@@ -2792,6 +2833,12 @@ impl ApiService {
                 .is_some()
     }
 
+    fn native_per_turn_effort_route(&self, model: &str, profile: Option<&str>) -> bool {
+        self.native_api_system_route(model, profile)
+            || self.client.protocol_for_model(model, profile).ok()
+                == Some(crate::ProtocolFamily::FoundryClaude)
+    }
+
     /// Port of claude-code's `B0t` (2.1.207): parse `CLAUDE_CODE_EXTRA_BODY` into a
     /// JSON object to be spread into the outgoing Anthropic-family request body.
     ///
@@ -2896,11 +2943,14 @@ impl ApiService {
     }
 
     fn prepared_per_turn_effort(
+        &self,
         prepared: &crate::PreparedLlmCall,
     ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        let route_admitted = prepared.route.protocol == crate::ProtocolFamily::FoundryClaude
+            || self.native_anthropic_request_selected(prepared);
         (prepared.anthropic_request_kind
             == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-            && prepared.route.resolved_route.provider_id == crate::ProviderId::AnthropicFirstParty
+            && route_admitted
             && lingxi_llm_client::providers::anthropic::supports_per_message_effort(
                 &prepared.route.resolved_route.request_model,
             ))
@@ -3457,6 +3507,7 @@ impl ApiService {
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
         self.apply_automatic_thinking_display(prepared)?;
+        self.append_native_afk_beta_after_display(prepared);
         prepared.computed_beta_headers =
             lingxi_llm_client::providers::anthropic::beta_repair::request_betas(
                 &prepared.provider_request.headers,
@@ -3521,6 +3572,7 @@ impl ApiService {
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
         self.apply_automatic_thinking_display(prepared)?;
+        self.append_native_afk_beta_after_display(prepared);
         prepared.computed_beta_headers =
             lingxi_llm_client::providers::anthropic::beta_repair::request_betas(
                 &prepared.provider_request.headers,
@@ -4776,7 +4828,7 @@ impl ApiService {
                             provider_resp.clone(),
                             crate::upstream::family(&prepared.route.protocol),
                         )?;
-                        let per_turn_effort = Self::prepared_per_turn_effort(&prepared);
+                        let per_turn_effort = self.prepared_per_turn_effort(&prepared);
                         response.set_per_turn_effort(per_turn_effort.as_ref())?;
                         response.usage.cost_estimate = estimate.clone();
                         if let Some(quote) = &server_fallback_quote {
@@ -6477,7 +6529,7 @@ impl ApiService {
                     // Assemble events via a manual unfold that drives next_frame + decode.
                     // We keep a queue of pre-decoded events and drain them first.
                     let stream_state = StreamState {
-                        per_turn_effort: Self::prepared_per_turn_effort(&prepared),
+                        per_turn_effort: self.prepared_per_turn_effort(&prepared),
                         safety: safety.clone(),
                         attempt,
                         decoder,
@@ -7335,7 +7387,7 @@ impl ApiService {
                                 protocol,
                                 value,
                             } if protocol == "anthropic_messages"
-                                && value.string_at("/type").as_deref() == Some("text") =>
+                                && value.string_at("/type") == Some("text") =>
                             {
                                 value.string_units("/text")
                             }
@@ -7402,7 +7454,7 @@ impl ApiService {
             }
         }
         let mut per_message_effort = false;
-        if self.native_api_system_route(model, profile) {
+        if self.native_per_turn_effort_route(model, profile) {
             let mut admitted = LlmRequest::new(model);
             admitted.profile = profile.map(str::to_owned);
             admitted.execution.resolve_native_effort = true;
@@ -7525,7 +7577,7 @@ impl ApiService {
             );
         }
 
-        let (mut input, overrides) =
+        let (input, overrides) =
             crate::convert::history_input(model, &messages, &[], &tools, family)?;
         req.input = input;
         req.execution.input_protocol = Some(family);
@@ -7704,6 +7756,7 @@ impl ApiService {
         req.execution
             .set_request_dispatch_admission(opts.request_dispatch_admission);
         req.execution.request_dispatch_observer = opts.request_dispatch_observer;
+        req.execution.native_anthropic_request_context = opts.native_anthropic_request_context;
         req.execution.query_source = opts.query_source;
         req.execution.failed_stream_outlasted_timeout = opts.failed_stream_outlasted_timeout;
         req.execution.stream_fallback = opts.initial_consecutive_overloaded.is_some();
@@ -7758,6 +7811,7 @@ impl ApiService {
         request_dispatch_admission: Option<crate::RequestDispatchAdmission>,
         tool_result_reminder_suffixes: Vec<crate::convert::AnthropicToolResultReminderSuffix>,
         request_dispatch_observer: Option<crate::RequestDispatchObserver>,
+        native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req = self.build_main_request(
             model,
@@ -7776,6 +7830,7 @@ impl ApiService {
         req.execution
             .set_request_dispatch_admission(request_dispatch_admission);
         req.execution.request_dispatch_observer = request_dispatch_observer;
+        req.execution.native_anthropic_request_context = native_anthropic_request_context;
         self.drive_stream(req).await
     }
 }

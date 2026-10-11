@@ -567,7 +567,7 @@ fn permission_result_to_core(
                         }
                     },
                     request_id: pending.request_id,
-                    started_at: pending.started_at.clone(),
+                    started_at: pending.started_at,
                 }
             }),
             metadata: metadata(result_metadata),
@@ -711,7 +711,7 @@ fn permission_result_from_core(
                         }
                     },
                     request_id: pending.request_id,
-                    started_at: pending.started_at.clone(),
+                    started_at: pending.started_at,
                 }
             }),
             metadata: metadata(result_metadata),
@@ -776,6 +776,13 @@ pub struct PolicyPermissionGate {
     /// non-mobile composition root, which makes the whole feature unreachable
     /// from engine-desktop / tui / cli / bridge-server.
     path_translator: Option<Arc<dyn crate::model_path::ModelPathTranslator>>,
+    /// Host-resolved AutoMode facts from trusted user/flag/managed settings.
+    /// `None` means the host could not resolve every trusted source.
+    classifier_auto_mode_settings:
+        std::sync::RwLock<Option<core_permission::PermissionClassifierAutoModeSettings>>,
+    /// Host-owned classifier workspace capabilities and roots.
+    classifier_host_capabilities:
+        std::sync::RwLock<core_permission::PermissionClassifierHostCapabilities>,
     /// Deny specs contributed by the slash command / skill behind the CURRENT
     /// user input — upstream `alwaysDenyRules.command`, written only by `Tbt`
     /// ([`PermissionGate::set_command_input_denies`]).
@@ -954,10 +961,39 @@ impl PolicyPermissionGate {
             loop_classifier: Arc::new(std::sync::OnceLock::new()),
             path_translator: None,
             command_input_denies: std::sync::RwLock::new(Vec::new()),
+            classifier_auto_mode_settings: std::sync::RwLock::new(None),
+            classifier_host_capabilities: std::sync::RwLock::new(
+                core_permission::PermissionClassifierHostCapabilities::default(),
+            ),
             auto_mode_disabled_from_settings: std::sync::atomic::AtomicBool::new(
                 auto_mode_disabled_from_settings,
             ),
         }
+    }
+
+    /// Attach the composition root's AutoMode merge from trusted settings
+    /// sources. This must be resolved from raw user/flag/managed tiers; a typed
+    /// `SettingsJson` alone does not retain the `autoMode` block.
+    pub fn set_classifier_auto_mode_settings(
+        &self,
+        settings: Option<core_permission::PermissionClassifierAutoModeSettings>,
+    ) {
+        *self
+            .classifier_auto_mode_settings
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = settings;
+    }
+
+    /// Attach the host's explicit workspace and disk capabilities before the
+    /// orchestrator begins preparing main requests.
+    pub fn set_classifier_host_capabilities(
+        &self,
+        capabilities: core_permission::PermissionClassifierHostCapabilities,
+    ) {
+        *self
+            .classifier_host_capabilities
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = capabilities;
     }
 
     /// Fill after constructing the session so the classifier can use weak ownership.
@@ -3766,6 +3802,13 @@ impl PermissionGate for PolicyPermissionGate {
         self.update_auto_mode_disabled_from_settings(disabled);
     }
 
+    fn update_classifier_auto_mode_settings(
+        &self,
+        settings: Option<core_permission::PermissionClassifierAutoModeSettings>,
+    ) {
+        self.set_classifier_auto_mode_settings(settings);
+    }
+
     async fn set_mcp_permission_mode_override(
         &self,
         server_name: &str,
@@ -3822,6 +3865,99 @@ impl PermissionGate for PolicyPermissionGate {
     /// re-mount snapshot and restore the user's mid-session Shift+Tab mode.
     fn permission_mode(&self) -> Option<String> {
         Some(self.effective_mode().wire_str().to_string())
+    }
+
+    fn permission_policy_snapshot(&self) -> Option<core_permission::PermissionPolicySnapshot> {
+        fn snapshot_rules(
+            buckets: &HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+        ) -> Vec<core_permission::PermissionPolicyRuleFact> {
+            let mut sources: Vec<_> = buckets.keys().copied().collect();
+            sources.sort_by_key(|source| std::cmp::Reverse(source.priority()));
+            sources
+                .into_iter()
+                .flat_map(|source| {
+                    buckets.get(&source).into_iter().flatten().map(|rule| {
+                        core_permission::PermissionPolicyRuleFact {
+                            rule: rule.value.to_rule_projection(),
+                            source: rule.source.lingxi_settings_source().to_owned(),
+                        }
+                    })
+                })
+                .collect()
+        }
+
+        let policy = self.live_policy();
+        let rule_roots = policy.roots.as_ref().map(|roots| {
+            [
+                ("userSettings", roots.lingxi_home.clone()),
+                ("projectSettings", roots.cwd.clone()),
+                ("localSettings", roots.cwd.clone()),
+                ("flagSettings", roots.cwd.clone()),
+                ("policySettings", roots.cwd.clone()),
+                ("cliArg", roots.cwd.clone()),
+                ("command", roots.cwd.clone()),
+                ("session", roots.cwd.clone()),
+                ("toolsNarrowing", roots.cwd.clone()),
+                ("mcpServerPolicy", roots.cwd.clone()),
+                ("hostCredential", roots.cwd.clone()),
+            ]
+            .into_iter()
+            .map(|(source, path)| core_permission::PermissionPolicyRuleRoot {
+                source: source.to_owned(),
+                path,
+            })
+            .collect()
+        });
+        let additional_working_directories = policy
+            .additional_working_dirs
+            .iter()
+            .map(
+                |directory| core_permission::PermissionPolicyWorkingDirectory {
+                    path: directory.path.clone(),
+                    source: directory.source.lingxi_settings_source().to_owned(),
+                },
+            )
+            .collect();
+        let denial_tracking = self
+            .policy
+            .denial_tracking
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        Some(core_permission::PermissionPolicySnapshot {
+            permission_mode: self.effective_mode().wire_str().to_owned(),
+            allow_rules: snapshot_rules(&policy.allow_rules),
+            deny_rules: snapshot_rules(&policy.deny_rules),
+            ask_rules: snapshot_rules(&policy.ask_rules),
+            rule_roots,
+            home_directory: policy.roots.as_ref().and_then(|roots| roots.home.clone()),
+            working_directory: policy.roots.as_ref().map(|roots| roots.cwd.clone()),
+            additional_working_directories,
+            block_reads_outside_working_directories: policy.block_reads_outside_working_directories,
+            restricted: policy.restricted,
+            classify_all_shell: policy.classify_all_shell,
+            classifier_auto_mode_settings: self
+                .classifier_auto_mode_settings
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+            classifier_host_capabilities: self
+                .classifier_host_capabilities
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+            auto_mode_disabled: self
+                .auto_mode_disabled_from_settings
+                .load(std::sync::atomic::Ordering::Acquire),
+            bypass_permissions_available: policy.bypass_permissions_available,
+            bypass_killswitch_active: policy.bypass_killswitch_active,
+            bypass_permissions_confirmed: self
+                .bypass_permissions_confirmed
+                .load(std::sync::atomic::Ordering::Acquire),
+            consecutive_denials: denial_tracking.consecutive_denials,
+            total_denials: denial_tracking.total_denials,
+            denial_circuit_broken: denial_tracking.is_circuit_broken(),
+        })
     }
 }
 
@@ -3903,7 +4039,9 @@ pub(crate) const PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON: &str =
 #[must_use]
 pub fn prompts_unavailable_deny_message(ask_message: &Utf16JsonProjection) -> Utf16JsonProjection {
     crate::source_input::joined_text(&[
-        crate::source_input::TextPart::Generated("Permission for this tool use was denied: it requires interactive approval, and permission prompts are not available in this session. The action was NOT performed. Do not claim it succeeded, and do not retry it in this session \u{2014} report the limitation to the user, or suggest an alternative. What was requested: "),
+        crate::source_input::TextPart::Generated(
+            "Permission for this tool use was denied: it requires interactive approval, and permission prompts are not available in this session. The action was NOT performed. Do not claim it succeeded, and do not retry it in this session \u{2014} report the limitation to the user, or suggest an alternative. What was requested: ",
+        ),
         crate::source_input::TextPart::Source(ask_message),
     ])
 }
@@ -4133,7 +4271,6 @@ mod plan_mode_divergence_test {
     use super::*;
     use crate::{PermissionMode, PermissionPolicy, PermissionRuleSource};
     use async_trait::async_trait;
-    use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Stands in for the interactive prompt transport. Asserting its CALL COUNT

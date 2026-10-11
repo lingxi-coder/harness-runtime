@@ -5,7 +5,6 @@ use lingxi_core::host::subagent_spawn::{
 };
 use lingxi_core::host::team_spawn::{TeamSpawnSeam, TeammateLaunch};
 use lingxi_core::host::{OutputStream, RuntimeSpawner};
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 
 /// Coordinates identity reservation, task startup and mailbox delivery.
@@ -461,6 +460,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use lingxi_core::host::team_spawn::TeamSpawnError;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::AgentId;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct Harness {

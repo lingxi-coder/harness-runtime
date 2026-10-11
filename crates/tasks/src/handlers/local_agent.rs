@@ -2910,6 +2910,7 @@ mod tests {
                 "prompt from the runner".into(),
             ),
             lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "actual last assistant row".into(),

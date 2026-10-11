@@ -332,6 +332,34 @@ pub(crate) fn permission_rule_path_forms(path: &Path, roots: &FsRoots) -> Permis
     resolve_native_permission_path_forms(&absolute)
 }
 
+/// Native `ALe` working-directory spellings for an already-expanded host path.
+///
+/// The caller keeps the original source spelling separately. This function
+/// resolves only at the filesystem boundary and returns the permission
+/// resolver's ordered spellings, including a proven symlink/canonical landing
+/// when one is available. Inaccessible or malformed paths retain the resolver's
+/// partial result rather than turning a filesystem error into an exception.
+pub fn native_permission_directory_path_spellings(path: &Path) -> Vec<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+    };
+    resolve_native_permission_path_forms(&absolute).spellings
+}
+
+/// Native `ALe` spellings after its `Mn(path, "permission")` lexical
+/// expansion step. The caller preserves the original projection separately;
+/// this performs only the filesystem-boundary path resolution and returns the
+/// ordered lexical/resolved spellings, including partial results on failure.
+pub fn native_permission_directory_path_spellings_with_roots(
+    path: &Path,
+    roots: &FsRoots,
+) -> Vec<PathBuf> {
+    let absolute = expand_path(&path.to_string_lossy(), roots);
+    resolve_native_permission_path_forms(&absolute).spellings
+}
+
 fn resolve_native_permission_path_forms(path: &Path) -> PermissionRulePathForms {
     let requested = normalize_lexically(path);
     let mut spellings = vec![requested.clone()];
@@ -731,6 +759,17 @@ pub fn test_rule_pattern(
     behavior: crate::rule::PermissionBehavior,
     roots: &FsRoots,
 ) -> RulePatternMatch {
+    test_rule_pattern_impl(input_path, pattern, source, behavior, roots, false)
+}
+
+fn test_rule_pattern_impl(
+    input_path: &str,
+    pattern: &str,
+    source: PermissionRuleSource,
+    behavior: crate::rule::PermissionBehavior,
+    roots: &FsRoots,
+    source_units: bool,
+) -> RulePatternMatch {
     let file_abs = expand_path(input_path, roots);
     let (rel_pattern, root_opt) = pattern_with_root(pattern, source, roots);
     let effective_root = root_opt.unwrap_or_else(|| roots.cwd.clone());
@@ -810,15 +849,20 @@ pub fn test_rule_pattern(
         None => (stripped, false),
     };
 
-    let gitignore = cached_gitignore(stripped);
-    let Some(gitignore) = gitignore.as_ref() else {
-        return RulePatternMatch::NoMatch;
-    };
     let target = Path::new("/").join(&rel_str);
-    if !gitignore
-        .matched_path_or_any_parents(&target, false)
-        .is_ignore()
-    {
+    let matched = if source_units {
+        cached_source_glob(stripped)
+            .and_then(|matcher| matcher.matched_path_or_any_parents(&target))
+            == Some(false)
+    } else {
+        let Some(gitignore) = cached_gitignore(stripped) else {
+            return RulePatternMatch::NoMatch;
+        };
+        gitignore
+            .matched_path_or_any_parents(&target, false)
+            .is_ignore()
+    };
+    if !matched {
         return RulePatternMatch::NoMatch;
     }
     if negated {
@@ -875,7 +919,225 @@ pub(crate) fn test_rule_pattern_units(
         home: roots.home.as_ref().map(|_| PathBuf::from(&mapped[3])),
         lingxi_home: PathBuf::from(&mapped[4]),
     };
-    test_rule_pattern(&mapped[0], &mapped[1], source, behavior, &mapped_roots)
+    test_rule_pattern_impl(
+        &mapped[0],
+        &mapped[1],
+        source,
+        behavior,
+        &mapped_roots,
+        true,
+    )
+}
+
+struct SourceGlobMatcher {
+    regex: regex::Regex,
+    is_whitelist: bool,
+    is_only_dir: bool,
+}
+
+impl SourceGlobMatcher {
+    /// Mirror `Gitignore::matched_path_or_any_parents` for one source glob.
+    fn matched_path_or_any_parents(&self, target: &Path) -> Option<bool> {
+        let relative = target.strip_prefix("/").ok()?;
+        for (index, path) in relative.ancestors().enumerate() {
+            let is_dir = index > 0;
+            if (!self.is_only_dir || is_dir)
+                && path
+                    .to_str()
+                    .is_some_and(|candidate| self.regex.is_match(candidate))
+            {
+                return Some(self.is_whitelist);
+            }
+        }
+        None
+    }
+}
+
+fn cached_source_glob(pattern: &str) -> Option<std::sync::Arc<SourceGlobMatcher>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Cache = Mutex<std::collections::HashMap<String, Option<Arc<SourceGlobMatcher>>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(hit) = guard.get(pattern) {
+            return hit.clone();
+        }
+    }
+    let built = build_source_glob(pattern).map(Arc::new);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.len() < 256 {
+        guard.insert(pattern.to_string(), built.clone());
+    }
+    built
+}
+
+fn build_source_glob(pattern: &str) -> Option<SourceGlobMatcher> {
+    let prepared = source_gitignore_pattern(pattern)?;
+    let glob = match globset::GlobBuilder::new(&prepared.actual)
+        .literal_separator(true)
+        .case_insensitive(false)
+        .backslash_escape(true)
+        .empty_alternates(false)
+        .build()
+    {
+        Ok(glob) => glob,
+        Err(error) => {
+            tracing::warn!(
+                pattern = %pattern,
+                error = %error,
+                "permission rule has an unparseable glob; the rule will not match"
+            );
+            return None;
+        }
+    };
+    let Some(unicode_regex) = unicode_regex_from_glob_regex(glob.regex()) else {
+        tracing::warn!(
+            pattern = %pattern,
+            "permission rule glob could not be represented as Unicode; the rule will not match"
+        );
+        return None;
+    };
+    let regex = match regex::RegexBuilder::new(&unicode_regex)
+        .dot_matches_new_line(true)
+        .build()
+    {
+        Ok(regex) => regex,
+        Err(error) => {
+            tracing::warn!(
+                pattern = %pattern,
+                error = %error,
+                "permission rule has an unparseable glob; the rule will not match"
+            );
+            return None;
+        }
+    };
+    Some(SourceGlobMatcher {
+        regex,
+        is_whitelist: prepared.is_whitelist,
+        is_only_dir: prepared.is_only_dir,
+    })
+}
+
+struct SourceGitignorePattern {
+    actual: String,
+    is_whitelist: bool,
+    is_only_dir: bool,
+}
+
+/// Reproduce the normalization in `ignore::gitignore::GitignoreBuilder::add_line`.
+/// The builder does not expose its parsed glob list, so the source-unit matcher
+/// applies the same comment, root, basename, directory, and `/**` rewrites
+/// before asking globset to parse the glob.
+fn source_gitignore_pattern(mut line: &str) -> Option<SourceGitignorePattern> {
+    if line.starts_with('#') {
+        return None;
+    }
+    if !line.ends_with(r"\ ") {
+        line = line.trim_end();
+    }
+    if line.is_empty() {
+        return None;
+    }
+
+    let mut is_whitelist = false;
+    let mut is_only_dir = false;
+    let mut is_absolute = false;
+    if line.starts_with(r"\!") || line.starts_with(r"\#") {
+        line = &line[1..];
+        is_absolute = line.starts_with('/');
+    } else {
+        if line.starts_with('!') {
+            is_whitelist = true;
+            line = &line[1..];
+        }
+        if line.starts_with('/') {
+            line = &line[1..];
+            is_absolute = true;
+        }
+    }
+    if line.as_bytes().last() == Some(&b'/') {
+        is_only_dir = true;
+        line = &line[..line.len() - 1];
+        if line.as_bytes().last() == Some(&b'\\') {
+            line = &line[..line.len() - 1];
+        }
+    }
+
+    let mut actual = line.to_string();
+    if !is_absolute && !line.contains('/') && !actual.starts_with("**/") && actual != "**" {
+        actual = format!("**/{actual}");
+    }
+    if actual.ends_with("/**") {
+        actual = format!("{}/*", &actual[..actual.len() - 3]);
+    }
+    Some(SourceGitignorePattern {
+        actual,
+        is_whitelist,
+        is_only_dir,
+    })
+}
+
+/// Convert globset's byte-mode regex back to scalar matching over the private
+/// operation alphabet. Globset emits literal bytes as `\xNN` escapes. Decode
+/// complete adjacent runs, then re-escape each scalar so literal regex syntax
+/// cannot be introduced by the decoded text. Other regex escapes are copied
+/// as indivisible pairs. A malformed run fails closed.
+fn unicode_regex_from_glob_regex(regex: &str) -> Option<String> {
+    let body = regex.strip_prefix("(?-u)")?;
+    let bytes = body.as_bytes();
+    let mut output = String::with_capacity(body.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some((first, width)) = glob_regex_hex_byte(bytes, index) {
+            let mut run = vec![first];
+            index += width;
+            while let Some((byte, width)) = glob_regex_hex_byte(bytes, index) {
+                run.push(byte);
+                index += width;
+            }
+            for character in std::str::from_utf8(&run).ok()?.chars() {
+                use std::fmt::Write as _;
+                write!(&mut output, r"\x{{{:X}}}", u32::from(character)).ok()?;
+            }
+            continue;
+        }
+        if bytes[index] == b'\\' {
+            output.push('\\');
+            index += 1;
+            if index < bytes.len() {
+                output.push(bytes[index] as char);
+                index += 1;
+            }
+            continue;
+        }
+        let character = body[index..].chars().next()?;
+        output.push(character);
+        index += character.len_utf8();
+    }
+    Some(output)
+}
+
+fn glob_regex_hex_byte(bytes: &[u8], index: usize) -> Option<(u8, usize)> {
+    if index + 3 >= bytes.len() || bytes[index] != b'\\' || bytes[index + 1] != b'x' {
+        return None;
+    }
+    let high = glob_regex_hex_digit(bytes[index + 2])?;
+    let low = glob_regex_hex_digit(bytes[index + 3])?;
+    Some(((high << 4) | low, 4))
+}
+
+fn glob_regex_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn cached_gitignore(pattern: &str) -> Option<std::sync::Arc<ignore::gitignore::Gitignore>> {
@@ -1161,6 +1423,214 @@ mod tests {
             RulePatternMatch::NoMatch,
             "path globs stay case-sensitive"
         );
+    }
+
+    #[test]
+    fn source_path_globs_preserve_gitignore_normalization_and_ancestor_matching() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let cases = [
+            (
+                "/proj/src/A.txt",
+                "src/[A-Z].txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/a.txt",
+                "src/[A-Z].txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/other/a.txt",
+                "*.txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/a.txt",
+                "/src/*.txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/other/src/a.txt",
+                "/src/*.txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/one/two.txt",
+                "src/**",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/file.txt",
+                "src/**",
+                crate::rule::PermissionBehavior::Allow,
+            ),
+            (
+                "/proj/vendor/src/file.txt",
+                "src/**",
+                crate::rule::PermissionBehavior::Allow,
+            ),
+            (
+                "/proj/vendor/src/file.txt",
+                "src/**",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/file.txt",
+                "src/",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/a.txt",
+                "!src/*.txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/a.txt",
+                "!!src/*.txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/a.txt",
+                "src/a.txt   ",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/[x].txt",
+                r"src/\[x\].txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/a.txt",
+                "{src,lib}/a.txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/#literal",
+                r"src/\#literal",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/comment",
+                "#comment",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/z.txt",
+                "src/[z-a].txt",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+            (
+                "/proj/src/a.txt",
+                "/**",
+                crate::rule::PermissionBehavior::Deny,
+            ),
+        ];
+        for (input, pattern, behavior) in cases {
+            assert_eq!(
+                test_rule_pattern_units(
+                    &input.encode_utf16().collect::<Vec<_>>(),
+                    &pattern.encode_utf16().collect::<Vec<_>>(),
+                    source,
+                    behavior,
+                    &roots(),
+                ),
+                test_rule_pattern(input, pattern, source, behavior, &roots()),
+                "input={input:?}, pattern={pattern:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_path_glob_negated_class_uses_mapped_unit_order() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let behavior = crate::rule::PermissionBehavior::Deny;
+        let mut pattern = "src/[!A-".encode_utf16().collect::<Vec<_>>();
+        pattern.push(0x0080);
+        pattern.extend("].txt".encode_utf16());
+        let inside = path_units("/proj/src/", &[0x0080], ".txt");
+        let outside = path_units("/proj/src/", &[0x0081], ".txt");
+        assert_eq!(
+            test_rule_pattern_units(&inside, &pattern, source, behavior, &roots()),
+            RulePatternMatch::NoMatch
+        );
+        assert_eq!(
+            test_rule_pattern_units(&outside, &pattern, source, behavior, &roots()),
+            RulePatternMatch::Match
+        );
+    }
+
+    #[test]
+    fn source_path_glob_preserves_escaped_trailing_space() {
+        let pattern = r"src/escaped\ ";
+        let target = Path::new("/").join("src/escaped ");
+        let source_match = cached_source_glob(pattern)
+            .and_then(|matcher| matcher.matched_path_or_any_parents(&target));
+        let gitignore_match = cached_gitignore(pattern).map(|matcher| {
+            matcher
+                .matched_path_or_any_parents(&target, false)
+                .is_ignore()
+        });
+        assert_eq!(source_match, Some(false));
+        assert_eq!(gitignore_match, Some(true));
+    }
+
+    #[test]
+    fn source_path_escaped_glob_literals_keep_unpaired_units_exact() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let behavior = crate::rule::PermissionBehavior::Deny;
+        let lone_surrogate = [0xd800u16];
+        let path = path_units("/proj/src/[", &lone_surrogate, "].txt");
+        let pattern = pattern_units(r"src/\[", &lone_surrogate, r"\].txt");
+        let replacement = path_units("/proj/src/[", &[0xfffdu16], "].txt");
+        assert_eq!(
+            test_rule_pattern_units(&path, &pattern, source, behavior, &roots()),
+            RulePatternMatch::Match
+        );
+        assert_eq!(
+            test_rule_pattern_units(&replacement, &pattern, source, behavior, &roots()),
+            RulePatternMatch::NoMatch
+        );
+    }
+
+    #[test]
+    fn source_path_literal_backslash_before_hex_text_is_not_redecoded() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let behavior = crate::rule::PermissionBehavior::Deny;
+        for (hex_text, marker_unit) in [("xF3", 0x0080), ("x80", 0x0081)] {
+            let pattern_prefix = format!(r"src/\\{hex_text}");
+            let path_prefix = format!(r"/proj/src/\{hex_text}");
+            let pattern = pattern_units(&pattern_prefix, &[marker_unit], ".txt");
+            let path = path_units(&path_prefix, &[marker_unit], ".txt");
+            assert_eq!(
+                test_rule_pattern_units(&path, &pattern, source, behavior, &roots()),
+                RulePatternMatch::Match,
+                "literal backslash followed by {hex_text} must stay literal"
+            );
+        }
+    }
+
+    #[test]
+    fn source_path_newline_globs_match_gitignore_ascii_semantics() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let behavior = crate::rule::PermissionBehavior::Deny;
+        for (input, pattern) in [
+            ("/proj/src/\n", "src/?"),
+            ("/proj/src/\n", "src/[!a-z]"),
+            ("/proj/src/a\nb", "src/*"),
+            ("/proj/src/a\nb/file", "src/**/file"),
+        ] {
+            assert_eq!(
+                test_rule_pattern_units(
+                    &input.encode_utf16().collect::<Vec<_>>(),
+                    &pattern.encode_utf16().collect::<Vec<_>>(),
+                    source,
+                    behavior,
+                    &roots(),
+                ),
+                test_rule_pattern(input, pattern, source, behavior, &roots()),
+                "input={input:?}, pattern={pattern:?}"
+            );
+        }
     }
 
     #[test]

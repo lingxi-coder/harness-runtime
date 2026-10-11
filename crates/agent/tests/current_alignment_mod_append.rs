@@ -1,11 +1,11 @@
-//! Focused Native 2.1.293 session.append contract gate.
+//! Focused Native 2.1.295 session.append contract gate.
 //!
 //! Uses the same checked-in Mod module as the Native plugin-test fixture. The
 //! first pass observes actual ModHost dispatch results and core `next` inputs;
 //! the second pass exercises AgentTranscriptWriter's retained-row consumer so
 //! a valid worker intermediate answer is not confused with persisted behavior.
 
-use agent::transcript::AgentTranscriptWriter;
+use agent::transcript::{AgentTranscriptWriter, TranscriptEntry};
 use hooks::mods::ModHost;
 use lingxi_core::types::{
     utf16_json::Utf16JsonProjection, AgentId, ConversationMessage, MessageId,
@@ -188,8 +188,8 @@ async fn native_system_lone_session_append_reaches_bun_worker_and_host_writer() 
     const SYSTEM_UUID: &str = "00000000-0000-4000-8000-000000000015";
     let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/parity/current-alignment/fixtures/session-append/native-plugin");
-    let native_event_path =
-        fixture_root.join("native-baseline/system-content-lone-surrogate/result-event.raw.json");
+    let native_event_path = fixture_root
+        .join("native-baseline/2.1.295/system-content-lone-surrogate/result-event.raw.json");
     let native_event_raw = std::fs::read_to_string(&native_event_path)
         .expect("captured public Native system append event");
     let native_event = Utf16JsonProjection::parse(&native_event_raw)
@@ -304,6 +304,7 @@ async fn native_system_lone_session_append_reaches_bun_worker_and_host_writer() 
         content: Utf16JsonProjection::root_string(display, input_units)
             .expect("fixed system source content"),
         subtype: None,
+        api_system: None,
         compact_metadata: None,
         model_fallback: None,
         refusal_fallback: None,
@@ -335,13 +336,21 @@ async fn native_system_lone_session_append_reaches_bun_worker_and_host_writer() 
         .expect("one persisted system row");
     let persisted_projection = Utf16JsonProjection::parse(persisted_line)
         .expect("persisted row parses as exact UTF-16 JSON projection");
+    // JSONL stores the typed ConversationMessage (`role`-tagged) inside the
+    // TranscriptEntry; it does not persist the Native plugin event envelope.
+    let persisted_entry = serde_json::from_str::<TranscriptEntry>(persisted_line)
+        .expect("persisted JSONL row matches the current TranscriptEntry schema");
     assert_eq!(
-        persisted_projection.string_at("/message/type"),
+        persisted_projection.string_at("/message/role"),
         Some("system")
     );
     assert_eq!(
         persisted_projection.string_units("/message/content"),
-        Some(expected_result_units),
+        Some(expected_result_units.clone()),
         "persisted System.content retains Native's lone UTF-16 unit"
+    );
+    assert_eq!(
+        persisted_entry.message, system_message,
+        "the durable entry round-trips the accepted System row and source units"
     );
 }

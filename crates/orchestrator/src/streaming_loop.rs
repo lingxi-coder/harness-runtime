@@ -17,7 +17,6 @@ use lingxi_core::host::{OutputStream, ServerFallbackTombstoneMessage};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use llm_runtime::{ExecutionUsage as LlmUsage, HistoryEvent, LlmError};
-use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -587,7 +586,7 @@ fn supersedes_ids_for_retained_rows(rows: &[CompletedAssistantRow]) -> Vec<Messa
             row.content.iter().any(|block| {
                 block
                     .visible_text()
-                    .map_or(true, |text| !text.trim().is_empty())
+                    .is_none_or(|text| !text.trim().is_empty())
             })
         })
         .map(|row| row.row_id)
@@ -2315,6 +2314,7 @@ async fn pump_stream_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     #[test]
     fn current_native_partial_notice_and_tool_truncation_flag() {
         let oracle: Value = serde_json::from_str(include_str!(
@@ -2925,8 +2925,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_delta_resumable_source_reaches_completed_assistant_rows() {
+    async fn terminal_delta_resumable_projection_matches_js_numbers_and_keeps_utf16_text() {
         let source = r#"{"opaque":"\ud800","number":1e400}"#;
+        let provider_resumable = lingxi_llm_client::protocol::JsonPayload::parse(source)
+            .expect("source fixture is valid JSON");
+        assert_eq!(provider_resumable.as_json_source(), source);
         let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
         let turn = pump_stream(
             boxed(vec![
@@ -2938,10 +2941,7 @@ mod tests {
                     delta: llm_runtime::HistoryMessageDelta {
                         stop_reason: Some("end_turn".into()),
                         stop_details: None,
-                        resumable: Some(
-                            lingxi_llm_client::protocol::JsonPayload::parse(source)
-                                .expect("source fixture is valid JSON"),
-                        ),
+                        resumable: Some(provider_resumable),
                     },
                     usage: None,
                 },
@@ -2953,14 +2953,20 @@ mod tests {
         .expect("stream pump completes");
 
         assert_eq!(turn.assistant_rows.len(), 1);
+        let projected = turn.assistant_rows[0]
+            .resumable
+            .as_ref()
+            .expect("provider checkpoint reaches the row");
         assert_eq!(
-            turn.assistant_rows[0]
-                .resumable
-                .as_ref()
-                .expect("provider checkpoint reaches the row")
+            projected.string_units("/opaque"),
+            Some(vec![0xd800]),
+            "Core retains exact UTF-16 units while applying JavaScript JSON number semantics"
+        );
+        assert_eq!(
+            projected
                 .to_json_string()
                 .expect("Core source projection is valid JSON"),
-            source
+            r#"{"opaque":"\ud800","number":null}"#
         );
     }
 

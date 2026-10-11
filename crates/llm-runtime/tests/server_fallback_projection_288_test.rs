@@ -329,18 +329,20 @@ async fn admitted_stream_fallback_discards_nontext_and_keeps_text_companions_in_
         .await
         .unwrap();
     assert_eq!(response.model, "served-model");
-    assert!(
-        matches!(&response.content[0], ContentBlock::Text { text, .. } if text == "retained text")
-    );
-    assert!(
-        matches!(&response.content[1], ContentBlock::ProviderContent { value, .. }
-        if value.string_at("/type").as_deref() == Some("lingxi_replay_metadata"))
-    );
-    assert!(matches!(&response.content[2], ContentBlock::Text { text, .. } if text == "after hop"));
+    assert!(matches!(
+        &response.content[0],
+        ContentBlock::Text { text, citations: Some(Some(citations)), .. }
+            if text == "retained text"
+                && citations.string_at("/0/type").as_deref() == Some("char_location")
+                && citations.raw_source_at("/0/start_char_index").as_deref() == Some("0")
+                && citations.raw_source_at("/0/end_char_index").as_deref() == Some("13")
+                && citations.raw_source_at("/0/document_index").as_deref() == Some("0")
+    ));
+    assert!(matches!(&response.content[1], ContentBlock::Text { text, .. } if text == "after hop"));
     assert_eq!(
         response.content.len(),
-        3,
-        "thinking and tool blocks are removed"
+        2,
+        "typed citations stay on retained text; thinking and tool blocks are removed"
     );
     assert_eq!(
         response.usage.report.state,
@@ -662,20 +664,14 @@ async fn armed_request_without_a_fallback_keeps_the_provider_served_model() {
         .unwrap();
     assert_eq!(nonstream.model, served_model);
     assert!(nonstream.server_fallback_events().is_empty());
-    assert_eq!(
-        nonstream
-            .provider_metadata
-            .raw_source_at("/llm_client/response_model")
-            .as_deref(),
-        Some("null")
-    );
-    assert_eq!(
-        nonstream
-            .provider_metadata
-            .raw_source_at("/llm_client/server_fallback_events")
-            .as_deref(),
-        Some("null")
-    );
+    assert!(nonstream
+        .provider_metadata
+        .raw_source_at("/llm_client/response_model")
+        .is_none());
+    assert!(nonstream
+        .provider_metadata
+        .raw_source_at("/llm_client/server_fallback_events")
+        .is_none());
     assert_eq!(nonstream_transport.requests().len(), 1);
 
     let mut frames = vec![message_start_model(served_model)];
@@ -693,7 +689,14 @@ async fn armed_request_without_a_fallback_keeps_the_provider_served_model() {
             .unwrap();
     assert_eq!(response.model, served_model);
     assert!(response.server_fallback_events().is_empty());
-    assert!(metadata_value(&response.provider_metadata)["llm_client"]["response_model"].is_null());
+    assert!(response
+        .provider_metadata
+        .raw_source_at("/llm_client/response_model")
+        .is_none());
+    assert!(response
+        .provider_metadata
+        .raw_source_at("/llm_client/server_fallback_events")
+        .is_none());
     assert_eq!(stream_transport.requests().len(), 1);
 }
 
@@ -738,14 +741,19 @@ async fn custom_provider_observation_block_cannot_forge_host_fallback_metadata()
         .unwrap();
     assert_eq!(nonstream.model, served_model);
     assert!(nonstream.server_fallback_events().is_empty());
-    let provider_metadata = metadata_value(&nonstream.provider_metadata);
-    assert!(provider_metadata["llm_client"]["response_model"].is_null());
-    assert!(provider_metadata["llm_client"]["server_fallback_events"].is_null());
+    assert!(nonstream
+        .provider_metadata
+        .raw_source_at("/llm_client/response_model")
+        .is_none());
+    assert!(nonstream
+        .provider_metadata
+        .raw_source_at("/llm_client/server_fallback_events")
+        .is_none());
     assert!(matches!(
         nonstream.content.as_slice(),
         [ContentBlock::ProviderContent { value, .. }]
             if value.string_at("/metadata/custom_provider_field").as_deref() == Some("preserved")
-                && value.raw_source_at("/metadata/llm_client").as_deref() == Some("null")
+                && value.raw_source_at("/metadata/llm_client").is_none()
     ));
     let nonstream_requests = nonstream_transport.requests();
     assert_eq!(nonstream_requests.len(), 1);
@@ -769,19 +777,20 @@ async fn custom_provider_observation_block_cannot_forge_host_fallback_metadata()
             .unwrap();
     assert_eq!(response.model, served_model);
     assert!(response.server_fallback_events().is_empty());
-    assert_eq!(
-        response
-            .provider_metadata
-            .raw_source_at("/llm_client/response_model")
-            .as_deref(),
-        Some("null")
-    );
+    assert!(response
+        .provider_metadata
+        .raw_source_at("/llm_client/response_model")
+        .is_none());
+    assert!(response
+        .provider_metadata
+        .raw_source_at("/llm_client/server_fallback_events")
+        .is_none());
     assert!(
         matches!(
             response.content.as_slice(),
             [ContentBlock::ProviderContent { value, .. }]
                 if value.string_at("/metadata/custom_provider_field").as_deref() == Some("preserved")
-                    && value.raw_source_at("/metadata/llm_client").as_deref() == Some("null")
+                    && value.raw_source_at("/metadata/llm_client").is_none()
         ),
         "provider content: {:#?}",
         response.content

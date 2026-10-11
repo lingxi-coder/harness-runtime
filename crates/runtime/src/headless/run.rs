@@ -757,6 +757,27 @@ async fn run_stream_json_print_inner(
                 }
                 Err(error) => Err(error),
             }
+        } else if argv.no_stream {
+            let prompt_source = Utf16JsonProjection::from(prompt.as_str());
+            if argv.prompt_images.is_empty() {
+                orchestrator::mod_prompt_origin::with_origin(
+                    json!({"kind":"sdk"}),
+                    runtime
+                        .orchestrator
+                        .run_turn_with_cancel(prompt_source, runtime.turn_cancel()),
+                )
+                .await
+            } else {
+                orchestrator::mod_prompt_origin::with_origin(
+                    json!({"kind":"sdk"}),
+                    runtime.orchestrator.run_turn_with_cancel_image_sources(
+                        prompt_source,
+                        argv.prompt_images.clone(),
+                        runtime.turn_cancel(),
+                    ),
+                )
+                .await
+            }
         } else {
             orchestrator::mod_prompt_origin::with_origin(
                 json!({"kind":"sdk"}),
@@ -1274,10 +1295,8 @@ async fn run_stream_json_input_loop_inner(
                         .orchestrator
                         .append_external_history_message(history.message)
                         .await;
-                    if argv.replay_user_messages {
-                        if history.replay_frame.is_some() {
-                            let _ = emit_projected_frame_queued(&outbound_tx, &history.frame_projection);
-                        }
+                    if argv.replay_user_messages && history.replay_frame.is_some() {
+                        let _ = emit_projected_frame_queued(&outbound_tx, &history.frame_projection);
                     }
                     continue;
                 }
@@ -1303,7 +1322,8 @@ async fn run_stream_json_input_loop_inner(
                                 content.clone(),
                             ))
                             .await;
-                        emit_replay_ack_queued(
+                        // Match the other history replay paths: this echo is best-effort.
+                        let _ = emit_replay_ack_queued(
                             &outbound_tx,
                             &uuid::Uuid::new_v4().to_string(),
                             &Value::String(content),
@@ -1352,7 +1372,11 @@ async fn run_stream_json_input_loop_inner(
                         &session_id_str,
                     );
                 }
-                emit_dedup_skip_terminal(&queue_lifecycle, uuid);
+                if let Err(error) = emit_dedup_skip_terminal(&queue_lifecycle, uuid) {
+                    last_turn_err =
+                        Some(orchestrator::OrchestratorError::Internal(error.to_string()));
+                    break;
+                }
                 let _ = queue_lifecycle.queued.take_current_turn_uuids();
                 continue;
             }
@@ -1402,7 +1426,12 @@ async fn run_stream_json_input_loop_inner(
 
         // msg_lifecycle_v1: the dequeued command's turn is now dispatching.
         if let Some(uuid) = turn.uuid.as_deref() {
-            queue_lifecycle.emit(uuid, crate::headless::queued_commands::LIFECYCLE_STARTED);
+            if let Err(error) =
+                queue_lifecycle.emit(uuid, crate::headless::queued_commands::LIFECYCLE_STARTED)
+            {
+                last_turn_err = Some(orchestrator::OrchestratorError::Internal(error.to_string()));
+                break;
+            }
         }
 
         // Phase 1: use cancel-aware turn entry point so `interrupt` can abort
@@ -1456,7 +1485,14 @@ async fn run_stream_json_input_loop_inner(
             cancel_bridge.abort();
             let _ = queue_lifecycle.queued.take_current_turn_uuids();
             if let Some(uuid) = turn.uuid.as_deref() {
-                queue_lifecycle.emit(uuid, crate::headless::queued_commands::LIFECYCLE_COMPLETED);
+                if let Err(error) = queue_lifecycle
+                    .emit(uuid, crate::headless::queued_commands::LIFECYCLE_COMPLETED)
+                {
+                    let _ = cancel_tx.send(false);
+                    last_turn_err =
+                        Some(orchestrator::OrchestratorError::Internal(error.to_string()));
+                    break;
+                }
             }
             let _ = cancel_tx.send(false);
             last_turn_err = None;
@@ -1510,24 +1546,37 @@ async fn run_stream_json_input_loop_inner(
         // and the next turn subscribes its own.
         cancel_bridge.abort();
         let consumed_uuids = queue_lifecycle.queued.take_current_turn_uuids();
+        let mut terminal_delivery_error = None;
         for uuid in consumed_uuids
             .iter()
             .filter(|uuid| turn.uuid.as_deref() != Some(uuid.as_str()))
         {
-            emit_turn_terminal_lifecycle(
+            if let Err(error) = emit_turn_terminal_lifecycle(
                 &queue_lifecycle,
                 Some(uuid),
                 &turn_result,
                 cancel_probe.is_cancelled(),
-            );
+            ) {
+                terminal_delivery_error = Some(error);
+                break;
+            }
+        }
+        if let Some(error) = terminal_delivery_error {
+            let _ = cancel_tx.send(false);
+            last_turn_err = Some(orchestrator::OrchestratorError::Internal(error.to_string()));
+            break;
         }
         publisher.publish(&turn_result, input_rx.len().await).await;
-        emit_turn_terminal_lifecycle(
+        if let Err(error) = emit_turn_terminal_lifecycle(
             &queue_lifecycle,
             turn.uuid.as_deref(),
             &turn_result,
             cancel_probe.is_cancelled(),
-        );
+        ) {
+            let _ = cancel_tx.send(false);
+            last_turn_err = Some(orchestrator::OrchestratorError::Internal(error.to_string()));
+            break;
+        }
         match turn_result {
             Ok(_) => {
                 // The SDK starts generation after queuing every successful
@@ -1594,7 +1643,13 @@ async fn run_stream_json_input_loop_inner(
     // Stream teardown (binary `Hkm`): every uuid still queue-resident gets a
     // terminal `discarded` lifecycle — covers both stdin EOF and `end_session`.
     for uuid in queue_lifecycle.queued.drain_for_discard() {
-        queue_lifecycle.emit(&uuid, crate::headless::queued_commands::LIFECYCLE_DISCARDED);
+        if let Err(error) =
+            queue_lifecycle.emit(&uuid, crate::headless::queued_commands::LIFECYCLE_DISCARDED)
+        {
+            last_turn_err.get_or_insert_with(|| {
+                orchestrator::OrchestratorError::Internal(error.to_string())
+            });
+        }
     }
 
     if let Some((cancel, mut handle)) = prompt_suggestion_task.take() {
@@ -1671,8 +1726,8 @@ fn turn_outcome_terminal_reason(outcome: &orchestrator::TurnOutcome) -> &'static
 pub(super) fn emit_dedup_skip_terminal(
     lifecycle: &crate::headless::queued_commands::QueueLifecycle,
     uuid: &str,
-) {
-    lifecycle.emit(uuid, crate::headless::queued_commands::LIFECYCLE_COMPLETED);
+) -> Result<(), crate::headless::stream_json_input::InputError> {
+    lifecycle.emit(uuid, crate::headless::queued_commands::LIFECYCLE_COMPLETED)
 }
 
 /// msg_lifecycle_v1 terminal for a finished turn's own uuid — the stream-json
@@ -1692,8 +1747,8 @@ fn emit_turn_terminal_lifecycle(
     uuid: Option<&str>,
     turn_result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
     aborted: bool,
-) {
-    let Some(uuid) = uuid else { return };
+) -> Result<(), crate::headless::stream_json_input::InputError> {
+    let Some(uuid) = uuid else { return Ok(()) };
     let state = match turn_result {
         Err(_) => crate::headless::queued_commands::LIFECYCLE_CANCELLED,
         Ok(outcome) => crate::headless::queued_commands::terminal_lifecycle_state(
@@ -1701,7 +1756,7 @@ fn emit_turn_terminal_lifecycle(
             aborted,
         ),
     };
-    lifecycle.emit(uuid, state);
+    lifecycle.emit(uuid, state)
 }
 
 /// Render the validated capture from the existing query driver in text mode.
@@ -1826,14 +1881,7 @@ async fn execute_structured_output(
     Ok(captured)
 }
 
-/// Dispatch a `/command [args]` line through the registry.
-pub async fn run_slash_command(input: &str, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
-    let input = Utf16JsonProjection::from(input);
-    run_slash_command_with_budget(&input, runtime, None, false, sink).await
-}
-
-/// Budget-aware internal form used by print mode. Keeping the public wrapper's
-/// original signature avoids breaking downstream callers of the CLI library.
+/// Dispatch a `/command [args]` line through the registry with the print-mode budget.
 async fn run_slash_command_with_budget(
     input: &Utf16JsonProjection,
     runtime: &Runtime,
@@ -2093,10 +2141,7 @@ mod result_publication_tests {
         assert_eq!(result["is_error"], true);
         assert_eq!(result["terminal_reason"], "api_error");
         assert_eq!(result["stop_reason"], "stop_sequence");
-        assert_eq!(
-            result["result"],
-            "API Error: 400 HEADLESS_LOCAL_PROVIDER_ERROR"
-        );
+        assert_eq!(result["result"], "400 HEADLESS_LOCAL_PROVIDER_ERROR");
         assert_eq!(result["api_error_status"], 400);
         let errors = runtime.execution_errors.lock().unwrap();
         assert_eq!(errors.len(), 1);
@@ -2246,6 +2291,67 @@ mod result_publication_tests {
             }
             stream.finish().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn no_stream_json_uses_batched_api_and_publishes_result() {
+        let root = tempfile::tempdir().unwrap();
+        let (output, receive) = tokio::io::duplex(128 * 1024);
+        let stream = Arc::new(StreamJsonStream::new_json_mode_placeholder(Output::new(
+            output,
+        )));
+        let mut runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
+        let batched = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![llm_runtime::ContentBlock::Text {
+                text: "batched answer".into(),
+                cache_control: None,
+                citations: None,
+            }],
+            Some("end_turn"),
+        )]));
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("streamed", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "streamed answer"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]));
+        runtime.inner.orchestrator = orchestrator::ConversationOrchestrator::into_shared(
+            orchestrator::ConversationOrchestrator::new_with_streaming(
+                Default::default(),
+                batched.clone(),
+                streaming.clone(),
+                Arc::new(tool_api::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                stream.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().join("project"),
+            )
+            .with_task_registry(runtime.task_registry.clone()),
+        );
+
+        let code = run_stream_json_print(
+            &Argv {
+                prompt: Some("say hello".into()),
+                no_stream: true,
+                ..Default::default()
+            },
+            &runtime,
+            stream.clone(),
+            permission::PermissionMode::Default,
+        )
+        .await;
+
+        assert_eq!(code, exit_codes::SUCCESS);
+        assert_eq!(batched.captured_msgs().await.len(), 1);
+        assert!(streaming.captured_calls().await.is_empty());
+        stream.finish().await.unwrap();
+        let mut lines = tokio::io::BufReader::new(receive).lines();
+        let result = next_result(&mut lines, &mut Vec::new()).await;
+        assert_eq!(result["type"], "result");
+        assert_eq!(result["result"], "batched answer");
     }
 
     #[tokio::test]

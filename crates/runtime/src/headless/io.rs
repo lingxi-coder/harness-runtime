@@ -6,15 +6,20 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
+/// An injected asynchronous byte stream used as headless session input.
 pub type Input = Pin<Box<dyn AsyncRead + Send>>;
 type Writer = Pin<Box<dyn AsyncWrite + Send>>;
 
+/// The first output-delivery failure retained by an [`Output`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputError {
+    /// The I/O error category reported by the writer.
     pub kind: io::ErrorKind,
+    /// Human-readable message captured when delivery failed.
     pub message: String,
 }
 impl OutputError {
+    /// Reconstruct an [`io::Error`] with the stored category and message.
     pub fn into_io_error(self) -> io::Error {
         io::Error::new(self.kind, self.message)
     }
@@ -32,9 +37,11 @@ pub struct Output {
     inner: Arc<OutputInner>,
 }
 impl Output {
+    /// Create a shared output writer that is not attached to a terminal.
     pub fn new(writer: impl AsyncWrite + Send + 'static) -> Self {
         Self::with_terminal(writer, false)
     }
+    /// Create a shared output writer with the host-supplied terminal status.
     pub fn with_terminal(writer: impl AsyncWrite + Send + 'static, terminal: bool) -> Self {
         Self {
             inner: Arc::new(OutputInner {
@@ -45,9 +52,11 @@ impl Output {
             }),
         }
     }
+    /// Returns the terminal status supplied when this writer was created.
     pub fn is_terminal(&self) -> bool {
         self.inner.terminal
     }
+    /// Returns the first recorded delivery failure, if any.
     pub fn error(&self) -> Option<OutputError> {
         self.inner
             .error
@@ -69,9 +78,11 @@ impl Output {
     pub fn abort_delivery(&self, reason: impl Into<String>) {
         self.record_error(&io::Error::new(io::ErrorKind::Interrupted, reason.into()));
     }
+    /// Wait until output delivery is cancelled by a writer failure or explicit abort.
     pub async fn delivery_cancelled(&self) {
         self.inner.delivery_stop.cancelled().await;
     }
+    /// Returns the recorded delivery error, or an interruption error if absent.
     pub fn delivery_error(&self) -> io::Error {
         self.error()
             .map(OutputError::into_io_error)
@@ -93,6 +104,7 @@ impl Output {
         }
         result
     }
+    /// Write bytes under the shared writer lock and retain any failure.
     pub async fn write_all(&self, bytes: &[u8]) -> io::Result<()> {
         self.deliver(async { self.inner.writer.lock().await.write_all(bytes).await })
             .await
@@ -106,24 +118,31 @@ impl Output {
         })
         .await
     }
+    /// Append a newline and write the complete record under one writer lease.
     pub async fn write_line(&self, line: &str) -> io::Result<()> {
         let mut bytes = line.as_bytes().to_vec();
         bytes.push(b'\n');
         self.write_record(&bytes).await
     }
+    /// Flush the shared writer and retain any delivery failure.
     pub async fn flush(&self) -> io::Result<()> {
         self.deliver(async { self.inner.writer.lock().await.flush().await })
             .await
     }
 }
+/// Host-provided input and output streams for a headless session.
 pub struct HeadlessIo {
+    /// Asynchronous input consumed by the selected headless input format.
     pub input: Input,
     /// Supplied by the host; print mode never waits for terminal input.
     pub input_is_terminal: bool,
+    /// Shared writer for user-facing or protocol output.
     pub stdout: Output,
+    /// Shared writer for diagnostics and recoverable input errors.
     pub stderr: Output,
 }
 impl HeadlessIo {
+    /// Wrap host-provided streams; input is marked as non-terminal.
     pub fn new(
         input: impl AsyncRead + Send + 'static,
         stdout: impl AsyncWrite + Send + 'static,

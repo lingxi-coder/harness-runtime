@@ -1813,22 +1813,19 @@ fn elicitation_property_valid(property: JsonValueView<'_>) -> bool {
 }
 
 fn validate_embedded_params(method: &str, params: Option<JsonValueView<'_>>) -> Result<(), String> {
+    // Native 2.1.295 accepted a roots/list string params value. The roots
+    // projection below omits non-object params before local dispatch, so keep
+    // that method-specific behavior without relaxing other embedded methods.
+    if method == "roots/list" {
+        return Ok(());
+    }
     let Some(params) = params else {
-        return if method == "roots/list" {
-            Ok(())
-        } else {
-            Err("params must be an object".into())
-        };
+        return Err("params must be an object".into());
     };
     if !is_object(params) {
-        return if method == "roots/list" {
-            Ok(())
-        } else {
-            Err("params must be an object".into())
-        };
+        return Err("params must be an object".into());
     }
     match method {
-        "roots/list" => optional_type(params, "_meta", "object"),
         "sampling/createMessage" => {
             let messages = required(params, "messages", "array", &["params"])?;
             let max_tokens = required(params, "maxTokens", "number", &["params"])?;
@@ -1938,7 +1935,7 @@ fn project_local_result(method: &str, result: &Utf16JsonProjection) -> Utf16Json
         "sampling/createMessage" => {
             let mut projected =
                 project_fields(result, &["role", "content", "_meta", "model", "stopReason"]);
-            if let Some(content) = result.get_property("content") {
+            if result.get_property("content").is_some() {
                 if let Ok(content) = result.subprojection("/content") {
                     let content = if content.array_len("").is_some() {
                         project_array(&content, project_source_content)
@@ -2030,8 +2027,12 @@ pub fn validate_input_request_schema(value: &Utf16JsonProjection) -> bool {
     let Some(root) = value.at_pointer("") else {
         return false;
     };
-    root.get_property("params").is_none_or(is_object)
-        && validate_embedded_request(&[], value).is_ok()
+    let params_have_schema_shape = root.get_property("params").is_none_or(|params| {
+        is_object(params)
+            && (value.string_at("/method") != Some("roots/list")
+                || params.get_property("_meta").is_none_or(is_object))
+    });
+    params_have_schema_shape && validate_embedded_request(&[], value).is_ok()
 }
 
 #[async_trait]

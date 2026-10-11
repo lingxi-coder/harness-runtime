@@ -186,6 +186,8 @@ pub(crate) async fn prepare(
         &sdk::RequestOptions {
             anthropic_request_kind,
             native_anthropic_endpoint_admission,
+            native_anthropic_request_context:
+                request.execution.native_anthropic_request_context.clone(),
             message_text_utf16_overrides: request.execution.message_json_string_overrides.clone(),
             fast_capability,
             authenticator: Some(sdk::client::options::RequestAuthenticator(authenticator)),

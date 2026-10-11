@@ -127,7 +127,10 @@ mod tests {
                 input["denylisted"].as_bool().unwrap(),
             );
             assert_eq!(
-                json!({"modern_lsn": actual.modern.wire(), "legacy_klt": actual.legacy.wire()}),
+                json!({
+                    "modern_lsn": serde_json::from_str::<Value>(&actual.modern.wire().to_json_string().unwrap()).unwrap(),
+                    "legacy_klt": serde_json::from_str::<Value>(&actual.legacy.wire().to_json_string().unwrap()).unwrap()
+                }),
                 case["expected"],
                 "{}",
                 case["name"]

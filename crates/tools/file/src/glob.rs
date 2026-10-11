@@ -39,7 +39,7 @@ use ignore::WalkBuilder;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 use tool_api::context::ToolUseContext;
@@ -747,6 +747,24 @@ fn search_resolution_error(path: &Path, error: SearchResolutionError) -> ToolErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
@@ -770,7 +788,7 @@ mod tests {
             "unexpected":"strip me"
         }));
         let parsed = tool.parse_output(&extra).await.unwrap();
-        assert_eq!(parsed.string_at("/filenames/0").as_deref(), Some("a.rs"));
+        assert_eq!(parsed.string_at("/filenames/0"), Some("a.rs"));
         assert!(parsed.get_property("unexpected").is_none());
         let invalid = crate::generated_result(
             &json!({"durationMs":1,"numFiles":0,"filenames":"wrong","truncated":false}),
@@ -978,7 +996,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            err.0.string_at("").as_deref(),
+            err.0.string_at(""),
             Some(
                 "Glob pattern cannot contain null bytes (\\0). Remove the null byte and try again."
             )
@@ -993,7 +1011,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            err.0.string_at("").as_deref(),
+            err.0.string_at(""),
             Some("Glob path cannot contain null bytes (\\0). Remove the null byte and try again.")
         );
         // `pattern` is found first when both are poisoned (JS `find`).
@@ -1250,8 +1268,8 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("symlink resolution changed"));
-        assert!(!error.to_string().contains("victim.rs"));
+        assert!(source_text(&error.model_facing_message()).contains("symlink resolution changed"));
+        assert!(!source_text(&error.model_facing_message()).contains("victim.rs"));
     }
 
     #[cfg(unix)]
@@ -1288,9 +1306,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            error.to_string(),
+            source_text(&error.model_facing_message()),
             format!(
-                "invalid input: Refusing to search {}: its symlink resolution changed after permission was checked",
+                "Refusing to search {}: its symlink resolution changed after permission was checked",
                 tmp.path().join("search-link").display()
             )
         );
@@ -1333,9 +1351,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            error.to_string(),
+            source_text(&error.model_facing_message()),
             format!(
-                "invalid input: Refusing to search {}: a path one of its Read deny rules is written through changed while the search was being prepared. Retry.",
+                "Refusing to search {}: a path one of its Read deny rules is written through changed while the search was being prepared. Retry.",
                 tmp.path().display()
             )
         );
@@ -1528,7 +1546,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("invalid glob pattern"));
+        assert!(source_text(&err.model_facing_message()).contains("invalid glob pattern"));
     }
 
     // --- ignore toggle (LINGXI_GLOB_NO_IGNORE) ---

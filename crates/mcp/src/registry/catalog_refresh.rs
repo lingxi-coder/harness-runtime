@@ -27,11 +27,18 @@ pub(super) fn modern_listen_request_params(
     version: &str,
     elicitation: lingxi_core::host::McpElicitationMode,
     notifications: serde_json::Map<String, serde_json::Value>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "_meta": crate::client::modern_meta(version, elicitation),
-        "notifications": notifications,
-    })
+) -> Utf16JsonProjection {
+    let notifications =
+        Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(notifications))
+            .expect("generated MCP listen notification filters are JSON");
+    Utf16JsonProjection::object(vec![
+        (
+            "_meta".into(),
+            crate::client::modern_meta(version, elicitation),
+        ),
+        ("notifications".into(), notifications),
+    ])
+    .expect("fixed modern listen request fields are unique")
 }
 
 pub(super) fn modern_listen_notifications_filter(
@@ -386,10 +393,11 @@ impl McpRegistry {
         else {
             return;
         };
-        let listen = match connection.start_call_unbounded(
-            "subscriptions/listen",
-            modern_listen_request_params(&negotiated.version, elicitation, filter),
-        ) {
+        let params = modern_listen_request_params(&negotiated.version, elicitation, filter)
+            .to_json_string()
+            .expect("generated modern listen request params are valid JSON");
+        let listen = match connection.start_call_raw_json_unbounded("subscriptions/listen", params)
+        {
             Ok(listen) => listen,
             Err(_) => {
                 #[cfg(test)]

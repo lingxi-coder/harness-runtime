@@ -676,7 +676,7 @@ async fn native_three_request_glob_reminders_and_tool_results_reach_real_sdk_and
             let row = projection(line);
             (row.string_at("/type") == Some("attachment")
                 && row.string_at("/attachment/type") == Some("total_tokens_reminder"))
-            .then(|| (line, row))
+            .then_some((line, row))
         })
         .collect::<Vec<_>>();
     assert_eq!(candidate_attachment_rows.len(), 3);

@@ -3,7 +3,9 @@
 //! the Desktop surface schema.
 
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+#[cfg(test)]
 use serde_json::Value;
+#[cfg(test)]
 use std::collections::HashSet;
 
 #[path = "mod_ui_source.rs"]
@@ -35,6 +37,7 @@ fn projection_unsigned(value: JsonValueView<'_>) -> Option<u64> {
 }
 
 /// Validate the exact `Client` parent-node schema pinned by Native 2.1.289.
+#[cfg(test)]
 pub(super) fn validate_client_parent_element(node: &Value) -> Result<(), String> {
     let Some(props) = node.get("props").and_then(Value::as_object) else {
         return Err("Client props must be an object".into());
@@ -89,6 +92,7 @@ pub(super) fn validate_client_parent_element(node: &Value) -> Result<(), String>
     Ok(())
 }
 
+#[cfg(test)]
 fn valid_client_percentage(value: &str) -> bool {
     let Some(digits) = value.strip_suffix('%') else {
         return false;
@@ -96,6 +100,7 @@ fn valid_client_percentage(value: &str) -> bool {
     (1..=3).contains(&digits.len()) && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+#[cfg(test)]
 fn validate_client_plain_data(value: &Value, label: &str) -> Result<(), String> {
     let mut values = 0usize;
     count_plain_data_values(value, 0, &mut values, label)?;
@@ -106,6 +111,7 @@ fn validate_client_plain_data(value: &Value, label: &str) -> Result<(), String> 
     Ok(())
 }
 
+#[cfg(test)]
 fn count_plain_data_values(
     value: &Value,
     depth: usize,
@@ -157,6 +163,7 @@ const DESKTOP_RENDER_COMPONENTS: &[&str] = &[
 /// Normalize the Desktop `ui_render` hook event through Native's Zod object
 /// schemas: unknown envelope and metadata keys are stripped, while arbitrary
 /// user-provided `props` keys remain intact.
+#[cfg(test)]
 pub(crate) fn normalize_ui_render_event(input: &Value) -> Result<Value, String> {
     let surface = input
         .get("surface")
@@ -208,6 +215,7 @@ pub(crate) fn normalize_ui_render_event(input: &Value) -> Result<Value, String> 
     Ok(normalized)
 }
 
+#[cfg(test)]
 fn validate_ui_render_event_shape(input: &Value) -> Result<(), String> {
     let surface = input
         .get("surface")
@@ -328,6 +336,7 @@ fn validate_ui_render_event_shape(input: &Value) -> Result<(), String> {
 /// Validate the bounded Desktop parent tree after UI hook rewriting. Client
 /// ownership stamping remains a separate call so the resolver chain can pass
 /// its previous-identity set explicitly.
+#[cfg(test)]
 pub(crate) fn validate_desktop_parent_tree(tree: &Value) -> Result<(), String> {
     let encoded = serde_json::to_string(tree).map_err(|error| error.to_string())?;
     if encoded.encode_utf16().count() > 100_000 {
@@ -338,10 +347,12 @@ pub(crate) fn validate_desktop_parent_tree(tree: &Value) -> Result<(), String> {
 }
 
 #[derive(Default)]
+#[cfg(test)]
 struct DesktopTreeBudget {
     nodes: usize,
 }
 
+#[cfg(test)]
 fn validate_desktop_node(
     node: &Value,
     depth: usize,
@@ -560,6 +571,7 @@ fn validate_desktop_node(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_parent_group(group: &Value) -> Result<(), String> {
     let Some(group) = group.as_object() else {
         return Err("Desktop UI group must contain a plugin".into());
@@ -575,6 +587,7 @@ fn validate_parent_group(group: &Value) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_parent_hover(
     kind: &str,
     hover: &Value,
@@ -704,6 +717,7 @@ fn validate_parent_hover(
     Ok(())
 }
 
+#[cfg(test)]
 fn subtree_has_hover(node: &Value) -> bool {
     let Some(object) = node.as_object() else {
         return false;
@@ -715,6 +729,7 @@ fn subtree_has_hover(node: &Value) -> bool {
             .is_some_and(|children| children.iter().any(subtree_has_hover))
 }
 
+#[cfg(test)]
 fn validate_parent_press(node: &serde_json::Map<String, Value>, kind: &str) -> Result<(), String> {
     let Some(press) = node.get("press").and_then(Value::as_object) else {
         return Err(format!("{kind} needs a private press identity"));
@@ -736,16 +751,19 @@ fn validate_parent_press(node: &serde_json::Map<String, Value>, kind: &str) -> R
     Ok(())
 }
 
+#[cfg(test)]
 fn keys_are_only(props: &serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
     props.keys().all(|key| allowed.contains(&key.as_str()))
 }
 
+#[cfg(test)]
 fn finite_number(value: &Value, minimum: f64, maximum: f64) -> bool {
     value
         .as_f64()
         .is_some_and(|number| number.is_finite() && minimum <= number && number <= maximum)
 }
 
+#[cfg(test)]
 fn safe_integer(value: &Value, minimum: i64, maximum: i64) -> bool {
     value
         .as_i64()
@@ -755,20 +773,24 @@ fn safe_integer(value: &Value, minimum: i64, maximum: i64) -> bool {
         })
 }
 
+#[cfg(test)]
 fn safe_unsigned_value(value: &Value) -> Option<u64> {
     value
         .as_u64()
         .filter(|number| *number <= MAX_SAFE_JS_INTEGER)
 }
 
+#[cfg(test)]
 fn safe_unsigned(value: &Value, minimum: u64) -> bool {
     safe_unsigned_value(value).is_some_and(|number| number >= minimum)
 }
 
+#[cfg(test)]
 fn valid_percent_or_dimension(value: &Value) -> bool {
     finite_number(value, 0.0, 10_000.0) || value.as_str().is_some_and(valid_client_percentage)
 }
 
+#[cfg(test)]
 fn valid_color(value: &Value) -> bool {
     value.as_str().is_some_and(|value| {
         (1..=40).contains(&value.len())
@@ -779,6 +801,7 @@ fn valid_color(value: &Value) -> bool {
     })
 }
 
+#[cfg(test)]
 fn validate_box_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
     const ALLOWED: &[&str] = &[
         "key",
@@ -937,6 +960,7 @@ fn validate_box_props(props: &serde_json::Map<String, Value>) -> Result<(), Stri
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_text_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
     const ALLOWED: &[&str] = &[
         "key",
@@ -994,6 +1018,7 @@ fn validate_text_props(props: &serde_json::Map<String, Value>) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_button_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
     const ALLOWED: &[&str] = &[
         "key",
@@ -1040,6 +1065,7 @@ fn validate_button_props(props: &serde_json::Map<String, Value>) -> Result<(), S
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_input_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
     const ALLOWED: &[&str] = &[
         "key",
@@ -1068,6 +1094,7 @@ fn validate_input_props(props: &serde_json::Map<String, Value>) -> Result<(), St
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_select_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
     const ALLOWED: &[&str] = &["key", "label", "options", "value", "autoFocus"];
     let Some(options) = props.get("options").and_then(Value::as_array) else {
@@ -1105,6 +1132,7 @@ fn validate_select_props(props: &serde_json::Map<String, Value>) -> Result<(), S
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_link_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
     const ALLOWED: &[&str] = &["href", "label"];
     if !keys_are_only(props, ALLOWED)
@@ -1123,6 +1151,7 @@ fn validate_link_props(props: &serde_json::Map<String, Value>) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_code_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
     const ALLOWED: &[&str] = &["source", "language", "path", "startLine", "format", "wrap"];
     if !keys_are_only(props, ALLOWED)
@@ -1147,6 +1176,7 @@ fn validate_code_props(props: &serde_json::Map<String, Value>) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_markdown_props(props: &serde_json::Map<String, Value>) -> Result<(), String> {
     const ALLOWED: &[&str] = &["key", "text", "dimColor", "pressableLinks"];
     if !keys_are_only(props, ALLOWED)
@@ -1429,10 +1459,13 @@ fn above_prompt_lines_at(tree: JsonValueView<'_>) -> Result<Vec<String>, String>
                 .get_property("children")
                 .and_then(JsonValueView::array_len)
                 .ok_or_else(|| "Text needs a children array".to_owned())?;
-            let props = tree
-                .get_property("props")
-                .and_then(JsonValueView::object_entries)
-                .ok_or_else(|| "Text props must be an object".to_owned())?;
+            let props = tree.get_property("props");
+            let props = match props {
+                Some(props) => props
+                    .object_entries()
+                    .ok_or_else(|| "Text props must be an object".to_owned())?,
+                None => Vec::new(),
+            };
             if !props.is_empty() {
                 return Err("Text props are outside the terminal AbovePrompt subset".into());
             }
@@ -1461,9 +1494,9 @@ fn above_prompt_lines_at(tree: JsonValueView<'_>) -> Result<Vec<String>, String>
                 .and_then(JsonValueView::code_units)
                 .map(String::from_utf16_lossy)
                 .ok_or_else(|| "Button needs a string label".to_owned())?;
-            let children = tree
+            let children_are_empty = tree
                 .get_property("children")
-                .and_then(JsonValueView::array_len);
+                .is_none_or(|children| children.array_len() == Some(0));
             let hotkey_is_valid = props.get_property("hotkey").is_none_or(|value| {
                 value.code_units().is_some_and(|units| {
                     units.len() == 1 && matches!(units[0], 0x30..=0x39 | 0x61..=0x7a)
@@ -1505,7 +1538,7 @@ fn above_prompt_lines_at(tree: JsonValueView<'_>) -> Result<Vec<String>, String>
                 || props
                     .get_property("autoFocus")
                     .is_some_and(|value| value.as_bool() != Some(true))
-                || children != Some(0)
+                || !children_are_empty
             {
                 return Err(
                     "Button props or children are outside the terminal AbovePrompt subset".into(),
@@ -1694,12 +1727,16 @@ mod tests {
             "type":"Box",
             "props":{"flexDirection":"row","columnGap":2},
             "children":[
-                {"type":"Text","props":{},"children":["Ready"]},
+                {"type":"Text","children":["Ready"]},
                 {"type":"Text","props":{},"children":["2 items"]}
             ]
         })))
         .unwrap();
         assert_eq!(lines, vec!["Ready  2 items"]);
+        assert!(above_prompt_lines(&source(&json!({
+            "type":"Text","props":[],"children":["invalid props"]
+        })))
+        .is_err());
     }
 
     #[test]

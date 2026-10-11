@@ -1176,6 +1176,8 @@ fn current_contract_index() -> ContractIndex {
     );
     put("ClientCommand::PluginCommand", "plugin_command");
     put("ClientCommand::PluginCommand.command", "PluginCommandDto");
+    put("ClientCommand::SkillAdmin", "skill_admin");
+    put("ClientCommand::SkillAdmin.command", "SkillAdminCommandDto");
     put(
         "ClientCommand::ResolveAppProfileProposal",
         "resolve_app_profile_proposal",
@@ -1429,6 +1431,14 @@ fn current_contract_index() -> ContractIndex {
     // ── CommandResultDto (commands.rs) ────────────────────────────────────
     put("CommandResultDto.display", "String");
     put("CommandResultDto.injected", "Option<String>");
+
+    // ── SkillAdminCommandDto (commands.rs) ────────────────────────────────
+    put("SkillAdminCommandDto.action", "String");
+    put("SkillAdminCommandDto.operation_id", "Option<u64>");
+    put("SkillAdminCommandDto.target", "Option<ClientTextDto>");
+    put("SkillAdminCommandDto.scope", "Option<String>");
+    put("SkillAdminCommandDto.revision", "Option<String>");
+    put("SkillAdminCommandDto.payload_json", "Option<String>");
 
     // ── ListingKindDto (commands.rs) ──────────────────────────────────────
     put("ListingKindDto::Sessions", "sessions");
@@ -3150,6 +3160,25 @@ fn current_contract_matches_index_or_version_bumped() {
     }
 }
 
+#[test]
+fn skill_admin_command_and_source_target_are_indexed() {
+    let index = current_contract_index();
+    assert_eq!(
+        index.get("ClientCommand::SkillAdmin").map(String::as_str),
+        Some("skill_admin")
+    );
+    assert_eq!(
+        index
+            .get("ClientCommand::SkillAdmin.command")
+            .map(String::as_str),
+        Some("SkillAdminCommandDto")
+    );
+    assert_eq!(
+        index.get("SkillAdminCommandDto.target").map(String::as_str),
+        Some("Option<ClientTextDto>")
+    );
+}
+
 /// Compile-time / structural anchor: constructing one value of EVERY contract
 /// type proves the index author saw every type. If a new DTO is added without a
 /// matching index line, this constructor still compiles but
@@ -3174,7 +3203,8 @@ fn contract_index_covers_every_dto() {
     };
     use client::protocol::commands::{
         AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto,
-        PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, WritableScopeDto,
+        PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, SkillAdminCommandDto,
+        WritableScopeDto,
     };
     use client::protocol::computer_access::{
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -3512,6 +3542,15 @@ fn contract_index_covers_every_dto() {
         session_duration_secs: 0,
         formatted: String::new(),
     };
+    let skill_admin_command = SkillAdminCommandDto {
+        action: "get_catalog".into(),
+        operation_id: None,
+        target: Some(ClientTextDto::default()),
+        scope: None,
+        revision: None,
+        payload_json: None,
+    };
+    let _skill_admin = skill_admin_command.clone();
     let _cmd: Vec<ClientCommand> = vec![
         ClientCommand::ListProviderCredentials {
             operation_id: 0,
@@ -3529,6 +3568,9 @@ fn contract_index_covers_every_dto() {
         },
         ClientCommand::ListModels,
         ClientCommand::RequestExit,
+        ClientCommand::SkillAdmin {
+            command: skill_admin_command,
+        },
         ClientCommand::GetConversationControls,
         ClientCommand::SetReasoningSelection {
             selection: ReasoningSelectionDto::Automatic,

@@ -82,7 +82,7 @@ async fn supervisor_retries_transient_commit_io_without_reexecuting_turn() {
 
 #[tokio::test]
 async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_identity() {
-    use crate::mobile::test_support::{FakeListener, HostFakePlatform, test_config};
+    use crate::mobile::test_support::{test_config, FakeListener, HostFakePlatform};
     use lingxi_core::host::PermissionGate as _;
     let temp = tempfile::tempdir().unwrap();
     let config = test_config(temp.path());
@@ -148,7 +148,10 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
     let request_task = tokio::spawn(async move {
         gate.check_with_worker(
             "Write",
-            &serde_json::json!({"file_path":"test.txt"}),
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"file_path":"test.txt"}),
+            )
+            .expect("test permission input is valid JSON"),
             Some(permission::gate::PromptWorker {
                 name: "cron-worker".into(),
                 team: None,
@@ -332,17 +335,15 @@ async fn explicit_manual_token_survives_busy_retry_and_blocks_terminal_replay() 
     .await
     .unwrap();
     assert!(matches!(completed.status, CronFireStatusDto::Ok));
-    assert!(
-        cron::claim_automation_run_now_at(
-            fs.as_ref(),
-            temp.path(),
-            "d12345678",
-            now + std::time::Duration::from_secs(60),
-            token
-        )
-        .await
-        .is_none()
-    );
+    assert!(cron::claim_automation_run_now_at(
+        fs.as_ref(),
+        temp.path(),
+        "d12345678",
+        now + std::time::Duration::from_secs(60),
+        token
+    )
+    .await
+    .is_none());
     let saved = read_cron_tasks(fs.as_ref(), temp.path()).await;
     let runs = &saved.tasks[0].automation.as_ref().unwrap().runs;
     assert_eq!(runs.len(), 1);
@@ -540,16 +541,14 @@ async fn cancelled_claim_settles_after_foreign_runtime_is_destroyed_without_exec
     .await
     .unwrap();
     assert!(!executed.load(std::sync::atomic::Ordering::Acquire));
-    assert!(
-        cron::claim_automation_run_now(
-            fs.as_ref(),
-            temp.path(),
-            "d12345678",
-            std::time::SystemTime::now()
-        )
-        .await
-        .is_some()
-    );
+    assert!(cron::claim_automation_run_now(
+        fs.as_ref(),
+        temp.path(),
+        "d12345678",
+        std::time::SystemTime::now()
+    )
+    .await
+    .is_some());
 }
 
 #[tokio::test]
@@ -646,11 +645,9 @@ async fn scheduled_empty_anchor_is_replayable_before_first_prompt() {
             .is_err()
     );
     std::fs::write(&path, "").unwrap();
-    assert!(
-        cron_replay_session(&home, &cwd.to_string_lossy(), id, fs)
-            .await
-            .is_err()
-    );
+    assert!(cron_replay_session(&home, &cwd.to_string_lossy(), id, fs)
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -692,11 +689,9 @@ async fn scheduled_existing_session_uses_its_persisted_mode() {
 fn only_naturally_completed_turns_are_successful() {
     use orchestrator::conversation::TurnOutcome;
     assert!(cron_scheduled_turn_outcome(TurnOutcome::EndTurn).is_ok());
-    assert!(
-        cron_scheduled_turn_outcome(TurnOutcome::Cancelled)
-            .unwrap_err()
-            .starts_with(cron::AUTOMATION_CANCELLED_PREFIX)
-    );
+    assert!(cron_scheduled_turn_outcome(TurnOutcome::Cancelled)
+        .unwrap_err()
+        .starts_with(cron::AUTOMATION_CANCELLED_PREFIX));
     let exhausted = cron_scheduled_turn_outcome(TurnOutcome::MaxTurns).unwrap_err();
     assert!(exhausted.contains("maximum turns"));
     assert!(!exhausted.starts_with(cron::AUTOMATION_CANCELLED_PREFIX));
@@ -844,13 +839,11 @@ async fn migration_marker_recovers_each_publication_boundary_without_duplicate_t
             serde_json::from_str(&migrated.automation_json.unwrap()).unwrap();
         assert_eq!(automation.status, cron::AutomationStatus::Active);
         assert_eq!(automation.model, "anthropic/claude-sonnet-4-6");
-        assert!(
-            cron::tasks_file::parse_automation_tasks(
-                &std::fs::read_to_string(cron::scheduled_tasks_path(root)).unwrap()
-            )
-            .tasks
-            .is_empty()
-        );
+        assert!(cron::tasks_file::parse_automation_tasks(
+            &std::fs::read_to_string(cron::scheduled_tasks_path(root)).unwrap()
+        )
+        .tasks
+        .is_empty());
         let marker: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(root.join(".lingxi/cron-v2-migration.json")).unwrap(),
         )

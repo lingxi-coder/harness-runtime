@@ -222,6 +222,18 @@ async fn exec_with(
     Arc::new(exec)
 }
 
+fn has_exact_visible_text(block: &ContentBlock, expected: &str) -> bool {
+    match block {
+        ContentBlock::Text { text, .. } => text == expected,
+        ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => text == expected && utf16_code_units.iter().copied().eq(expected.encode_utf16()),
+        _ => false,
+    }
+}
+
 #[tokio::test]
 async fn pre_tool_use_additional_context_is_a_separate_system_reminder_message() {
     let tool_use_id = ToolUseId::new();
@@ -299,10 +311,9 @@ async fn pre_tool_use_additional_context_is_a_separate_system_reminder_message()
     // as claude-code's `hook_additional_context` attachment renders it.
     let expected = "<system-reminder>\nPreToolUse:Echo hook additional context: USE THE NEW API\n</system-reminder>";
     let found_separate = s.history.iter().any(|m| match m {
-        ConversationMessage::User { content, .. } => content.iter().any(|b| {
-            matches!(
-            b, ContentBlock::Text { text, .. } if text == expected)
-        }),
+        ConversationMessage::User { content, .. } => {
+            content.iter().any(|b| has_exact_visible_text(b, expected))
+        }
         _ => false,
     });
     assert!(

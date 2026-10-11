@@ -1003,7 +1003,10 @@ mod tests {
                 .unwrap();
             assert_eq!(source_json(&result.data), json!({"mapped":"direct"}));
             assert_eq!(
-                result.model_content.as_ref().and_then(|text| text.string_at("")),
+                result
+                    .model_content
+                    .as_ref()
+                    .and_then(|text| text.string_at("")),
                 Some("child-mapped:direct")
             );
         }

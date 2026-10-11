@@ -332,17 +332,11 @@ mod tests {
         });
 
         assert_eq!(
-            provider.skill_entries().await[0]
-                .name
-                .string_at("")
-                .as_deref(),
+            provider.skill_entries().await[0].name.string_at(""),
             Some("live")
         );
         assert_eq!(
-            provider.skill_entries().await[0]
-                .name
-                .string_at("")
-                .as_deref(),
+            provider.skill_entries().await[0].name.string_at(""),
             Some("live")
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -351,10 +345,7 @@ mod tests {
     #[test]
     fn empty_entries_render_none() {
         assert_eq!(render_reminder(&[], Some(200_000)), None);
-        assert_eq!(
-            format_within_budget(&[], None).string_at("").as_deref(),
-            Some("")
-        );
+        assert_eq!(format_within_budget(&[], None).string_at(""), Some(""));
     }
 
     #[test]
@@ -376,14 +367,14 @@ mod tests {
             - debug: Debug a failing test\n\
             - loop: Run a prompt on a loop - for repeated tasks\n\
             </system-reminder>";
-        assert_eq!(got.string_at("").as_deref(), Some(want));
+        assert_eq!(got.string_at(""), Some(want));
     }
 
     #[test]
     fn when_to_use_is_appended_to_description() {
         let e = entry("x", "Base desc", Some("when X happens"), false);
         assert_eq!(
-            skill_description(&e).string_at("").as_deref(),
+            skill_description(&e).string_at(""),
             Some("Base desc - when X happens")
         );
     }

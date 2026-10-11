@@ -726,7 +726,7 @@ impl DurableTranscriptWriter {
         if line.is_empty() {
             return Ok(None);
         }
-        let mut actual = std::str::from_utf8(line)
+        let actual = std::str::from_utf8(line)
             .ok()
             .and_then(|line| Utf16JsonProjection::parse(line).ok())
             .ok_or(TranscriptWriterError::CorruptLine { offset })?;

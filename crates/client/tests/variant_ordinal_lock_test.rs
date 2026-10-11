@@ -1,77 +1,18 @@
-//! F1-09 companion — the POSITIONAL half of the version guard.
+//! Positional variant locks for the current Client protocol 23.0.0 baseline.
 //!
-//! # What this catches that `version_guard_test.rs` cannot
-//!
-//! `version_guard_test.rs` fingerprints the contract as an unordered map of
-//! `"<enum>::<Variant>::<field>" -> "<type>"`. That map is blind to ORDER, so
-//! `adding_a_variant_is_compatible` passes whether the new variant lands at the
-//! end of the enum or is spliced into the middle of it. On the JSON wire that
-//! really is the same thing — the variant is tagged by name (`#[serde(tag =
-//! "type")]`), so position is irrelevant.
-//!
-//! It is NOT the same thing on mobile. `#[derive(uniffi::Enum)]` encodes a
-//! variant as its 1-based DECLARATION INDEX; the generated Swift and Kotlin
-//! read that integer and switch on it. Insert a variant in the middle and every
-//! variant after it silently shifts. A client built against the old ordinals
-//! and a host built against the new ones both still advertise the same
-//! `CLIENT_PROTOCOL_VERSION`, the handshake accepts, and then the host decodes
-//! one command as an entirely different command. That is the exact rule
-//! `version.rs` writes down for 9.0.0: "The wire JSON is additive, but the
-//! mobile bindings are positional and must version-lock with the host."
-//!
-//! This is not hypothetical. On 2026-08-28, `AttachTurn` / `ResumeTurn` /
-//! `PauseTurn` were inserted at `ClientCommand` ordinals 2/3/4 (between
-//! `Cancel` and `ApprovePermission`), `TurnRecoveryState` / `TurnEventReplay`
-//! at `ClientEvent` ordinals 12/13, and `Skills` at `ClientEvent` ordinal 29 —
-//! shifting 48 and 45 pre-existing variants respectively — with
-//! `CLIENT_PROTOCOL_VERSION` left at `9.0.0` and `snapshots/blessed_major.txt`
-//! left at `9`. Every gate in the repo was green.
-//!
-//! # The rule this enforces
-//!
-//! The variants frozen below are the ones that existed when 9.0.0 was blessed
-//! (commit `391d89fff`, `client/src/protocol/{commands,events}.rs`). Each must
-//! still sit at exactly the index recorded here.
-//!
-//! - Appending a variant AFTER the frozen prefix: allowed, no bump. Do not add
-//!   it to the frozen lists — they are the 9.0.0 snapshot, not a mirror of the
-//!   current enum.
-//! - Inserting, removing, or reordering anything inside the frozen prefix: this
-//!   test goes red and NAMES the ordinal. Move the variant to the end instead.
-//!   If it genuinely cannot go at the end, that is a MAJOR
-//!   `CLIENT_PROTOCOL_VERSION` bump plus a re-bless of
-//!   `snapshots/blessed_major.txt` — and the frozen lists here are then
-//!   re-cut from the new major.
-//!
-//! # Why it parses the source instead of reading UniFFI metadata
-//!
-//! The metadata constants only exist under `--features uniffi`, which the
-//! desktop gates never enable — that blindness is what let the 2026-08-27
-//! metadata overflow and this ordinal shift both land. Declaration order in the
-//! source IS what the derive reads, so this file reads the same thing, and it
-//! runs under default features on every `cargo test -p client`.
+//! UniFFI encodes each enum variant by declaration index, so inserting, removing,
+//! or reordering a variant can change the mobile ABI even when JSON tags remain
+//! stable. The arrays below are an explicit re-cut of the complete command and
+//! event order in the current protocol macro invocations, reviewed against
+//! `CLIENT_PROTOCOL_VERSION = 23.0.0` and `snapshots/blessed_major.txt = 23`.
+//! They are not generated from a snapshot update. A later append remains
+//! compatible with this frozen prefix; any ordinal change requires a deliberate
+//! major-version re-cut.
 
 const COMMANDS_SRC: &str = include_str!("../src/protocol/commands.rs");
 const EVENTS_SRC: &str = include_str!("../src/protocol/events.rs");
 
-/// `ClientCommand`'s variants in declaration order as of the 9.0.0 bless
-/// (`391d89fff`), MINUS one row. 49 entries; ordinal N here is UniFFI ordinal
-/// N+1.
-///
-/// 🚨 PROVENANCE, stated as fact rather than as policy: the 9.0.0 bless froze
-/// 50 entries, with `ResolveAppRuntimeProfileSelection` at ordinal 38. Commit
-/// `77d1ec7fb` deleted that one row from this list. It was NOT a re-cut: at
-/// `77d1ec7fb^` and at `77d1ec7fb` alike `CLIENT_PROTOCOL_VERSION` reads
-/// `"10.0.0"` and `snapshots/blessed_major.txt` reads `10`, so nothing was
-/// bumped and nothing was re-blessed. Per this file's own rule above, dropping
-/// a row from the frozen prefix is a MAJOR bump plus a re-bless, and a re-cut
-/// then takes the FULL current order — not the old list minus a row. So this
-/// 49-entry list is a hybrid that has never been sanctioned; do not read it as
-/// precedent, and do not shrink it further to turn a red run green. Resolving
-/// it (restore ordinal 38, or re-cut both lists from the blessed 11.0.0 and
-/// rename them `_AT_11_0_0`) belongs with the owner of
-/// `client/src/protocol/{commands,events}.rs`.
-const CLIENT_COMMAND_ORDINALS_AT_9_0_0: &[&str] = &[
+const CLIENT_COMMAND_ORDINALS_AT_23_0_0: &[&str] = &[
     "SendPrompt",
     "Cancel",
     "ApprovePermission",
@@ -121,11 +62,45 @@ const CLIENT_COMMAND_ORDINALS_AT_9_0_0: &[&str] = &[
     "SetReasoningSelection",
     "SetFastMode",
     "ResolveAppDependencyChangeConfirmation",
+    "PluginCommand",
+    "SkillAdmin",
+    "McpAdmin",
+    "PluginAdmin",
+    "HookAdmin",
+    "UpdateSettings",
+    "UpdatePermissionRules",
+    "SetDefaultPermissionMode",
+    "UpdateWorkspaceDirectories",
+    "UpsertMcpServer",
+    "RemoveMcpServer",
+    "AudioResponse",
+    "AttachTurn",
+    "ResumeTurn",
+    "PauseTurn",
+    "SetTypescriptLspMode",
+    "ResolveAppRuntimeProfileSelection",
+    "ForkSession",
+    "TestProviderConnection",
+    "CronManage",
+    "TaskMessage",
+    "CronRunStarted",
+    "ScheduledRunTurn",
+    "CronRunCompleted",
+    "UpdateAudioCapabilities",
+    "UiAttach",
+    "UiDetach",
+    "UiRender",
+    "UiClientModule",
+    "UiMessage",
+    "UiClientFault",
+    "UiClientPress",
+    "UiPress",
+    "UiInput",
+    "UiSelect",
+    "UiClientOperation",
 ];
 
-/// `ClientEvent`'s variants in declaration order as of the 9.0.0 bless
-/// (`391d89fff`). 57 entries; ordinal N here is UniFFI ordinal N+1.
-const CLIENT_EVENT_ORDINALS_AT_9_0_0: &[&str] = &[
+const CLIENT_EVENT_ORDINALS_AT_23_0_0: &[&str] = &[
     "Error",
     "SystemNotice",
     "AskUserQuestion",
@@ -147,6 +122,7 @@ const CLIENT_EVENT_ORDINALS_AT_9_0_0: &[&str] = &[
     "SessionAgentTranscript",
     "SessionAgentUpdated",
     "SessionAgentMessage",
+    "SessionAgentTombstone",
     "SessionList",
     "ModelList",
     "ModelChanged",
@@ -183,82 +159,112 @@ const CLIENT_EVENT_ORDINALS_AT_9_0_0: &[&str] = &[
     "WorkflowResumed",
     "ConversationControlsChanged",
     "FastModeChanged",
+    "AudioRequest",
+    "TurnRecoveryState",
+    "TurnEventReplay",
+    "Skills",
+    "TypescriptLspModeChanged",
+    "SessionForked",
+    "ProviderConnectionTested",
+    "ConfigurationOperation",
+    "SkillCatalog",
+    "SkillDocument",
+    "McpConfigurationSnapshot",
+    "PluginCatalog",
+    "ProviderModelCatalog",
+    "CompactionStatus",
+    "CronResult",
+    "MessageRetracted",
+    "MessageIdentity",
+    "LoopWakeup",
+    "TaskLifecycle",
+    "OpenAiOAuthUpdated",
+    "CronRunBound",
+    "ScheduledRunFinished",
+    "CronRunRequested",
+    "ScheduledTaskFire",
+    "TaskListComplete",
+    "AudioCancel",
+    "AudioCapabilitiesChanged",
+    "QueryModelChange",
+    "AssistantBlockStart",
+    "AssistantBlockIdentity",
+    "Tombstone",
+    "RefusalContinuation",
+    "UserTranscriptRowIdentity",
+    "AssistantTranscriptRowUuids",
+    "UiLog",
+    "UiToast",
+    "UiStatus",
+    "UiControlResult",
+    "UiClientFrame",
+    "UiInvalidate",
+    "TerminalApiError",
+    "UiNotify",
+    "VisualizationBlock",
 ];
 
-/// Strip `//`-comments so brace counting is not thrown off by prose. The enum
-/// bodies here really do contain braces inside comments (`{media_type,
-/// base64}`), and a miscount would silently truncate the variant list — a
-/// parser that under-reads is a parser that passes for the wrong reason.
-fn strip_line_comment(line: &str) -> &str {
-    match line.find("//") {
-        Some(at) => &line[..at],
-        None => line,
-    }
-}
-
-/// Extract the top-level variant identifiers of `enum <name>` from Rust source,
-/// in declaration order.
+/// Extract variant names from a literal enum used by parser tests, or from the
+/// current `define_client_command!` / `define_client_event!` invocation.
 fn variants_in_declaration_order(src: &str, enum_name: &str) -> Vec<String> {
-    let header = format!("pub enum {enum_name} {{");
-    let start = src
-        .find(&header)
-        .unwrap_or_else(|| panic!("`{header}` not found in the source"))
-        + header.len();
-
-    let mut depth: i32 = 1;
-    let mut out = Vec::new();
-    for line in src[start..].lines() {
-        let code = strip_line_comment(line);
-
-        if depth == 1 {
-            let trimmed = code.trim_start();
-            let ident: String = trimmed
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if !ident.is_empty() && ident.starts_with(|c: char| c.is_ascii_uppercase()) {
-                let rest = trimmed[ident.len()..].trim_start();
-                if rest.starts_with('{')
-                    || rest.starts_with('(')
-                    || rest.starts_with(',')
-                    || rest.is_empty()
-                {
-                    out.push(ident);
-                }
-            }
-        }
-
-        for c in code.chars() {
-            match c {
-                '{' | '(' | '[' => depth += 1,
-                '}' | ')' | ']' => depth -= 1,
-                _ => {}
-            }
-        }
-        if depth <= 0 {
-            break;
-        }
+    let file = syn::parse_file(src).expect("protocol source is valid Rust syntax");
+    if let Some(item) = file.items.iter().find_map(|item| match item {
+        syn::Item::Enum(item) if item.ident == enum_name => Some(item),
+        _ => None,
+    }) {
+        return item
+            .variants
+            .iter()
+            .map(|variant| variant.ident.to_string())
+            .collect();
     }
-    out
+
+    let macro_name = match enum_name {
+        "ClientCommand" => "define_client_command",
+        "ClientEvent" => "define_client_event",
+        _ => panic!("no protocol macro registered for {enum_name}"),
+    };
+    let invocation = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Macro(item) if item.mac.path.is_ident(macro_name) => Some(&item.mac),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("`{macro_name}!` invocation not found"));
+    let enum_source = format!("enum {enum_name} {{ {} }}", invocation.tokens);
+    let item: syn::ItemEnum = syn::parse_str(&enum_source)
+        .unwrap_or_else(|e| panic!("parse {enum_name} macro body: {e}"));
+    item.variants
+        .iter()
+        .map(|variant| variant.ident.to_string())
+        .collect()
 }
 
-/// A SECOND, deliberately different reading of the same enum body, used only by
-/// `the_parser_reads_the_whole_enum_body` to catch a truncating
-/// `variants_in_declaration_order`.
-///
-/// It shares no logic with that function: instead of tracking brace depth it
-/// takes everything between the enum header and the first column-0 `}`, and
-/// treats a line indented by exactly four spaces and starting with an uppercase
-/// ASCII letter as a variant. `rustfmt` puts every top-level variant there and
-/// nothing else (fields sit at eight, doc comments start with `/`, attributes
-/// with `#`). A depth bug — an unbalanced brace inside a string or a comment —
-/// truncates the depth parser without touching this one, so the two disagree.
-fn variants_by_flat_scan(src: &str, enum_name: &str) -> Vec<String> {
+/// Find the body opening in a direct enum fixture or protocol macro invocation.
+fn variant_body_start(src: &str, enum_name: &str) -> usize {
+    let macro_name = match enum_name {
+        "ClientCommand" => Some("define_client_command"),
+        "ClientEvent" => Some("define_client_event"),
+        _ => None,
+    };
+    if let Some(macro_name) = macro_name {
+        let opener = format!("{macro_name}! {{");
+        if let Some(start) = src.find(&opener) {
+            return start + opener.len();
+        }
+    }
+
     let header = format!("pub enum {enum_name} {{");
-    let start = src
-        .find(&header)
+    src.find(&header)
         .unwrap_or_else(|| panic!("`{header}` not found in the source"))
-        + header.len();
+        + header.len()
+}
+
+/// A deliberately independent source-line scan used to verify that the AST
+/// parser did not omit a top-level variant from the literal enum or macro body.
+fn variants_by_flat_scan(src: &str, enum_name: &str) -> Vec<String> {
+    let start = variant_body_start(src, enum_name);
 
     let mut out = Vec::new();
     for line in src[start..].lines() {
@@ -294,7 +300,7 @@ fn assert_frozen_prefix(enum_name: &str, source_path: &str, actual: &[String], f
     assert!(
         actual.len() >= frozen.len(),
         "`{enum_name}` ({source_path}) now has {} variants, fewer than the {} frozen at the \
-         9.0.0 bless. A REMOVED variant shifts every later ordinal on the positional UniFFI \
+         23.0.0 bless. A REMOVED variant shifts every later ordinal on the positional UniFFI \
          mobile bindings and is a breaking change: it needs a MAJOR CLIENT_PROTOCOL_VERSION \
          bump and a re-bless of snapshots/blessed_major.txt.\nCurrent order: {actual:?}",
         actual.len(),
@@ -307,12 +313,12 @@ fn assert_frozen_prefix(enum_name: &str, source_path: &str, actual: &[String], f
             found,
             *expected,
             "`{enum_name}` ordinal {ordinal} (UniFFI ordinal {uniffi}) is `{found}`, but \
-             `{expected}` was frozen there at the 9.0.0 bless.\n\
+             `{expected}` was frozen there at the 23.0.0 bless.\n\
              \n\
              UniFFI encodes a variant as its DECLARATION INDEX, so a variant inserted, removed \
              or reordered ahead of ordinal {ordinal} shifts this and every later variant. An \
              old mobile client and a new host would both still advertise \
-             CLIENT_PROTOCOL_VERSION 9.0.0, the handshake would accept, and `{expected}` would \
+             CLIENT_PROTOCOL_VERSION 23.0.0, the handshake would accept, and `{expected}` would \
              decode as `{found}`.\n\
              \n\
              FIX: move the new variant to the END of `{enum_name}` in {source_path}. Appending \
@@ -327,44 +333,42 @@ fn assert_frozen_prefix(enum_name: &str, source_path: &str, actual: &[String], f
 }
 
 #[test]
-fn client_command_keeps_every_9_0_0_variant_at_its_ordinal() {
+fn client_command_keeps_every_23_0_0_variant_at_its_ordinal() {
     let actual = variants_in_declaration_order(COMMANDS_SRC, "ClientCommand");
     assert_frozen_prefix(
         "ClientCommand",
         "client/src/protocol/commands.rs",
         &actual,
-        CLIENT_COMMAND_ORDINALS_AT_9_0_0,
+        CLIENT_COMMAND_ORDINALS_AT_23_0_0,
     );
 }
 
 #[test]
-fn client_event_keeps_every_9_0_0_variant_at_its_ordinal() {
+fn client_event_keeps_every_23_0_0_variant_at_its_ordinal() {
     let actual = variants_in_declaration_order(EVENTS_SRC, "ClientEvent");
     assert_frozen_prefix(
         "ClientEvent",
         "client/src/protocol/events.rs",
         &actual,
-        CLIENT_EVENT_ORDINALS_AT_9_0_0,
+        CLIENT_EVENT_ORDINALS_AT_23_0_0,
     );
 }
 
-/// The parser is the gate. If it silently under-reads — stopping early on a
-/// brace inside a comment, or skipping a variant shape it does not recognise —
-/// both tests above would pass while reading a truncated list. Pin it against
-/// the real files by count, so a truncating parser is a red run rather than a
-/// green one.
+/// Cross-check the AST parser against an independent scan of the original
+/// macro invocation body, so a parser that omits a variant cannot pass by
+/// agreeing only with the frozen prefix.
 #[test]
 fn the_parser_reads_the_whole_enum_body() {
     let commands = variants_in_declaration_order(COMMANDS_SRC, "ClientCommand");
     let events = variants_in_declaration_order(EVENTS_SRC, "ClientEvent");
 
     assert!(
-        commands.len() >= CLIENT_COMMAND_ORDINALS_AT_9_0_0.len(),
+        commands.len() >= CLIENT_COMMAND_ORDINALS_AT_23_0_0.len(),
         "parsed only {} ClientCommand variants",
         commands.len()
     );
     assert!(
-        events.len() >= CLIENT_EVENT_ORDINALS_AT_9_0_0.len(),
+        events.len() >= CLIENT_EVENT_ORDINALS_AT_23_0_0.len(),
         "parsed only {} ClientEvent variants",
         events.len()
     );

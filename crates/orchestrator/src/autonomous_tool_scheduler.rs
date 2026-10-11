@@ -149,11 +149,28 @@ pub(crate) type ToolDispatch =
 #[derive(Clone)]
 pub(crate) struct ReadyToolMeta {
     pub(crate) id: ToolUseId,
+    /// Retains the captured presented identity alongside the ready dispatch
+    /// snapshot through scheduler result release; current result consumers use
+    /// the tracked tool row instead of rereading this snapshot field.
+    #[allow(dead_code)]
     pub(crate) presented_name: String,
+    /// Retains the captured canonical identity alongside the ready dispatch
+    /// snapshot through scheduler result release; current result consumers use
+    /// the tracked tool row instead of rereading this snapshot field.
+    #[allow(dead_code)]
     pub(crate) canonical_name: Option<String>,
     pub(crate) input: Utf16JsonProjection,
+    /// Retains the provider identity associated with this captured dispatch
+    /// until the ready record is released, matching the other snapshot fields.
+    #[allow(dead_code)]
     pub(crate) provider_id: Option<String>,
+    /// Retains the originating assistant identity with the captured dispatch
+    /// through result release; ownership is intentionally kept on the record.
+    #[allow(dead_code)]
     pub(crate) assistant_id: MessageId,
+    /// Retains the dispatch facts snapshot through ordered result release; the
+    /// current result consumer reads the tracked tool's separate facts copy.
+    #[allow(dead_code)]
     pub(crate) facts: Option<ToolUseDispatchFacts>,
     pub(crate) resolved_tool: Option<Arc<dyn Tool>>,
     pub(crate) concurrency_safe: bool,
@@ -179,7 +196,9 @@ impl From<&OwnedToolCall> for ReadyToolMeta {
 
 pub(crate) struct CompletedDispatch {
     pub(crate) meta: ReadyToolMeta,
-    pub(crate) context_state: Option<ToolInvocationContextState>,
+    /// Keep the context snapshot alive until this completed record is consumed
+    /// and dropped, preserving the scheduler's existing ownership/drop timing.
+    pub(crate) _context_state: Option<ToolInvocationContextState>,
     pub(crate) outcome: ToolOutcome,
 }
 
@@ -236,8 +255,6 @@ enum Command {
     ),
     Shutdown,
 }
-
-type RunningTask = Pin<Box<dyn Future<Output = (u64, usize, ToolOutcome)> + Send>>;
 
 pub(crate) struct ToolScheduler {
     tx: mpsc::UnboundedSender<Command>,
@@ -521,10 +538,6 @@ impl ToolScheduler {
             .map_err(|_| SchedulerStopped::Unavailable)??;
         self.lifecycle.apply_removal(&removal);
         Ok(removal)
-    }
-
-    pub(crate) fn is_agent_idle(&self) -> bool {
-        self.lifecycle.is_agent_idle()
     }
 }
 
@@ -1133,7 +1146,7 @@ impl Actor {
                     if let Some(outcome) = record.outcome.take() {
                         out.push(CompletedDispatch {
                             meta: record.meta.clone(),
-                            context_state: record.context_state.clone(),
+                            _context_state: record.context_state.clone(),
                             outcome,
                         });
                     }
@@ -1696,7 +1709,7 @@ mod tests {
     }
 
     fn seed_context_state() -> ToolInvocationContextState {
-        ToolInvocationContextState::new(Arc::new(ToolUseContext::model_seed("seed".into(), None)))
+        ToolInvocationContextState::new(Arc::new(ToolUseContext::model_seed("seed".into())))
     }
 
     fn context_model(state: &ToolInvocationContextState) -> String {
@@ -2109,7 +2122,7 @@ mod tests {
         let ready = bounded(scheduler.take_ready()).await.unwrap();
         assert_eq!(ready.len(), 1);
         assert_eq!(
-            context_model(ready[0].context_state.as_ref().unwrap()),
+            context_model(ready[0]._context_state.as_ref().unwrap()),
             "seed",
             "Tn sees the pre-layer context when no queued call caused processQueue to apply it"
         );
@@ -2156,7 +2169,7 @@ mod tests {
                 "route rejection cannot drop the tool result"
             );
             assert_eq!(
-                context_model(ready[0].context_state.as_ref().unwrap()),
+                context_model(ready[0]._context_state.as_ref().unwrap()),
                 "seed"
             );
             if !concurrency_safe {
@@ -2172,10 +2185,9 @@ mod tests {
 
     #[tokio::test]
     async fn alias_reselection_is_projected_even_when_canonical_pair_matches_frozen_context() {
-        let initial = ToolInvocationContextState::new(Arc::new(ToolUseContext::model_seed(
-            "shared-model".into(),
-            Some("provider-a".into()),
-        )));
+        let mut context = ToolUseContext::model_seed("shared-model".into());
+        context.options.model_profile = Some("provider-a".into());
+        let initial = ToolInvocationContextState::new(Arc::new(context));
         let resolver: ModelContextResolver = Arc::new(|previous, mut updated| {
             assert_eq!(updated.options.main_loop_model, "balanced");
             updated.options.main_loop_model = previous.options.main_loop_model.clone();
@@ -2241,10 +2253,9 @@ mod tests {
                 payload_with_modifiers(&call.id, vec![modifier])
             })
         });
-        let initial = ToolInvocationContextState::new(Arc::new(ToolUseContext::model_seed(
-            "shared-model".into(),
-            Some("provider-a".into()),
-        )));
+        let mut context = ToolUseContext::model_seed("shared-model".into());
+        context.options.model_profile = Some("provider-a".into());
+        let initial = ToolInvocationContextState::new(Arc::new(context));
         let (session_root, publication_lock) = test_session_generation();
         let mut scheduler = ToolScheduler::spawn(
             dispatch,
@@ -2284,7 +2295,7 @@ mod tests {
             release.lock().unwrap().insert(id.clone(), rx);
             release_senders.insert(id.clone(), tx);
         }
-        let mut shared_context = ToolUseContext::model_seed("seed".into(), None);
+        let mut shared_context = ToolUseContext::model_seed("seed".into());
         let request_history = vec![lingxi_core::types::ConversationMessage::user(
             MessageId::new(),
             "frozen shared request history".into(),
@@ -2805,11 +2816,11 @@ mod tests {
         let modifier = ToolInvocationContextModifier::new::<ToolUseContext, _>(tool_api_modifier);
         let shared = modifier.clone();
         assert!(modifier
-            .apply(ToolUseContext::model_seed("seed".into(), None))
+            .apply(ToolUseContext::model_seed("seed".into()))
             .is_ok());
         assert_eq!(applications.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(matches!(
-            shared.apply(ToolUseContext::model_seed("seed".into(), None)),
+            shared.apply(ToolUseContext::model_seed("seed".into())),
             Err(
                 lingxi_core::host::tool_invoker::ToolInvocationContextModifierError::AlreadyApplied
             )

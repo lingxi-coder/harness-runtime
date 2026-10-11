@@ -1,3 +1,5 @@
+//! Client protocol tests for exact UTF-16 text fields and their JSON roundtrips.
+
 use client::protocol::events::ClientEvent;
 use client::protocol::message::MessageBlockDto;
 use client::protocol::{commands::ClientCommand, text::ClientTextDto};
@@ -95,6 +97,92 @@ fn prompt_raw_members_keep_last_duplicate_and_optional_null_semantics() {
     )
     .is_err());
     assert!(serde_json::from_str::<ClientCommand>(r#"{"type":"send_prompt","text":"x"}"#).is_err());
+}
+
+#[test]
+fn skill_admin_target_preserves_exact_units_and_plain_string_wire_shape() {
+    let raw = r#"{"type":"skill_admin","command":{"action":"get_document","target":"command:re\ud800view"}}"#;
+    let outer: ClientCommand = serde_json::from_str(raw).expect("deserialize skill admin");
+    let ClientCommand::SkillAdmin { command } = &outer else {
+        panic!("expected SkillAdmin");
+    };
+    assert_eq!(
+        command.target.as_ref().unwrap().code_units,
+        [
+            "command:re".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            "view".encode_utf16().collect()
+        ]
+        .concat()
+    );
+    let encoded = serde_json::to_string(&outer).expect("serialize skill admin command");
+    assert!(
+        encoded.contains(r#""target":"command:re\ud800view""#),
+        "{encoded}"
+    );
+    assert_eq!(
+        serde_json::from_str::<ClientCommand>(&encoded).unwrap(),
+        outer
+    );
+
+    let paired: ClientCommand = serde_json::from_str(
+        r#"{"type":"skill_admin","command":{"action":"get_document","target":"rocket:\ud83d\ude80"}}"#,
+    )
+    .expect("deserialize paired skill identity");
+    let ClientCommand::SkillAdmin { command } = paired else {
+        panic!("expected SkillAdmin");
+    };
+    assert_eq!(
+        command.target.unwrap().code_units,
+        "rocket:🚀".encode_utf16().collect::<Vec<_>>()
+    );
+
+    let ordinary: ClientCommand = serde_json::from_str(
+        r#"{"type":"skill_admin","command":{"action":"get_document","target":"/skills/review"}}"#,
+    )
+    .expect("deserialize ordinary skill identity");
+    let ClientCommand::SkillAdmin { command } = ordinary else {
+        panic!("expected SkillAdmin");
+    };
+    assert_eq!(
+        command.target.unwrap().code_units,
+        "/skills/review".encode_utf16().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn skill_admin_target_keeps_optional_and_duplicate_member_policies() {
+    for raw in [
+        r#"{"type":"skill_admin","command":{"action":"get_catalog"}}"#,
+        r#"{"type":"skill_admin","command":{"action":"get_catalog","target":null}}"#,
+    ] {
+        let ClientCommand::SkillAdmin { command } =
+            serde_json::from_str(raw).expect("decode optional target")
+        else {
+            panic!("expected SkillAdmin");
+        };
+        assert!(command.target.is_none());
+    }
+
+    let duplicate_outer = r#"{"type":"skill_admin","command":{"action":"get_document","target":"first"},"command":{"action":"get_document","target":"last"}}"#;
+    let ClientCommand::SkillAdmin { command } =
+        serde_json::from_str(duplicate_outer).expect("outer envelope is last-member-wins")
+    else {
+        panic!("expected SkillAdmin");
+    };
+    assert_eq!(
+        command.target.unwrap().code_units,
+        "last".encode_utf16().collect::<Vec<_>>()
+    );
+
+    assert!(serde_json::from_str::<ClientCommand>(
+        r#"{"type":"skill_admin","command":{"action":"get_document","target":"first","target":"last"}}"#
+    )
+    .is_err());
+    assert!(serde_json::from_str::<ClientCommand>(
+        r#"{"type":"skill_admin","command":{"action":"get_document","target":7}}"#
+    )
+    .is_err());
 }
 
 #[test]

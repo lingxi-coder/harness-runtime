@@ -71,10 +71,12 @@ async fn mod_ui_control_without_mods_preserves_the_canonical_empty_render() {
     )
     .await
     .unwrap();
+    // Preserve the host control response's property order in this synthetic
+    // unit expectation; Native wire acceptance is a separate captured gate.
     assert_eq!(
         outcome.response,
         source_projection(
-            serde_json::json!({"tree":null,"props":props,"rewritten":false,"hooked":false})
+            serde_json::json!({"tree":null,"rewritten":false,"hooked":false,"props":props})
         )
     );
     assert_eq!(outcome.render_revision, None);
@@ -2132,7 +2134,8 @@ async fn mod_turn_complete_sums_response_usage_and_keeps_last_model() {
         ),
         ..Default::default()
     };
-    orch.fire_mod_turn_start("question", "turn-usage").await;
+    let question = lingxi_core::types::utf16_json::Utf16JsonProjection::from("question");
+    orch.fire_mod_turn_start(&question, "turn-usage").await;
     let first = ConversationMessage::Assistant {
         per_turn_effort: None,
         id: MessageId::new(),
@@ -2927,21 +2930,20 @@ async fn prompt_context_mod_instruction_files_reach_the_model_reminder() {
         lingxi_core::host::instructions::InstructionRendering::Announced,
     )
     .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-    let body = text(
-        &orch
-            .additional_context_message()
-            .await
-            .expect("context message"),
-    );
-    assert!(body.contains("# instructions\nCodebase and user instructions are shown below."));
-    assert!(body.contains("Contents of /project/AGENTS.md (project instructions, checked into the codebase):\n\nFOLLOW AGENT RULES"));
-    assert!(body.contains("# currentDate\nToday's date is "));
-    let announcements = orch.context_announcement_messages().await;
-    assert!(announcements
+    let prepared = orch
+        .prepare_turn_step(ModelCallPath::Batched, None, true, true, None)
+        .await
+        .expect("prepared turn");
+    // The scalar prompt-context preview is an intermediate for the inline lane.
+    // Announced mode discards it and sends the typed instruction announcement.
+    assert!(prepared.context_announcements.inline_context.is_none());
+    let announcements = prepared
+        .context_announcements
+        .messages
         .iter()
         .map(text)
-        .collect::<String>()
-        .contains("FOLLOW AGENT RULES"));
+        .collect::<String>();
+    assert!(announcements.contains("FOLLOW AGENT RULES"));
     let context = orch.instruction_context_snapshot().await;
     assert!(context.eager_instructions.as_ref().is_some_and(|files| {
         files

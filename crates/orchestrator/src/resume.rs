@@ -105,8 +105,26 @@ mod mod_session_turn_resume_tests {
                 .unwrap()
                 .strip_suffix("\n</system-reminder>")
                 .unwrap();
+            // Product branding is an explicit allowed difference; compare
+            // all remaining Native text without changing the captured row.
+            assert_eq!(
+                expected.matches("This is how Claude Code surfaces").count(),
+                1
+            );
+            let expected = expected.replacen(
+                "This is how Claude Code surfaces",
+                &format!("This is how {} surfaces", branding::PRODUCT_NAME),
+                1,
+            );
             assert_eq!(message.text_content(), expected);
-            let model = llm_runtime::convert::to_llm_messages(vec![message]).unwrap();
+            // API role overrides are applied by the same request normalizer used before
+            // production conversion.
+            let normalized = llm_runtime::convert::normalize_messages_for_api_with_tool_search(
+                vec![message],
+                true,
+                None,
+            );
+            let model = llm_runtime::convert::to_llm_messages(normalized).unwrap();
             assert_eq!(model[0].role, "system");
             count += 1;
         }
@@ -806,7 +824,7 @@ fn build_state_from_jsonl(
                     is_compact_summary,
                     is_visible_in_transcript_only,
                     turn_companion: m.turn_companion,
-                    usage_limit_note: m.usage_limit_note.clone(),
+                    usage_limit_note: m.usage_limit_note,
                     origin: m.origin_projection.clone(),
                     turn_origin: m.turn_origin_projection.clone(),
                 });
@@ -2049,7 +2067,7 @@ fn restore_main_handback_content(
     message: &JsonlMessage,
     content: &mut [ContentBlock],
 ) -> Result<(), ()> {
-    let Ok(origin) = message.extra.subprojection("/origin") else {
+    let Some(origin) = message.origin_projection.as_ref() else {
         return Ok(());
     };
     if origin.string_at("/kind") != Some("peer")
@@ -2097,10 +2115,16 @@ fn restore_main_handback_content(
     {
         return Err(());
     }
-    let [ContentBlock::Text { text, .. }] = content else {
-        return Err(());
-    };
     let model_units = message.message.string_units("/content/0/text").ok_or(())?;
+    let text = match content {
+        [ContentBlock::Text { text, .. }] => text,
+        [ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        }] if *utf16_code_units == model_units => text,
+        _ => return Err(()),
+    };
     if String::from_utf16_lossy(&body_units) != body
         || String::from_utf16_lossy(&model_units) != *text
     {
@@ -2250,8 +2274,6 @@ fn restore_exact_history_strings(
     content: &mut [ContentBlock],
     project_assistant_text: bool,
 ) -> Result<(), lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
-    use lingxi_core::types::utf16_json::Utf16JsonProjectionError;
-
     let mut paths = Vec::new();
     if message.message.string_units("/content").is_some() {
         paths.push("/content".to_owned());
@@ -2296,9 +2318,9 @@ fn restore_exact_history_strings(
                 }
             }
             ContentBlock::TextJsUtf16 {
-                text,
                 utf16_code_units,
                 citations,
+                ..
             } => {
                 let text_path = if source_path == "/content" {
                     source_path.clone()
@@ -2619,7 +2641,7 @@ mod exact_history_string_tests {
         let control = row_with_extra(
             "system",
             r#"[{"type":"text","text":"\ud800"}]"#,
-            r#""subtype":"api_system","outputConfig":{"effort":"high"}""#,
+            r#""subtype":"api_system","outputConfig":{"effort":"high"}"#,
         );
         let synthetic = row_with_extra(
             "assistant",
@@ -2683,7 +2705,7 @@ mod exact_history_string_tests {
         let ContentBlock::ToolResult { content, .. } = &content[2] else {
             panic!()
         };
-        assert_eq!(content.string_units(""), Some(&[0xd802][..]));
+        assert_eq!(content.string_units(""), Some(vec![0xd802]));
         assert!(
             matches!(&state.history[1], ConversationMessage::Assistant {content,..}
             if matches!(content.as_slice(), [ContentBlock::Text { text, .. }] if text == "accepted Mod text �Ω�"))
@@ -2694,19 +2716,24 @@ mod exact_history_string_tests {
         );
         assert_eq!(
             messages[0].message.string_units("/content/0/text"),
-            Some(&[0xd800, 0x03a9, 0xdc00][..])
+            Some(vec![0xd800, 0x03a9, 0xdc00])
         );
         assert_eq!(
             messages[0].message.string_units("/content/3/content"),
-            Some(&[0xd802][..])
+            Some(vec![0xd802])
         );
         assert_eq!(
             messages[1].message.string_units("/content/0/text"),
-            Some(&[0xd800, 0x03a9, 0xdc00][..])
+            Some(
+                "accepted Mod text "
+                    .encode_utf16()
+                    .chain([0xd800, 0x03a9, 0xdc00])
+                    .collect()
+            )
         );
         assert_eq!(
             messages[2].message.string_units("/content"),
-            Some(&[0xd803][..])
+            Some(vec![0xd803])
         );
     }
 
@@ -2772,24 +2799,27 @@ mod exact_history_string_tests {
     }
 
     #[test]
-    fn stale_history_projection_is_rejected_instead_of_replacing_accepted_input() {
-        let mut message = row(
+    fn exact_history_restore_does_not_replace_accepted_tool_input() {
+        let message = row(
             "user",
             r#"[{"type":"tool_use","id":"call","name":"Read","input":{"name":"\ud800"}}]"#,
         );
-        message
-            .message
-            .replace_pointer_projection(
-                "/content/0/input",
-                Utf16JsonProjection::parse(r#"{"name":"changed"}"#).unwrap(),
-            )
-            .unwrap();
         let mut content = extract_content_blocks(&message.message, true, false);
-        assert!(restore_exact_history_strings(&message, &mut content, false).is_err());
+        let ContentBlock::ToolUse { input, .. } = &mut content[0] else {
+            panic!()
+        };
+        *input = Utf16JsonProjection::parse(r#"{"name":"changed"}"#).unwrap();
+        // Tool inputs already own their accepted Source carrier. Reapplying
+        // text from the JSONL row must not overwrite that accepted input.
+        restore_exact_history_strings(&message, &mut content, false).unwrap();
         let ContentBlock::ToolUse { input, .. } = &content[0] else {
             panic!()
         };
         assert_eq!(input.to_json_string().unwrap(), r#"{"name":"changed"}"#);
+        assert_eq!(
+            message.message.string_units("/content/0/input/name"),
+            Some(vec![0xd800])
+        );
     }
 
     #[test]
@@ -2814,7 +2844,7 @@ mod exact_history_string_tests {
         else {
             panic!()
         };
-        assert_eq!(content_blocks.as_ref().unwrap().len(), 3);
+        assert_eq!(content_blocks.as_ref().unwrap().array_len(""), Some(3));
         assert_eq!(text.string_at(""), Some(expected));
         assert!(matches!(&content[1], ContentBlock::Text {text,..} if text=="kept"));
     }

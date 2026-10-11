@@ -168,9 +168,11 @@ impl StreamingApiClient for MockStreamingApiClient {
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
         request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
+        native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = tool_result_reminder_suffixes;
         let _ = request_dispatch_observer;
+        let _ = native_anthropic_request_context;
         let stream = self
             .stream(
                 model,

@@ -1,0 +1,13 @@
+{
+  "returncode": 1,
+  "launch_error": null,
+  "timed_out": false,
+  "interrupted_signal": null,
+  "native_process_launches": 1,
+  "elapsed_seconds": 0.637,
+  "max_native_seconds": 60,
+  "stdout_bytes": 1235,
+  "stdout_sha256": "aefe021e6303428b141ae07387783b7b2dad3538afee85332eec1cb8cb2a350c",
+  "stderr_bytes": 0,
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

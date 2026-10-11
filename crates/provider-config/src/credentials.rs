@@ -157,19 +157,18 @@ impl MultiCredentialProvider {
 
     /// The same selection serves request loading and redacted source inspection.
     async fn provider_key_selection(&self, credential_id: &str) -> (Option<Credential>, Source) {
-        let store_unavailable;
-        match self.credentials.get_provider_key(credential_id).await {
+        let store_unavailable = match self.credentials.get_provider_key(credential_id).await {
             Ok(Some(secret)) => {
                 return (
                     Some(Credential::ApiKey(secret.expose_secret().clone())),
                     Source::Stored,
                 );
             }
-            Ok(None) => store_unavailable = false,
+            Ok(None) => false,
             // Keychain unavailable (headless): fall through to env so env keys
             // still work; a truly-missing key surfaces as the per-turn 401.
-            Err(_) => store_unavailable = true,
-        }
+            Err(_) => true,
+        };
         if let Some(var) = self
             .sources
             .get(credential_id)

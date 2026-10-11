@@ -97,7 +97,11 @@ def main():
             if d == "harness-runtime" and c not in LEAVES:
                 violations.append("%s depends on the Harness composition root" % n)
                 continue
-            if n == "core" and d not in {"branding", "jsonrpc"}:
+            # json-projection is the dependency-neutral exact-UTF-16 JSON
+            # carrier re-exported by core's public source-preserving types.
+            # Keep this as a narrow foundation exception; other core edges
+            # remain forbidden here.
+            if n == "core" and d not in {"branding", "jsonrpc", "json-projection"}:
                 violations.append(
                     "core depends on %s — shared contracts must stay below domain and telemetry crates" % d
                 )

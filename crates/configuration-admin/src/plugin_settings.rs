@@ -30,7 +30,7 @@ use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use migrations::settings_update::{
     read_settings_source, update_settings_source_with_before_publish,
 };
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::plugin_policy;
 
@@ -259,12 +259,7 @@ fn enabled_dependents(
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter(|owner| {
-            enabled
-                .get_property(*owner)
-                .and_then(JsonValueView::as_bool)
-                == Some(true)
-        })
+        .filter(|owner| enabled.get_property(owner).and_then(JsonValueView::as_bool) == Some(true))
         .map(ToOwned::to_owned)
         .collect()
 }

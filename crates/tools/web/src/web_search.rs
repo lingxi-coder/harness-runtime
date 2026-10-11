@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
@@ -1051,6 +1051,7 @@ mod tests {
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
+    use serde_json::Value;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -1093,13 +1094,6 @@ mod tests {
     fn payload_text_is(payload: &JsonPayload, expected: &str) -> bool {
         payload.root_string_code_units().as_deref()
             == Some(expected.encode_utf16().collect::<Vec<_>>().as_slice())
-    }
-
-    fn assert_source_text(source: &Source, expected: &str) {
-        assert_eq!(
-            source.string_units(""),
-            Some(expected.encode_utf16().collect())
-        );
     }
 
     fn validate_generated_output(_source_schema: &Source, output: &Value) -> Result<(), String> {

@@ -332,7 +332,7 @@ fn registry_with(tool: Arc<dyn Tool>) -> Arc<ToolRegistry> {
 fn streaming_orch(
     registry: Arc<ToolRegistry>,
     api: Arc<MockStreamingApiClient>,
-) -> ConversationOrchestrator {
+) -> Arc<ConversationOrchestrator> {
     streaming_orch_with_hooks(registry, api, noop_hook_executor())
 }
 
@@ -340,9 +340,9 @@ fn streaming_orch_with_hooks(
     registry: Arc<ToolRegistry>,
     api: Arc<MockStreamingApiClient>,
     hooks: Arc<HookExecutorImpl>,
-) -> ConversationOrchestrator {
+) -> Arc<ConversationOrchestrator> {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
-    ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api,
@@ -352,7 +352,7 @@ fn streaming_orch_with_hooks(
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    )
+    ))
 }
 
 /// Turn 1 dispatches `tool_name` once; turn 2 ends with text.
@@ -374,6 +374,21 @@ fn two_turns(tu: ToolUseId, tool_name: &str) -> Arc<MockStreamingApiClient> {
         message_stop(),
     ];
     Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]))
+}
+
+fn text_block_matches(block: &ContentBlock, expected: &str) -> bool {
+    let expected_units = expected.encode_utf16().collect::<Vec<_>>();
+    match block {
+        ContentBlock::Text { text, .. } => {
+            text == expected && text.encode_utf16().eq(expected_units.iter().copied())
+        }
+        ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => text == expected && utf16_code_units == &expected_units,
+        _ => false,
+    }
 }
 
 /// A streaming turn whose tool returns `new_messages` replays those messages
@@ -404,7 +419,7 @@ async fn streaming_replays_tool_injected_new_messages_into_history() {
         .iter()
         .position(|m| {
             matches!(m, ConversationMessage::User { content, .. }
-                if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "EXPANDED-SKILL-PROMPT")))
+                if content.iter().any(|block| text_block_matches(block, "EXPANDED-SKILL-PROMPT")))
         })
         .expect("injected skill-prompt message present in streaming history");
 
@@ -425,8 +440,19 @@ async fn streaming_replays_tool_injected_new_messages_into_history() {
         }
     }
 
-    // The message AFTER the injected one is the next turn's assistant text.
-    let after = &s.history[injected_pos + 1];
+    // Runtime reminder rows may sit between the injected message and the next
+    // assistant request. In the transcript-bearing sequence, the next entry is
+    // still the assistant response.
+    let after = s.history[injected_pos + 1..]
+        .iter()
+        .find(|message| {
+            matches!(
+                message,
+                ConversationMessage::User { is_meta: false, .. }
+                    | ConversationMessage::Assistant { .. }
+            )
+        })
+        .expect("next transcript message after injection");
     assert!(
         matches!(after, ConversationMessage::Assistant { .. }),
         "the injected message must precede the next assistant message, got {after:?}"
@@ -468,8 +494,10 @@ async fn streaming_tool_without_new_messages_leaves_history_unchanged() {
 
     // No injected message text anywhere in history.
     assert!(
-        !s.history.iter().any(|m| matches!(m, ConversationMessage::User { content, .. }
-            if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "EXPANDED-SKILL-PROMPT")))),
+        !s.history
+            .iter()
+            .any(|m| matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|block| text_block_matches(block, "EXPANDED-SKILL-PROMPT")))),
         "a tool with no new_messages must not inject any history message"
     );
 
@@ -488,12 +516,40 @@ async fn streaming_tool_without_new_messages_leaves_history_unchanged() {
         "no sourceToolUseID key may reach the wire: {json}"
     );
 
-    // Exact history shape (byte-identical to a plain tool turn): user, assistant,
-    // tool_result user, assistant. No extra trailing user message.
+    // Exact execution transcript shape, ignoring this turn's ordinary
+    // system/reminder rows: user, assistant(tool_use), tool_result, assistant.
+    // A tool without new_messages contributes no extra non-meta user row.
+    let transcript_shape = s
+        .history
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::User {
+                content,
+                is_meta: false,
+                ..
+            } if content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. })) =>
+            {
+                Some("tool_result")
+            }
+            ConversationMessage::User { is_meta: false, .. } => Some("user"),
+            ConversationMessage::Assistant { content, .. }
+                if content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. })) =>
+            {
+                Some("assistant(tool_use)")
+            }
+            ConversationMessage::Assistant { .. } => Some("assistant"),
+            ConversationMessage::User { is_meta: true, .. }
+            | ConversationMessage::System { .. } => None,
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        s.history.len(),
-        4,
-        "expected [user, assistant, tool_result, assistant]: {:?}",
+        transcript_shape,
+        vec!["user", "assistant(tool_use)", "tool_result", "assistant"],
+        "expected the plain-tool transcript without injected tool messages: {:?}",
         s.history
     );
 }
@@ -532,7 +588,9 @@ async fn streaming_pre_tool_additional_context_is_a_separate_message_after_tool_
             for b in content {
                 if let ContentBlock::ToolResult { content, .. } = b {
                     assert!(
-                        !content.string_at("").is_some_and(|text| text.contains("STREAM-CTX")),
+                        !content
+                            .string_at("")
+                            .is_some_and(|text| text.contains("STREAM-CTX")),
                         "additionalContext must NOT be folded into the streaming tool_result: {content:?}"
                     );
                 }
@@ -547,7 +605,7 @@ async fn streaming_pre_tool_additional_context_is_a_separate_message_after_tool_
         .iter()
         .position(|m| {
             matches!(m, ConversationMessage::User { content, .. }
-                if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == ctx_text)))
+                if content.iter().any(|block| text_block_matches(block, ctx_text)))
         })
         .expect("standalone additionalContext message present in streaming history");
 

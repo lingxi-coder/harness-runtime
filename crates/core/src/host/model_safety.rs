@@ -61,16 +61,14 @@ pub fn bind_current_model_safety<F: std::future::Future>(
 }
 
 /// Bind an already captured origin to existing work before task transfer.
-pub fn bind_model_safety<F: std::future::Future>(
+pub async fn bind_model_safety<F: std::future::Future>(
     observer: Option<ModelSafetyObserver>,
     future: F,
-) -> impl std::future::Future<Output = F::Output> {
-    async move {
-        if let Some(observer) = observer {
-            scope_model_safety(observer, future).await
-        } else {
-            future.await
-        }
+) -> F::Output {
+    if let Some(observer) = observer {
+        scope_model_safety(observer, future).await
+    } else {
+        future.await
     }
 }
 
@@ -88,13 +86,16 @@ mod tests {
                 count.fetch_add(1, Ordering::Relaxed);
             })
         };
-        let work = scope_model_safety(observer(old.clone()), async {
-            bind_current_model_safety(async {
-                current_model_safety_observer()
-                    .unwrap()
-                    .record(ModelSafetyStop::Refusal);
-            })
-        })
+        let work = scope_model_safety(
+            observer(old.clone()),
+            std::future::poll_fn(|_| {
+                std::task::Poll::Ready(bind_current_model_safety(async {
+                    current_model_safety_observer()
+                        .unwrap()
+                        .record(ModelSafetyStop::Refusal);
+                }))
+            }),
+        )
         .await;
         scope_model_safety(observer(new.clone()), async {
             tokio::spawn(work).await.unwrap();

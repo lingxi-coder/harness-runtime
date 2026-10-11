@@ -4389,7 +4389,7 @@ mod once_and_status_message_tests {
     #[tokio::test]
     async fn post_hook_classifier_context_reaches_aggregate_capped() {
         let mut context_units = vec![0xD800];
-        context_units.extend(std::iter::repeat(u16::from(b'x')).take(2_500));
+        context_units.resize(context_units.len() + 2_500, u16::from(b'x'));
         struct ContextBuiltin {
             classifier_context: crate::response::ExactHookText,
         }
@@ -5070,6 +5070,7 @@ mod http_agent_dispatch_tests {
         assert!(expired.all_results[0]
             .1
             .stderr
+            .display
             .contains("agent executor not wired"));
     }
 }
@@ -5279,8 +5280,8 @@ mod prompt_dispatch_tests {
         let identity = attachment_identity(&pre_event());
         let result = HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: Some(HookResponse {
                 decision: Some(HookDecision::Defer),
@@ -5354,12 +5355,14 @@ mod prompt_dispatch_tests {
             child,
             child_selection.clone(),
             child_snapshot.clone(),
+            crate::executor::AgentStopMetadata::default(),
         );
         exec.publish_agent_prompt_transcript(
             session,
             other,
             other_selection.clone(),
             other_snapshot.clone(),
+            crate::executor::AgentStopMetadata::default(),
         );
         exec.execute_excluding_agent(
             HookEvent::SubagentStop {
@@ -5370,7 +5373,10 @@ mod prompt_dispatch_tests {
             HookContext {
                 session_id: session,
                 prompt_transcript: Some(snapshot("parent must not leak")),
-                model_selection: Some(parent_route),
+                model_selection: Some(crate::HookModelSelection {
+                    model: "parent-model".into(),
+                    model_profile: Some("parent-provider".into()),
+                }),
                 permission_mode: Some("plan".into()),
                 ..Default::default()
             },
@@ -5382,9 +5388,12 @@ mod prompt_dispatch_tests {
             calls[0].model.is_none(),
             "the default evaluator route is exercised"
         );
-        assert_eq!(calls[0].model_selection.as_ref(), Some(&child_route));
+        assert_eq!(calls[0].model_selection.as_ref(), Some(&child_selection));
         assert!(
-            calls[0].prompt.contains(r#""permission_mode":"plan""#),
+            calls[0]
+                .prompt
+                .string_at("")
+                .is_some_and(|prompt| prompt.contains(r#""permission_mode":"plan""#)),
             "the parent still owns the hook's base permission metadata"
         );
         assert_eq!(
@@ -5441,6 +5450,7 @@ mod prompt_dispatch_tests {
                 last_usage_tokens: 987,
                 ..Default::default()
             },
+            crate::executor::AgentStopMetadata::default(),
         );
 
         exec.execute_excluding_agent(
@@ -5518,7 +5528,10 @@ mod prompt_dispatch_tests {
         assert_eq!(recorded[0].model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(recorded[0].model_selection.as_ref(), Some(&selection));
         assert!(
-            !recorded[0].prompt.contains("child-model"),
+            recorded[0]
+                .prompt
+                .string_at("")
+                .is_some_and(|prompt| !prompt.contains("child-model")),
             "route authority stays outside the event payload"
         );
         drop(recorded);

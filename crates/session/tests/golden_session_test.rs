@@ -56,7 +56,8 @@ async fn writer_output_equals_single_turn_fixture() {
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
     let writer = JsonlWriter::new(path.clone(), fs);
 
-    let user = JsonlMessage {         message_type: "user".into(),
+    let user = JsonlMessage {
+        message_type: "user".into(),
         uuid: UUID1.into(),
         parent_uuid: None,
         session_id: SESSION1.into(),
@@ -71,7 +72,8 @@ async fn writer_output_equals_single_turn_fixture() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty JSON object"),
 
         attachment_projection: None,
         tool_use_result_projection: None,
@@ -81,7 +83,8 @@ async fn writer_output_equals_single_turn_fixture() {
         origin_projection: None,
         turn_origin_projection: None,
     };
-    let assistant = JsonlMessage {         message_type: "assistant".into(),
+    let assistant = JsonlMessage {
+        message_type: "assistant".into(),
         uuid: UUID2.into(),
         parent_uuid: Some(UUID1.into()),
         session_id: SESSION1.into(),
@@ -105,7 +108,8 @@ async fn writer_output_equals_single_turn_fixture() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty JSON object"),
 
         attachment_projection: None,
         tool_use_result_projection: None,
@@ -161,7 +165,8 @@ async fn writer_output_equals_multi_turn_fixture() {
     let writer = JsonlWriter::new(path.clone(), fs);
 
     let messages: Vec<JsonlMessage> = vec![
-        JsonlMessage {             message_type: "user".into(),
+        JsonlMessage {
+            message_type: "user".into(),
             uuid: UUID1.into(),
             parent_uuid: None,
             session_id: SESSION1.into(),
@@ -176,17 +181,19 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
 
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         },
-        JsonlMessage {             message_type: "assistant".into(),
+        JsonlMessage {
+            message_type: "assistant".into(),
             uuid: UUID2.into(),
             parent_uuid: Some(UUID1.into()),
             session_id: SESSION1.into(),
@@ -207,17 +214,19 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
 
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         },
-        JsonlMessage {             message_type: "user".into(),
+        JsonlMessage {
+            message_type: "user".into(),
             uuid: UUID3.into(),
             parent_uuid: Some(UUID2.into()),
             session_id: SESSION1.into(),
@@ -234,17 +243,19 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
 
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         },
-        JsonlMessage {             message_type: "assistant".into(),
+        JsonlMessage {
+            message_type: "assistant".into(),
             uuid: UUID4.into(),
             parent_uuid: Some(UUID3.into()),
             session_id: SESSION1.into(),
@@ -265,17 +276,19 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
 
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         },
-        JsonlMessage {             message_type: "user".into(),
+        JsonlMessage {
+            message_type: "user".into(),
             uuid: UUID5.into(),
             parent_uuid: Some(UUID4.into()),
             session_id: SESSION1.into(),
@@ -290,15 +303,16 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
 
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         },
     ];
 
@@ -362,7 +376,8 @@ async fn writer_output_equals_compacted_fixture() {
     summary_extra.insert("isCompactSummary".into(), Value::Bool(true));
 
     let messages: Vec<JsonlMessage> = vec![
-        JsonlMessage {             message_type: "user".into(),
+        JsonlMessage {
+            message_type: "user".into(),
             uuid: UUID1.into(),
             parent_uuid: None,
             session_id: SESSION1.into(),
@@ -377,17 +392,19 @@ async fn writer_output_equals_compacted_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
 
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         },
-        JsonlMessage {             message_type: "assistant".into(),
+        JsonlMessage {
+            message_type: "assistant".into(),
             uuid: UUID2.into(),
             parent_uuid: Some(UUID1.into()),
             session_id: SESSION1.into(),
@@ -408,17 +425,19 @@ async fn writer_output_equals_compacted_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
 
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         },
-        JsonlMessage {             message_type: "system".into(),
+        JsonlMessage {
+            message_type: "system".into(),
             uuid: UUID3.into(),
             // Chain reset: `parentUuid: null`, real parent in logicalParentUuid.
             parent_uuid: None,
@@ -440,12 +459,13 @@ async fn writer_output_equals_compacted_fixture() {
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         },
-        JsonlMessage {             message_type: "user".into(),
+        JsonlMessage {
+            message_type: "user".into(),
             uuid: UUID4.into(),
             parent_uuid: Some(UUID3.into()),
             session_id: SESSION1.into(),
@@ -467,10 +487,10 @@ async fn writer_output_equals_compacted_fixture() {
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         },
     ];
 

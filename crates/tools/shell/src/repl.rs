@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -307,6 +307,24 @@ mod tests {
     }
 
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
@@ -404,7 +422,7 @@ mod tests {
             )
             .await;
         assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("unsupported"));
+        assert!(source_text(&r.unwrap_err().0).contains("unsupported"));
     }
 
     #[tokio::test]

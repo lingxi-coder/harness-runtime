@@ -166,7 +166,7 @@ mod tests {
             Some(4)
         );
         let bytes = std::fs::read_to_string(root.join("skill_usage.json")).unwrap();
-        assert!(bytes.contains(r#"p\\ud800"#));
+        assert!(bytes.contains(r#"p\ud800"#));
         std::fs::remove_dir_all(root).ok();
     }
 }

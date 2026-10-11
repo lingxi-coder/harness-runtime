@@ -711,12 +711,11 @@ mod tests {
         );
         // Merely reading startup recovery views does not rewrite live states.
         let view = core.recover_session(id).await.unwrap();
-        assert!(
-            view.executions
-                .iter()
-                .any(|r| r.execution_id() == in_flight.execution_id()
-                    && r.stage == ToolExecutionStage::OutcomeUnknown)
-        );
+        assert!(view
+            .executions
+            .iter()
+            .any(|r| r.execution_id() == in_flight.execution_id()
+                && r.stage == ToolExecutionStage::OutcomeUnknown));
         assert_eq!(
             view.receipts[0].stage,
             NativeReceiptStage::SubmissionUnknown
@@ -951,12 +950,11 @@ mod tests {
         });
         drop(rx);
         core.flush().await.unwrap();
-        assert!(
-            core.journal()
-                .find_event_durable(&record.event_id())
-                .unwrap()
-                .is_some()
-        );
+        assert!(core
+            .journal()
+            .find_event_durable(&record.event_id())
+            .unwrap()
+            .is_some());
         core.close_and_drain().await.unwrap();
         worker.await.unwrap();
         drop(core);
@@ -1140,14 +1138,12 @@ mod tests {
         let recovery = reopened.recover_session(id).await.unwrap();
         assert_eq!(recovery.receipts, vec![blocked.clone()]);
         assert!(recovery.receipts[0].receipt.media_refs.is_empty());
-        assert!(
-            recovery.executions[0]
-                .output
-                .as_ref()
-                .unwrap()
-                .media_refs
-                .is_empty()
-        );
+        assert!(recovery.executions[0]
+            .output
+            .as_ref()
+            .unwrap()
+            .media_refs
+            .is_empty());
         assert!(reopened.tool_projection_pending());
         // CannotResume is absorbing even if a caller keeps the original binding.
         let mut illegal = blocked;
@@ -1191,11 +1187,10 @@ mod tests {
         let mut terminal = started(id);
         terminal.stage = ToolExecutionStage::Terminal;
         terminal.outcome = Some(ToolExecutionOutcome::Succeeded);
-        assert!(
-            core.state
-                .persist_tool_event(SessionEvent::ToolExecution(terminal))
-                .is_err()
-        );
+        assert!(core
+            .state
+            .persist_tool_event(SessionEvent::ToolExecution(terminal))
+            .is_err());
         let mut value = serde_json::to_value(started(id)).unwrap();
         value["unexpected"] = serde_json::json!(true);
         assert!(decode_session_event(serde_json::json!({"ToolExecution":value})).is_err());

@@ -1269,7 +1269,7 @@ fn safe_integer_range(value: JsonValueView<'_>, minimum: i64, maximum: i64) -> b
 
 fn safe_unsigned_value(value: JsonValueView<'_>) -> Option<u64> {
     let number = value.as_number()?;
-    (number.is_finite() && number.fract() == 0.0 && number >= 0.0 && number <= MAX_SAFE_JS_INTEGER)
+    (number.is_finite() && number.fract() == 0.0 && (0.0..=MAX_SAFE_JS_INTEGER).contains(&number))
         .then_some(number as u64)
 }
 

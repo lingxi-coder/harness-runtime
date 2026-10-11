@@ -201,7 +201,7 @@ async fn assert_diagnostics(streaming: bool) {
         let previous_user = &previous_body["messages"][2]["content"];
         let current_user = &current_body["messages"][2]["content"];
 
-        assert_eq!(previous_user[0]["text"], "continue\n");
+        assert_eq!(previous_user[0]["text"], "continue");
         assert!(previous_user[1]["text"]
             .as_str()
             .unwrap()
@@ -325,7 +325,7 @@ impl lingxi_core::host::instructions::InstructionContextProvider for ChildInstru
         };
         let body = self.0.lock().unwrap().clone();
         Ok(InstructionContext {
-            user_context: BTreeMap::from([("claudeMd".into(), body.clone())]),
+            user_context: BTreeMap::from([("instructions".into(), body.clone())]),
 
             eager_instructions: Some(vec![InstructionFile {
                 path: "/managed/LINGXI.md".into(),
@@ -414,7 +414,7 @@ async fn child_announcements_reach_prepared_wire_and_cold_resume_reloads_policy(
         .unwrap();
     definition.agent_type = "policy-worker".into();
     definition.source = agent::AgentSource::Plugin;
-    definition.omit_claude_md = true;
+    definition.omit_instructions = true;
 
     definition.max_turns = 1;
     let spawner = agent::PoolSubagentSpawner::new(Arc::new(agent::StateMachinePool::new(

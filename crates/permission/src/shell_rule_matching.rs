@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn source_wildcard_uses_exact_utf16_units_and_native_operators() {
-        let lone_pattern = [0xd800, b'.' as u16, b'r' as u16, b's' as u16];
+        let lone_pattern = [b'/' as u16, 0xd800, b'.' as u16, b'r' as u16, b's' as u16];
         let lone_value = [b'/' as u16, 0xd800, b'.' as u16, b'r' as u16, b's' as u16];
         let other_value = [b'/' as u16, 0xd801, b'.' as u16, b'r' as u16, b's' as u16];
         assert!(match_wildcard_pattern_utf16(&lone_pattern, &lone_value));

@@ -615,6 +615,7 @@ async fn physical_request_history_and_raw_row_facts_reach_the_tool_context() {
         content: vec![first_tool.clone(), second_tool],
         stop_reason: Some("tool_use".into()),
         resumable: None,
+        per_turn_effort: None,
     };
     let seen_context = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ToolRegistry::new();

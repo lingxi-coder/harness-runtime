@@ -108,6 +108,22 @@ struct CoordinatorFixture {
 /// behind a `MockSink`. `register_handler` takes `&mut self`, so the handler is
 /// registered before the registry is `Arc`-wrapped — mirroring `build()`'s
 /// pre-Arc registration.
+fn scripted_model_resolution_context(
+    model: &str,
+    profile: Option<&str>,
+) -> Result<agent::ModelResolutionContext, agent::ModelResolutionError> {
+    Ok(agent::ModelResolutionContext {
+        route: agent::ModelRouteFacts {
+            model: model.to_owned(),
+            profile: profile.map(str::to_owned),
+            provider: Some(agent::ModelProviderKind::Other),
+            protocol: Some("scripted-test".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+}
+
 fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture {
     let tmp = tempfile::tempdir().unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(tmp.path().to_path_buf()));
@@ -144,7 +160,11 @@ fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture 
         output_manager.clone(),
         api.clone() as Arc<dyn agent::api::SubagentApiClient>,
     )
-    .with_status_sink(status_sink as Arc<dyn tasks::handlers::TaskStatusSink>);
+    .with_status_sink(status_sink as Arc<dyn tasks::handlers::TaskStatusSink>)
+    // Admission now requires the task to carry its resolved route. The fixture
+    // uses a deterministic test route because ScriptedApiClient is not provider-backed.
+    .with_model_resolution_context_provider(Arc::new(scripted_model_resolution_context))
+    .with_default_model("scripted");
 
     let mut registry = TaskRegistry::new(runtime, fs, output_manager);
     registry.register_handler(TaskType::InProcessTeammate, Arc::new(teammate_handler));
@@ -587,7 +607,7 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
         tool_ui::send_message::truncate_preview,
     )
     .with_spawn_seam(fixture.spawn_seam.clone());
-    let mut context = tool_api::ToolUseContext::model_seed("scripted".into(), None);
+    let mut context = tool_api::ToolUseContext::model_seed("scripted".into());
     context.agent_id = Some(worker.agent_id);
     let (progress, _events) = tool_api::progress_channel();
     let error = approval
@@ -603,7 +623,10 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
         )
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("Remove teammate membership"));
+    assert!(error
+        .model_facing_message()
+        .string_at("")
+        .is_some_and(|message| message.contains("Remove teammate membership")));
     assert_eq!(
         fixture
             .registry
@@ -622,24 +645,12 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
     );
     assert_eq!(std::fs::read(&task_path).unwrap(), task_before);
     let initial = mailbox.drain();
-    assert!(initial.iter().any(|message| {
-        message
-            .content
-            .string_at("")
-            .and_then(|source| {
-                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok()
-            })
-            .is_some_and(|frame| frame.string_at("/type") == Some("shutdown_approved"))
-    }));
-    assert!(!initial.iter().any(|message| {
-        message
-            .content
-            .string_at("")
-            .and_then(|source| {
-                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok()
-            })
-            .is_some_and(|frame| frame.string_at("/type") == Some("teammate_terminated"))
-    }));
+    assert!(initial
+        .iter()
+        .any(|message| message.content.string_at("/type") == Some("shutdown_approved")));
+    assert!(!initial
+        .iter()
+        .any(|message| message.content.string_at("/type") == Some("teammate_terminated")));
     std::fs::remove_dir(&config_path).unwrap();
     std::fs::write(&config_path, config_before).unwrap();
 
@@ -698,7 +709,8 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
         .await
         .unwrap_err();
     assert!(error
-        .to_string()
-        .contains("is not running (status: killed)"));
+        .model_facing_message()
+        .string_at("")
+        .is_some_and(|message| message.contains("is not running (status: killed)")));
     assert!(mailbox.drain().is_empty());
 }

@@ -214,7 +214,7 @@ impl ConversationOrchestrator {
         let Some(command_units) = input.string_units("/command") else {
             return input;
         };
-        let Some(immediate) = input
+        let Some(_) = input
             .at_pointer("/immediate")
             .and_then(|value| value.as_bool())
         else {
@@ -503,7 +503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_command_description_is_evicted_without_overwriting_source() {
+    async fn thrown_command_description_hook_falls_through_to_cached_source() {
         let dir = tempfile::tempdir().unwrap();
         let module = dir.path().join("describe-command.js");
         std::fs::write(
@@ -543,16 +543,60 @@ mod tests {
         let input = projection(
             r#"{"command":"retry","description":"base","isHidden":false,"immediate":false,"provider":{"plugin":"engine"}}"#,
         );
-        assert!(orch
-            .apply_mod_command_description(input.clone())
-            .await
-            .semantically_eq(&input));
-        assert_eq!(
-            orch.apply_mod_command_description(input)
-                .await
-                .string_at("/description"),
-            Some("retry-ok")
+        let first = orch.apply_mod_command_description(input.clone()).await;
+        assert!(first.semantically_eq(&input));
+
+        let second = orch.apply_mod_command_description(input.clone()).await;
+        assert!(second.semantically_eq(&input));
+        assert_eq!(second.string_at("/description"), Some("base"));
+    }
+
+    #[tokio::test]
+    async fn caught_command_description_result_is_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("describe-command-catch.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              let catches = 0;
+              on('command.describe', { command: 'caught' }, () => {
+                throw new Error('primary hook failed');
+              }).catch(($, e) => ({ ...e, description: `caught:${++catches}` }));
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load(
+            "describe-caught-cache",
+            dir.path(),
+            &module,
+            Ujp::parse("{}").unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_hook_registry(registry);
+        let input = projection(
+            r#"{"command":"caught","description":"base","isHidden":false,"immediate":false,"provider":{"plugin":"engine"}}"#,
         );
+
+        let first = orch.apply_mod_command_description(input.clone()).await;
+        assert_eq!(first.string_at("/description"), Some("caught:1"));
+        let second = orch.apply_mod_command_description(input).await;
+        assert!(second.semantically_eq(&first));
+        assert_eq!(second.string_at("/description"), Some("caught:1"));
     }
 
     #[tokio::test]

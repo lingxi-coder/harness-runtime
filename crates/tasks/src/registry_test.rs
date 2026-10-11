@@ -2867,7 +2867,7 @@ async fn seam_send_message_keeps_exact_units_for_retained_receivers() {
     let seam: &dyn TeamSpawnSeam = &registry;
     seam.send_message(task_id, source.clone()).await.unwrap();
     let delivered = receiver.0.lock().unwrap();
-    assert_eq!(delivered.as_slice(), &[source.clone()]);
+    assert_eq!(delivered.as_slice(), std::slice::from_ref(&source));
     assert_eq!(
         delivered[0].string_units(""),
         Some(
@@ -8256,10 +8256,19 @@ async fn command_monitor_registry_reports_shell_kind_and_retains_stop_handler() 
     let (_dir, mut registry) = make_registry();
     let handler = RecordingHandler::new(TaskType::Monitor, "bmonitor1");
     registry.register_handler(TaskType::Monitor, handler.clone());
+    let command_units = "tail -f build.log"
+        .encode_utf16()
+        .chain([0xd800])
+        .collect::<Vec<_>>();
+    let command = Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&command_units),
+        command_units.clone(),
+    )
+    .unwrap();
     let id = TaskRegistryHandle::spawn_monitor(
         &registry,
         MonitorRegistration {
-            command: "tail -f build.log".into(),
+            command,
             description: "build".into(),
             persistent: true,
             ..Default::default()
@@ -8277,8 +8286,8 @@ async fn command_monitor_registry_reports_shell_kind_and_retains_stop_handler() 
         record
             .command
             .as_ref()
-            .and_then(|value| value.string_at("")),
-        Some("tail -f build.log")
+            .and_then(|value| value.string_units("")),
+        Some(command_units)
     );
     registry.kill(&id).await.unwrap();
     assert_eq!(*handler.killed.lock().unwrap(), vec![id]);
@@ -10934,6 +10943,7 @@ async fn terminal_agent_wait_uses_native_transcript_and_claims_completion() {
     state.agent_id = agent_id;
     let settled_messages = vec![
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "transcript answer".into(),
@@ -10944,6 +10954,7 @@ async fn terminal_agent_wait_uses_native_transcript_and_claims_completion() {
         },
         // Native kfo skips an empty assistant candidate and scans backward.
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: String::new(),
@@ -11042,6 +11053,7 @@ async fn terminal_agent_wait_preserves_whitespace_and_prefers_task_error() {
     state.error = Some("terminal failure".into());
     state.outcome.result = Some("different task result".into());
     state.messages = vec![ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "  \n".into(),

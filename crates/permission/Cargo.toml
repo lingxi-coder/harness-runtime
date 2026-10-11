@@ -17,6 +17,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "io-std", "fs"] }
 tracing.workspace = true
 regex = "1"
+globset = "=0.4.15"
 # WHATWG URL parser — the Rust analogue of the JS `new URL(...)` claude-code
 # uses to key `WebFetch(domain:${new URL(n).hostname})` rules (`_qa`,
 # offset ~201711761). `host_str()` reproduces `.hostname`: it Punycode/IDNA-

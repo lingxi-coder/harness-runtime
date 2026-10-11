@@ -1,15 +1,15 @@
 //! Real HTTP and SSE round trips for the shared remote-only transport.
 
 use axum::{
-    Json, Router,
     extract::State,
     response::sse::{Event, Sse},
     routing::{get, post},
+    Json, Router,
 };
-use futures::{Stream, StreamExt, stream};
+use futures::{stream, Stream, StreamExt};
 use lingxi_core::host::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 use platform_common::RemoteMcpTransport;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;

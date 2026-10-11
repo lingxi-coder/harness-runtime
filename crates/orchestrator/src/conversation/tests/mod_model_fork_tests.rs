@@ -174,6 +174,7 @@ async fn model_fork_uses_captured_prefix_and_reports_cold_session() {
 
     let history = ConversationMessage::user(MessageId::new(), "history".into());
     let latest = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             lingxi_core::types::ContentBlock::Text {

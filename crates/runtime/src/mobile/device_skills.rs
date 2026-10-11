@@ -205,21 +205,22 @@ mod tests {
     async fn visualize_skill_follows_the_visualization_tool_in_both_modes() {
         let mut registry = CommandRegistry::new();
         register_mobile_device_skills(&mut registry, &tool_names(&["Read"]));
-        assert!(registry.resolve("visualize").is_none());
+        assert!(registry.resolve(&"visualize".into()).is_none());
         register_mobile_device_skills(&mut registry, &tool_names(&["Visualization", "Shell"]));
         let registry = Arc::new(RwLock::new(registry));
         for mode in [SessionMode::Chat, SessionMode::Code] {
             let loader = MobileDiskSkillLoader::for_mode(registry.clone(), mode);
-            assert_eq!(loader.list_names().await, ["visualize"]);
-            let descriptor = loader.load("visualize").await.unwrap().unwrap();
+            assert_eq!(loader.list_names().await, ["visualize".into()]);
+            let descriptor = loader.load(&"visualize".into()).await.unwrap().unwrap();
             assert!(descriptor.allowed_tools.is_empty());
             assert!(descriptor.shell.is_none() && descriptor.context.is_none());
             assert_eq!(descriptor.skip_shell_expansion, mode == SessionMode::Chat);
             assert!(descriptor
                 .dynamic_body
                 .unwrap()
-                .build("")
-                .contains("with the `Shell` tool"));
+                .build(&"".into())
+                .string_at("")
+                .is_some_and(|text| text.contains("with the `Shell` tool")));
         }
     }
 
@@ -323,9 +324,20 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let [ContentBlock::Text { text, .. }] = loaded.content.as_slice() else {
-            panic!("device skill should preload one instruction block");
+        let [ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        }] = loaded.content.as_slice()
+        else {
+            panic!("device skill should preload one exact-text instruction block");
         };
+        assert_eq!(
+            String::from_utf16(utf16_code_units)
+                .expect("bundled guidance is well-formed UTF-16")
+                .as_str(),
+            text.as_str(),
+        );
         assert!(text.contains("## calendar\n"));
         assert!(!text.contains("## contacts\n"));
         assert!(!text.contains("## User Request\n"));

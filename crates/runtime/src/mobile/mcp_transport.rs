@@ -272,6 +272,7 @@ impl mcp::RawConnectionProvider for MobileMcpTransport {
 mod tests {
     use super::*;
     use mcp::RawConnectionProvider;
+    use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -309,7 +310,8 @@ mod tests {
             );
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(), response_body
+                response_body.len(),
+                response_body
             );
             let _ = stream.write_all(response.as_bytes()).await;
         });
@@ -414,7 +416,8 @@ mod tests {
                     let body = reply.to_string();
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(), body
+                        body.len(),
+                        body
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
                 });
@@ -535,11 +538,14 @@ mod tests {
             .call_tool(
                 &result.connection,
                 "echo",
-                serde_json::json!({"text": "mobile"}),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"text": "mobile"}),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(called.content[0]["text"], "mobile");
+        assert_eq!(called.content.string_at("/0/text"), Some("mobile"));
         assert_eq!(
             transport
                 .list_resources(&result.connection)
@@ -550,11 +556,11 @@ mod tests {
         );
         assert_eq!(
             transport
-                .read_resource(&result.connection, "test://resource")
+                .read_resource(&result.connection, &"test://resource".into())
                 .await
                 .unwrap()
                 .content,
-            "resource body"
+            "resource body".into()
         );
         assert_eq!(
             transport
@@ -570,10 +576,19 @@ mod tests {
             .expect("remote route must expose raw connection");
         let client = mcp::McpClient::new("mobile-e2e", root.path().to_path_buf(), raw).await;
         let prompt = client
-            .get_prompt("hello", serde_json::json!({}))
+            .get_prompt(
+                &"hello".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({}),
+                )
+                .unwrap(),
+            )
             .await
             .unwrap();
-        assert_eq!(prompt["messages"][0]["content"]["text"], "hello prompt");
+        assert_eq!(
+            prompt.string_at("/messages/0/content/text"),
+            Some("hello prompt")
+        );
 
         transport.disconnect(connection_id).await.unwrap();
         assert!(transport.connection_for(connection_id).is_none());

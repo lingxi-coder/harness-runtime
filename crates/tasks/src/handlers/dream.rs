@@ -51,7 +51,6 @@ use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -528,6 +527,7 @@ mod tests {
         SubagentInvocationContext, ToolInvoker, ToolInvokerError,
     };
     use lingxi_core::host::{BudgetError, SubagentSpawnError, SubagentUsage};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use serde_json::json;
     use std::any::Any;
     use std::collections::HashMap as StdHashMap;

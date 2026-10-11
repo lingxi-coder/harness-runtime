@@ -26,7 +26,7 @@ use crate::update::PermissionUpdate;
 use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
 use lingxi_core::host::FsError;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Filesystem roots used to resolve a [`PermissionUpdateDestination`] to a
@@ -924,6 +924,7 @@ pub async fn persist_workspace_directories(
 mod tests {
     use super::*;
     use crate::rule::PermissionRuleSource;
+    use serde_json::json;
 
     fn allow_rule(spec: &str, dest: PermissionUpdateDestination) -> PermissionUpdate {
         PermissionUpdate {

@@ -52,7 +52,7 @@ pub fn path(input: &Utf16JsonProjection) -> Result<Option<Vec<(u32, u32)>>, Tool
     let len = value
         .array_len()
         .ok_or_else(|| invalid("path must be an array"))?;
-    if len < 2 || len > 1000 {
+    if !(2..=1000).contains(&len) {
         return Err(invalid("path must contain between 2 and 1000 points"));
     }
     (0..len)

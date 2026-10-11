@@ -10,6 +10,35 @@ struct Boundary {
 
 impl Boundary {
     fn check(&mut self, path: Vec<String>) {
+        // `ClientTextDto` is the protocol string carrier; its adapter-only
+        // projection conversions use this one foundation type and constructor.
+        // Keep the exception exact and module-local so the protocol layer still
+        // rejects every other dependency on core.
+        let path_parts: Vec<_> = path.iter().map(String::as_str).collect();
+        let is_protocol_text_module = (self.module.len() == 2
+            && self.module[0].as_str() == "protocol"
+            && self.module[1].as_str() == "text")
+            || (self.module.len() == 3
+                && self.module[0].as_str() == "protocol"
+                && self.module[1].as_str() == "text"
+                && self.module[2].as_str() == "tests");
+        let is_protocol_text_projection = self.layer == "protocol"
+            && is_protocol_text_module
+            && matches!(
+                path_parts.as_slice(),
+                ["lingxi_core", "types", "utf16_json", "Utf16JsonProjection"]
+                    | [
+                        "lingxi_core",
+                        "types",
+                        "utf16_json",
+                        "Utf16JsonProjection",
+                        "root_string"
+                    ]
+            );
+        if is_protocol_text_projection {
+            return;
+        }
+
         let mut resolved = self.module.clone();
         let mut segments = path.iter().peekable();
         match segments.peek().map(|s| s.as_str()) {
@@ -83,7 +112,13 @@ impl Boundary {
 
 impl<'ast> Visit<'ast> for Boundary {
     fn visit_path(&mut self, path: &'ast syn::Path) {
-        self.check(path.segments.iter().map(|s| s.ident.to_string()).collect());
+        // A one-segment path is also how Rust represents a local value use, as
+        // in `Self::OpenAiOAuthUpdated { session }`. Import trees are checked
+        // separately by `visit_item_use`; only qualified paths prove a module
+        // dependency here.
+        if path.segments.len() > 1 {
+            self.check(path.segments.iter().map(|s| s.ident.to_string()).collect());
+        }
         syn::visit::visit_path(self, path);
     }
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
@@ -136,6 +171,83 @@ fn client_layers_keep_their_dependency_direction() {
             );
         }
     }
+}
+
+#[test]
+fn protocol_text_allows_only_its_utf16_projection_foundation_paths() {
+    let mut text = Boundary {
+        module: vec!["protocol".into(), "text".into()],
+        layer: "protocol".into(),
+        violations: Vec::new(),
+    };
+    text.visit_file(
+        &syn::parse_file(
+            "use lingxi_core::types::utf16_json::Utf16JsonProjection; \
+             fn rebuild(units: Vec<u16>) { \
+                 lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(\
+                     String::new(), units); \
+             }",
+        )
+        .unwrap(),
+    );
+    assert!(text.violations.is_empty());
+
+    text.visit_file(&syn::parse_file("use lingxi_core::host::PermissionGate;").unwrap());
+    assert_eq!(text.violations, vec!["lingxi_core::host::PermissionGate"]);
+
+    let mut text_tests = Boundary {
+        module: vec!["protocol".into(), "text".into(), "tests".into()],
+        layer: "protocol".into(),
+        violations: Vec::new(),
+    };
+    text_tests.visit_file(
+        &syn::parse_file(
+            "use lingxi_core::types::utf16_json::Utf16JsonProjection; \
+             fn rebuild(units: Vec<u16>) { \
+                 lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(\
+                     String::new(), units); \
+             }",
+        )
+        .unwrap(),
+    );
+    assert!(text_tests.violations.is_empty());
+    text_tests.visit_file(&syn::parse_file("use lingxi_core::host::PermissionGate;").unwrap());
+    assert_eq!(
+        text_tests.violations,
+        vec!["lingxi_core::host::PermissionGate"]
+    );
+
+    let mut commands = Boundary {
+        module: vec!["protocol".into(), "commands".into()],
+        layer: "protocol".into(),
+        violations: Vec::new(),
+    };
+    commands.visit_file(
+        &syn::parse_file("use lingxi_core::types::utf16_json::Utf16JsonProjection;").unwrap(),
+    );
+    assert_eq!(
+        commands.violations,
+        vec!["lingxi_core::types::utf16_json::Utf16JsonProjection"]
+    );
+}
+
+#[test]
+fn guard_ignores_bare_values_but_detects_qualified_module_paths() {
+    let mut guard = Boundary {
+        module: vec!["protocol".into()],
+        layer: "protocol".into(),
+        violations: Vec::new(),
+    };
+    guard.visit_file(&syn::parse_file(
+        "fn f(session: &str) { let _ = session; let _ = Self::OpenAiOAuthUpdated { session }; }",
+    ).unwrap());
+    assert!(
+        guard.violations.is_empty(),
+        "local values are not module dependencies"
+    );
+
+    guard.visit_file(&syn::parse_file("fn f() { session::load(); }").unwrap());
+    assert_eq!(guard.violations, vec!["session::load"]);
 }
 
 #[test]

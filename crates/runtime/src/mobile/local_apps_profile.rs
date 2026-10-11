@@ -195,7 +195,7 @@ impl ProfileApps {
                 return Err(AppError::Io(format!(
                     "inspect Local App profile root {}: {error}",
                     root.display()
-                )))
+                )));
             }
         };
         if root_is_real_directory {

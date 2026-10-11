@@ -864,10 +864,8 @@ fn source_parser_text(
         .expect("parser input is a root string");
     let avoid_units = avoid.string_units("").expect("skill body is a root string");
     let mut unavailable = std::collections::HashSet::new();
-    for decoded in std::char::decode_utf16(avoid_units.iter().copied()) {
-        if let Ok(character) = decoded {
-            unavailable.insert(u32::from(character));
-        }
+    for character in std::char::decode_utf16(avoid_units.iter().copied()).flatten() {
+        unavailable.insert(u32::from(character));
     }
     let mut index = 0;
     while index < units.len() {
@@ -1289,8 +1287,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
                     // local-jsx commands as skills), so `u` = "built-in CLI".
                     return Err(ValidationError(join_source_parts(&[
                         normalized.clone(),
-                        format!(" is a built-in CLI command, not a skill. Ask the user to run /")
-                            .into(),
+                        " is a built-in CLI command, not a skill. Ask the user to run /".into(),
                         normalized,
                         format!(
                             " themselves — it cannot be invoked via the {SKILL_TOOL_NAME} tool."

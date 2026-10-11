@@ -1,0 +1,1826 @@
+{
+  "fixture_version": 1,
+  "native": {
+    "version": "2.1.295",
+    "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "scope": "Observed main-request projections from public TTY captures; selected fields only, not full request/body parity.",
+  "lifecycle_summary": {
+    "complete_tty_lifecycles": 42,
+    "qualified_incomplete_rows": [
+      265,
+      267
+    ]
+  },
+  "source_receipts": {
+    "capture_manifest": {
+      "path": "capture-manifest.json",
+      "sha256": "a31b695a320ed29fc4f17c0fa8975338ebe588dd9487c7f4832c33e862f9555d"
+    },
+    "remaining39_batch_result": {
+      "path": "matrix-captures/tty-seeded-batch-remaining39-20261010/batch-result.json",
+      "sha256": "b4ba5bc686d5fad524b552a7f0635b599f59be3abbe08f20967ec986b7e01ee2"
+    },
+    "remaining43_batch_result": {
+      "path": "matrix-captures/tty-seeded-batch-remaining43-20261010/batch-result.json",
+      "sha256": "26d4708523be9f16c3b37a5f4c75b7a4cf33da3f40241c4203e31fb70fa8fe83"
+    },
+    "initial_batch_result": {
+      "path": "matrix-captures/tty-seeded-batch-20261010/batch-result.json",
+      "sha256": "231ffb62a9630984acdb6d23ddae038425aeeb3604ffee69d033d60591e7faee"
+    },
+    "row267_offline_audit": {
+      "path": "native-audit-row-0267-20261010/audit-receipt.json",
+      "sha256": "0e0e57b2965dc8c3058fd7bb83b9f5b91042f9e0333bbc6e34184264354ef75e"
+    }
+  },
+  "cases": [
+    {
+      "matrix_row": 265,
+      "source_batch": "initial",
+      "lifecycle_status": "incomplete",
+      "capture_complete": false,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {},
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": null,
+        "classification_status": "request 1 observed; source request_class remains null; separate row-267 audit comparison sees its actual-turn marker, without promoting this capture",
+        "request_sha256": "64b15a8265109f8376ad2d48f7f39eba865bc5b0e9968ba6bcdcd99da91c49c5",
+        "headers_sha256": "fa7b0001b305f022b38bbcd5006e6dd7ec266c9b664d77fd731a30894aace7ae",
+        "body_sha256": "eaa0a49ffa225521b39a9baa7990aceee63d6ff9234d2521a195b436f33fe0ed",
+        "source_request_path": "matrix-captures/tty-seeded-batch-20261010/row-0265-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-20261010/row-0265-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-20261010/row-0265-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true,
+        "separate_offline_audit_comparison": {
+          "receipt_path": "native-audit-row-0267-20261010/audit-receipt.json",
+          "receipt_sha256": "0e0e57b2965dc8c3058fd7bb83b9f5b91042f9e0333bbc6e34184264354ef75e",
+          "request_1_hash_matches": true,
+          "request_1_actual_turn_marker_observed": true,
+          "original_request_class_remains_null": true,
+          "original_capture_remains_incomplete": true
+        }
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 267,
+      "source_batch": "remaining43",
+      "lifecycle_status": "incomplete",
+      "capture_complete": false,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "actual-user-turn recorded; original capture remains incomplete; title side separately audited offline",
+        "request_sha256": "a9c2e5a80c09ab9472cd9058cc0ee0cde49e787dac4cb7aa25929b34aac21fe8",
+        "headers_sha256": "d4d8a8a551be9245757a37f03562b7d78c31e9b28aca3707957c6ef7ff520ff5",
+        "body_sha256": "75793ddbb3ef7c7d80687c3f0a7750ce180512d853297f8a6fcf376f8feb6f17",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0267-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0267-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0267-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true,
+        "separate_offline_audit": {
+          "receipt_path": "native-audit-row-0267-20261010/audit-receipt.json",
+          "receipt_sha256": "0e0e57b2965dc8c3058fd7bb83b9f5b91042f9e0333bbc6e34184264354ef75e",
+          "request_0_title_classification_only": true,
+          "request_1_actual_user_turn_hash_matches": true,
+          "original_capture_remains_incomplete": true
+        }
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,effort-2025-11-24\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c6566666f72742d323032352d31312d32340d0a"
+      }
+    },
+    {
+      "matrix_row": 269,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "22e1c23af34b807c95371e3632dedee1332b6a622dfc875bc2e84eab176fab23",
+        "headers_sha256": "989139f7a2842eed03c586216a903106e9e28a62e583e148db1275c11708a3c9",
+        "body_sha256": "047b5f92c8d305d1db6cc147da12f39caa79257492ff174c48278c9013cba819",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0269-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0269-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0269-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 271,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "1af1d7a174f22c49fc3d2c599f3f7dd33e0092b4d78fc9cb9e9385a899750a38",
+        "headers_sha256": "688e70190162c3930e281ec703a5d389173ed882a5874d23112f0f7605323984",
+        "body_sha256": "ea6c30240c19ba66dd2ecfa6a7c300b46314d7368cfd274d07eed0ce2c038195",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0271-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0271-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0271-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 273,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "6a106c9748baac290b90f9cacfb2ab900f94570f03bec1784c720262928e9ca6",
+        "headers_sha256": "741a4ebbe2983390973fde7540249b6b0b0178b8a0449b0d6ae275a1c3cb70fb",
+        "body_sha256": "2d26243e54e25e8d74907ed2830ab4ed6708935c0b14ea8a47c9e5f9a01f32a2",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0273-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0273-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0273-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 275,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\ufeffon\ufeff"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "6623f062b8cc654872389fa7821d851d90d846d1a632945ef6dbed6ec5e1fe64",
+        "headers_sha256": "7572b71de1a7543b9b4754334a0e56b2a826cefbad4c3ebfa92faf5716c1fc05",
+        "body_sha256": "2e51fd1a12bfc334356bef3876f4655fc3b750d8a9e04de4bf8ce41652d3f53b",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0275-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0275-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0275-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 277,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\u0085on\u0085"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "eed264c9417b46eabba0889801ae9b3fc039e8504d9719979a25c2882ff44b6b",
+        "headers_sha256": "e63a47d457b9723ee09665ae5ab246ff64b1a0656d6632031db2dd99066ef527",
+        "body_sha256": "701ff19cc4011e707d8e2f5e85a483f48a3b866b0dce7ea2b04834f016ca7e66",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0277-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0277-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0277-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 279,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "6135d692c008f1b5995bfa7c71c34241eaefeb114f8aac7e050aa114028b37ee",
+        "headers_sha256": "c3a4013c3a8002c2a01f755ad49003e62dc099bd7ee476a0fa730fe8e5c889ac",
+        "body_sha256": "411467c829169081f3403ab080f3160a59b325c691d74a6948898194b2f460d1",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0279-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0279-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0279-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 281,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "false"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "beb61776fb687cff72cee9e31d2bd66abd55650ae5b17c3b224508d91963d675",
+        "headers_sha256": "8bcd5577ea30d38b655948c3206de2342d1868e11ac2536cb7d9463043f0fe29",
+        "body_sha256": "7de195f83bdaef548a43140fa537699e40fd79abf6518874519c48625b29cdac",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0281-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0281-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0281-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 283,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "a4a439e0ab4bde26041bcc8d83dc219462ea7722bc79ab6a933c670d9d78701b",
+        "headers_sha256": "253b856b826957a19fb36991b8533dae655c73fc11ac2c5b7b74c10875574750",
+        "body_sha256": "5be2bdad4f1ef5a73a829035c4f00f3bc445c9b55093b66380d0b30d466db4a0",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0283-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0283-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0283-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 285,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "26bc7f41b64a2895e9ce675a1d72425076a6c3cc1779f490ae0cf1248c8740a5",
+        "headers_sha256": "c6df57ef824f218ffbe8b1788dba884ba49b80a04b4b270c89d3d513fa07b3a2",
+        "body_sha256": "e8c0c029554487cbc284104121b4f3af6f867136807d59321a8fdde8f6cb0b62",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0285-firstParty-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0285-firstParty-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0285-firstParty-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 309,
+      "source_batch": "remaining43",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {},
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "5fea490fde102784c92d0523ce9873a7b125d4dfa68800fbced163ba1385a86b",
+        "headers_sha256": "04c4df84c1593fd675fbce4fcbd37ccb6c14764eb9ab8841881d02c1824a297c",
+        "body_sha256": "f685062989ef72adb2c9b2a4b6d3af902a62a34c7e1a13db55ae57f9bbf06fbe",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0309-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0309-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0309-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 311,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "b72978260153d9b880e4395993b7f1441d22599ae5a9f0b69e15336134c21782",
+        "headers_sha256": "6835bc9b51daeb8580b4936cbe2446b89034e35085b7b3546add84d06b979511",
+        "body_sha256": "34349ae533ea220bcb4ea817d8e361afb192df83d83cfb2ada8413e5e1b05edc",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0311-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0311-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0311-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,effort-2025-11-24\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c6566666f72742d323032352d31312d32340d0a"
+      }
+    },
+    {
+      "matrix_row": 313,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "680bf9e98cac7884b611d74944485f1058fc07f0122a57dcf6b4bd97d8df4a31",
+        "headers_sha256": "8b94aad2fe63f23c0387494269b958987e9ef666f7174346655bdc6990846361",
+        "body_sha256": "40c72d09679a63a0bbb2b7405f12af47ff177d45ad73b3c85a9b1b238ff99c33",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0313-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0313-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0313-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 315,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "bc2953bbd19cd3943d3639ba62658ddcb4b3bc022d490a5be93c71f048a4446b",
+        "headers_sha256": "31e4239dc737ed39e4501acbbf968c700dceb6fa7df6009145b92fec2a699215",
+        "body_sha256": "5e4d299d0545d8cc65e22a6e6b895c80ac63f2db35c823c9d00964224bccd71f",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0315-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0315-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0315-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 317,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "8000a251c388c7838fb57913e4962783433fb112aefade0755f6687de1126f29",
+        "headers_sha256": "762675bfa57c84ca036a64a95ffcbc5ee2fbdc716b76a9854bb4aee2a2b4b294",
+        "body_sha256": "0acab6e04a540bb2d80b684cf4fd37b1bfd471ed0fc3e321de0f299b29e414ef",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0317-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0317-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0317-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 319,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\ufeffon\ufeff"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "d118f1d9d8ca99b37d0afe0252fcc74284f0f4a8cd98bf519eba040533e8ec25",
+        "headers_sha256": "128e76c4501693532744681812baef0a890a265325b3c0a71862107685c62e58",
+        "body_sha256": "e4bb3d4feda36323092f1a4b26004f877a9e01b99cfc15d6720bf510a7d6c0d5",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0319-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0319-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0319-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 321,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\u0085on\u0085"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "83a19a42621f5192d81311174bd5b4e476c19a33db480f6c20afae7bdf9de757",
+        "headers_sha256": "9fbd82e808c99f2cb954bd5c4483ae891f2cc084ddb694c65bf6cf7f16dc4d04",
+        "body_sha256": "e825d474c396ef9afb08b4cec10ab78e3ee2e09b7104e47b52713b9594d2dc46",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0321-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0321-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0321-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 323,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "2908724e9d4253d7e37528b1a213ea6f79763594a4ce01449d252e2d928731a9",
+        "headers_sha256": "120fc15fe30890588fd44cc505e9c83c5c4810a9fcca0268006637143e8cda8c",
+        "body_sha256": "b2ddada256d2ca4ae0d2b1a4d7b71c5efef38ec367e8f287be0f8c1488d0084e",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0323-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0323-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0323-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 325,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "false"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "f34b1a5f4185a433f5c2640d926f642266091b5a5c40f6bca6f0e966b5861376",
+        "headers_sha256": "2354172fd41607966439dc9f4e6279766a0943d0112bdc8ee39ed02d77289f4d",
+        "body_sha256": "1c9933a9fbebe98a075634cfadb5977eee7697b28cb5781fba78ab0c2d370b87",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0325-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0325-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0325-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 327,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "08430c8999b98caa2f6611749c2415d9d20c278a3dc2ce7a76920a465253f7a5",
+        "headers_sha256": "6e6572c3ca3aaf10ca8b93fbc3201b9c5542899780376cbef623de473262bf9f",
+        "body_sha256": "215360ba79e6d925bd9d4fb5bb50253f9a58843088f51a8d082c378fd816ab94",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0327-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0327-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0327-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 329,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "firstParty",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "896845279840c756f43b83bc0ec1a8af561e9140273be3ecc7bf0d575cbae380",
+        "headers_sha256": "d9990cb102b909d35cdd4d2e8a245ac81b8e19b4209916267c85b46c1a7e0a4f",
+        "body_sha256": "d321f0cc66730b7e4bc660bd808a713c44bf583f107b47dba825ed4571f0b265",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0329-firstParty-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0329-firstParty-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0329-firstParty-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7468696e6b696e672d746f6b656e2d636f756e742d323032362d30352d31332c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 661,
+      "source_batch": "remaining43",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {},
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "36d349424cf2374b3b1a60188d9ecb38a6d6a5ade4c7bad8885cd44445032655",
+        "headers_sha256": "7572e8bb058a85500e602a4ab91d4a7562231645e10fc0b1ca1b139adfd96bbd",
+        "body_sha256": "2321417c5ebcf62c65b9eeb79395db3646833e21cf1830836eeb78ed2a99d7b0",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0661-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0661-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0661-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 663,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "10b1be1b119a05da187443fe83e9df071b0da95a79d57636f0a4cf8eed3a2e9c",
+        "headers_sha256": "771183b34b056ec3df8bfaa93ee4911433ae6f8c95206600694303c8ed560b79",
+        "body_sha256": "2cbba5552f44e0020af499a4c61cf9c4d9df8e1c79e82257a8a673a4717bf652",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0663-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0663-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0663-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,web-search-2025-03-05,mid-conversation-system-2026-04-07,effort-2025-11-24,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7765622d7365617263682d323032352d30332d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c6566666f72742d323032352d31312d32342c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 665,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "cc18bd84cbed5592aea3233c8ffab373a8c0466f3d731fd458e8caf01f17af50",
+        "headers_sha256": "ef15c6fbaea00b43ab4e2fdceb8291d39a2fccbfc42a9b36df8888560b8c4c05",
+        "body_sha256": "1cb7644ed76cd13f745f0f0f3c99e80592e2b5a5be9adb8e663cc7f5434da2f9",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0665-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0665-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0665-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 667,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "1d8e389dcc1fb0119ded1cfa0ef1c3b6534897982fb797123abbd39db961da20",
+        "headers_sha256": "1b4a52de5c5ff6e312cefb2afca8425674daa83ae6486c77a64cc0b5a73a8666",
+        "body_sha256": "d48882e34468893bfb72a915675bdc982b98938e43f3079356125a2a69fac4a9",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0667-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0667-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0667-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 669,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "9976ae9694ff08106c79d6f2884c19d7331222b782874716ae10bc563049c99a",
+        "headers_sha256": "d710933ae3993567b60ef7341d772e89cb701f00787dd55d6337efee930a66c9",
+        "body_sha256": "a7a661ee1e7c8246ee89530106be03e11e013e125d47ebe7364a96702e8da522",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0669-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0669-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0669-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 671,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\ufeffon\ufeff"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "5065f2b8bc4d15ca62e9c0195df1bb42ee32b2bd52c5569408bcd7618c58b484",
+        "headers_sha256": "07ab844972d3cf9b651a53da8baa1a31178df6eeb5de8fa847219461981cf218",
+        "body_sha256": "ab1307c633bd6e056ea212f88f0e066a0b2d1b83054fe6158f85ee09e0c5a587",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0671-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0671-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0671-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 673,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\u0085on\u0085"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "3e24ddf67b529cf021840ad3b86c692eb23152c934b9356536cc773744adb6c8",
+        "headers_sha256": "eafeb9216ade6feca3f59fd0008996d8a137394fe7e8fe4d44fbd5eb778af35d",
+        "body_sha256": "c423bd7d78ab994dece2bf8f3c75ff6f38a8c8aabd7eb627a8c454a567a74332",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0673-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0673-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0673-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 675,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "8e5a03f830d52fd2c2535fba92ba997e7fb6b8960f9367d45a96edd5bd7e5ff7",
+        "headers_sha256": "e947fcca83f67f44f1668f9aa86a8d20f54db5435380968bcba79d0a8ce3ed51",
+        "body_sha256": "f02c50458ec502e342ec810164fbe5c52aeda967c5a64020786a96cd40e9531a",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0675-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0675-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0675-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 677,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "false"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "4a32aa3b51cb6ff7e4f0f21ef4c71869db00e56d4adf6bb9c089b52864303dd7",
+        "headers_sha256": "930180c6980e3733ecf79eb8566f212c807e3e0003afc5637d4af4113c8759a2",
+        "body_sha256": "812644bb75941112e00f764862c0921c885fa25fe2efd690b6c5ceeb29c70caf",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0677-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0677-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0677-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 679,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "5f3481345039be1a403fb2deaec2ccc2a6c5cd504dac8d3ccbfe78c99e898928",
+        "headers_sha256": "d45afed54361e9ea49c65771bd03d84e75067724d16451e4654e7060c285c4df",
+        "body_sha256": "b4e590e36497622ba53bae2fdc5b8aa7841c1675c044a0ae4a36fdb34e6270eb",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0679-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0679-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0679-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 681,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-sonnet-5-5",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "39be5fab394678e749150d4819bc7d00d984f6b7f0c2644b531440ef0ca12617",
+        "headers_sha256": "60573d5e77fab0d21f9cbd95449e29020215c44323c329f31996a499a75b6b71",
+        "body_sha256": "2b3202091610b433e17b91ab6c549ad673a42302145af47a6867e1abc3d39e84",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0681-foundry-claude-sonnet-5-5/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0681-foundry-claude-sonnet-5-5/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0681-foundry-claude-sonnet-5-5/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-sonnet-5-5",
+        "stream": true,
+        "top_level_output_config_effort": "medium",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "medium"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 705,
+      "source_batch": "remaining43",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {},
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "97a349b596ab748348797ca6ec628cca4dfb055c73e59e53663912d13aaaf75f",
+        "headers_sha256": "c091620104c40ebc87927aee8f4cdd70bd690ef10b7f61e3f456b65c03c3a23d",
+        "body_sha256": "5e91342f677b91e7cb57508286e1c9dbb0e85c345d7bd9cd6e927ee1376ef7e3",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0705-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0705-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining43-20261010/row-0705-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 707,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "56621c8388550a3e198d64971bc0d2d09702c8ee742206e03f2e0a954d659ad4",
+        "headers_sha256": "77f47cceffb14fed2cd0c41ef5e83bed12804ac696457895221ed65487462123",
+        "body_sha256": "4e7b9bf5b3e6ef32fafbf3b353ae5cd4e41aa102962a9908c330105b8759ec82",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0707-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0707-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0707-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,web-search-2025-03-05,mid-conversation-system-2026-04-07,effort-2025-11-24,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c7765622d7365617263682d323032352d30332d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c6566666f72742d323032352d31312d32342c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 709,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "c6f1c7f638188b3f5698033cbe8124fc38d77c6219b48f4df1fb5c1701694c19",
+        "headers_sha256": "991d62b0e1869abe47e046262a636de6007a2a583af9ef5cb321f48195d821a0",
+        "body_sha256": "bc3761edbfe3af6e6af104b57b2779f7fd2daa7b7a9787f5120ceced8cbbfb8f",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0709-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0709-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0709-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 711,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "34023629fd414b848e84e5f74d4b6bc454897330e600988e53aea6cc71cf2d55",
+        "headers_sha256": "e4343c1968c51e0e38c450e93f9cc5a0fae4cb64711c75f68bcd49b4336e078d",
+        "body_sha256": "f3275c1484917df207773e6a2372e3635c736f499cf9cd05d1e033c4eec6e173",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0711-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0711-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0711-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 713,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "ea8acccc629a6135e47e1b071a99a05a02f68dbc636876249bf2d6b83c7f0695",
+        "headers_sha256": "c74702b47b33a8657c20e016c98664174faeec67017b70c137b77b2cb6e551b5",
+        "body_sha256": "dc264cb135d23187c9271ba3cdc7086e8b65e0e307a64926a1ac36fb9d360bd0",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0713-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0713-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0713-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 715,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\ufeffon\ufeff"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "b2daa1b256ec181720850a577918ec691cd2e45a80131431ef21e1a6edac1f52",
+        "headers_sha256": "ab7a4860bab156801a81b494d0e8bc0e01d2303d63404a0b18afa933c2dd4dc3",
+        "body_sha256": "3926da9848686f25cd758d0697aa529caa64966a5b4b9287b6225a7f91c5b883",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0715-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0715-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0715-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 717,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "DISABLE_INTERLEAVED_THINKING": "\u0085on\u0085"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "60dab96390e8319f5cd58607cd86541f967af18448b9e030b26e98316bd71ef6",
+        "headers_sha256": "fc31e80aef730a1b53592815c531e283a9abd045d8bb11559e910ab82616dd39",
+        "body_sha256": "880eecc6c271414c4494b58c9c0fcf9e1b1c0ed527a563bf8a05292480331f1d",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0717-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0717-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0717-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 719,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "634f56d73ecccf275001c005cae927b3e776279ec70952b28a0e509f76b9461c",
+        "headers_sha256": "f41406c7311882bde3dd8ca3fd0e6f628d59b9b412ab1b27fe8f5d925eba6c0a",
+        "body_sha256": "fc56699d59d3c74aac9ecd5c1234f5cf1416ea4ff481fe240cc3890020ea8072",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0719-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0719-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0719-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 721,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM": "false"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "0006ae1271341f5df521f19400a840d89e1aafed054efedcbd893e90a31f3d62",
+        "headers_sha256": "5344b10bdefe3d5f0e2540e6acf6c2de844c9de5f52f58a602d1a50e8b485f30",
+        "body_sha256": "a2f61fc4a5360992746d3c7c04eb63f4891a4c8e96348b7dd850659138ad243b",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0721-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0721-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0721-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 723,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "true"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "2ece4605280b690288a59cbf64fb5f86204cfa3c2cc4387dac8328013e2b7a2c",
+        "headers_sha256": "071f8a46aed804f2493bc4a404679d59318bf1506f67df108a73101c4d0ddb6f",
+        "body_sha256": "91cb59b6041cc8d952d9bb115ff3cd08b1b186ddf26898293c950c4a978258d8",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0723-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0723-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0723-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    },
+    {
+      "matrix_row": 725,
+      "source_batch": "remaining39",
+      "lifecycle_status": "complete",
+      "capture_complete": true,
+      "native_launched": true,
+      "input": {
+        "provider": "foundry",
+        "model": "claude-fable-5-1",
+        "env": {
+          "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "wat"
+        },
+        "interactive": true
+      },
+      "main_request": {
+        "request_index": 1,
+        "request_class": "actual-user-turn",
+        "classification_status": "recorded actual-user-turn",
+        "request_sha256": "1f05bd2e8d992b8180a8def2aa09b9cd273a2caf148bafbec3ce49fcde60d6e4",
+        "headers_sha256": "8b1639c019c52206fa35bf326bf507dd56776b7664d73ada814d3b432af36bfb",
+        "body_sha256": "9c30d736111d9ee7772176ff91b8d127fc08cdced4d5918d8fe7fad4f948a358",
+        "source_request_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0725-foundry-claude-fable-5-1/attempt-01/request-001.raw",
+        "source_headers_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0725-foundry-claude-fable-5-1/attempt-01/request-001-headers.raw",
+        "source_body_path": "matrix-captures/tty-seeded-batch-remaining39-20261010/row-0725-foundry-claude-fable-5-1/attempt-01/request-001-body.raw",
+        "stream": true
+      },
+      "observed": {
+        "body_model": "claude-fable-5-1",
+        "stream": true,
+        "top_level_output_config_effort": "high",
+        "per_message_effort_markers": [
+          {
+            "message_index": 1,
+            "role": "system",
+            "effort": "high"
+          }
+        ],
+        "anthropic_beta_header_line": "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31\r\n",
+        "anthropic_beta_header_line_hex": "616e7468726f7069632d626574613a20636c617564652d636f64652d32303235303231392c696e7465726c65617665642d7468696e6b696e672d323032352d30352d31342c636f6e746578742d6d616e6167656d656e742d323032352d30362d32372c7765622d7365617263682d323032352d30332d30352c70726f6d70742d63616368696e672d73636f70652d323032362d30312d30352c6d69642d636f6e766572736174696f6e2d73797374656d2d323032362d30342d30372c7065722d7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d6368616e6765732d323032362d30372d30312c6566666f72742d323032352d31312d32342c64616e6765726f75732d746f6f6c2d7573652d323032362d30392d30332c7468696e6b696e672d646973706c61792d757064617465732d323032362d30382d31382c61666b2d6d6f64652d323032362d30312d33310d0a"
+      }
+    }
+  ]
+}

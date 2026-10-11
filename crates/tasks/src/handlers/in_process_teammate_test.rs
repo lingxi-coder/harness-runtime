@@ -32,7 +32,7 @@ fn fallback_api_error_projects_once_and_tombstone_is_not_spooled_or_terminal() {
     let query_message =
         Utf16JsonProjection::parse(&serde_json::to_string(&row.query_message()).unwrap()).unwrap();
     let api_error_event = SubagentEvent::ServerFallbackApiErrorRow {
-        agent_id: agent_id.clone(),
+        agent_id,
         row: row.clone(),
         message_index: 7,
     };
@@ -57,7 +57,7 @@ fn fallback_api_error_projects_once_and_tombstone_is_not_spooled_or_terminal() {
     let tombstone = SubagentEvent::ServerFallbackTombstone {
         agent_id,
         message: lingxi_core::host::ServerFallbackTombstoneMessage {
-            uuid: row.uuid.clone(),
+            uuid: row.uuid,
             message_type: "assistant".into(),
             timestamp: "2026-10-04T00:00:00.000Z".into(),
             request_id: row.request_id.clone(),
@@ -561,9 +561,19 @@ impl tool_api::Tool for RoutePromptTool {
     fn name(&self) -> &str {
         "RouteFacts"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
-        SCHEMA.get_or_init(|| serde_json::json!({"type": "object"}))
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: OnceLock<Utf16JsonProjection> = OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({"type": "object"}))
+                .expect("generated RouteFacts schema is valid JSON")
+        })
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
         true
@@ -571,15 +581,15 @@ impl tool_api::Tool for RoutePromptTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
     async fn check_permissions(
         &self,
-        _: &serde_json::Value,
+        _: &Utf16JsonProjection,
         _: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -591,15 +601,22 @@ impl tool_api::Tool for RoutePromptTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &tool_api::DescriptionOptions,
+    ) -> String {
         "Route facts".into()
     }
-    async fn prompt(&self, opts: &tool_api::PromptOptions) -> String {
-        format!("model={:?}, profile={:?}", opts.model, opts.model_profile)
+    async fn prompt(&self, opts: &tool_api::PromptOptions) -> Utf16JsonProjection {
+        Utf16JsonProjection::from(format!(
+            "model={:?}, profile={:?}",
+            opts.model, opts.model_profile
+        ))
     }
     async fn call(
         &self,
-        _: serde_json::Value,
+        _: Utf16JsonProjection,
         _: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
@@ -642,21 +659,24 @@ async fn teammate_tool_prompts_use_child_model_and_profile_for_duplicate_model_i
             .await
             .unwrap();
         definition.model = AgentModel::Explicit("shared-child-model".into());
+        let description = Utf16JsonProjection::from("");
         let context = handler
             .build_context_for_profile(
                 lingxi_core::types::AgentId::new(),
                 "worker",
                 "",
-                "",
+                &description,
                 Some(profile),
                 definition,
             )
             .await
             .unwrap();
         assert_eq!(context.model_profile.as_deref(), Some(profile));
+        let expected_description =
+            format!("model=Some(\"shared-child-model\"), profile=Some(\"{profile}\")");
         assert_eq!(
-            context.tool_schemas[0]["description"],
-            format!("model=Some(\"shared-child-model\"), profile=Some(\"{profile}\")")
+            context.tool_schemas[0].description.string_at(""),
+            Some(expected_description.as_str())
         );
     }
 }
@@ -1103,7 +1123,9 @@ async fn explicit_child_profile_overrides_the_default_route() {
         .with_default_model_profile(Some("provider-a".into()))
         .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
             let (profile, sonnet) = match (model, profile) {
+                ("parent-model", Some("provider-a")) => ("provider-a", "provider-a-sonnet"),
                 ("parent-model", Some("provider-b")) => ("provider-b", "provider-b-sonnet"),
+                ("sonnet", Some("provider-b")) => ("provider-b", "provider-b-sonnet"),
                 ("provider-b-sonnet", Some("provider-b")) => ("provider-b", "provider-b-sonnet"),
                 _ => {
                     return Err(ModelResolutionError::RouteUnavailable {
@@ -1284,12 +1306,13 @@ async fn teammate_alias_uses_immediate_parent_profile_with_shared_model_id() {
         .await
         .unwrap();
     definition.model = AgentModel::Alias("sonnet".into());
+    let description = Utf16JsonProjection::from("");
     let context = handler
         .build_context_for_selection(
             lingxi_core::types::AgentId::new(),
             "lead",
             "",
-            "",
+            &description,
             None,
             Some("shared-parent"),
             Some("provider-b"),
@@ -1341,12 +1364,13 @@ async fn teammate_environment_model_resolves_before_definition_and_call_profile(
             .await
             .unwrap();
         definition.model = preference;
+        let description = Utf16JsonProjection::from("");
         let (context, admitted) = handler
             .build_context_for_selection(
                 lingxi_core::types::AgentId::new(),
                 "lead",
                 "",
-                "",
+                &description,
                 Some("call-profile"),
                 None,
                 None,
@@ -1397,12 +1421,13 @@ async fn teammate_same_tier_and_bedrock_region_follow_parent_policy() {
             .await
             .unwrap();
         definition.model = AgentModel::Explicit(preference.into());
+        let description = Utf16JsonProjection::from("");
         let (context, admitted) = handler
             .build_context_for_selection(
                 lingxi_core::types::AgentId::new(),
                 "lead",
                 "",
-                "",
+                &description,
                 None,
                 None,
                 None,
@@ -2522,27 +2547,39 @@ async fn message_received_while_busy_waits_for_the_idle_poll() {
     assert_eq!(api.calls.load(Ordering::SeqCst), 2);
     {
         let histories = api.histories.lock().unwrap();
-        let exact_message_units = histories[1].iter().find_map(|message| match message {
-            lingxi_core::types::ConversationMessage::User { content, .. } => {
-                content.iter().find_map(|block| match block {
-                    lingxi_core::types::ContentBlock::TextJsUtf16 {
-                        utf16_code_units, ..
-                    } => Some(utf16_code_units.clone()),
-                    _ => None,
-                })
-            }
-            _ => None,
-        });
+        let expected_units = "queued "
+            .encode_utf16()
+            .chain([0xd800])
+            .chain(" one".encode_utf16())
+            .collect::<Vec<_>>();
+        let messages = &histories[1];
+        let first_user = messages
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    lingxi_core::types::ConversationMessage::User { .. }
+                )
+            })
+            .expect("initial task prompt remains in history");
+        let queued_units = messages
+            .iter()
+            .skip(first_user + 1)
+            .find_map(|message| match message {
+                lingxi_core::types::ConversationMessage::User { content, .. } => {
+                    content.iter().find_map(|block| match block {
+                        lingxi_core::types::ContentBlock::TextJsUtf16 {
+                            utf16_code_units, ..
+                        } => Some(utf16_code_units.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            });
         assert_eq!(
-            exact_message_units,
-            Some(
-                "queued "
-                    .encode_utf16()
-                    .chain([0xd800])
-                    .chain(" one".encode_utf16())
-                    .collect()
-            ),
-            "the UJP message survives the queue and becomes exact UTF-16 history"
+            queued_units,
+            Some(expected_units),
+            "the queued UJP message follows the initial prompt with exact UTF-16 history"
         );
     }
     handler.kill(&handle.task_id, c).await.unwrap();

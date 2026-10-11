@@ -129,7 +129,8 @@ async fn cold_valid_session_context_freezes_missing_git_but_invalid_latest_uses_
                 );
                 row.message_type = "attachment".into();
                 row.message = Source::parse("null").unwrap();
-                row.extra = Source::object(vec![("attachment".into(), attachment)]).unwrap();
+                row.extra = Source::object(Vec::new()).unwrap();
+                row.attachment_projection = Some(attachment);
 
                 row
             })
@@ -281,8 +282,10 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
                 .at_pointer("")
                 .is_some_and(|value| value.is_null()));
             assert_eq!(
-                row.extra.subprojection("/attachment").unwrap(),
-                source(&expected_attachment)
+                row.attachment_projection
+                    .as_ref()
+                    .expect("raw attachment carrier"),
+                &source(&expected_attachment)
             );
 
             assert_eq!(row.uuid, message.id().as_uuid().to_string());
@@ -334,7 +337,11 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
             None,
         );
         assert_eq!(
-            total_row.extra.string_at("/attachment/type"),
+            total_row
+                .attachment_projection
+                .as_ref()
+                .unwrap()
+                .string_at("/type"),
             Some("total_tokens_reminder")
         );
         rows.push(total_row);
@@ -488,9 +495,8 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
                 );
                 row.message_type = "attachment".into();
                 row.message = Source::parse("null").unwrap();
-                row.extra =
-                    Source::object(vec![("attachment".into(), source(&prior["attachment"]))])
-                        .unwrap();
+                row.extra = Source::object(Vec::new()).unwrap();
+                row.attachment_projection = Some(source(&prior["attachment"]));
 
                 row
             })
@@ -586,6 +592,7 @@ async fn auto_kept_tail_places_missing_native_announcements_before_summary_and_s
             consecutive_rapid_refills: 0,
             compaction_usage: None,
             compaction_model: None,
+            compaction_profile: None,
         };
         orch.apply_post_compact(
             result,

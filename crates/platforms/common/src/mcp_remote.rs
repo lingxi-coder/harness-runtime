@@ -55,10 +55,6 @@ fn empty_source_object() -> Utf16JsonProjection {
     Utf16JsonProjection::parse("{}").expect("empty JSON object is valid")
 }
 
-fn empty_source_array() -> Utf16JsonProjection {
-    Utf16JsonProjection::parse("[]").expect("empty JSON array is valid")
-}
-
 fn null_source_value() -> Utf16JsonProjection {
     Utf16JsonProjection::parse("null").expect("null JSON value is valid")
 }

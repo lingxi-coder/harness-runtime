@@ -17,7 +17,7 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
@@ -28,9 +28,9 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
-    InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
-    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
+    generated_builtin_schema, source_text_projection, DescriptionOptions, InterruptBehavior,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
 
@@ -248,8 +248,28 @@ fn invalid_tool_input(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use mobile_linux_api::ProcessOutput;
+    use serde_json::Value;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::tool_trait::generated_builtin_result;
 
     fn fixture(value: Value) -> Utf16JsonProjection {
         generated_builtin_result(&value)
@@ -332,6 +352,6 @@ mod tests {
             .await
             .expect_err("scalar input must fail");
         assert!(matches!(err, ToolError::InvalidInput(_)));
-        assert!(format!("{err}").contains("must be a JSON object"));
+        assert!(source_text(&err.model_facing_message()).contains("must be a JSON object"));
     }
 }

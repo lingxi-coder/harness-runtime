@@ -4,6 +4,7 @@ use crate::test_support::{
     mock_message_response, noop_hook_executor, text_delta, MockApiClient, MockOutputStream,
     MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
+use hooks::HookExecutorImpl;
 
 #[test]
 fn compact_focus_and_hook_instructions_are_separate_paragraphs() {
@@ -1320,7 +1321,7 @@ async fn recov1_streaming_blocking_limit_preempts_before_opening_stream() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, OutputEvent::Text { text } if text.string_at("").as_deref() == Some("Prompt is too long"))),
+            .any(|e| matches!(e, OutputEvent::Text { text } if text.string_at("") == Some("Prompt is too long"))),
         "byte-exact prompt-too-long message must be surfaced; events={events:#?}"
     );
     assert!(
@@ -1428,7 +1429,7 @@ async fn terminal_model_context_window_exceeded_surfaces_api_error() {
     let events = output.snapshot().await;
     assert!(
         events.iter().any(|e| matches!(e, OutputEvent::Text { text }
-            if text.string_at("").as_deref() == Some("API Error: The model has reached its context window limit."))),
+            if text.string_at("") == Some("API Error: The model has reached its context window limit."))),
         "byte-exact context-window-exceeded API error must be surfaced; events={events:#?}"
     );
     assert!(
@@ -1443,10 +1444,9 @@ async fn terminal_model_context_window_exceeded_surfaces_api_error() {
 #[tokio::test]
 async fn terminal_refusal_without_fallback_surfaces_safety_message() {
     // A `refusal` with no `refusalFallbackModel` configured hits the terminal
-    // arm (the swap arm `continue`s only when a fallback is set), so it must
-    // surface claude-code's byte-locked `U2e` refusal message — the model-label
-    // branch (resolved via `marketing_name_for_model`), non-interactive suffix
-    // (`interactive_permissions` defaults false).
+    // arm (the swap arm `continue`s only when a fallback is set). The default
+    // non-interactive session uses the Native refusal copy with the response
+    // message id, not the separate interactive model-label branch.
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
         message_start("m", "claude-opus-4-8"),
         content_block_start_text(0),
@@ -1476,19 +1476,23 @@ async fn terminal_refusal_without_fallback_surfaces_safety_message() {
     orch.run_turn_streaming("go").await.expect("turn ends");
 
     let events = output.snapshot().await;
-    let expected = "API Error: Opus 4.8's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. LingXi can't respond to this request with Opus 4.8.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/15363606";
+    let expected = "API Error: Opus 4.8 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nMessage ID: m";
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, OutputEvent::Text { text } if text.string_at("").as_deref() == Some(expected))),
+        events.iter().any(
+            |e| matches!(e, OutputEvent::Text { text } if text.string_at("") == Some(expected))
+        ),
         "byte-exact U2e refusal message must be surfaced; events={events:#?}"
     );
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, OutputEvent::EndTurn { stop_reason, .. }
-            if stop_reason == "refusal")),
-        "the turn must end with stop_reason refusal; events={events:#?}"
+        events.iter().any(|event| matches!(
+            event,
+            OutputEvent::TerminalApiError {
+                api_error_status: None,
+                terminal_reason,
+                stop_reason,
+            } if terminal_reason == "api_error" && stop_reason == "refusal"
+        )),
+        "the terminal API-error event must preserve the refusal stop reason; events={events:#?}"
     );
 }
 

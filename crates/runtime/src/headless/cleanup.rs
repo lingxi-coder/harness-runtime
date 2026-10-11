@@ -4,9 +4,12 @@ use std::sync::Arc;
 
 use crate::desktop::{DesktopRuntime, DesktopSessionShutdownReport};
 
+/// Latest report from the retained headless shutdown drain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeadlessCleanupStatus {
+    /// Whether every shutdown barrier reported completion.
     pub complete: bool,
+    /// Persistence or producer failures observed during the drain.
     pub errors: Vec<String>,
 }
 
@@ -27,10 +30,14 @@ pub struct HeadlessCleanup {
 }
 
 impl HeadlessCleanup {
+    /// Return the most recently published cleanup report without waiting.
     pub fn status(&self) -> HeadlessCleanupStatus {
         self.status.borrow().clone()
     }
 
+    /// Wait until retained cleanup completes or its reporting task closes.
+    ///
+    /// Returns the latest report available at that point.
     pub async fn wait(&mut self) -> HeadlessCleanupStatus {
         loop {
             let status = self.status.borrow_and_update().clone();

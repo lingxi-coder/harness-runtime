@@ -49,7 +49,6 @@ impl BundledPromptFn for FewerPermissionPromptsPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     #[test]
     fn body_is_inline_and_branded() {

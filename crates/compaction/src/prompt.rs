@@ -628,6 +628,7 @@ fn append_replacement_template(
 
 fn trim_js_source_units(units: &[u16]) -> Vec<u16> {
     let mut index = 0;
+    let mut first_non_whitespace = None;
     let mut last_non_whitespace = 0;
     while index < units.len() {
         let (width, is_whitespace) = match char::decode_utf16(units[index..].iter().copied()).next()
@@ -639,12 +640,13 @@ fn trim_js_source_units(units: &[u16]) -> Vec<u16> {
             Some(Err(_)) => (1, false),
             None => break,
         };
-        index += width;
         if !is_whitespace {
-            last_non_whitespace = index;
+            first_non_whitespace.get_or_insert(index);
+            last_non_whitespace = index + width;
         }
+        index += width;
     }
-    units[..last_non_whitespace].to_vec()
+    first_non_whitespace.map_or_else(Vec::new, |start| units[start..last_non_whitespace].to_vec())
 }
 
 fn collapse_source_blank_lines(units: &[u16]) -> Vec<u16> {
@@ -671,6 +673,17 @@ fn collapse_source_blank_lines(units: &[u16]) -> Vec<u16> {
 #[cfg(test)]
 mod source_tests {
     use super::*;
+
+    #[test]
+    fn compact_source_trim_removes_js_whitespace_from_both_ends_losslessly() {
+        let units = "\u{feff} \t"
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("\u{0085} \n\u{feff}".encode_utf16())
+            .collect::<Vec<_>>();
+        let trimmed = trim_compact_source_text(&source_projection(units));
+        assert_eq!(trimmed.string_units(""), Some(vec![0xd800, 0x0085]));
+    }
 
     #[test]
     fn summary_formatting_keeps_unpaired_units() {

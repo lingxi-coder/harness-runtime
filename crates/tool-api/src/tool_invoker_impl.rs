@@ -14,7 +14,6 @@ use lingxi_core::host::tool_invoker::{
     ToolInvoker, ToolInvokerError,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::Value;
 use std::sync::Arc;
 
 /// Turn fork-time frozen command denies into the `disallowed_tools` permission
@@ -1626,6 +1625,7 @@ mod tests {
             provider_id: Some("provider-current".into()),
         };
         let current_assistant_row = lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![current_tool_use],
             stop_reason: Some("tool_use".into()),
@@ -1641,6 +1641,7 @@ mod tests {
         let mut stale_context = crate::context::ToolUseContext::model_seed("stale".into());
         stale_context.assistant_message =
             Some(lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "stale assistant row".into(),
@@ -1763,6 +1764,7 @@ mod tests {
             "next query history".into(),
         );
         let next_assistant_row = lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::ToolUse {
                 id: lingxi_core::types::ToolUseId::new(),

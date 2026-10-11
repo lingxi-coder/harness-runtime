@@ -70,6 +70,7 @@ use std::sync::Arc;
 use futures_core::Stream;
 use hooks::file_changed_firer::{FileChangedFire, FileChangedFirer};
 use lingxi_core::host::{FileEvent, FileEventKind, FileSystem};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_stream::StreamExt;
@@ -94,16 +95,31 @@ fn kind_to_event(kind: FileEventKind) -> &'static str {
 /// deduplicated, sorted set (a hook with no matcher contributes nothing — the
 /// dynamic-path channel claude-code also folds in is not ported).
 #[must_use]
-pub fn resolve_watch_paths(matchers: &[&str], cwd: &Path) -> Vec<PathBuf> {
+pub fn resolve_watch_paths(matchers: &[Utf16JsonProjection], cwd: &Path) -> Vec<PathBuf> {
     let mut set: BTreeSet<PathBuf> = BTreeSet::new();
     for m in matchers {
-        for name in m.split('|').map(str::trim) {
-            if name.is_empty() {
+        let Some(units) = m.string_units("") else {
+            continue;
+        };
+        let mut segment_start = 0;
+        for index in 0..=units.len() {
+            if index != units.len() && units[index] != b'|' as u16 {
                 continue;
             }
-            let p = Path::new(name);
-            let resolved = if p.is_absolute() {
-                p.to_path_buf()
+
+            let segment = hooks::matcher::trim_js_units(&units[segment_start..index]);
+            segment_start = index + 1;
+            if segment.is_empty() {
+                continue;
+            }
+
+            // FileSystem paths are Rust/OS strings. Match Native's path-boundary
+            // replacement behavior only after exact JS splitting and trimming;
+            // the registered hook matcher remains the original UTF-16 source.
+            let name = String::from_utf16_lossy(segment);
+            let path = Path::new(&name);
+            let resolved = if path.is_absolute() {
+                path.to_path_buf()
             } else {
                 cwd.join(name)
             };
@@ -152,7 +168,10 @@ enum WatcherControl {
     /// Replace the configuration-derived matcher set after a Desktop settings
     /// save. Unlike dynamic watch-path additions this is an authoritative
     /// source swap, so paths from the previous hook document are dropped.
-    ReplaceMatchers { matchers: Vec<String>, cwd: PathBuf },
+    ReplaceMatchers {
+        matchers: Vec<Utf16JsonProjection>,
+        cwd: PathBuf,
+    },
 }
 
 /// Cloneable configuration control for a live FileChanged watcher. The
@@ -165,7 +184,7 @@ pub struct FileChangedWatcherController {
 
 impl FileChangedWatcherController {
     /// Replace every settings-derived matcher and restart the watched paths.
-    pub fn replace_matchers(&self, matchers: Vec<String>, cwd: PathBuf) {
+    pub fn replace_matchers(&self, matchers: Vec<Utf16JsonProjection>, cwd: PathBuf) {
         let _ = self
             .control
             .send(WatcherControl::ReplaceMatchers { matchers, cwd });
@@ -414,7 +433,7 @@ pub struct FileChangedWatcher {
     /// retained so a mid-session cwd move can re-resolve them against the new cwd
     /// (`onCwdChanged`). Without this, only the already-resolved absolute paths
     /// survive and a relative matcher could never be re-anchored.
-    matchers: Vec<String>,
+    matchers: Vec<Utf16JsonProjection>,
     /// The set of file paths to fire for (resolved from the hook matchers).
     watch_paths: Vec<PathBuf>,
     /// The deduplicated parent directories initially watched.
@@ -430,11 +449,15 @@ impl FileChangedWatcher {
     /// Construct a watcher from the `FileChanged` hook matchers, resolved against
     /// `cwd`, firing through `firer` (the orchestrator firer in production).
     #[must_use]
-    pub fn new(matchers: &[&str], cwd: &Path, firer: Arc<dyn FileChangedFirer>) -> Self {
+    pub fn new(
+        matchers: &[Utf16JsonProjection],
+        cwd: &Path,
+        firer: Arc<dyn FileChangedFirer>,
+    ) -> Self {
         let watch_paths = resolve_watch_paths(matchers, cwd);
         let watch_dirs = watch_dirs_for(&watch_paths, cwd);
         Self {
-            matchers: matchers.iter().map(|m| (*m).to_string()).collect(),
+            matchers: matchers.to_vec(),
             watch_paths,
             watch_dirs,
             cwd: cwd.to_path_buf(),
@@ -501,7 +524,7 @@ struct Supervisor {
     /// restart without a back-reference to the handle.
     control_tx: mpsc::UnboundedSender<WatcherControl>,
     /// The ORIGINAL matchers, re-resolved against a new cwd on `onCwdChanged`.
-    matchers: Vec<String>,
+    matchers: Vec<Utf16JsonProjection>,
     cwd: PathBuf,
     watch_paths: BTreeSet<PathBuf>,
     dir_tasks: JoinSet<()>,
@@ -557,19 +580,14 @@ impl Supervisor {
                     // reassigns `r` from the re-resolution. The `CwdChanged` hooks
                     // are fired shell-side (the Bash tool's `CwdChanged` firer),
                     // so this NEVER fires them — no double-fire.
-                    let matcher_refs: Vec<&str> =
-                        self.matchers.iter().map(String::as_str).collect();
-                    self.watch_paths = resolve_watch_paths(&matcher_refs, &new_cwd)
+                    self.watch_paths = resolve_watch_paths(&self.matchers, &new_cwd)
                         .into_iter()
                         .collect();
                     self.cwd = new_cwd;
                     self.restart().await;
                 }
                 WatcherControl::ReplaceMatchers { matchers, cwd } => {
-                    let matcher_refs: Vec<&str> = matchers.iter().map(String::as_str).collect();
-                    self.watch_paths = resolve_watch_paths(&matcher_refs, &cwd)
-                        .into_iter()
-                        .collect();
+                    self.watch_paths = resolve_watch_paths(&matchers, &cwd).into_iter().collect();
                     self.matchers = matchers;
                     self.cwd = cwd;
                     self.restart().await;
@@ -664,7 +682,18 @@ async fn handle_event(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonBuilder;
     use std::sync::Mutex;
+
+    fn projection_from_units(units: &[u16]) -> Utf16JsonProjection {
+        let mut builder = Utf16JsonBuilder::new();
+        let root = builder.push_string_units(units.to_vec());
+        builder.finish(root).unwrap()
+    }
+
+    fn projection(value: &str) -> Utf16JsonProjection {
+        projection_from_units(&value.encode_utf16().collect::<Vec<_>>())
+    }
 
     /// Recording fake firer — captures every `(path, kind)` the watcher fires so
     /// tests can assert deterministically without a real orchestrator. `respond`
@@ -811,7 +840,10 @@ mod tests {
     fn resolve_watch_paths_splits_pipes_and_resolves_relative() {
         let cwd = Path::new("/work/proj");
         // Mirrors `.envrc|.env` plus an absolute path; whitespace is trimmed.
-        let paths = resolve_watch_paths(&[".envrc | .env", "/etc/abs.conf"], cwd);
+        let paths = resolve_watch_paths(
+            &[projection(".envrc | .env"), projection("/etc/abs.conf")],
+            cwd,
+        );
         assert!(paths.contains(&PathBuf::from("/work/proj/.envrc")));
         assert!(paths.contains(&PathBuf::from("/work/proj/.env")));
         assert!(paths.contains(&PathBuf::from("/etc/abs.conf")));
@@ -828,7 +860,7 @@ mod tests {
         });
         let firer = Arc::new(RecordingFirer::default());
         let weak_firer = Arc::downgrade(&firer);
-        let handle = FileChangedWatcher::new(&[".env"], root.path(), firer)
+        let handle = FileChangedWatcher::new(&[projection(".env")], root.path(), firer)
             .spawn(fs)
             .await;
         gate.polled.notified().await;
@@ -864,8 +896,56 @@ mod tests {
     fn resolve_watch_paths_dedups_and_skips_empty() {
         let cwd = Path::new("/work");
         // Empty segments (leading/trailing pipe) are skipped; duplicates dedup.
-        let paths = resolve_watch_paths(&["|.env|", ".env"], cwd);
+        let paths = resolve_watch_paths(&[projection("|.env|"), projection(".env")], cwd);
         assert_eq!(paths, vec![PathBuf::from("/work/.env")]);
+    }
+
+    #[test]
+    fn matcher_segments_trim_before_os_boundary_replacement() {
+        let cwd = Path::new("/work");
+        let source_units = [
+            0x0020,
+            b'.' as u16,
+            b'e' as u16,
+            b'n' as u16,
+            b'v' as u16,
+            0x00a0,
+            b'|' as u16,
+            0x2000,
+            0xd800,
+            0xfeff,
+            b'|' as u16,
+            0x0009,
+            0xd83d,
+            0xde80,
+            b'.' as u16,
+            b't' as u16,
+            b'x' as u16,
+            b't' as u16,
+            0x3000,
+        ];
+        let matcher = projection_from_units(&source_units);
+
+        // The registry-facing matcher still has the exact lone D800. The
+        // replacement below is specifically the filesystem path boundary; it
+        // makes no claim about hook matching/dispatch for that matcher.
+        assert_eq!(matcher.string_units(""), Some(source_units.to_vec()));
+        let paths = resolve_watch_paths(&[matcher], cwd);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/work/.env"),
+                PathBuf::from("/work/\u{fffd}"),
+                PathBuf::from("/work/🚀.txt"),
+            ]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(paths
+                .iter()
+                .any(|path| path.as_os_str().as_bytes() == b"/work/\xef\xbf\xbd"));
+        }
     }
 
     #[test]
@@ -873,7 +953,9 @@ mod tests {
         // A matcher-less config (or only empty matchers) resolves to nothing —
         // the no-watch case (`if (paths.length === 0) return`).
         assert!(resolve_watch_paths(&[], Path::new("/work")).is_empty());
-        assert!(resolve_watch_paths(&["", "  "], Path::new("/work")).is_empty());
+        assert!(
+            resolve_watch_paths(&[projection(""), projection("  ")], Path::new("/work")).is_empty()
+        );
     }
 
     #[test]
@@ -1013,7 +1095,8 @@ mod tests {
 
         // Watch a file in dir A initially.
         let a_env = dir_a.join(".env");
-        let watcher = FileChangedWatcher::new(&[a_env.to_str().unwrap()], root.path(), firer);
+        let watcher =
+            FileChangedWatcher::new(&[projection(a_env.to_str().unwrap())], root.path(), firer);
         let handle = watcher.spawn(fs as Arc<dyn FileSystem>).await;
 
         // Wait for the initial watch of dir A.
@@ -1063,7 +1146,9 @@ mod tests {
             .controller()
             .expect("idle watcher keeps a live controller")
             .replace_matchers(
-                vec![watched_dir.join(".env").to_string_lossy().into_owned()],
+                vec![projection(
+                    watched_dir.join(".env").to_string_lossy().as_ref(),
+                )],
                 root.path().to_path_buf(),
             );
 
@@ -1096,7 +1181,7 @@ mod tests {
     ) {
         let fs = Arc::new(RecordingFs::default());
         let watched = fs.watched.clone();
-        let watcher = FileChangedWatcher::new(&[matcher], cwd, firer);
+        let watcher = FileChangedWatcher::new(&[projection(matcher)], cwd, firer);
         let handle = watcher.spawn(fs as Arc<dyn FileSystem>).await;
         let watched_for_wait = watched.clone();
         let wait_for = move |needle: PathBuf| {
@@ -1254,7 +1339,7 @@ mod tests {
     #[tokio::test]
     async fn new_resolves_paths_and_dirs() {
         let firer: Arc<dyn FileChangedFirer> = Arc::new(RecordingFirer::default());
-        let w = FileChangedWatcher::new(&[".env|.envrc"], Path::new("/work"), firer);
+        let w = FileChangedWatcher::new(&[projection(".env|.envrc")], Path::new("/work"), firer);
         assert_eq!(
             w.watch_paths(),
             &[PathBuf::from("/work/.env"), PathBuf::from("/work/.envrc")]

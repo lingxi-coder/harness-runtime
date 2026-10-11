@@ -80,6 +80,16 @@ pub trait OrchestratorApiClient: Send + Sync {
         false
     }
 
+    /// Exact selected wire protocol for this model/profile route. Unknown
+    /// routes do not admit Native-only request context.
+    fn protocol_for_model(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Option<llm_runtime::ProtocolFamily> {
+        None
+    }
+
     /// Inspect the selected credential's redacted origin without executing auth.
     async fn credential_source(
         &self,
@@ -451,10 +461,12 @@ pub trait StreamingApiClient: Send + Sync {
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
         request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
+        native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = effort;
         let _ = tool_result_reminder_suffixes;
         let _ = request_dispatch_observer;
+        let _ = native_anthropic_request_context;
         self.stream(
             model,
             profile,
@@ -1663,6 +1675,8 @@ mod mod_session_measure_sampler;
 mod model_impl;
 #[path = "conversation/model_reminders.rs"]
 mod model_reminders_impl;
+#[path = "conversation/native_classifier_context.rs"]
+pub(crate) mod native_classifier_context;
 pub(crate) use context_announcements_impl::PreparedContextAnnouncements;
 #[path = "conversation/prompt_cache.rs"]
 mod prompt_cache_impl;

@@ -57,7 +57,6 @@ impl BundledPromptFn for DatavizPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     #[test]
     fn body_is_frontmatter_stripped_and_provider_neutral() {

@@ -8,6 +8,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 mod acceptance {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_llm_client::protocol::computer::*;
     use serde_json::{json, Value};
     use std::{
@@ -21,11 +22,16 @@ mod acceptance {
     };
     use tool_computer_use::{AutoGrantResolver, ComputerTool};
 
+    fn project_json(value: Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value)
+            .expect("generated acceptance input is representable as source JSON")
+    }
+
     async fn invoke(
         tool: &ComputerTool,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: &ToolUseContext,
-    ) -> Result<Value, String> {
+    ) -> Result<Utf16JsonProjection, String> {
         tool.validate_input(&input, ctx)
             .await
             .map_err(|e| e.to_string())?;
@@ -78,13 +84,13 @@ mod acceptance {
             if permissions.is_some_and(|(accessibility, recording)| !accessibility || !recording) {
                 return Err(format!("macOS permissions unavailable for the acceptance executable: {permissions:?}"));
             }
-            invoke(&tool, json!({"action":"request_access","apps":[bundle],"tier":"full"}), &ctx).await?;
+            invoke(&tool, project_json(json!({"action":"request_access","apps":[bundle],"tier":"full"})), &ctx).await?;
             let source = backend.frame_geometry().await.map_err(|e| e.to_string())?.ok_or("missing physical geometry")?;
             let before=backend.screenshot().await.map_err(|e|e.to_string())?;
             std::fs::write(dir.join("before.png"),before.png_bytes).map_err(|e|e.to_string())?;
-            let shot = invoke(&tool, json!({"action":"screenshot"}), &ctx).await?;
+            let shot = invoke(&tool, project_json(json!({"action":"screenshot"})), &ctx).await?;
             let frame = tool.native_computer_frame(&ctx).await.map_err(|e| e.to_string())?.ok_or("no model-visible frame")?;
-            checks.push(json!({"operation":"screenshot","frame":frame,"physical_scale":source.scale,"width":shot["width"],"height":shot["height"]}));
+            checks.push(json!({"operation":"screenshot","frame":frame,"physical_scale":source.scale,"width":shot.number_at("/width"),"height":shot.number_at("/height")}));
             let point = |v: &Value| -> ComputerPoint {
                 ComputerPoint {x:(v[0].as_f64().unwrap()-source.origin_x)*source.scale* f64::from(frame.width)/f64::from(source.pixel_width),
                     y:(v[1].as_f64().unwrap()-source.origin_y)*source.scale*f64::from(frame.height)/f64::from(source.pixel_height)}
@@ -106,7 +112,7 @@ mod acceptance {
             tool.begin_computer_sequence(&ctx).await.map_err(|e| e.to_string())?;
             for operation in &operations {
                 let input = tool.lower_computer_operation(operation, &frame).map_err(|e| e.to_string())?;
-                invoke(&tool, input, &ctx).await?;
+                invoke(&tool, project_json(input), &ctx).await?;
                 checks.push(json!({"operation":operation,"status":"executed"}));
                 tokio::time::sleep(Duration::from_millis(120)).await;
             }
@@ -117,18 +123,18 @@ mod acceptance {
             let trigger=cancel.clone();
             tokio::spawn(async move {tokio::time::sleep(Duration::from_millis(100)).await;trigger.cancel();});
             let started=Instant::now();
-            let held = tool.call(json!({"action":"hold_key","text":"shift","duration":1.0}), held_ctx,
+            let held = tool.call(project_json(json!({"action":"hold_key","text":"shift","duration":1.0})), held_ctx,
                 tool_api::test_support::fresh_tx()).await;
             if !matches!(held, Err(ToolError::Aborted)) || !cancel.is_cancelled() { return Err("hold did not abort from the requested cancellation".into()); }
             checks.push(json!({"operation":"cancel_hold","status":"cancelled","elapsed_ms":started.elapsed().as_millis(),"token_cancelled":cancel.is_cancelled()}));
             tokio::time::sleep(Duration::from_millis(150)).await;
             std::fs::copy(dir.join("observed.json"),dir.join("post-cancel.json")).map_err(|e|e.to_string())?;
-            invoke(&tool, json!({"action":"mouse_move","coordinate":[(path[0].x*f64::from(source.pixel_width)/f64::from(frame.width)).round() as u32,
-                (path[0].y*f64::from(source.pixel_height)/f64::from(frame.height)).round() as u32]}), &ctx).await?;
-            invoke(&tool, json!({"action":"left_mouse_down"}), &ctx).await?;
+            invoke(&tool, project_json(json!({"action":"mouse_move","coordinate":[(path[0].x*f64::from(source.pixel_width)/f64::from(frame.width)).round() as u32,
+                (path[0].y*f64::from(source.pixel_height)/f64::from(frame.height)).round() as u32]})), &ctx).await?;
+            invoke(&tool, project_json(json!({"action":"left_mouse_down"})), &ctx).await?;
             tool.cleanup_computer_inputs(&ctx).await.map_err(|e| e.to_string())?;
             tokio::time::sleep(Duration::from_millis(200)).await;
-            invoke(&tool, json!({"action":"list_granted_applications"}), &ctx).await?;
+            invoke(&tool, project_json(json!({"action":"list_granted_applications"})), &ctx).await?;
             checks.push(json!({"operation":"function_management","status":"passed"}));
             let after=backend.screenshot().await.map_err(|e|e.to_string())?;
             std::fs::write(dir.join("after.png"),after.png_bytes).map_err(|e|e.to_string())?;

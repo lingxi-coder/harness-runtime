@@ -1,0 +1,24 @@
+POST /v1/messages?beta=true HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+User-Agent: claude-cli/2.1.295 (external, sdk-cli)
+X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000029508
+X-Stainless-Arch: arm64
+X-Stainless-Lang: js
+X-Stainless-OS: MacOS
+X-Stainless-Package-Version: 0.128.0
+X-Stainless-Retry-Count: 0
+X-Stainless-Runtime: node
+X-Stainless-Runtime-Version: v26.3.0
+X-Stainless-Timeout: 600
+anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05
+anthropic-dangerous-direct-browser-access: true
+anthropic-version: 2023-06-01
+x-api-key: sk-ant-print-http422-local-dummy-only
+x-app: cli
+Connection: keep-alive
+Host: 127.0.0.1:59031
+Accept-Encoding: gzip, deflate, br, zstd
+Content-Length: 914
+
+{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":[{"type":"text","text":"Return the fixed Native HTTP 422 error-copy probe.","cache_control":{"type":"ephemeral"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.295.990; cc_entrypoint=sdk-cli;"},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"You are a local deterministic headless fixture.","cache_control":{"type":"ephemeral"}}],"tools":[],"metadata":{"user_id":"{\"device_id\":\"5dfd3134764360932730ce8a6c30cba2b5f02f1fd24e5570ea2a42916d4c6f60\",\"account_uuid\":\"\",\"session_id\":\"00000000-0000-4000-8000-000000029508\"}"},"max_tokens":32000,"thinking":{"budget_tokens":31999,"type":"enabled","display":"omitted"},"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"stream":true}

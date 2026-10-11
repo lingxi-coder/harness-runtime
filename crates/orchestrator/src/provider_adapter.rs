@@ -359,6 +359,14 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             .unwrap_or(false)
     }
 
+    fn protocol_for_model(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<llm_runtime::ProtocolFamily> {
+        self.service.protocol_for_model(model, profile).ok()
+    }
+
     async fn credential_source(
         &self,
         model: &str,
@@ -1115,6 +1123,7 @@ impl StreamingApiClient for ProviderApiAdapter {
             skip_global_cache_for_system_prompt,
             request_dispatch_admission,
             None,
+            None,
         )
         .await
     }
@@ -1132,6 +1141,7 @@ impl StreamingApiClient for ProviderApiAdapter {
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
         request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
+        native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.build_scheduled_request(
@@ -1148,6 +1158,7 @@ impl StreamingApiClient for ProviderApiAdapter {
                 .execution
                 .set_request_dispatch_admission(request_dispatch_admission);
             request.execution.request_dispatch_observer = request_dispatch_observer;
+            request.execution.native_anthropic_request_context = native_anthropic_request_context;
             return self.service.stream_request(request).await;
         }
         // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
@@ -1183,6 +1194,7 @@ impl StreamingApiClient for ProviderApiAdapter {
                 request_dispatch_admission,
                 tool_result_reminder_suffixes,
                 request_dispatch_observer,
+                native_anthropic_request_context,
             )
             .await
     }
@@ -1999,9 +2011,10 @@ mod tests {
             request.string_at("/model").as_deref(),
             Some("claude-sonnet-4-20250514")
         );
-        assert!(request
-            .payload_at("/output_config/effort")
-            .is_some_and(|value| value.as_json_source() == "null"));
+        assert!(
+            request.payload_at("/output_config/effort").is_none(),
+            "scheduled None must not inherit the adapter's initial effort"
+        );
         assert!(crate::scheduled_turn::current().is_none());
         assert_eq!(adapter.current_effort(), Some(serde_json::json!("low")));
     }
@@ -2818,7 +2831,7 @@ mod tests {
                         lingxi_core::types::MessageId::new(),
                         label.into(),
                     )],
-                    tools: tool_names.iter().map(|name| tool(*name)).collect(),
+                    tools: tool_names.iter().map(|name| tool(name)).collect(),
                     forced_tool: forced_tool.map(str::to_string),
                     effort: None,
                     opts: agent::api::SubagentApiCallOpts {

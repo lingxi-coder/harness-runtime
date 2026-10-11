@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use client::adapter::ClientEventListener;
 use client::protocol::events::ClientEvent;
-use local_apps::{AppAuthoringSpec, sha256_hex};
+use local_apps::{sha256_hex, AppAuthoringSpec};
 use serde::Deserialize;
 
 /// Fenced-block info string a Local App plan carries its machine-readable

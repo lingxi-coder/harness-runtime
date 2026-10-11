@@ -3190,9 +3190,6 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
         .expect("agent MCP config parses");
     let table_key = mcp::registry::agent_scope_table_key(agent_id, "srv");
     let dto = |tool_name: &str, requires_user_interaction: bool| lingxi_core::host::McpToolDto {
-        input_schema_projection: None,
-        definition_projection: None,
-
         server_name: "srv".into(),
         tool_name: tool_name.into(),
         description: tool_name.into(),
@@ -4192,6 +4189,37 @@ async fn build_constructs_runtime_deterministically() {
         rt.orchestrator.has_compaction(),
         "no CompactionOrchestrator"
     );
+}
+
+#[tokio::test]
+async fn desktop_factory_exposes_admitted_native_classifier_policy_snapshot() {
+    let (_tmp, mut cfg) = test_config(true);
+    cfg.permission_mode = permission::PermissionMode::Plan;
+    cfg.permission_mode_cli_explicit = true;
+    // Keep the policy wrapper independent of a process-level escape hatch in
+    // this factory test; the real composition root still wraps the selected
+    // base gate and exposes that same wrapper to the orchestrator.
+    cfg.restricted = true;
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
+        Arc::new(orchestrator::test_support::MockOutputStream::new());
+    let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
+        Arc::new(RecordingPermissionSink::default());
+
+    let runtime = build(cfg.clone(), output, perm_sink)
+        .await
+        .expect("desktop build");
+    let gate = runtime
+        .enforcing_permission_gate
+        .as_ref()
+        .expect("desktop build wraps the selected base gate with policy enforcement");
+    let snapshot = gate
+        .permission_policy_snapshot()
+        .expect("the composed gate must forward its live Native policy facts");
+
+    assert_eq!(snapshot.permission_mode, "plan");
+    assert!(snapshot.working_directory.is_some());
+    assert!(snapshot.rule_roots.is_some());
+    assert!(snapshot.classifier_auto_mode_settings.is_some());
 }
 
 #[tokio::test]
@@ -9071,6 +9099,122 @@ fn perm_tier_dirs() -> (tempfile::TempDir, tempfile::TempDir) {
 }
 
 #[tokio::test]
+async fn classifier_auto_mode_merges_only_trusted_raw_sources_in_source_order() {
+    let _guard = MANAGED_ENV_LOCK.lock().unwrap();
+    let managed = tempfile::tempdir().unwrap();
+    std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed.path());
+    let (home, cwd) = perm_tier_dirs();
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"autoMode":{"allow":["user-allow"],"soft_deny":["user-soft"],"deny":["legacy-user"],"classifyAllShell":false}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(cwd.path().join(".lingxi")).unwrap();
+    std::fs::write(
+        cwd.path().join(".lingxi/settings.json"),
+        r#"{"autoMode":{"allow":["project-allow"],"hard_deny":["project-hard"],"classifyAllShell":true}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cwd.path().join(".lingxi/settings.local.json"),
+        r#"{"autoMode":{"allow":["local-allow"],"environment":["local-env"],"classifyAllShell":true}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        managed.path().join("managed-settings.json"),
+        r#"{"autoMode":{"allow":["policy-allow"],"hard_deny":["policy-hard"],"environment":["policy-env"],"classifyAllShell":false}}"#,
+    )
+    .unwrap();
+    let flag_raw = r#"{"autoMode":{"allow":["flag-allow"],"soft_deny":["flag-soft"],"hard_deny":["\ud800"],"environment":["flag-env"],"deny":["legacy-flag"]}}"#;
+    // The typed flag object cannot represent an isolated UTF-16 unit from the
+    // raw source; the AutoMode merge must use the retained source projection.
+    let flag = lingxi_core::settings::SettingsJson::default();
+
+    let tiers = super::load_boot_permission_tiers_with_flag(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        Some(&flag),
+        Some(flag_raw),
+    )
+    .await;
+    let facts = tiers
+        .classifier_auto_mode_settings
+        .expect("all trusted sources were available and valid");
+    let exact = |values: &[lingxi_core::types::utf16_json::Utf16JsonProjection]| {
+        values
+            .iter()
+            .map(|value| value.string_units(""))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        exact(&facts.allow),
+        ["user-allow", "flag-allow", "policy-allow"]
+            .into_iter()
+            .map(|value| Some(value.encode_utf16().collect::<Vec<_>>()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        exact(&facts.soft_deny),
+        ["user-soft", "flag-soft"]
+            .into_iter()
+            .map(|value| Some(value.encode_utf16().collect::<Vec<_>>()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        exact(&facts.hard_deny),
+        vec![
+            Some(vec![0xd800]),
+            Some("policy-hard".encode_utf16().collect::<Vec<_>>()),
+        ]
+    );
+    assert_eq!(
+        exact(&facts.environment),
+        ["flag-env", "policy-env"]
+            .into_iter()
+            .map(|value| Some(value.encode_utf16().collect::<Vec<_>>()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !facts.classify_all_shell,
+        "project/local true values must not enable the trusted classifier flag"
+    );
+
+    let trusted_flag_raw = r#"{"autoMode":{"classifyAllShell":true}}"#;
+    let trusted_flag_tiers = super::load_boot_permission_tiers_with_flag(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        Some(&flag),
+        Some(trusted_flag_raw),
+    )
+    .await;
+    assert!(
+        trusted_flag_tiers
+            .classifier_auto_mode_settings
+            .expect("trusted raw source is available")
+            .classify_all_shell,
+        "a true trusted source enables the flag"
+    );
+
+    let typed_flag_without_raw_source = super::load_boot_permission_tiers_with_flag(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        Some(&flag),
+        None,
+    )
+    .await;
+    assert!(
+        typed_flag_without_raw_source
+            .classifier_auto_mode_settings
+            .is_none(),
+        "a typed flag object cannot stand in for an unavailable raw AutoMode source"
+    );
+    std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+}
+
+#[tokio::test]
 async fn permission_preference_respects_flag_and_managed_default_modes() {
     let _guard = MANAGED_ENV_LOCK.lock().unwrap();
     let managed = tempfile::tempdir().unwrap();
@@ -9086,12 +9230,14 @@ async fn permission_preference_respects_flag_and_managed_default_modes() {
         tiers.mode_preference_allowed,
         "ordinary defaults can yield to the last selection"
     );
-    let flags = serde_json::from_str(r#"{"permissions":{"defaultMode":"default"}}"#).unwrap();
+    let flag_raw = r#"{"permissions":{"defaultMode":"default"}}"#;
+    let flags = serde_json::from_str(flag_raw).unwrap();
     let tiers = super::load_boot_permission_tiers_with_flag(
         home.path(),
         cwd.path(),
         (true, true),
         Some(&flags),
+        Some(flag_raw),
     )
     .await;
     assert!(!tiers.mode_preference_allowed, "explicit settings must win");

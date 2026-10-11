@@ -1142,7 +1142,7 @@ pub(super) fn dependency_tree_digest_from_marker(marker: &Path) -> Result<Option
             return Err(format!(
                 "read dependency marker {}: {error}",
                 marker.display()
-            ))
+            ));
         }
     };
     let lines: Vec<&str> = contents.lines().collect();

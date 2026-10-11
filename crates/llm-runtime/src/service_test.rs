@@ -174,86 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn native_custom_system_prompt_matches_hwe_utf16_line_splitting() {
-        use lingxi_llm_client::providers::anthropic::system_prompt::{
-            PromptText, SystemPromptInput, DYNAMIC_BOUNDARY,
-        };
-
-        let marker = DYNAMIC_BOUNDARY.encode_utf16().collect::<Vec<_>>();
-        let mut exact_units = "before".encode_utf16().collect::<Vec<_>>();
-        exact_units.push(0xd800);
-        exact_units.push(b'\n' as u16);
-        exact_units.extend("\u{feff} \u{00a0}\t".encode_utf16());
-        exact_units.extend(marker.iter().copied());
-        exact_units.push(b'\r' as u16);
-        exact_units.push(0x2028);
-        exact_units.push(b'\n' as u16);
-        exact_units.extend("middle\n".encode_utf16());
-        exact_units.extend(marker.iter().copied());
-        exact_units.push(b'\n' as u16);
-        exact_units.push(0xdc00);
-
-        let original = PromptText::from_utf16(exact_units);
-        let parsed = native_custom_system_prompt(original.clone());
-        let SystemPromptInput::NativeCustomPrompt {
-            text,
-            source_elements,
-        } = parsed
-        else {
-            panic!("Native customSystemPrompt must retain its parsed source elements");
-        };
-        assert_eq!(text, original);
-        assert_eq!(source_elements.len(), 3);
-        assert_eq!(
-            source_elements[0].utf16_code_units(),
-            [
-                "before".encode_utf16().collect::<Vec<_>>(),
-                vec![0xd800, b'\n' as u16]
-            ]
-            .concat()
-        );
-        assert_eq!(source_elements[1].utf16_code_units(), marker);
-        let mut expected_after = vec![b'\n' as u16];
-        expected_after.extend("middle\n".encode_utf16());
-        expected_after.extend(marker.iter().copied());
-        expected_after.push(b'\n' as u16);
-        expected_after.push(0xdc00);
-        assert_eq!(source_elements[2].utf16_code_units(), expected_after);
-
-        let empty_sides = PromptText::from_string(format!("\n \t{DYNAMIC_BOUNDARY} \r\n"));
-        let parsed = native_custom_system_prompt(empty_sides);
-        let SystemPromptInput::NativeCustomPrompt {
-            source_elements, ..
-        } = parsed
-        else {
-            panic!("Native customSystemPrompt variant");
-        };
-        assert_eq!(source_elements.len(), 1);
-        assert!(source_elements[0].equals_ascii(DYNAMIC_BOUNDARY));
-
-        let no_marker = PromptText::from_utf16(vec![0xd800, b' ' as u16, b'x' as u16]);
-        let parsed = native_custom_system_prompt(no_marker.clone());
-        let SystemPromptInput::NativeCustomPrompt {
-            text,
-            source_elements,
-        } = parsed
-        else {
-            panic!("Native customSystemPrompt variant");
-        };
-        assert_eq!(text, no_marker);
-        assert_eq!(source_elements, vec![no_marker]);
-
-        let through_string_entry =
-            custom_system_prompt(Some(&format!("first\n{DYNAMIC_BOUNDARY}\nsecond")))
-                .expect("custom string input");
-        assert!(matches!(
-            through_string_entry,
-            SystemPromptInput::NativeCustomPrompt { source_elements, .. }
-                if source_elements.len() == 3
-        ));
-    }
-
-    #[test]
     fn frozen_stream_quote_stays_out_of_serialized_provider_metadata() {
         let mut events = vec![HistoryEvent::MessageDelta {
             delta: crate::HistoryMessageDelta {
@@ -2102,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn build_request_samples_current_main_and_subagent_cache_ttl_settings() {
+    fn build_request_samples_cache_ttl_settings_into_execution_policy() {
         use lingxi_core::settings::schema::{
             PromptCacheTtl as HostTtl, PromptCacheTtlSettings as HostSettings,
         };
@@ -2189,12 +2109,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_request_samples_current_main_and_subagent_cache_ttl_settings() {
+    #[tokio::test]
+    async fn build_request_projects_sampled_cache_ttl_settings_to_wire() {
         use lingxi_core::settings::schema::{
             PromptCacheTtl as HostTtl, PromptCacheTtlSettings as HostSettings,
         };
-        use lingxi_llm_client::protocol::{CachePosition, CacheTtl};
 
         let _guard = CACHE_ENV_LOCK
             .lock()
@@ -2235,17 +2154,17 @@ mod tests {
                 PromptCacheQuerySource::Named("sdk"),
             )
             .expect("main request");
-        let ttl_at_system = |request: &LlmRequest| {
-            request
-                .input
-                .prompt_cache
-                .breakpoints
+        fn system_cache_ttl(body: &serde_json::Value) -> &str {
+            body["system"]
+                .as_array()
+                .expect("wire system array")
                 .iter()
-                .find(|point| matches!(&point.position, CachePosition::System { index: 0 }))
-                .expect("system cache breakpoint")
-                .ttl
-        };
-        assert_eq!(ttl_at_system(&main), CacheTtl::OneHour);
+                .find_map(|block| block["cache_control"]["ttl"].as_str())
+                .expect("wire system cache breakpoint")
+        }
+        let main_prepared = adapter.client.prepare(&main).await.expect("prepare main");
+        let main_body = request_body_value(&main_prepared.provider_request.body_json);
+        assert_eq!(system_cache_ttl(&main_body), "1h");
 
         *settings.lock().unwrap() = HostSettings {
             main: Some(HostTtl::FiveMinutes),
@@ -2264,7 +2183,13 @@ mod tests {
                 PromptCacheQuerySource::Subagent,
             )
             .expect("subagent request");
-        assert_eq!(ttl_at_system(&subagent), CacheTtl::OneHour);
+        let subagent_prepared = adapter
+            .client
+            .prepare(&subagent)
+            .await
+            .expect("prepare subagent");
+        let subagent_body = request_body_value(&subagent_prepared.provider_request.body_json);
+        assert_eq!(system_cache_ttl(&subagent_body), "1h");
     }
 
     /// The `tool_reference` normalization branch is selected by the SESSION-scoped
@@ -2285,7 +2210,6 @@ mod tests {
                     per_turn_effort: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolUse {
-                        input_projection: None,
                         id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         name: "ToolSearch".to_string(),
                         input: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
@@ -2299,7 +2223,6 @@ mod tests {
                     api_message_override: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolResult {
-                        output_projection: None,
                         tool_use_id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         content: String::new().into(),
                         is_error: Some(false),
@@ -2822,110 +2745,6 @@ mod tests {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
 
-    #[tokio::test]
-    async fn sdk_request_body_emits_native_global_scope_without_subscription_or_opt_in() {
-        use lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY;
-
-        let _guard = CACHE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        std::env::remove_var("DISABLE_PROMPT_CACHING");
-        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
-        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
-        std::env::remove_var("ANTHROPIC_BASE_URL");
-        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
-        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
-            200,
-            ok_response_json(),
-        )));
-        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
-            vec![
-                PromptText::from_string(HEADER),
-                PromptText::from_string("static"),
-                PromptText::from_string(DYNAMIC_BOUNDARY),
-                PromptText::from_string("dynamic"),
-            ],
-            None,
-            None,
-        );
-        let request = adapter
-            .build_request(
-                "claude-sonnet-4-20250514",
-                None,
-                Some(&system),
-                vec![text_user_msg("hi")],
-                vec![],
-                false,
-                Some(1024),
-                false,
-                PromptCacheQuerySource::Unspecified,
-            )
-            .expect("global-cache request");
-        let prepared = adapter.client.prepare(&request).await.expect("SDK prepare");
-        let body = prepared.provider_request.body_json;
-        assert_eq!(body["system"].as_array().unwrap().len(), 3);
-        assert_eq!(body["system"][0]["text"], HEADER);
-        assert_eq!(body["system"][1]["text"], "static");
-        assert_eq!(body["system"][2]["text"], "dynamic");
-        assert_eq!(body["system"][1]["cache_control"]["scope"], "global");
-        assert!(!body.to_string().contains(DYNAMIC_BOUNDARY));
-    }
-
-    #[tokio::test]
-    async fn sdk_request_body_honors_native_process_base_url_gate() {
-        use lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY;
-
-        let _guard = CACHE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        std::env::remove_var("DISABLE_PROMPT_CACHING");
-        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
-        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
-        std::env::set_var("ANTHROPIC_BASE_URL", "https://proxy.example.test");
-        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
-        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
-            200,
-            ok_response_json(),
-        )));
-        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
-            vec![
-                PromptText::from_string(HEADER),
-                PromptText::from_string("static"),
-                PromptText::from_string(DYNAMIC_BOUNDARY),
-                PromptText::from_string("dynamic"),
-            ],
-            None,
-            None,
-        );
-        let request = adapter
-            .build_request(
-                "claude-sonnet-4-20250514",
-                None,
-                Some(&system),
-                vec![text_user_msg("hi")],
-                vec![],
-                false,
-                Some(1024),
-                false,
-                PromptCacheQuerySource::Unspecified,
-            )
-            .expect("proxy-gated request");
-        let prepared = adapter.client.prepare(&request).await.expect("SDK prepare");
-        let body = prepared.provider_request.body_json;
-        assert_eq!(body["system"].as_array().unwrap().len(), 2);
-        assert_eq!(body["system"][0]["text"], HEADER);
-        assert_eq!(body["system"][1]["text"], "static\n\ndynamic");
-        assert!(body["system"][1].get("cache_control").is_some());
-        assert_eq!(
-            body["system"][1]
-                .get("cache_control")
-                .and_then(|value| value.get("scope")),
-            None
-        );
-        assert!(!body.to_string().contains(DYNAMIC_BOUNDARY));
-        std::env::remove_var("ANTHROPIC_BASE_URL");
-    }
-
     // ── 1P cache-EDITING (cache_edits / cache_reference, RESIDUAL 4) ───────────
 
     /// A multi-message conversation: an assistant tool_use, a user tool_result,
@@ -2942,7 +2761,6 @@ mod tests {
                 per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![PB::ToolUse {
-                    input_projection: None,
                     id: tool_id.clone(),
                     name: "Read".to_string(),
                     input: core_projection(&serde_json::json!({"path": "/x"})),
@@ -2955,7 +2773,6 @@ mod tests {
                 api_message_override: None,
                 id: MessageId::new(),
                 content: vec![PB::ToolResult {
-                    content_projection: None,
                     tool_use_id: tool_id,
                     content: "file body".to_string().into(),
                     is_error: Some(false),
@@ -4078,16 +3895,12 @@ mod tests {
         )));
         let request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
 
-        // (8) unset env → exact source-identical to a no-merge prepare.
-        let mut raw_request = request.clone();
-        raw_request.execution.resolve_native_effort = true;
-        let raw = adapter.client.prepare(&raw_request).await.expect("prepare");
-        let raw_body = raw.provider_request.body_json.clone();
+        // Header policy places main requests in the SDK's Native top-level order.
         let unset = body_after_inject(&adapter, &request).await;
         assert_eq!(
-            raw_body.as_json_source(),
             unset.as_json_source(),
-            "unset env leaves the body source-identical"
+            r#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"max_tokens":4096}"#,
+            "unset extra body retains the Native main-template source"
         );
 
         // (1) valid object → new key appended at the tail; (2) a colliding key
@@ -4152,15 +3965,7 @@ mod tests {
             ok_response_json(),
         )));
         let request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
-        let mut baseline_request = request.clone();
-        baseline_request.execution.resolve_native_effort = true;
-        let baseline = adapter
-            .client
-            .prepare(&baseline_request)
-            .await
-            .expect("prepare")
-            .provider_request
-            .body_json;
+        let baseline = body_after_inject(&adapter, &request).await;
 
         // (3) non-object JSON values are ignored (error logged, body unchanged).
         for val in ["[1]", "\"x\"", "5", "true", "null"] {
@@ -5744,6 +5549,9 @@ mod tests {
             let mut adapter = make_adapter_for_protocol(protocol, provider, url)
                 .with_anthropic_compatible_version("2.1.293")
                 .with_anthropic_client_metadata(lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin", "aarch64"));
+            if protocol == ProtocolFamily::AnthropicMessages {
+                adapter = adapter.with_native_anthropic_endpoint(url);
+            }
             adapter.ua = UserAgentEnv {
                 user_type: Some("external".into()),
                 entrypoint: Some("sdk-cli".into()),
@@ -5810,16 +5618,26 @@ mod tests {
         let metadata = ApiService::build_api_metadata_user_id_with_extra(
             "device", "account", "boot", None, None,
         );
-        let adapter = make_adapter_for_protocol(ProtocolFamily::AnthropicMessages,ProviderId::AnthropicFirstParty,"https://api.anthropic.com")
-            .with_request_metadata(crate::RequestMetadata { user_id:metadata.clone() })
-            .with_anthropic_client_metadata(lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin","aarch64"));
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        )
+        .with_request_metadata(crate::RequestMetadata { user_id: metadata.clone() })
+        .with_anthropic_client_metadata(
+            lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin", "aarch64"),
+        )
+        .with_native_anthropic_endpoint("https://api.anthropic.com");
         let owner = live.clone();
         adapter.set_request_session_id_source(Arc::new(move || {
             let owner = owner.clone();
             Box::pin(async move { Some(owner.lock().unwrap().clone()) })
         }));
         let mut admitted = LlmRequest::new("model").with_user_text("hi");
-        admitted.input.metadata = serde_json::json!({"user_id":metadata});
+        admitted.input.metadata = lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+            &serde_json::json!({"user_id":metadata}),
+        )
+        .unwrap();
         adapter.capture_request_session_id(&mut admitted).await;
         *live.lock().unwrap() = replacement.clone();
         adapter.capture_request_session_id(&mut admitted).await;
@@ -5833,8 +5651,12 @@ mod tests {
             prepared.provider_request.headers["x-claude-code-session-id"],
             original
         );
-        let identity: serde_json::Value =
-            serde_json::from_str(admitted.input.metadata["user_id"].as_str().unwrap()).unwrap();
+        let user_id = admitted
+            .input
+            .metadata
+            .string_at("/user_id")
+            .expect("request metadata retains the host user_id");
+        let identity: serde_json::Value = serde_json::from_str(&user_id).unwrap();
         assert_eq!(identity["session_id"], original);
         let mut next = LlmRequest::new("model").with_user_text("next");
         adapter.capture_request_session_id(&mut next).await;
@@ -5858,7 +5680,10 @@ mod tests {
             Box::pin(async move { Some(current) })
         }));
         let mut request = LlmRequest::new("model").with_user_text("child");
-        request.input.metadata = serde_json::json!({"session_id":"provider-authored-id"});
+        request.input.metadata = lingxi_llm_client::protocol::JsonPayload::parse(
+            r#"{"session_id":"provider-authored-id"}"#,
+        )
+        .unwrap();
         lingxi_core::host::session_flags::scope_request_session_id(parent, async {
             adapter.capture_request_session_id(&mut request).await;
         })
@@ -6120,7 +5945,6 @@ mod tests {
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 ContentBlock::ToolResult {
-                    output_projection: None,
                     tool_use_id: lingxi_core::types::ToolUseId::new(),
                     content: "lots of text, no media".to_string().into(),
                     is_error: Some(false),
@@ -6149,7 +5973,6 @@ mod tests {
             api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                output_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see images".to_string().into(),
                 is_error: Some(false),
@@ -6177,7 +6000,6 @@ mod tests {
             api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                output_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see image".to_string().into(),
                 is_error: Some(false),
@@ -6206,7 +6028,6 @@ mod tests {
             api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                output_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "imgs".to_string().into(),
                 is_error: Some(false),
@@ -8023,6 +7844,7 @@ mod tests {
                 Some(crate::RequestDispatchObserver::new(move || {
                     rejected.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 })),
+                None,
             ))
             .await;
 
@@ -8066,6 +7888,7 @@ mod tests {
                 Some(crate::RequestDispatchObserver::new(move || {
                     observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 })),
+                None,
             )
             .await
             .expect("positive control reaches transport");
@@ -8115,6 +7938,7 @@ mod tests {
                 Some(crate::RequestDispatchObserver::new(move || {
                     observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 })),
+                None,
             )
             .await;
 
@@ -10029,6 +9853,527 @@ mod tests {
             assert_eq!(captured, Some(expected.as_uuid().to_string()));
         }
     }
+
+    #[tokio::test]
+    async fn headless_admission_preserves_native_effort_context_and_text_display_with_base_override(
+    ) {
+        let _display_env = CacheEnvRestore::clear(&[branding::THINKING_DISPLAY_UPDATES_ENV]);
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "http://configured-anthropic-base.test",
+            "native",
+            "claude-sonnet-5-5",
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+        )
+        .with_anthropic_client_metadata(
+            lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::
+                claude_code_2_1_293("darwin", "arm64"),
+        )
+        .with_native_anthropic_endpoint("http://configured-anthropic-base.test")
+        .with_native_thinking_display(
+            lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy {
+                omit_default: true,
+                ..Default::default()
+            },
+        )
+        .with_interactive_session(false);
+        let request = adapter
+            .build_request(
+                "claude-sonnet-5-5",
+                None,
+                None,
+                vec![text_user_msg("Return marker.")],
+                vec![],
+                true,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .unwrap();
+        assert!(request.execution.resolve_native_effort);
+        let mut prepared = adapter.client.prepare(&request).await.unwrap();
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        let body = request_body_value(&prepared.provider_request.body_json);
+        assert_eq!(body["thinking"]["display"], "omitted");
+        assert_eq!(body["output_config"]["effort"], "medium");
+        assert_eq!(
+            body["messages"][1],
+            serde_json::json!({"role":"system","content":[],"output_config":{"effort":"medium"}})
+        );
+        let betas: Vec<_> = prepared.provider_request.headers["anthropic-beta"]
+            .split(',')
+            .collect();
+        assert!(
+            betas
+                .iter()
+                .position(|beta| *beta == crate::model::betas::MID_CONVERSATION_SYSTEM)
+                .unwrap()
+                < betas
+                    .iter()
+                    .position(|beta| *beta == crate::model::betas::PER_TURN_CONTROL)
+                    .unwrap()
+        );
+        assert_eq!(
+            body["context_management"],
+            serde_json::json!({"edits":[{"type":"clear_thinking_20251015","keep":"all"}]})
+        );
+
+        assert!(!prepared.provider_request.headers["anthropic-beta"]
+            .contains("thinking-display-updates-2026-08-18"));
+    }
+
+    #[tokio::test]
+    async fn native_295_per_turn_effort_matches_prepared_first_party_and_foundry_requests() {
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "DISABLE_INTERLEAVED_THINKING",
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            branding::EFFORT_LEVEL_ENV,
+            "DISABLE_PROMPT_CACHING",
+        ]);
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/native_per_turn_control_2_1_295_print_44.json"
+        ))
+        .expect("captured Native fixture parses");
+
+        // One default and one beta-disabled row per provider and model. This
+        // exercises the actual host-built PreparedLlmCall consumed by the
+        // protocol codec, rather than testing only the beta-list helper.
+        for matrix_row in [264_u64, 266, 308, 310, 660, 662, 704, 706] {
+            let case = fixture["cases"]
+                .as_array()
+                .expect("capture cases")
+                .iter()
+                .find(|case| case["matrix_row"].as_u64() == Some(matrix_row))
+                .unwrap_or_else(|| panic!("missing Native capture row {matrix_row}"));
+            let input = &case["input"];
+            for key in [
+                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+                "DISABLE_INTERLEAVED_THINKING",
+                "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            ] {
+                if let Some(value) = input["env"][key].as_str() {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+
+            let model = input["model"].as_str().expect("request model");
+            let first_party = input["provider"] == "firstParty";
+            let (protocol, provider_id, profile_name, base_url) = if first_party {
+                (
+                    ProtocolFamily::AnthropicMessages,
+                    ProviderId::AnthropicFirstParty,
+                    "native",
+                    "http://configured-anthropic-base.test",
+                )
+            } else {
+                (
+                    ProtocolFamily::FoundryClaude,
+                    ProviderId::OpenAICompatible {
+                        name: "foundry-claude".to_owned(),
+                    },
+                    "foundry-claude",
+                    "https://example.services.ai.azure.com/anthropic",
+                )
+            };
+            let mut adapter = make_adapter_for_protocol_with_transport(
+                protocol,
+                provider_id,
+                base_url,
+                profile_name,
+                model,
+                FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+            )
+            .with_interactive_session(false);
+            if first_party {
+                adapter = adapter.with_native_anthropic_endpoint(base_url);
+            }
+            let mut request = adapter
+                .build_request(
+                    model,
+                    None,
+                    None,
+                    vec![text_user_msg("Return marker.")],
+                    vec![],
+                    false,
+                    None,
+                    false,
+                    PromptCacheQuerySource::Unspecified,
+                )
+                .expect("build captured main request");
+            // The real non-stream and stream drivers make this admission
+            // immediately before ModelRuntime::prepare for every provider.
+            request.execution.resolve_native_effort = true;
+            let mut prepared = adapter
+                .client
+                .prepare(&request)
+                .await
+                .expect("prepare actual provider request");
+            adapter
+                .inject_headers(&mut prepared, DispatchHeaderState::default())
+                .expect("inject production headers");
+
+            let body = request_body_value(&prepared.provider_request.body_json);
+            let actual_top_effort = body.pointer("/output_config/effort").cloned();
+            let actual_message_effort = body["messages"]
+                .as_array()
+                .expect("encoded messages")
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    let effort = message.pointer("/output_config/effort")?;
+                    Some(serde_json::json!({
+                        "message_index": index,
+                        "role": message["role"],
+                        "effort": effort,
+                    }))
+                })
+                .collect::<Vec<_>>();
+            let actual_header = prepared
+                .provider_request
+                .headers
+                .get("anthropic-beta")
+                .map(|value| format!("anthropic-beta: {value}\r\n"));
+            let captured = &case["captured"];
+            assert_eq!(
+                actual_top_effort
+                    .as_ref()
+                    .and_then(serde_json::Value::as_str),
+                captured["top_level_output_config_effort"].as_str(),
+                "row {matrix_row}: top-level effort"
+            );
+            assert_eq!(
+                &actual_message_effort,
+                captured["per_message_effort_markers"]
+                    .as_array()
+                    .expect("captured markers"),
+                "row {matrix_row}: per-message effort markers"
+            );
+            assert_eq!(
+                actual_header.as_deref(),
+                captured["beta_header_line_utf8"].as_str(),
+                "row {matrix_row}: exact provider header line"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_295_tty_main_request_projections_match_prepared_host_calls() {
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "DISABLE_INTERLEAVED_THINKING",
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
+            branding::EFFORT_LEVEL_ENV,
+            "DISABLE_PROMPT_CACHING",
+        ]);
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/native_per_turn_control_2_1_295_tty_mainrequest_44.json"
+        ))
+        .expect("captured Native TTY main-request fixture parses");
+        assert_eq!(fixture["native"]["version"], "2.1.295");
+        let cases = fixture["cases"].as_array().expect("TTY cases");
+        assert_eq!(
+            cases.len(),
+            44,
+            "all available main requests are represented"
+        );
+        assert_eq!(fixture["lifecycle_summary"]["complete_tty_lifecycles"], 42);
+        assert_eq!(
+            fixture["lifecycle_summary"]["qualified_incomplete_rows"],
+            serde_json::json!([265, 267])
+        );
+
+        let environment_keys = [
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "DISABLE_INTERLEAVED_THINKING",
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
+        ];
+        for case in cases {
+            let matrix_row = case["matrix_row"].as_u64().expect("matrix row");
+            let input = &case["input"];
+            assert_eq!(input["interactive"], true, "row {matrix_row}");
+            for key in environment_keys {
+                if let Some(value) = input["env"].get(key).and_then(serde_json::Value::as_str) {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+            let capture_complete = case["capture_complete"]
+                .as_bool()
+                .expect("capture lifecycle status");
+            assert_eq!(
+                capture_complete,
+                case["lifecycle_status"] == "complete",
+                "row {matrix_row}: keep capture lifecycle status explicit"
+            );
+
+            let model = input["model"].as_str().expect("request model");
+            let (protocol, provider_id, profile_name, base_url, first_party) =
+                match input["provider"].as_str().expect("provider") {
+                    "firstParty" => (
+                        ProtocolFamily::AnthropicMessages,
+                        ProviderId::AnthropicFirstParty,
+                        "native",
+                        "http://configured-anthropic-base.test",
+                        true,
+                    ),
+                    "foundry" => (
+                        ProtocolFamily::FoundryClaude,
+                        ProviderId::OpenAICompatible {
+                            name: "foundry-claude".to_owned(),
+                        },
+                        "foundry-claude",
+                        "https://example.services.ai.azure.com/anthropic",
+                        false,
+                    ),
+                    other => panic!("unexpected captured provider {other:?}"),
+                };
+            let mut adapter = make_adapter_for_protocol_with_transport(
+                protocol,
+                provider_id,
+                base_url,
+                profile_name,
+                model,
+                FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+            )
+            .with_interactive_session(true);
+            if first_party {
+                adapter = adapter.with_native_anthropic_endpoint(base_url);
+            }
+            let stream = case["observed"]["stream"]
+                .as_bool()
+                .expect("captured main request stream flag");
+            let mut request = adapter
+                .build_request(
+                    model,
+                    None,
+                    None,
+                    vec![text_user_msg("Return marker.")],
+                    vec![],
+                    stream,
+                    None,
+                    false,
+                    PromptCacheQuerySource::Unspecified,
+                )
+                .expect("build current Host main request");
+            request.execution.resolve_native_effort = true;
+            let mut prepared = adapter
+                .client
+                .prepare(&request)
+                .await
+                .expect("prepare current Host request");
+            adapter
+                .inject_headers(&mut prepared, DispatchHeaderState::default())
+                .expect("inject current Host headers");
+
+            let body = request_body_value(&prepared.provider_request.body_json);
+            assert_eq!(
+                body["model"].as_str(),
+                case["observed"]["body_model"].as_str(),
+                "row {matrix_row}: model"
+            );
+            assert_eq!(
+                body["stream"].as_bool(),
+                Some(stream),
+                "row {matrix_row}: stream flag"
+            );
+            let actual_top_effort = body.pointer("/output_config/effort").cloned();
+            let expected_top_effort = case["observed"]["top_level_output_config_effort"]
+                .as_str()
+                .map(|effort| serde_json::Value::String(effort.to_owned()));
+            assert_eq!(
+                actual_top_effort, expected_top_effort,
+                "row {matrix_row}: top-level effort"
+            );
+            let actual_message_effort = body["messages"]
+                .as_array()
+                .expect("encoded messages")
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    let effort = message.pointer("/output_config/effort")?;
+                    Some(serde_json::json!({
+                        "message_index": index,
+                        "role": message["role"],
+                        "effort": effort,
+                    }))
+                })
+                .collect::<Vec<_>>();
+            let expected_message_effort = case["observed"]["per_message_effort_markers"]
+                .as_array()
+                .expect("captured per-message markers")
+                .clone();
+            assert_eq!(
+                actual_message_effort, expected_message_effort,
+                "row {matrix_row}: per-message effort markers"
+            );
+
+            let actual_beta_line = prepared
+                .provider_request
+                .headers
+                .get("anthropic-beta")
+                .map(|value| format!("anthropic-beta: {value}\r\n").into_bytes());
+            let expected_beta_line = case["observed"]["anthropic_beta_header_line"]
+                .as_str()
+                .expect("exact captured beta header line");
+            assert_eq!(
+                actual_beta_line.as_deref(),
+                Some(expected_beta_line.as_bytes()),
+                "row {matrix_row}: exact Native beta header bytes"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn foundry_effort_from_successful_response_replays_as_history_marker() {
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "DISABLE_INTERLEAVED_THINKING",
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            branding::EFFORT_LEVEL_ENV,
+            "DISABLE_PROMPT_CACHING",
+        ]);
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::FoundryClaude,
+            ProviderId::OpenAICompatible {
+                name: "foundry-claude".to_owned(),
+            },
+            "https://example.services.ai.azure.com/anthropic",
+            "foundry-claude",
+            "claude-sonnet-5-5",
+            transport.clone(),
+        );
+        service.set_session_effort(lingxi_core::host::effort_table::SessionEffort::Level(
+            serde_json::json!("high"),
+        ));
+        let first_user = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "first turn".into(),
+        );
+        let first_response = service
+            .messages_create(crate::MessagesCreateRequest::new(
+                "claude-sonnet-5-5",
+                Some("foundry-claude"),
+                None,
+                vec![first_user.clone()],
+                vec![],
+            ))
+            .await
+            .expect("first Foundry main response");
+        let first_effort = first_response
+            .per_turn_effort()
+            .expect("successful Foundry response records its admitted effort");
+        assert_eq!(first_effort.string_at(""), Some("high"));
+        let first_body = request_body_value(&transport.seen.lock().unwrap()[0].body_json);
+        assert!(first_body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["role"] == "system" && message["output_config"]["effort"] == "high"
+            }));
+
+        // Seed the next API-history batch from the actual response, including
+        // its response-owned effort tag, then select a different current level.
+        let assistant_content = first_response
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                crate::ContentBlock::Text { text, .. } => {
+                    Some(lingxi_core::types::ContentBlock::Text {
+                        text: text.clone(),
+                        citations: None,
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !assistant_content.is_empty(),
+            "fixture returns assistant text"
+        );
+        let prior_assistant = lingxi_core::types::ConversationMessage::Assistant {
+            id: lingxi_core::types::MessageId::new(),
+            content: assistant_content,
+            stop_reason: first_response.stop_reason.clone(),
+            resumable: None,
+            per_turn_effort: Some(first_effort),
+        };
+        service.set_session_effort(lingxi_core::host::effort_table::SessionEffort::Level(
+            serde_json::json!("medium"),
+        ));
+        let second_response = service
+            .messages_create(crate::MessagesCreateRequest::new(
+                "claude-sonnet-5-5",
+                Some("foundry-claude"),
+                None,
+                vec![
+                    first_user,
+                    prior_assistant,
+                    lingxi_core::types::ConversationMessage::user(
+                        lingxi_core::types::MessageId::new(),
+                        "second turn".into(),
+                    ),
+                ],
+                vec![],
+            ))
+            .await
+            .expect("second Foundry main response");
+        assert_eq!(
+            second_response
+                .per_turn_effort()
+                .and_then(|effort| effort.string_at("").map(str::to_owned)),
+            Some("medium".into())
+        );
+
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let second_body = request_body_value(&seen[1].body_json);
+        assert_eq!(second_body["output_config"]["effort"], "medium");
+        let markers = second_body["messages"]
+            .as_array()
+            .expect("encoded Foundry message history")
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                let effort = message.pointer("/output_config/effort")?.as_str()?;
+                Some((
+                    index,
+                    message["role"].as_str()?.to_owned(),
+                    effort.to_owned(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            markers,
+            vec![
+                (1, "system".to_owned(), "high".to_owned()),
+                (4, "system".to_owned(), "medium".to_owned()),
+            ],
+            "successful response effort stays attached to its historical turn"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -10055,60 +10400,6 @@ mod subscription_rate_limit_tests {
         // handled by the parity subscriber gate.
         assert!(!cannot_clear(Some("anthropic"), "claude-opus-5"));
         assert!(!cannot_clear(None, "claude-opus-5"));
-    }
-    #[tokio::test]
-    async fn headless_admission_preserves_native_effort_context_and_text_display_with_base_override(
-    ) {
-        let adapter=make_adapter_for_protocol_with_transport(
-            ProtocolFamily::AnthropicMessages,ProviderId::AnthropicFirstParty,
-            "http://configured-anthropic-base.test","native","claude-sonnet-5-5",
-            FakeTransport::always(ProviderResponse::json(200,ok_response_json())),
-        ).with_anthropic_client_metadata(lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin","arm64"))
-            .with_native_thinking_display(lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy {omit_default:true,..Default::default()});
-        let request = adapter
-            .build_request(
-                "claude-sonnet-5-5",
-                None,
-                None,
-                vec![text_user_msg("Return marker.")],
-                vec![],
-                true,
-                None,
-                false,
-                PromptCacheQuerySource::Unspecified,
-            )
-            .unwrap();
-        assert!(request.execution.resolve_native_effort);
-        let mut prepared = adapter.client.prepare(&request).await.unwrap();
-        adapter
-            .inject_headers(&mut prepared, DispatchHeaderState::default())
-            .unwrap();
-        let body = &prepared.provider_request.body_json;
-        assert_eq!(body["thinking"]["display"], "omitted");
-        assert_eq!(body["output_config"]["effort"], "medium");
-        assert_eq!(
-            body["messages"][1],
-            serde_json::json!({"role":"system","content":[],"output_config":{"effort":"medium"}})
-        );
-        let betas: Vec<_> = prepared.provider_request.headers["anthropic-beta"]
-            .split(',')
-            .collect();
-        assert!(
-            betas
-                .iter()
-                .position(|beta| *beta == crate::model::betas::MID_CONVERSATION_SYSTEM)
-                .unwrap()
-                < betas
-                    .iter()
-                    .position(|beta| *beta == crate::model::betas::PER_TURN_CONTROL)
-                    .unwrap()
-        );
-        assert_eq!(
-            body["context_management"],
-            serde_json::json!({"edits":[{"type":"clear_thinking_20251015","keep":"all"}]})
-        );
-        assert!(!prepared.provider_request.headers["anthropic-beta"]
-            .contains("thinking-display-updates-2026-08-18"));
     }
 }
 
@@ -10141,6 +10432,7 @@ mod tool_result_reminder_suffix_tests {
                     usage_limit_note: None,
                     origin: None,
                     turn_origin: None,
+                    api_message_override: None,
                 },
                 ConversationMessage::user_meta(
                     reminder_id,

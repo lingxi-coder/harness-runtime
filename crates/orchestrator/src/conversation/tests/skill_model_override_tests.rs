@@ -98,12 +98,24 @@ impl Tool for ModelSwitchTool {
     }
     async fn call(
         &self,
-        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let modifier: ContextModifier = Box::new(|mut ctx: ToolUseContext| {
-            ctx.options.main_loop_model = SWITCHED_MODEL.to_string();
+        // The optional fixture input selects a qualified route for the profile
+        // regressions; ordinary switch tests retain their changed-model target.
+        let (selected_model, selected_profile) = match input.string_at("/model") {
+            Some(model) => match model.split_once('/') {
+                Some((profile, model)) => (model.to_owned(), Some(profile.to_owned())),
+                None => (model.to_owned(), None),
+            },
+            None => (SWITCHED_MODEL.to_owned(), None),
+        };
+        let modifier: ContextModifier = Box::new(move |mut ctx: ToolUseContext| {
+            ctx.options.main_loop_model = selected_model.clone();
+            if let Some(profile) = &selected_profile {
+                ctx.options.model_profile = Some(profile.clone());
+            }
             ctx
         });
         Ok(ToolCallResult {
@@ -383,7 +395,8 @@ async fn skill_model_override_streaming_context_state_applies_profile_only_chang
         session.model = "shared".into();
         session.model_profile = Some("a".into());
     }
-    let context = ToolUseContext::model_seed("shared".into(), Some("b".into()));
+    let mut context = ToolUseContext::model_seed("shared".into());
+    context.options.model_profile = Some("b".into());
     let state = lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(context));
     crate::turn_loop::apply_model_context_state(&orch, state)
         .await
@@ -399,7 +412,8 @@ async fn batched_skill_model_override_next_call_uses_selected_profile_with_same_
         vec![LlmContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "ModelSwitch".into(),
-            input: serde_json::json!({"model": "b/shared"}),
+            input: lingxi_llm_client::protocol::JsonPayload::parse(r#"{"model":"b/shared"}"#)
+                .expect("generated skill input is valid JSON"),
         }],
         Some("tool_use"),
     );
@@ -595,17 +609,20 @@ async fn streaming_skill_model_override_switches_session_and_next_call() {
         message_stop(),
     ];
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
-    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
-        Arc::new(MockApiClient::new(vec![])),
-        streaming.clone(),
-        registry_with(Arc::new(ModelSwitchTool)),
-        noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
-        Arc::new(StaticMemoryProvider::empty()),
-        std::env::temp_dir(),
-    ));
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            registry_with(Arc::new(ModelSwitchTool)),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_model_resolution_context_provider(Arc::new(skill_test_route)),
+    );
 
     orch.run_turn_streaming("switch please")
         .await

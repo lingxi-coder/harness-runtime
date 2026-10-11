@@ -4,7 +4,7 @@ use futures::future::join_all;
 use hooks::mods::{ModError, ModHost, ModSessionContext};
 use lingxi_core::host::subagent_spawn::{AgentOfferCandidate, SubagentListingEntry};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
 
 /// The call context inputs used by native `Brt(context)` to bypass offer
@@ -160,6 +160,7 @@ async fn dispatch_agent_offer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn source(value: &Value) -> Utf16JsonProjection {
         Utf16JsonProjection::from_serde_value(value).expect("test JSON value is valid")

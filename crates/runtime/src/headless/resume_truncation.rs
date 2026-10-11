@@ -163,8 +163,8 @@ fn content(m: &JsonlMessage) -> Option<JsonValueView<'_>> {
 
 /// Oracle `e.attachment.type` for an `attachment` entry.
 fn attachment_type(m: &JsonlMessage) -> Option<&str> {
-    m.extra
-        .get_property("attachment")
+    m.attachment_projection
+        .as_ref()
         .and_then(|attachment| attachment.get_property("type"))
         .and_then(|value| value.as_str())
 }
@@ -184,9 +184,9 @@ fn describe(m: &JsonlMessage, index: usize) -> String {
 
 /// Oracle `pnu(e){return e.origin===void 0||e.origin.kind==="human"||e.origin.kind==="auto-continuation"}`
 fn is_locally_sourced(m: &JsonlMessage) -> bool {
-    match m.extra.get_property("origin") {
+    match m.origin_projection.as_ref() {
         None => true,
-        Some(origin) if origin.is_null() => true,
+        Some(origin) if origin.at_pointer("").is_some_and(|value| value.is_null()) => true,
         Some(origin) => matches!(
             origin.get_property("kind").and_then(|value| value.as_str()),
             Some("human" | "auto-continuation")

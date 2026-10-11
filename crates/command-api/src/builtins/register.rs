@@ -515,7 +515,6 @@ mod registry_tests {
     use super::*;
     use crate::builtin_support::BUILTIN_COMMAND_NAMES;
     use crate::model::CommandResult;
-    use crate::model::SourceTextTestExt;
 
     #[test]
     fn register_all_registers_exactly_87_names() {
@@ -672,7 +671,6 @@ mod registry_tests {
 mod batch_1_tests {
     use super::*;
     use crate::model::CommandResult;
-    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
     use orchestrator::test_support::MockOrchestratorHandle;
 
@@ -761,7 +759,6 @@ mod batch_1_tests {
 mod batch_3_tests {
     use super::*;
     use crate::model::CommandResult;
-    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
 
     fn args(name: &str) -> ParsedSlashCommand {
@@ -975,7 +972,6 @@ mod batch_5_tests {
 mod batch_6_tests {
     use super::*;
     use crate::model::CommandResult;
-    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
 
     fn args(name: &str) -> ParsedSlashCommand {
@@ -1046,7 +1042,6 @@ mod batch_6_tests {
 mod batch_4_tests {
     use super::*;
     use crate::model::CommandResult;
-    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
     use orchestrator::test_support::MockOrchestratorHandle;
 
@@ -1165,7 +1160,6 @@ mod batch_4_tests {
 mod batch_8_tests {
     use super::*;
     use crate::model::CommandResult;
-    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
     use orchestrator::test_support::MockOrchestratorHandle;
 
@@ -1357,7 +1351,6 @@ mod connect_tests {
         ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
         CopilotConnectStep,
     };
-    use crate::model::SourceTextTestExt;
     use async_trait::async_trait;
 
     struct NoopWriter;

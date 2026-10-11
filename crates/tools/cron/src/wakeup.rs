@@ -1412,11 +1412,6 @@ mod fold_line_tests {
     }
 }
 
-fn invalid_tool_input(message: impl Into<String>) -> ToolError {
-    let message = message.into();
-    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1673,9 +1668,8 @@ mod tests {
             let actual = tool
                 .coerce_input(&source_input)
                 .map_or_else(|| source_input.clone(), |c| c.input);
-            assert_eq!(
+            assert!(
                 actual.semantically_eq(&generated_builtin_result(&case["coerced"])),
-                true,
                 "coercion {index}"
             );
             if case["success"] == true {

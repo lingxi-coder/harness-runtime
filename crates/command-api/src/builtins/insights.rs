@@ -58,22 +58,22 @@ fn build_prompt(args: &Utf16JsonProjection) -> Utf16JsonProjection {
     // for-your-context-only summary label, and the verbatim-output
     // instruction (the older "Here is what the user sees:" / "Now output the
     // following message exactly:" wording is gone from the binary).
-    let framing = format!(
+    let framing = String::from(
         r#"The user just ran /insights to generate a usage report analyzing their LingXi sessions.
 Here is the full insights data:
-{{insights_json}}
-Report URL: {{report_url}}
-HTML file: {{html_path}}
-Facets directory: {{facets_dir}}
+{insights_json}
+Report URL: {report_url}
+HTML file: {html_path}
+Facets directory: {facets_dir}
 At-a-glance summary (for your context only — the user has not seen any output yet):
-{{user_summary}}{{upload_hint}}
+{user_summary}{upload_hint}
 Output the text between <message> tags verbatim as your entire response. Do not omit any line:
 <message>
 Your shareable insights report is ready:
-{{report_url}}
+{report_url}
 Want to dig into any section or try one of the suggestions?
 </message>
-"#
+"#,
     );
     if args.string_units("").is_some_and(|units| units.is_empty()) {
         framing.into()
@@ -90,7 +90,6 @@ Want to dig into any section or try one of the suggestions?
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {

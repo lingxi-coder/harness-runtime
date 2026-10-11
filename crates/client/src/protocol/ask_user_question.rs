@@ -43,28 +43,6 @@ pub struct AskUserQuestionAnswersDto {
     pub pairs: Vec<AskUserQuestionAnswerDto>,
 }
 
-impl AskUserQuestionAnswersDto {
-    /// Convert ordered FFI answer pairs into the model-facing source carrier.
-    #[cfg(feature = "adapter")]
-    #[must_use]
-    pub fn into_projections(
-        self,
-    ) -> Vec<(
-        lingxi_core::types::utf16_json::Utf16JsonProjection,
-        lingxi_core::types::utf16_json::Utf16JsonProjection,
-    )> {
-        self.pairs
-            .into_iter()
-            .map(|pair| {
-                (
-                    pair.question.into_projection(),
-                    pair.answer.into_projection(),
-                )
-            })
-            .collect()
-    }
-}
-
 impl Serialize for AskUserQuestionAnswersDto {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

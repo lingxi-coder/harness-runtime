@@ -14,9 +14,10 @@ use client::protocol::listings::{
     ConfigurationDomainDto as Domain, ConfigurationEffectDto as Effect,
     ConfigurationOperationStatusDto as Status,
 };
+use client::protocol::text::ClientTextDto;
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 async fn protocol_error(sink: &dyn ClientEventSink, message: impl Into<String>) {
     sink.emit(ClientEvent::Error {
@@ -108,6 +109,21 @@ fn source_with_prefix(prefix: &str, value: &Utf16JsonProjection) -> Utf16JsonPro
         .expect("prefixing text preserves the source string")
 }
 
+fn source_projection(value: &ClientTextDto) -> Utf16JsonProjection {
+    let units = value.code_units.clone();
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("ClientTextDto display is derived from its exact units")
+}
+
+fn strip_source_prefix<'a>(units: &'a [u16], prefix: &str) -> Option<&'a [u16]> {
+    let prefix_units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.strip_prefix(prefix_units.as_slice())
+}
+
+fn has_source_prefix(units: &[u16], prefix: &str) -> bool {
+    strip_source_prefix(units, prefix).is_some()
+}
+
 fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
     Utf16JsonProjection::object(fields).expect("generated mobile skill objects have unique fields")
 }
@@ -164,26 +180,27 @@ fn mobile_bundled_entries() -> Vec<Utf16JsonProjection> {
         .collect()
 }
 
-fn mobile_bundled_document(target: &str) -> Result<String, String> {
-    let name = target
-        .strip_prefix("<bundled:")
-        .and_then(|v| v.strip_suffix('>'))
+fn mobile_bundled_document(target: &ClientTextDto) -> Result<String, String> {
+    let target_units = target.code_units.as_slice();
+    let name_units = strip_source_prefix(target_units, "<bundled:")
+        .and_then(|units| units.strip_suffix(&[b'>' as u16]))
         .ok_or("invalid bundled skill identifier")?;
+    let name = String::from_utf16(name_units).map_err(|_| "invalid bundled skill identifier")?;
     let mut registry = skill_api::SkillRegistry::new();
     skill_api::builtin::register_mobile(&mut registry);
     let skill = registry
-        .get(name)
+        .get(&name)
         .ok_or_else(|| "This bundled skill is not available on mobile.".to_string())?;
     let markdown = skill
         .content
         .string_at("")
         .expect("bundled mobile skill body is generated from UTF-8 text");
     source_object(vec![
-        ("id".into(), source_string(target)),
+        ("id".into(), source_projection(target)),
         ("name".into(), source_string(name)),
         ("source".into(), source_string("bundled")),
         ("rootDir".into(), source_string("<bundled>")),
-        ("directory".into(), source_string(target)),
+        ("directory".into(), source_projection(target)),
         ("markdown".into(), skill.content.clone()),
         (
             "writable".into(),
@@ -305,21 +322,62 @@ impl MobileEngineHandle {
         }
     }
 
-    async fn emit_mobile_skill_document(&self, target: &str, sink: &dyn ClientEventSink) {
-        let result = if target.starts_with("<bundled:") {
+    async fn emit_mobile_skill_document(&self, target: &ClientTextDto, sink: &dyn ClientEventSink) {
+        let target_units = target.code_units.as_slice();
+        let result = if has_source_prefix(target_units, "<bundled:") {
             mobile_bundled_document(target)
-        } else if let Some(name) = target.strip_prefix("command:") {
+        } else if let Some(name_units) = strip_source_prefix(target_units, "command:") {
             let registry = self.inner.slash_registry.read().await;
-            registry.list_all().into_iter().find(|command| command.name.string_at("") == Some(name)).ok_or_else(|| "Unknown plugin skill.".to_string()).and_then(|command| {
-                if let command_api::SlashCommandKind::Plugin { file_path, plugin_id, .. } = &command.kind {
-                    let markdown = std::fs::read_to_string(file_path).map_err(|error| format!("Cannot read plugin skill: {error}"))?;
-                    let root = command.skill_root.as_deref().or_else(|| file_path.parent()).unwrap_or(file_path);
-                    Ok(json!({"id":target,"name":name,"source":"plugin","pluginOwner":plugin_id.to_string(),
-                        "rootDir":root.to_string_lossy(),"directory":root.to_string_lossy(),"markdown":markdown,
-                        "revision":config_admin::sha256_hex(markdown.as_bytes()),"writable":false,
-                        "readonlyReason":"Managed by the owning plugin."}).to_string())
-                } else { Err("This command is not a plugin skill document.".into()) }
-            })
+            registry
+                .list_all()
+                .into_iter()
+                .find(|command| command.name.string_units("").as_deref() == Some(name_units))
+                .ok_or_else(|| "Unknown plugin skill.".to_string())
+                .and_then(|command| {
+                    if let command_api::SlashCommandKind::Plugin {
+                        file_path,
+                        plugin_id,
+                        ..
+                    } = &command.kind
+                    {
+                        let markdown = std::fs::read_to_string(file_path)
+                            .map_err(|error| format!("Cannot read plugin skill: {error}"))?;
+                        let root = command
+                            .skill_root
+                            .as_deref()
+                            .or_else(|| file_path.parent())
+                            .unwrap_or(file_path);
+                        let revision = config_admin::sha256_hex(markdown.as_bytes());
+                        source_object(vec![
+                            ("id".into(), source_projection(target)),
+                            ("name".into(), command.name.clone()),
+                            ("source".into(), source_string("plugin")),
+                            ("pluginOwner".into(), source_string(plugin_id.to_string())),
+                            (
+                                "rootDir".into(),
+                                source_string(root.to_string_lossy().into_owned()),
+                            ),
+                            (
+                                "directory".into(),
+                                source_string(root.to_string_lossy().into_owned()),
+                            ),
+                            ("markdown".into(), source_string(markdown)),
+                            ("revision".into(), source_string(revision)),
+                            (
+                                "writable".into(),
+                                Utf16JsonProjection::parse("false").expect("boolean JSON"),
+                            ),
+                            (
+                                "readonlyReason".into(),
+                                source_string("Managed by the owning plugin."),
+                            ),
+                        ])
+                        .to_json_string()
+                        .map_err(|error| error.to_string())
+                    } else {
+                        Err("This command is not a plugin skill document.".into())
+                    }
+                })
         } else {
             skills_admin::document_json(target, &self.skills_admin_context())
         };
@@ -339,7 +397,7 @@ impl MobileEngineHandle {
     ) {
         match command.action.as_str() {
             "get_catalog" => self.emit_skill_catalog(sink).await,
-            "get_document" => match command.target.as_deref() {
+            "get_document" => match command.target.as_ref() {
                 Some(target) => self.emit_mobile_skill_document(target, sink).await,
                 None => protocol_error(sink, "Skill document target is required.").await,
             },
@@ -774,7 +832,8 @@ mod tests {
                 .string_at("/id")
                 .expect("bundled entry id is a string");
             let document: Value =
-                serde_json::from_str(&mobile_bundled_document(id).unwrap()).unwrap();
+                serde_json::from_str(&mobile_bundled_document(&ClientTextDto::from(id)).unwrap())
+                    .unwrap();
             assert_eq!(document["writable"], false);
             assert_eq!(document["id"], id);
             assert!(document["markdown"].is_string());
@@ -797,10 +856,44 @@ mod tests {
             Some(vec![u16::from(b'A'), 0xd800, u16::from(b'B')])
         );
     }
+
+    #[test]
+    fn mobile_command_skill_prefix_keeps_exact_name_units() {
+        let name_units = vec![
+            u16::from(b'r'),
+            u16::from(b'e'),
+            0xd800,
+            u16::from(b'v'),
+            u16::from(b'i'),
+            u16::from(b'e'),
+            u16::from(b'w'),
+        ];
+        let name = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&name_units),
+            name_units.clone(),
+        )
+        .unwrap();
+        let id = source_with_prefix("command:", &name);
+        let target = ClientTextDto::from_code_units(id.string_units("").unwrap());
+        let loaded_name = strip_source_prefix(&target.code_units, "command:")
+            .expect("catalog id has the command prefix");
+        assert_eq!(loaded_name, name_units);
+        let replacement = [
+            u16::from(b'r'),
+            u16::from(b'e'),
+            0xfffd,
+            u16::from(b'v'),
+            u16::from(b'i'),
+            u16::from(b'e'),
+            u16::from(b'w'),
+        ];
+        assert_ne!(loaded_name, replacement);
+    }
+
     #[tokio::test]
     async fn mobile_recorded_plugin_reconnect_uses_layers_and_secure_fields() {
         use crate::mobile::test_support::{
-            CollectingPermissionSink, FakeListener, HostFakePlatform, test_config,
+            test_config, CollectingPermissionSink, FakeListener, HostFakePlatform,
         };
         use lingxi_core::host::SecureStorage;
         use std::sync::Arc;
@@ -834,25 +927,21 @@ mod tests {
             )
         };
         let disabled = build(cfg.clone()).await.unwrap();
-        assert!(
-            disabled
-                .slash_registry
-                .read()
-                .await
-                .resolve("fixture:ping")
-                .is_none()
-        );
+        assert!(disabled
+            .slash_registry
+            .read()
+            .await
+            .resolve(&Utf16JsonProjection::from("fixture:ping"))
+            .is_none());
         drop(disabled);
         std::fs::write(workspace.join(branding::DOT_DIR).join("settings.local.json"),json!({"enabledPlugins":{"fixture@tests":true},"pluginConfigs":{"fixture@tests":{"options":{"REGION":"eu"}}}}).to_string()).unwrap();
         let missing_secret = build(cfg.clone()).await.unwrap();
-        assert!(
-            missing_secret
-                .slash_registry
-                .read()
-                .await
-                .resolve("fixture:ping")
-                .is_none()
-        );
+        assert!(missing_secret
+            .slash_registry
+            .read()
+            .await
+            .resolve(&Utf16JsonProjection::from("fixture:ping"))
+            .is_none());
         drop(missing_secret);
         storage
             .store(
@@ -878,7 +967,7 @@ mod tests {
                 .slash_registry
                 .read()
                 .await
-                .resolve("fixture:ping")
+                .resolve(&Utf16JsonProjection::from("fixture:ping"))
                 .is_some(),
             "layered enable and secure required config must be consumed by the real boot path"
         );

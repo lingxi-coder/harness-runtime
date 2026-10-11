@@ -16,7 +16,6 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_core::host::{ModelListing, OrchestratorHandle};
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 

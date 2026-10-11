@@ -271,7 +271,7 @@ async fn server_stitch_keeps_prefix_and_metadata_for_opaque_text() {
     assert_eq!(turn.assistant_blocks.len(), 1);
     assert!(
         matches!(turn.assistant_blocks.first(), Some(ContentBlock::ProviderContent { value, .. })
-        if value.string_at("/text").as_deref() == Some("retained text answer")
+        if value.string_at("/text") == Some("retained text answer")
             && value.at_pointer("/citations").is_some_and(|value| value.is_null())
             && value.number_at("/extra_native/keep") == Some(289.0))
     );
@@ -2035,6 +2035,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 }],
                 session_append_dispatched: false,
                 supersedes_row_ids: Vec::new(),
+                per_turn_effort: None,
             },
             CompletedAssistantRow {
                 stream_order: 1,
@@ -2058,6 +2059,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 }],
                 session_append_dispatched: false,
                 supersedes_row_ids: Vec::new(),
+                per_turn_effort: None,
             },
             CompletedAssistantRow {
                 stream_order: 2,
@@ -2079,6 +2081,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 }],
                 session_append_dispatched: false,
                 supersedes_row_ids: Vec::new(),
+                per_turn_effort: None,
             },
             CompletedAssistantRow {
                 stream_order: 3,
@@ -2102,6 +2105,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 }],
                 session_append_dispatched: false,
                 supersedes_row_ids: Vec::new(),
+                per_turn_effort: None,
             },
         ],
         ..PumpedTurn::default()
@@ -2268,7 +2272,7 @@ async fn ordinary_turn_does_not_adopt_a_projected_model_without_a_fallback_event
         [
             ContentBlock::Text { text, .. },
             ContentBlock::ProviderContent { value, .. }
-        ] if text == "ordinary answer" && value.string_at("/type").as_deref() == Some("lingxi_observation")
+        ] if text == "ordinary answer" && value.string_at("/type") == Some("lingxi_observation")
     ));
 }
 

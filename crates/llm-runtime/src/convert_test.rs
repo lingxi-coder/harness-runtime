@@ -46,6 +46,7 @@ mod tests {
             ],
             stop_reason: None,
             resumable: None,
+            per_turn_effort: None,
         };
 
         let converted = to_llm_messages(vec![message]).unwrap();
@@ -95,7 +96,6 @@ mod tests {
             per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolUse {
-                input_projection: None,
                 id,
                 name: "Read".to_string(),
                 input: projection(serde_json::json!({"path": "/tmp/x"})),
@@ -121,7 +121,6 @@ mod tests {
             per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolUse {
-                input_projection: None,
                 id: ToolUseId::from("toolu_01ABCDEF"),
                 name: "Read".to_string(),
                 input: projection(serde_json::json!({"path": "/tmp/x"})),
@@ -144,7 +143,6 @@ mod tests {
             api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
-                content_projection: None,
                 tool_use_id: ToolUseId::from("toolu_01ABCDEF"),
                 content: "file content".into(),
                 is_error: Some(false),
@@ -174,7 +172,6 @@ mod tests {
             api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
-                content_projection: None,
                 tool_use_id,
                 content: "file content".into(),
                 is_error: Some(false),
@@ -203,7 +200,6 @@ mod tests {
             api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
-                content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "boom".into(),
                 is_error: Some(true),
@@ -437,7 +433,6 @@ mod tests {
                     citations: None,
                 },
                 ProtoBlock::ToolUse {
-                    input_projection: None,
                     id,
                     name: "Read".to_string(),
                     input: projection(serde_json::json!({"path": "/x"})),
@@ -724,6 +719,7 @@ mod tests {
                     id: MessageId::new(),
                     content: notice.into(),
                     subtype: None,
+                    api_system: None,
                     compact_metadata: None,
                     model_fallback: None,
                     refusal_fallback: None,
@@ -877,7 +873,6 @@ mod tests {
 
     fn tool_result(content: &str) -> ProtoBlock {
         ProtoBlock::ToolResult {
-            content_projection: None,
             tool_use_id: ToolUseId::new(),
             content: content.into(),
             is_error: Some(false),
@@ -1012,8 +1007,8 @@ mod tests {
                         ProtoBlock::ToolResult { content: c0, .. },
                         ProtoBlock::ToolResult { content: c1, .. },
                     ) => {
-                        assert_eq!(c0.string_at("").as_deref(), Some("tr1"));
-                        assert_eq!(c1.string_at("").as_deref(), Some("tr2"));
+                        assert_eq!(c0.string_at(""), Some("tr1"));
+                        assert_eq!(c1.string_at(""), Some("tr2"));
                     }
                     _ => panic!("expected two leading tool_results"),
                 }
@@ -1052,7 +1047,6 @@ mod tests {
 
     fn tu(id: &str) -> ProtoBlock {
         ProtoBlock::ToolUse {
-            input_projection: None,
             id: ToolUseId::from(id),
             name: "Read".into(),
             input: projection(serde_json::json!({})),
@@ -1061,7 +1055,6 @@ mod tests {
     }
     fn tr(id: &str) -> ProtoBlock {
         ProtoBlock::ToolResult {
-            content_projection: None,
             tool_use_id: ToolUseId::from(id),
             content: "ok".into(),
             is_error: Some(false),
@@ -1135,7 +1128,7 @@ mod tests {
                 assert_eq!(tool_use_id.as_str(), "toolu_x");
                 assert!(is_error.unwrap_or(false));
                 assert_eq!(
-                    content.string_at("").as_deref(),
+                    content.string_at(""),
                     Some("[Tool result missing due to internal error]")
                 );
             }
@@ -1264,7 +1257,6 @@ mod tests {
 
     fn tool_reference_result(names: &[&str]) -> ConversationMessage {
         usr_blocks(vec![ProtoBlock::ToolResult {
-            content_projection: None,
             tool_use_id: ToolUseId::from("toolu_search"),
             content: String::new().into(),
             is_error: Some(false),
@@ -1420,6 +1412,7 @@ mod tests {
                 id: MessageId::new(),
                 content: "Conversation compacted".into(),
                 subtype: Some("compact_boundary".to_string()),
+                api_system: None,
                 compact_metadata: None,
                 model_fallback: None,
                 refusal_fallback: None,
@@ -1450,6 +1443,7 @@ mod tests {
                     usage_limit_note: None,
                     origin: None,
                     turn_origin: None,
+                    api_message_override: None,
                 },
                 user(retained_id, "ordinary user content"),
             ]),

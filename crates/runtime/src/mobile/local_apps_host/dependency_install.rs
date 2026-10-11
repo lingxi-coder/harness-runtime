@@ -174,7 +174,7 @@ impl LocalAppsHostBroker {
                     return Err(format!(
                         "inspect dependency input {}: {error}",
                         path.display()
-                    ))
+                    ));
                 }
             };
             if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -735,7 +735,7 @@ impl LocalAppsHostBroker {
                 return Err(format!(
                     "inspect dependency snapshot {}: {error}",
                     snapshot_root.display()
-                ))
+                ));
             }
         };
         if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
@@ -749,7 +749,7 @@ impl LocalAppsHostBroker {
                 return Err(format!(
                     "inspect dependency snapshot marker {}: {error}",
                     marker.display()
-                ))
+                ));
             }
         };
         if !marker_metadata.is_file()
@@ -816,7 +816,7 @@ impl LocalAppsHostBroker {
             Err(error) => {
                 return Err(format!(
                     "inspect dependency snapshot Vite executable: {error}"
-                ))
+                ));
             }
         };
         Ok(vite_metadata.is_file() && !vite_metadata.file_type().is_symlink())
@@ -891,7 +891,7 @@ impl LocalAppsHostBroker {
                 return Err(format!(
                     "inspect existing dependency snapshot {}: {error}",
                     snapshot_root.display()
-                ))
+                ));
             }
         }
         let parent = snapshot_root.parent().ok_or_else(|| {
@@ -999,7 +999,7 @@ impl LocalAppsHostBroker {
                 return Err(format!(
                     "read bundled dependency seed manifest {}: {error}",
                     manifest_path.display()
-                ))
+                ));
             }
         };
         let manifest: Value = serde_json::from_slice(&manifest).map_err(|error| {
@@ -1027,14 +1027,14 @@ impl LocalAppsHostBroker {
                 return Err(format!(
                     "bundled dependency seed is not a directory: {}",
                     seed_node_modules.display()
-                ))
+                ));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => {
                 return Err(format!(
                     "inspect bundled dependency seed {}: {error}",
                     seed_node_modules.display()
-                ))
+                ));
             }
         }
         Self::publish_dependency_snapshot(
@@ -1590,20 +1590,20 @@ impl LocalAppsHostBroker {
                 return Err(format!(
                     "verified local-app runtime ready marker is invalid: {} must not be a symlink",
                     marker.display()
-                ))
+                ));
             }
             Ok(_) => {
                 return Err(format!(
                     "verified local-app runtime ready marker is invalid: {} must be a regular file",
                     marker.display()
-                ))
+                ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => {
                 return Err(format!(
                     "inspect verified local-app runtime ready marker {}: {error}",
                     marker.display()
-                ))
+                ));
             }
         }
         let mut marker_file = std::fs::File::open(&marker).map_err(|error| {

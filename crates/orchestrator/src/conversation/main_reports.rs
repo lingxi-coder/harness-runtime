@@ -540,9 +540,7 @@ impl ConversationOrchestrator {
                         .to_string_lossy()
                         .into_owned();
                     row.message = native_report_message(&pending.envelope);
-                    row.extra
-                        .set_field("origin", native_peer_origin(&pending.envelope))
-                        .expect("transcript metadata object");
+                    row.origin_projection = Some(native_peer_origin(&pending.envelope));
                     let prepared = candidate.pending.front_mut().expect("pending front");
                     prepared.prepared_row = Some(
                         session::jsonl::exact_json::native_message_projection(&row)

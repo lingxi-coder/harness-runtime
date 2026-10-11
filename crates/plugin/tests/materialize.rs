@@ -1248,9 +1248,6 @@ impl McpTransport for RoleMcpTransport {
         _connection: &McpRawConnection,
     ) -> Result<Vec<McpToolDto>, McpError> {
         Ok(vec![McpToolDto {
-            input_schema_projection: None,
-            definition_projection: None,
-
             server_name: "echo".into(),
             tool_name: "send".into(),
             description: "send through the role fixture".into(),

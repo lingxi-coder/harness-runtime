@@ -22,7 +22,7 @@ fn session_reset_stages_remain_in_the_pre_split_order() {
         "reset_read_state",
         "self.transcript.reset_session_scoped().await",
         "orphan_forced_decisions.lock().await.clear()",
-        "self.prompt_runtime.reset_session_scoped().await",
+        "self.prompt_runtime.prepare_session_scoped_reset().await",
     ];
 
     let positions = ordered_calls.map(|call| {

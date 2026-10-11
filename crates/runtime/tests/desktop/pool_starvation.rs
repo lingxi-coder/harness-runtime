@@ -176,6 +176,9 @@ impl SubagentApiClient for PendingModel {
 /// A persistent teammate configured with the required model seam.
 fn pending_teammate_ctx(model: Arc<PendingModel>) -> SubagentContext {
     SubagentContext {
+        model_resolution_context_provider: None,
+        stop_hook_scope: Default::default(),
+        subagent_stop_firer: None,
         native_query_depth: 0,
         server_fallback_model_enforcement: None,
         handback: None,
@@ -187,7 +190,7 @@ fn pending_teammate_ctx(model: Arc<PendingModel>) -> SubagentContext {
         agent_name: None,
         team_name: None,
         agent_definition: AgentDefinition {
-            omit_claude_md: false,
+            omit_instructions: false,
             cache_ttl: None,
             agent_type: "teammate".into(),
             when_to_use: String::new(),
@@ -366,6 +369,7 @@ async fn fill_with_pending_teammates(pool: &StateMachinePool) -> FilledTeammates
 
 fn agent_tool_request() -> SubagentSpawnRequest {
     SubagentSpawnRequest {
+        stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
         teammate_color: None,

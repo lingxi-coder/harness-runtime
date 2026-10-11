@@ -75,14 +75,13 @@ impl PoolSubagentSpawner {
         &self,
         request: &SubagentSpawnRequest,
     ) -> Result<Option<DefaultModelSelection>, ModelResolutionError> {
-        let live = self.resolved_default_selection()?;
         let parent_model = request
             .parent_model_override
             .as_deref()
             .map(trim_route_text)
             .filter(|model| !model.is_empty());
         let Some(parent_model) = parent_model else {
-            return Ok(live);
+            return self.resolved_default_selection();
         };
 
         let parent_profile = request
@@ -91,6 +90,11 @@ impl PoolSubagentSpawner {
             .map(trim_route_text)
             .filter(|profile| !profile.is_empty());
 
+        // An explicit immediate-parent route is sufficient to resolve the
+        // child. The unrelated live root route may have gone away since this
+        // nested agent started, so use it only as an optional source of richer
+        // profile facts when it still agrees with the explicit override.
+        let live = self.resolved_default_selection().ok().flatten();
         if let Some(selection) = live.filter(|selection| {
             selection.model == parent_model
                 && parent_profile

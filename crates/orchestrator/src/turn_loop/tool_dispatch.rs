@@ -19,7 +19,7 @@ use hooks::registry::HookContext;
 use hooks::response::HookDecision;
 use lingxi_core::host::tool_invoker::tool_call_ref_index;
 use lingxi_core::types::{
-    utf16_json::{JsonValueView, Utf16JsonProjection},
+    utf16_json::{JsonValueView, Utf16JsonConsumer, Utf16JsonProjection},
     ContentBlock, ConversationMessage, MessageId, ToolUseId,
 };
 use std::path::{Component, Path, PathBuf};
@@ -203,9 +203,7 @@ fn projects_session_tool_check_mod_hard_hold(
         return None;
     }
     if feature.value && feature.source == hooks::mods::ProjectsFeatureSource::Payload {
-        return facts
-            .growthbook_used_non_default_host
-            .map(|used_non_default_host| used_non_default_host);
+        return facts.growthbook_used_non_default_host;
     }
     Some(true)
 }
@@ -226,7 +224,7 @@ fn mod_tool_call_agent_result(
     raw_result: &Utf16JsonProjection,
 ) -> Utf16JsonProjection {
     let mut fields = vec![("agentId".into(), agent_id.into())];
-    if let Some(resolved_model) = raw_result.subprojection("/resolvedModel").ok() {
+    if let Ok(resolved_model) = raw_result.subprojection("/resolvedModel") {
         fields.push(("resolvedModel".into(), resolved_model));
     }
     Utf16JsonProjection::object(fields).expect("Agent result is a valid JSON object")
@@ -2365,18 +2363,21 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             ModToolCheckDecision::Ask => "ask",
             ModToolCheckDecision::Deny => "deny",
         };
-        let mut result = serde_json::Map::new();
-        result.insert("decision".into(), serde_json::json!(decision));
+        let mut result = vec![("decision".into(), decision.into())];
         if let Some(reason) = verdict.reason {
-            result.insert("reason".into(), serde_json::json!(reason));
+            result.push(("reason".into(), reason));
         }
         if let Some(rule) = verdict.rule {
-            result.insert("rule".into(), serde_json::json!(rule));
+            result.push(("rule".into(), rule));
         }
         if let Some(ceiling) = mod_tool_check_ceiling_value(evaluation.ceiling) {
-            result.insert("ceiling".into(), ceiling);
+            result.push((
+                "ceiling".into(),
+                Utf16JsonProjection::from_serde_value(&ceiling)
+                    .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?,
+            ));
         }
-        Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(result))
+        Utf16JsonProjection::object(result)
             .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
     }
 }
@@ -2444,7 +2445,7 @@ async fn dispatch_mod_session_tool_call(
     let history = { orch.session.lock().await.history.clone() };
     let mut inherited = streaming_tool_context_base(orch, history).await;
     inherited.tool_use_id = Some(tool_use_id.clone());
-    inherited.assistant_message_id = Some(assistant_message_id.clone());
+    inherited.assistant_message_id = Some(assistant_message_id);
     inherited.agent_spawn_provenance = context.agent_spawn_provenance.clone();
     let cancellation = context.cancellation.clone();
     inherited.cancel = Some(cancellation.clone());
@@ -3809,6 +3810,7 @@ pub(crate) async fn streaming_tool_context_base(
 /// Streaming-only entry point. A completed row can sit queued until another
 /// tool releases a concurrency slot, so its query facts travel with that
 /// registered tool rather than being reread from session state at start time.
+#[cfg(test)]
 pub(crate) async fn dispatch_streaming_tool_use(
     orch: &ConversationOrchestrator,
     tool_use: &(ToolUseId, String, Utf16JsonProjection, Option<String>),
@@ -4235,6 +4237,13 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                         .and_then(|reference| tool_call_ref_index(reference, completed.len()))
                         .and_then(|index| completed.get(index))
                         .is_some_and(|core| {
+                            // A deferred core run intentionally has no ToolResult;
+                            // its null `result` is only the Mod `next` sentinel.
+                            // Reuse that run before output-schema validation so the
+                            // defer disposition and its stop signal remain intact.
+                            let deferred_without_result = core.dispatched.results.is_empty()
+                                && core.dispatched.prevent_continuation
+                                && result.at_pointer("").is_some_and(JsonValueView::is_null);
                             let original = core.stage.tool_use_result.clone().or_else(|| {
                                 core.dispatched
                                     .results
@@ -4246,9 +4255,10 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                         _ => None,
                                     })
                             });
-                            original
-                                .as_ref()
-                                .is_some_and(|original| original.semantically_eq(&result))
+                            deferred_without_result
+                                || original
+                                    .as_ref()
+                                    .is_some_and(|original| original.semantically_eq(&result))
                         })
                 };
                 if reuses_core {
@@ -4843,11 +4853,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // context).
         let tool_handle = match prepared_tool.as_ref() {
             Some(prepared)
-                if prepared.name() == name
-                    || prepared
-                        .aliases()
-                        .iter()
-                        .any(|alias| *alias == name.as_str()) =>
+                if prepared.name() == name || prepared.aliases().contains(&name.as_str()) =>
             {
                 Some(std::sync::Arc::clone(prepared))
             }
@@ -5651,7 +5657,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         //   other (request aborted)    → "user_abort"
         //   mode/classifier/…/no reason→ "config"
         let mut decision_otel_source: &'static str = "config";
-        let mut mod_changed_tool_check_decision = false;
+        let mod_changed_tool_check_decision;
         let decision = if let Some(forced) = forced_decision {
             // `oVo` wraps the ordinary permission evaluator with `LPr` even
             // when orphan recovery supplies a saved canUseTool response. A
@@ -6757,6 +6763,17 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         .await;
         #[allow(clippy::cast_possible_truncation)]
         let tool_duration_ms = tool_started.elapsed().as_millis() as u64;
+        // Preserve allocated child identity when a terminal Agent error has no
+        // successful `data.agentId` payload. The error content remains the
+        // model-facing message; lifecycle routing consumes this typed metadata.
+        let subagent_failure = match &tool_outcome {
+            Err(tool_api::tool_trait::ToolError::SubagentFailed {
+                agent_id,
+                terminal_hooks_owned,
+                ..
+            }) => Some((*agent_id, *terminal_hooks_owned)),
+            _ => None,
+        };
 
         let (content, is_error, emit_payload, is_abort, tool_use_result, mcp_meta, turn_end): (
             Utf16JsonProjection,
@@ -6867,10 +6884,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 // and feeds it raw into tool_result.content (line 1721).
                 // Only pre-execution paths (unknown-tool, schema validation) wrap.
                 //
-                // The model-facing content uses `model_facing_message()` — the
-                // BARE inner message (claude's `error.message`) — NOT the
-                // `Display` form, which would leak a LingXi-internal variant
-                // prefix (`invalid input: ` / `internal: `) into the wire bytes.
+                // Native's main thrown-tool handler puts `error.message` directly
+                // into model-facing `tool_result.content`. It separately prefixes
+                // `toolUseResult` with `Error: ` for the output/session surface.
                 //
                 // O4-A: claude-code's `oQ_` catch (2.1.220 @235424972) also
                 // stamps `toolDenialKind: YDd(err, signal)` on this very frame.
@@ -6887,26 +6903,26 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 // branch.
                 let is_abort = matches!(err, tool_api::ToolError::Aborted);
                 let bare = err.model_facing_message();
-                let mut text_units = "Error: ".encode_utf16().collect::<Vec<_>>();
-                text_units.extend(
+                let mut display_units = "Error: ".encode_utf16().collect::<Vec<_>>();
+                display_units.extend(
                     bare.string_units("")
                         .expect("model-facing tool error is a root string"),
                 );
-                let text = Utf16JsonProjection::root_string(
-                    String::from_utf16_lossy(&text_units),
-                    text_units,
+                let display_text = Utf16JsonProjection::root_string(
+                    String::from_utf16_lossy(&display_units),
+                    display_units,
                 )
-                .expect("tool error text is a valid source string");
-                // O1: on the ERROR arm claude stores the plain STRING
+                .expect("tool error display text is a valid source string");
+                // O1: on the ERROR arm Native stores the plain STRING
                 // `` `Error: ${ae}` `` in `toolUseResult` (2.1.220 BIN off
-                // 235424595), NOT a structured object. Carry both wires to Tn.
+                // 235424595), separately from the bare model-facing message.
                 (
-                    text.clone(),
+                    bare.clone(),
                     true,
                     Utf16JsonProjection::object(vec![("error".into(), bare.into())])
                         .expect("tool error payload is a JSON object"),
                     is_abort,
-                    Some(text.clone()),
+                    Some(display_text),
                     None,
                     None,
                 )
@@ -7228,11 +7244,31 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 // Validate against the tool's output schema when one exists
                 // (`e.outputSchema?.safeParse(...)?.success!==!1`): substitute
                 // unless validation EXPLICITLY fails. No schema → substitute.
-                let schema_ok = tool_handle.output_schema().map_or(Ok(()), |schema| {
-                    tool_api::native_schema::validate_flat_input(name, &schema, &new_output)
-                        .and_then(Result::err)
-                        .map_or(Ok(()), |detail| Err(detail.display))
-                });
+                let schema_ok = match tool_handle.output_schema() {
+                    None => Ok(()),
+                    Some(schema) => match Utf16JsonConsumer::new(&[schema, &new_output]) {
+                        Ok(consumer) => tool_api::output_schema::validate(
+                            &consumer.values()[0],
+                            &consumer.values()[1],
+                        )
+                        .map_err(|detail| {
+                            consumer
+                                .restore(&serde_json::Value::String(detail))
+                                .unwrap_or_else(|_| {
+                                    source_text_from_units(
+                                        "could not restore output schema diagnostic"
+                                            .encode_utf16()
+                                            .collect(),
+                                    )
+                                })
+                        }),
+                        Err(error) => Err(source_text_from_units(
+                            format!("could not inspect output schema: {error}")
+                                .encode_utf16()
+                                .collect(),
+                        )),
+                    },
+                };
                 match schema_ok {
                     Ok(()) => (
                         tool_handle
@@ -7383,6 +7419,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 .at_pointer("/subagentStopHooksOwned")
                 .and_then(JsonValueView::as_bool)
                 != Some(true)
+            && !subagent_failure
+                .as_ref()
+                .is_some_and(|(_, terminal_hooks_owned)| *terminal_hooks_owned)
         {
             let subagent_type = effective_input
                 .string_at("/subagent_type")
@@ -7390,7 +7429,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 .to_string();
             let real_agent_id = emit_payload
                 .string_at("/agentId")
-                .and_then(lingxi_core::types::AgentId::parse_prefixed);
+                .and_then(lingxi_core::types::AgentId::parse_prefixed)
+                .or_else(|| subagent_failure.as_ref().map(|(agent_id, _)| *agent_id));
             // Completed results report the start lifecycle already owned by the
             // runner. A failed allocated child may have stopped before startup;
             // never manufacture a start event after that terminal failure.
@@ -7928,9 +7968,10 @@ mod final_input_validation_tests {
         assert!(matches!(
             &results[0],
             ContentBlock::ToolResult {
-                is_error: Some(false),
+                is_error: None,
+                content,
                 ..
-            }
+            } if content.string_at("") == Some(r#"{"action":"updated"}"#)
         ));
     }
 

@@ -591,6 +591,35 @@ impl jsonrpc::InboundHandler for ProjectionHandler {
         jsonrpc::Response::success(request.id, self.result.clone())
     }
 }
+
+#[tokio::test]
+async fn roots_list_dispatch_accepts_native_295_string_params_and_omits_them() {
+    let (connection, _input, mut output) = connection();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    connection
+        .register_handler(
+            "roots/list",
+            Arc::new(ProjectionHandler {
+                seen: seen.clone(),
+                result: json!({"roots": []}),
+            }),
+        )
+        .await;
+    let io = JsonrpcMcpResultIo {
+        connection,
+        client_capabilities: source(&json!({"roots": {}})),
+    };
+    let request = source(&json!({"method": "roots/list", "params": "bad"}));
+    let result = io
+        .dispatch_local(vec![b'r' as u16], request, CancellationToken::new())
+        .await
+        .expect("the captured Native string-param case reaches the roots handler");
+    assert_eq!(to_value(&result), json!({"roots": []}));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "the validated roots handler ran once");
+    assert!(seen[0].params.is_none(), "non-object roots params are omitted");
+    assert!(output.try_recv().is_err());
+}
 #[tokio::test]
 async fn actual_registered_handler_params_and_result_match_native_schema_projection_bytes() {
     for name in [

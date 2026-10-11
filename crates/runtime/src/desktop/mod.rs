@@ -4756,22 +4756,20 @@ impl PluginRuntime {
             .iter()
             .filter(|id| live.contains(*id))
         {
-            match self.manager.plugin_state(id).await {
-                Some(
-                    plugin::PluginState::Loaded {
-                        manifest,
-                        install_dir,
-                        ..
-                    }
-                    | plugin::PluginState::DisablingFailed {
-                        manifest,
-                        install_dir,
-                        ..
-                    },
-                ) => {
-                    result.push((manifest, install_dir));
+            if let Some(
+                plugin::PluginState::Loaded {
+                    manifest,
+                    install_dir,
+                    ..
                 }
-                _ => {}
+                | plugin::PluginState::DisablingFailed {
+                    manifest,
+                    install_dir,
+                    ..
+                },
+            ) = self.manager.plugin_state(id).await
+            {
+                result.push((manifest, install_dir));
             }
         }
         // Stable sorting preserves discovery order for each category; it does
@@ -5003,6 +5001,7 @@ mod pending_fork_history_tests {
         let (messages, _) = session::jsonl::build_conversation_chain(&loaded, source_id);
         let target_id = lingxi_core::types::SessionId::new();
         let target_path = directory.path().join("fork.jsonl");
+        std::fs::create_dir(directory.path().join("ledger")).unwrap();
         let writer = session::JsonlWriter::new(
             target_path.clone(),
             Arc::new(platform::DesktopFileSystem::new(

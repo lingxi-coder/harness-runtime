@@ -58,6 +58,10 @@ pub const MID_CONVERSATION_SYSTEM: &str = "mid-conversation-system-2026-04-07";
 /// Native main-turn system effort control, emitted after mid-conversation
 /// system support and before the general per-request effort beta.
 pub const PER_TURN_CONTROL: &str = "per-turn-control-2026-07-01";
+/// Native main-request beta for admitted mid-conversation tool changes.
+pub const MID_CONVERSATION_TOOL_CHANGES: &str = "mid-conversation-tool-changes-2026-07-01";
+/// Native safeguard beta paired with an admitted server-classifier context.
+pub const DANGEROUS_TOOL_USE: &str = "dangerous-tool-use-2026-09-03";
 /// Connector-text summarization (`ewt`, `pewter_owl_header` flag — never emitted).
 pub const SUMMARIZE_CONNECTOR_TEXT: &str = "summarize-connector-text-2026-03-13";
 /// AFK transcript-classifier mode (`PH`).
@@ -134,6 +138,10 @@ pub struct BetaContext {
     pub effort: bool,
     /// Native per-turn system effort marker is present on this request.
     pub per_turn_control: bool,
+    /// Native admitted mid-conversation tool-change beta for this request.
+    pub mid_conversation_tool_changes: bool,
+    /// Native admitted server-classifier safeguard beta for this request.
+    pub dangerous_tool_use: bool,
     /// Automatic format admitted before explicit extra-body merging.
     pub structured_output: bool,
     pub request_kind: lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
@@ -157,6 +165,8 @@ impl BetaContext {
             fast_mode: false,
             effort: false,
             per_turn_control: false,
+            mid_conversation_tool_changes: false,
+            dangerous_tool_use: false,
             structured_output: false,
             request_kind: Default::default(),
             tool_search: false,
@@ -195,6 +205,18 @@ impl BetaContext {
     #[must_use]
     pub fn with_per_turn_control(mut self, on: bool) -> Self {
         self.per_turn_control = on;
+        self
+    }
+
+    #[must_use]
+    pub fn with_mid_conversation_tool_changes(mut self, on: bool) -> Self {
+        self.mid_conversation_tool_changes = on;
+        self
+    }
+
+    #[must_use]
+    pub fn with_dangerous_tool_use(mut self, on: bool) -> Self {
+        self.dangerous_tool_use = on;
         self
     }
 
@@ -449,6 +471,7 @@ fn model_betas_in(
         betas.push(MID_CONVERSATION_SYSTEM);
     }
     if first_party
+        && exp
         && ctx.effort
         && ctx.request_kind == Default::default()
         && lingxi_llm_client::providers::anthropic::supports_per_message_effort(model)
@@ -469,8 +492,22 @@ fn model_betas_in(
     if ctx.per_turn_control {
         betas.push(PER_TURN_CONTROL);
     }
+    if first_party
+        && ctx.request_kind
+            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+        && ctx.mid_conversation_tool_changes
+    {
+        betas.push(MID_CONVERSATION_TOOL_CHANGES);
+    }
     if ctx.effort {
         betas.push(EFFORT);
+    }
+    if first_party
+        && ctx.request_kind
+            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+        && ctx.dangerous_tool_use
+    {
+        betas.push(DANGEROUS_TOOL_USE);
     }
     // Per-feature: context-hint when the request sets the `context_hint` key.
     if ctx.context_hint {
@@ -485,6 +522,22 @@ fn model_betas_in(
         betas.push(ADVANCED_TOOL_USE_1P);
     }
     betas
+}
+
+/// Append Native AFK only after the automatic thinking-display beta has been
+/// resolved, preserving Native header order. Callers must pass an admitted main
+/// request fact; unsupported providers are filtered here as a final guard.
+pub(crate) fn append_afk_mode_after_thinking_display(
+    headers: &mut std::collections::BTreeMap<String, String>,
+    provider: Provider,
+    admitted: bool,
+) {
+    if admitted && matches!(provider, Provider::Anthropic | Provider::Foundry) {
+        lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
+            headers,
+            &[AFK_MODE.to_owned()],
+        );
+    }
 }
 
 /// Build the `anthropic-beta` header value for `provider` + `endpoint` + the
@@ -640,10 +693,25 @@ pub fn apply_beta_header_with_auth_and_custom(
 mod tests {
     use super::*;
 
+    /// The 2.1.287 fixture remains immutable. Exact 2.1.295 print captures
+    /// override only their matching input tuples; TTY values come from the
+    /// separate source-derived/unverified overlay, not a Native TTY capture.
     #[test]
-    fn current_native_model_beta_source_matches_headers_and_effort() {
+    fn versioned_beta_expectations_keep_287_and_295_evidence_distinct() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/fixtures/betas_2_1_287.json")).unwrap();
+        assert_eq!(fixture["version"], "2.1.287");
+        let print_overlay: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/native_per_turn_control_2_1_295_print_44.json"
+        ))
+        .expect("captured Native 2.1.295 print fixture parses");
+        let tty_overlay: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/native_per_turn_control_2_1_295_tty_source_derived_44.json"
+        ))
+        .expect("source-derived Native 2.1.295 TTY overlay parses");
+        assert_eq!(print_overlay["cases"].as_array().unwrap().len(), 44);
+        assert_eq!(tty_overlay["cases"].as_array().unwrap().len(), 44);
+
         for case in fixture["cases"].as_array().unwrap() {
             let input = &case["input"];
             let provider = match input["provider"].as_str().unwrap() {
@@ -709,9 +777,133 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join(",");
-            assert_eq!(automatic, case["expected"]["default_main"], "{case}");
+            let expected_main = default_main_from_versioned_overlay(
+                input,
+                &case["expected"]["default_main"],
+                &print_overlay,
+                &tty_overlay,
+            );
+            assert_eq!(automatic, expected_main, "{case}");
             assert_eq!(base.join(","), case["expected"]["explicit_main"], "{case}");
         }
+    }
+
+    fn default_main_from_versioned_overlay(
+        input: &serde_json::Value,
+        legacy_expected: &serde_json::Value,
+        print_overlay: &serde_json::Value,
+        tty_overlay: &serde_json::Value,
+    ) -> String {
+        if let Some(captured) = print_overlay["cases"]
+            .as_array()
+            .expect("print overlay cases")
+            .iter()
+            .find(|case| case.get("input") == Some(input))
+        {
+            let header = captured["captured"]["beta_header_line_utf8"]
+                .as_str()
+                .expect("captured raw Native header");
+            return header
+                .strip_prefix("anthropic-beta: ")
+                .and_then(|value| value.strip_suffix("\r\n"))
+                .expect("captured beta header framing")
+                .to_owned();
+        }
+        if let Some(source_derived) = tty_overlay["cases"]
+            .as_array()
+            .expect("TTY overlay cases")
+            .iter()
+            .find(|case| case.get("input") == Some(input))
+        {
+            assert_eq!(
+                source_derived["evidence_class"],
+                "source-derived-unverified"
+            );
+            return source_derived["expected_default_main_beta_tokens"]
+                .as_array()
+                .expect("source-derived expected beta tokens")
+                .iter()
+                .map(|token| token.as_str().expect("beta token"))
+                .collect::<Vec<_>>()
+                .join(",");
+        }
+        legacy_expected
+            .as_str()
+            .expect("historical 2.1.287 default_main expectation")
+            .to_owned()
+    }
+
+    #[test]
+    fn admitted_native_request_betas_keep_capture_order() {
+        let context = BetaContext::for_model("claude-sonnet-5-5")
+            .with_request_kind(
+                lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
+            )
+            .with_per_turn_control(true)
+            .with_mid_conversation_tool_changes(true)
+            .with_effort(true)
+            .with_dangerous_tool_use(true);
+        let assembled =
+            assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate, &context);
+        let mut headers = std::collections::BTreeMap::new();
+        lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
+            &mut headers,
+            &[assembled],
+        );
+        let header = headers.get("anthropic-beta").unwrap().clone();
+        let per_turn = header.find(PER_TURN_CONTROL).unwrap();
+        let tool_changes = header.find(MID_CONVERSATION_TOOL_CHANGES).unwrap();
+        let effort = header.find(EFFORT).unwrap();
+        let dangerous = header.find(DANGEROUS_TOOL_USE).unwrap();
+        assert!(
+            per_turn < tool_changes && tool_changes < effort && effort < dangerous,
+            "{header}"
+        );
+
+        let foundry_header =
+            assemble_beta_header(Provider::Foundry, Endpoint::MessagesCreate, &context);
+        assert!(foundry_header.contains(MID_CONVERSATION_TOOL_CHANGES));
+        assert!(foundry_header.contains(DANGEROUS_TOOL_USE));
+
+        let side_query = BetaContext::for_model("claude-sonnet-5-5")
+            .with_request_kind(
+                lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery,
+            )
+            .with_mid_conversation_tool_changes(true)
+            .with_dangerous_tool_use(true);
+        let side_header =
+            assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate, &side_query);
+        assert!(!side_header.contains(MID_CONVERSATION_TOOL_CHANGES));
+        assert!(!side_header.contains(DANGEROUS_TOOL_USE));
+        let count_header =
+            assemble_beta_header(Provider::Anthropic, Endpoint::CountTokens, &context);
+        assert!(!count_header.contains(MID_CONVERSATION_TOOL_CHANGES));
+        assert!(!count_header.contains(DANGEROUS_TOOL_USE));
+
+        lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
+            &mut headers,
+            &[lingxi_llm_client::providers::anthropic::thinking_display::UPDATES_BETA.to_owned()],
+        );
+        append_afk_mode_after_thinking_display(&mut headers, Provider::Anthropic, true);
+        let ordered = headers.get("anthropic-beta").unwrap();
+        let display = ordered
+            .find(lingxi_llm_client::providers::anthropic::thinking_display::UPDATES_BETA)
+            .unwrap();
+        let afk = ordered.find(AFK_MODE).unwrap();
+        assert!(dangerous < display && display < afk, "{ordered}");
+
+        let mut foundry = std::collections::BTreeMap::new();
+        append_afk_mode_after_thinking_display(&mut foundry, Provider::Foundry, true);
+        assert_eq!(
+            foundry.get("anthropic-beta").map(String::as_str),
+            Some(AFK_MODE)
+        );
+
+        let mut unsupported = std::collections::BTreeMap::new();
+        append_afk_mode_after_thinking_display(&mut unsupported, Provider::Vertex, true);
+        assert!(!unsupported.contains_key("anthropic-beta"));
+        append_afk_mode_after_thinking_display(&mut unsupported, Provider::Anthropic, false);
+        assert!(!unsupported.contains_key("anthropic-beta"));
     }
 
     #[test]
@@ -748,6 +940,12 @@ mod tests {
             "mid-conversation-system-2026-04-07"
         );
         assert_eq!(PER_TURN_CONTROL, "per-turn-control-2026-07-01");
+        assert_eq!(
+            MID_CONVERSATION_TOOL_CHANGES,
+            "mid-conversation-tool-changes-2026-07-01"
+        );
+        assert_eq!(DANGEROUS_TOOL_USE, "dangerous-tool-use-2026-09-03");
+        assert_eq!(AFK_MODE, "afk-mode-2026-01-31");
         assert_eq!(ADVISOR_TOOL, "advisor-tool-2026-03-01");
         assert_eq!(OAUTH, "oauth-2025-04-20");
     }
@@ -1194,7 +1392,7 @@ mod native_per_turn_beta_tests {
     fn encoder_discovered_per_turn_beta_keeps_native_model_order() {
         let mut request = crate::ProviderRequest::post_json(
             "http://configured-base.test/v1/messages",
-            serde_json::json!({}),
+            lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
         );
         request
             .headers
@@ -1218,5 +1416,131 @@ mod native_per_turn_beta_tests {
         );
         let side=BetaContext::for_model("claude-sonnet-5-5").with_effort(true).with_request_kind(lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery);
         assert!(!model_betas(Provider::Anthropic, &side).contains(&PER_TURN_CONTROL));
+    }
+}
+
+#[cfg(test)]
+mod native_per_turn_disabled_beta_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_experimental_betas_suppresses_automatic_per_turn_control_only() {
+        let context = BetaContext::for_model("claude-sonnet-5-5")
+            .with_effort(true)
+            .with_request_kind(
+                lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
+            );
+        for provider in [Provider::Anthropic, Provider::Foundry] {
+            let betas = model_betas_in(
+                provider,
+                &context,
+                BetaEnvironment {
+                    disabled: true,
+                    ..BetaEnvironment::default()
+                },
+            );
+            assert!(
+                !betas.contains(&PER_TURN_CONTROL),
+                "{provider:?}: {betas:?}"
+            );
+            assert!(betas.contains(&EFFORT), "{provider:?}: {betas:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_per_turn_control_295_capture_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn captured_bool_env(input: &Value, key: &str) -> bool {
+        input["env"][key]
+            .as_str()
+            .is_some_and(crate::structured_output::bool_value)
+    }
+
+    #[test]
+    fn model_betas_in_matches_native_2_1_295_public_print_header_bytes() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/native_per_turn_control_2_1_295_print_44.json"
+        ))
+        .expect("captured Native fixture parses");
+        assert_eq!(fixture["native"]["version"], "2.1.295");
+        let cases = fixture["cases"].as_array().expect("capture fixture cases");
+        assert_eq!(cases.len(), 44, "public-print capture count");
+
+        let mut mismatches = Vec::new();
+        for case in cases {
+            let input = &case["input"];
+            assert_eq!(case["mode"], "public-print", "{case}");
+            assert_eq!(input["interactive"], false, "{case}");
+            let provider = match input["provider"].as_str().expect("provider") {
+                "firstParty" => Provider::Anthropic,
+                "foundry" => Provider::Foundry,
+                other => panic!("unexpected captured provider {other:?}"),
+            };
+            let model = input["model"].as_str().expect("request model");
+            let captured = &case["captured"];
+            let has_effort = captured["top_level_output_config_effort"]
+                .as_str()
+                .is_some();
+            let has_per_message_effort = captured["per_message_effort_markers"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty());
+            let context = BetaContext::for_model(model)
+                .with_interactive(false)
+                .with_effort(has_effort)
+                .with_per_turn_control(has_per_message_effort)
+                .with_request_kind(
+                    lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
+                );
+            let environment = BetaEnvironment {
+                disabled: captured_bool_env(input, "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"),
+                interleaved_disabled: captured_bool_env(input, "DISABLE_INTERLEAVED_THINKING"),
+                force_mid_system: captured_bool_env(
+                    input,
+                    "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+                ),
+            };
+
+            // The production header merge keeps first occurrence order and
+            // removes duplicates from the automatic + encoder-discovered path.
+            let mut actual_tokens = Vec::new();
+            for beta in model_betas_in(provider, &context, environment) {
+                if !actual_tokens.contains(&beta) {
+                    actual_tokens.push(beta);
+                }
+            }
+            let actual_line = format!("anthropic-beta: {}\r\n", actual_tokens.join(","));
+            let expected_line = captured["beta_header_line_utf8"]
+                .as_str()
+                .expect("raw captured header line");
+            let captured_per_turn_count = actual_tokens
+                .iter()
+                .filter(|beta| **beta == PER_TURN_CONTROL)
+                .count();
+            let expected_per_turn_count = captured["per_turn_control_header_count"]
+                .as_u64()
+                .expect("captured per-turn token count")
+                as usize;
+            if actual_line.as_bytes() != expected_line.as_bytes()
+                || captured_per_turn_count != expected_per_turn_count
+            {
+                mismatches.push(format!(
+                    "row {} ({:?}, {:?}, env={:?}): actual={:?}, Native raw={:?}",
+                    case["matrix_row"],
+                    input["provider"],
+                    input["model"],
+                    input["env"],
+                    actual_line,
+                    expected_line,
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "Native 2.1.295 beta header mismatches:\n{}",
+            mismatches.join("\n")
+        );
     }
 }

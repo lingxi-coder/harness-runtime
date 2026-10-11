@@ -66,7 +66,7 @@ fn relative_path(payload: &Value) -> Result<(String, PathBuf), BridgeFailure> {
             _ => {
                 return Err(invalid(
                     "path must contain only normalized relative components",
-                ))
+                ));
             }
         }
     }

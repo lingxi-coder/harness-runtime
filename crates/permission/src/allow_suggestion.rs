@@ -482,7 +482,6 @@ fn webfetch_domain(input: &Utf16JsonProjection) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     macro_rules! json {
         ($($tokens:tt)*) => {{

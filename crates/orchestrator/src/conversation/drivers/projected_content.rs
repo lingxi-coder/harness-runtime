@@ -1,7 +1,6 @@
 //! Invocation-owned native user content admitted by the shared turn driver.
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ImageSource};
-use serde_json::Value;
 
 use crate::error::OrchestratorError;
 
@@ -18,7 +17,13 @@ pub(super) fn queued_human_content(
         .encode_utf16()
         .collect();
     units.extend(parsed.text.string_units("").expect("parsed exact text"));
-    units.extend("\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.".encode_utf16());
+    units.extend(
+        format!(
+            "\n\nThis is how {} surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+            branding::PRODUCT_NAME
+        )
+        .encode_utf16(),
+    );
     let wrapped = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
         .map_err(invalid_content)?;
     let mut blocks = vec![text_block(wrapped, None)?];
@@ -246,7 +251,6 @@ mod tests {
         message_stop, noop_hook_executor, text_delta, MockApiClient, MockOutputStream,
         MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     };
-    use lingxi_core::host::OrchestratorHandle;
     use lingxi_core::types::{ConversationMessage, MessageId};
     use serde_json::Value;
     use std::sync::Arc;
@@ -325,7 +329,11 @@ mod tests {
             let messages = capture["providerMessages"][1].as_array().unwrap();
             let system = messages.last().unwrap();
             assert_eq!(system["role"], "system");
-            assert_eq!(system["content"][0]["text"], *text);
+            let native_text = system["content"][0]["text"]
+                .as_str()
+                .expect("native queued-message text");
+            let expected = native_text.replace("Claude Code", branding::PRODUCT_NAME);
+            assert_eq!(expected, *text);
             assert_eq!(capture["observation"]["resultCount"], 1);
         }
     }
@@ -366,7 +374,11 @@ mod tests {
                 .last()
                 .unwrap();
             assert_eq!(native["role"], "system");
-            assert_eq!(native["content"][0]["text"], *text);
+            let native_text = native["content"][0]["text"]
+                .as_str()
+                .expect("native multifold text");
+            let expected = native_text.replace("Claude Code", branding::PRODUCT_NAME);
+            assert_eq!(expected, *text);
         }
     }
 
@@ -406,18 +418,20 @@ mod tests {
                 root.path().to_path_buf(),
             )),
         ));
-        let orch = crate::ConversationOrchestrator::new_with_streaming(
-            crate::OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            stream.clone(),
-            Arc::new(tool_api::registry::ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            root.path().to_path_buf(),
-        )
-        .with_jsonl_writer(writer);
+        let orch = crate::ConversationOrchestrator::into_shared(
+            crate::ConversationOrchestrator::new_with_streaming(
+                crate::OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                stream.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().to_path_buf(),
+            )
+            .with_jsonl_writer(writer),
+        );
         let incoming = Utf16JsonProjection::parse(
             r#"[{"type":"text","text":"first\ud800"},{"type":"text","text":"second"}]"#,
         )
@@ -454,19 +468,21 @@ mod tests {
         let history = orch.snapshot_history().await;
         assert!(history.iter().any(|message| message.id() == id));
 
-        // A subsequent failing turn publishes its own counter and reason;
-        // neither comes from accumulated usage or the previous result row.
-        assert!(orch
+        // A generic connect error is surfaced as a model-error message and a
+        // graceful turn completion. Its metrics must replace the prior turn's
+        // end_turn reason and counter.
+        let outcome = orch
             .run_turn_streaming_with_cancel_projected_content(
                 &Utf16JsonProjection::from_serde_value(&serde_json::json!("next")).unwrap(),
                 CancellationToken::new(),
                 None,
             )
             .await
-            .is_err());
+            .expect("generic connect error completes through the model-error path");
+        assert_eq!(outcome, crate::TurnOutcome::EndTurn);
         let metrics = orch.completed_turn_metrics().expect("error owner metrics");
         assert_eq!(metrics.num_turns, 1);
-        assert_ne!(metrics.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(metrics.stop_reason.as_deref(), Some("model_error"));
     }
 
     #[tokio::test]

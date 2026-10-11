@@ -1,0 +1,222 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "24f0184507850ee1542c83d684c30abd1af9c3eea2494e00ccb8a0e1312ad595",
+  "stdio_server_sha256": "93aeb27939a37670afeb09eda9a03d6792ee9caa7754122684eb0d37c0f4f30a",
+  "fixture_sha256": "9a91200a306d8c40ef13e0c7db9eefd967329b8a9e2d6732c4f0855d1ae87f30",
+  "native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "public_entrypoint": "Native 2.1.295 --print --output-format json, strict isolated --mcp-config, local stdio MCP, loopback Messages stub",
+  "fixed_inputs": {
+    "native_version": "2.1.295",
+    "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "session_id": "00000000-0000-4000-8000-000000002300",
+    "model": "claude-sonnet-4-5",
+    "server_name": "fixture",
+    "prompt": "Call the three fixture MCP tools in the order they are listed, then finish with the fixed response.",
+    "final_text": "NATIVE_MCP_TOOL_RESULT_PRESENCE_FINISHED",
+    "timeout_seconds": 45,
+    "tool_cases": [
+      {
+        "name": "result_omitted",
+        "tool_use_id": "toolu_native_iserror_omitted_295",
+        "marker": "MCP_RESULT_ISERROR_OMITTED",
+        "is_error": "omitted"
+      },
+      {
+        "name": "result_false",
+        "tool_use_id": "toolu_native_iserror_false_295",
+        "marker": "MCP_RESULT_ISERROR_FALSE",
+        "is_error": false
+      },
+      {
+        "name": "result_true",
+        "tool_use_id": "toolu_native_iserror_true_295",
+        "marker": "MCP_RESULT_ISERROR_TRUE",
+        "is_error": true
+      }
+    ]
+  },
+  "network_boundary": {
+    "model_endpoint": "127.0.0.1 loopback only",
+    "mcp_transport": "local stdio subprocess only",
+    "dummy_api_key_only": true,
+    "isolated_home_config": true,
+    "no_upstream_relay": true
+  },
+  "elapsed_seconds": 1.33,
+  "timeout_seconds": 45,
+  "timed_out": false,
+  "native_exit_code": 0,
+  "native_result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "NATIVE_MCP_TOOL_RESULT_PRESENCE_FINISHED",
+    "num_turns": 4,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-4000-8000-000000002300"
+  },
+  "native_stdout": {
+    "path": "native.stdout.raw.json",
+    "bytes": 1605,
+    "sha256": "f44896600e4b56ef5ae3c4b4c9b5cec9e75ead8a35d36271f0a6dbf4a100385c"
+  },
+  "native_stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "mcp": {
+    "incoming": {
+      "path": "mcp-trace/mcp-stdio-in.raw.jsonl",
+      "bytes": 3444,
+      "sha256": "a0c2102f0208ad5a8901ca433e4bffe1aa7b4d18487e3939e7c2e196a9a9fdf1"
+    },
+    "outgoing": {
+      "path": "mcp-trace/mcp-stdio-out.raw.jsonl",
+      "bytes": 1991,
+      "sha256": "5d77cb639c3f61f4a9384220acbf04331e7aa30eeeb4d4f62e1a8b08b748b294"
+    },
+    "tools_call_count": 3
+  },
+  "anthropic_messages_requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 115458,
+      "request_sha256": "af14b687bbd41d97ef3fd99c8aa4581e271b769a195b68c3a92e4a40b6d5161a",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "target_tool_name": "mcp__fixture__result_omitted",
+      "target_tool_present": true
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 115857,
+      "request_sha256": "a4df0dd4254c985678d2f0376102de34dcec9a7cd704c46b6199d0f21218775a",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "target_tool_name": "mcp__fixture__result_false",
+      "target_tool_present": true
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 116246,
+      "request_sha256": "59fe2bbb759a613304981ee6edd89f40c21b8002e62490b73913f007591927c1",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "target_tool_name": "mcp__fixture__result_true",
+      "target_tool_present": true
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 116643,
+      "request_sha256": "e62a453cd297f112267d318d6769b88b8d648b204f00227a498a17dafd00d710",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "all_expected_tool_results_present": true
+    }
+  ],
+  "anthropic_messages_responses": [
+    {
+      "index": 1,
+      "kind": "tool_use",
+      "name": "mcp__fixture__result_omitted",
+      "tool_use_id": "toolu_native_iserror_omitted_295",
+      "bytes": 897,
+      "sha256": "ce8293a976efdad8034d4de8d806427a2c78bf6e6918feea127dca0f571ef459"
+    },
+    {
+      "index": 2,
+      "kind": "tool_use",
+      "name": "mcp__fixture__result_false",
+      "tool_use_id": "toolu_native_iserror_false_295",
+      "bytes": 891,
+      "sha256": "43104d2965d0525630685b4daad0fca7fcb68b825d5acc9c8672b169d46b0799"
+    },
+    {
+      "index": 3,
+      "kind": "tool_use",
+      "name": "mcp__fixture__result_true",
+      "tool_use_id": "toolu_native_iserror_true_295",
+      "bytes": 888,
+      "sha256": "6971a0fc7e87b51c6318a121d88db53f5392888f8ce64ce2cdca61ded28339c3"
+    },
+    {
+      "index": 4,
+      "kind": "final",
+      "bytes": 815,
+      "sha256": "8fcb381d3a319a68bb192dd0b748f3d79a7d856898b1a0babdfec9d1244055e3"
+    }
+  ],
+  "tool_result_observations": {
+    "result_omitted": {
+      "path": "run-output/native-mcp-tool-result-presence-295-03uoy8uu/model-tool-result-result_omitted.raw.json",
+      "bytes": 242,
+      "sha256": "40d4c9ffd12c33de529b8a43a198d96ca57dfa83f93d7a63a31f2f9cd3052bf6",
+      "key_order": [
+        "tool_use_id",
+        "type",
+        "content",
+        "cache_control"
+      ],
+      "is_error_present": false,
+      "is_error_value": null,
+      "tool_use_id": "toolu_native_iserror_omitted_295",
+      "content": "{\"case\":\"result_omitted\"}\n\n<system-reminder>\n<total_tokens>14999985 tokens left</total_tokens>\n</system-reminder>"
+    },
+    "result_false": {
+      "path": "run-output/native-mcp-tool-result-presence-295-03uoy8uu/model-tool-result-result_false.raw.json",
+      "bytes": 238,
+      "sha256": "23228031de254c928c49b21d555a4720cf80e0fa2f9f57bbb6a1860d23ac1b1c",
+      "key_order": [
+        "tool_use_id",
+        "type",
+        "content",
+        "cache_control"
+      ],
+      "is_error_present": false,
+      "is_error_value": null,
+      "tool_use_id": "toolu_native_iserror_false_295",
+      "content": "{\"case\":\"result_false\"}\n\n<system-reminder>\n<total_tokens>14999985 tokens left</total_tokens>\n</system-reminder>"
+    },
+    "result_true": {
+      "path": "run-output/native-mcp-tool-result-presence-295-03uoy8uu/model-tool-result-result_true.raw.json",
+      "bytes": 249,
+      "sha256": "5245327638719e53a2b50c4251222d000329f8ff2c813fb205100bb4fafde55d",
+      "key_order": [
+        "type",
+        "content",
+        "is_error",
+        "tool_use_id",
+        "cache_control"
+      ],
+      "is_error_present": true,
+      "is_error_value": true,
+      "tool_use_id": "toolu_native_iserror_true_295",
+      "content": "MCP_RESULT_ISERROR_TRUE\n\n<system-reminder>\n<total_tokens>14999985 tokens left</total_tokens>\n</system-reminder>"
+    }
+  },
+  "native_session": {
+    "path": "native-session.raw.jsonl",
+    "bytes": 224427,
+    "sha256": "47b79e3265d9d84fe22a5e7d3031ef10943f1cfe1a93d68feb2162d87dfc6e3a"
+  },
+  "native_mcp_debug": {
+    "path": "native-mcp-debug.raw.jsonl",
+    "bytes": 3575,
+    "sha256": "4d65e7524aefee3a43e41584ca20a567acf04471351709dd92c7ed28f5385be1"
+  },
+  "raw_outputs_relative_path": "run-output/native-mcp-tool-result-presence-295-03uoy8uu"
+}

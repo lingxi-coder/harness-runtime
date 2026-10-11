@@ -3,7 +3,7 @@
 use lingxi_core::host::FileSystem;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use platform_posix::fs::PosixFileSystem;
-use serde_json::{json, Map};
+use serde_json::json;
 use session::jsonl::reader::{route_lines, JsonlReader, SessionMetadata};
 use session::jsonl::schema::JsonlMessage;
 use session::jsonl::writer::JsonlWriter;
@@ -11,7 +11,8 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn user_msg(n: u8) -> JsonlMessage {
-    JsonlMessage {         message_type: "user".into(),
+    JsonlMessage {
+        message_type: "user".into(),
         uuid: format!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa{n:02x}"),
         parent_uuid: None,
         session_id: "11111111-2222-3333-4444-555555555555".into(),
@@ -278,19 +279,19 @@ fn route_lines_tracks_content_replacements_and_marble_state_exactly() {
 
     assert_eq!(
         vec![
-            routed.content_replacements.get("sid-1").unwrap()[0]["path"]
-                .as_str()
+            routed.content_replacements.get("sid-1").unwrap()[0]
+                .string_at("/path")
                 .unwrap(),
-            routed.content_replacements.get("sid-1").unwrap()[1]["path"]
-                .as_str()
+            routed.content_replacements.get("sid-1").unwrap()[1]
+                .string_at("/path")
                 .unwrap(),
         ],
         vec!["a.txt", "c.txt"],
         "session-level content replacements must flatten in encounter order",
     );
     assert_eq!(
-        routed.agent_content_replacements.get("agent-1").unwrap()[0]["path"],
-        "b.txt",
+        routed.agent_content_replacements.get("agent-1").unwrap()[0].string_at("/path"),
+        Some("b.txt"),
         "agent-level replacements must stay separate from the session map",
     );
     assert_eq!(routed.context_collapse_commits.len(), 1);
@@ -302,6 +303,41 @@ fn route_lines_tracks_content_replacements_and_marble_state_exactly() {
         routed.context_collapse_snapshot.as_ref().unwrap()["snapshot"],
         "post-reset",
         "only the live marble snapshot survives cold load",
+    );
+}
+
+#[test]
+fn route_lines_preserves_content_replacement_source_units_and_structure() {
+    let routed = route_lines(concat!(
+        r#"{"type":"content-replacement","sessionId":"sid-1","replacements":[{"path":"a.txt","text":"A\ud800B","nullable":null},{"path":"b.txt","text":"C"}]}"#,
+        "\n",
+        r#"{"type":"content-replacement","agentId":"agent-1","replacements":[{"path":"agent.txt","text":"D\udfffE"}]}"#,
+    ));
+    assert_eq!(routed.malformed_line_count, 0);
+
+    let session_replacements = &routed.content_replacements["sid-1"];
+    assert_eq!(session_replacements.len(), 2);
+    assert_eq!(session_replacements[0].string_at("/path"), Some("a.txt"));
+    assert_eq!(session_replacements[1].string_at("/path"), Some("b.txt"));
+    assert_eq!(
+        session_replacements[0].string_units("/text"),
+        Some(vec![u16::from(b'A'), 0xd800, u16::from(b'B')])
+    );
+    assert!(session_replacements[0]
+        .get_property("nullable")
+        .unwrap()
+        .is_null());
+    assert!(!session_replacements[1].contains_property("nullable"));
+    assert_eq!(
+        session_replacements[0].to_json_string().unwrap(),
+        r#"{"path":"a.txt","text":"A\ud800B","nullable":null}"#
+    );
+
+    let agent_replacement = &routed.agent_content_replacements["agent-1"][0];
+    assert_eq!(agent_replacement.string_at("/path"), Some("agent.txt"));
+    assert_eq!(
+        agent_replacement.string_units("/text"),
+        Some(vec![u16::from(b'D'), 0xdfff, u16::from(b'E')])
     );
 }
 

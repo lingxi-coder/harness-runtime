@@ -346,7 +346,7 @@ pub async fn apply_operation(
                         .get_property("sparse")
                         .and_then(JsonValueView::array_len)
                         .into_iter()
-                        .flat_map(|length| (0..length))
+                        .flat_map(|length| 0..length)
                         .filter_map(|index| {
                             payload
                                 .get_property("sparse")?
@@ -716,7 +716,7 @@ fn available_plugins(
             return Err(format!(
                 "failed to read {}: {error}",
                 registry_path.display()
-            ))
+            ));
         }
     };
     let registry_entries = registry

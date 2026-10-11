@@ -80,8 +80,7 @@ pub fn request_dispatch_admission(
     }
     Some(llm_runtime::RequestDispatchAdmission::for_message_sources(
         guards.into_iter().map(|(message_id, guard)| {
-            let check: Arc<dyn Fn() -> bool + Send + Sync> =
-                Arc::new(move || guard.is_current());
+            let check: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || guard.is_current());
             (message_id, check)
         }),
     ))
@@ -99,7 +98,11 @@ pub async fn run_hook_prompt_work<T: Send>(
             let _ = result_tx.send(future.await);
         }))
         .await;
-    if accepted { result_rx.await.ok() } else { None }
+    if accepted {
+        result_rx.await.ok()
+    } else {
+        None
+    }
 }
 
 /// Remove async-hook messages whose producer generation was reset or dropped.
@@ -194,10 +197,12 @@ mod tests {
     fn test_generation_guard(
         generation: lingxi_core::host::CancellationToken,
     ) -> Arc<dyn HookPublicationGuard> {
-        Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
-            generation,
-            Arc::new(tokio::sync::Mutex::new(())),
-        ))
+        Arc::new(
+            crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+                generation,
+                Arc::new(tokio::sync::Mutex::new(())),
+            ),
+        )
     }
 
     #[test]
@@ -214,7 +219,7 @@ mod tests {
             active_id,
             "accepted hook reminder".into(),
         );
-        let admission = request_dispatch_admission(&[message.clone()], &guards)
+        let admission = request_dispatch_admission(std::slice::from_ref(&message), &guards)
             .expect("the final request contains one guarded message");
         absent_generation.cancel();
         assert!(admission.is_admitted());
@@ -238,8 +243,7 @@ mod tests {
 
     #[test]
     fn responses_wrapped_in_single_system_reminder() {
-        let out = render_reminder(&["ran lints: clean".into(), "synced".into()])
-            .expect("reminder");
+        let out = render_reminder(&["ran lints: clean".into(), "synced".into()]).expect("reminder");
         assert_eq!(
             out.display,
             "<system-reminder>\nran lints: clean\nsynced\n</system-reminder>"
@@ -248,8 +252,8 @@ mod tests {
 
     #[test]
     fn blank_entries_are_skipped_but_others_kept() {
-        let out = render_reminder(&[String::new().into(), "kept".into(), "  ".into()])
-            .expect("reminder");
+        let out =
+            render_reminder(&[String::new().into(), "kept".into(), "  ".into()]).expect("reminder");
         assert_eq!(out.display, "<system-reminder>\nkept\n</system-reminder>");
     }
 

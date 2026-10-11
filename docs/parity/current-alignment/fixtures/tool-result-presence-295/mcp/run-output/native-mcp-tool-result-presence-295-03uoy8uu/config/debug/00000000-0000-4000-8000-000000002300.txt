@@ -1,0 +1,173 @@
+2026-10-09T02:25:06.417Z [DEBUG] Loading skills from: managed=/Library/Application Support/ClaudeCode/.claude/skills, user=/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/skills, project=[]
+2026-10-09T02:25:06.417Z [DEBUG] Failed to stat directory /Library/Application Support/ClaudeCode/.claude/agents: ENOENT: no such file or directory, stat '/Library/Application Support/ClaudeCode/.claude/agents'
+2026-10-09T02:25:06.417Z [DEBUG] installed_plugins.json doesn't exist, returning empty V2 object
+2026-10-09T02:25:06.418Z [DEBUG] Found 2 plugins (2 enabled, 0 disabled)
+2026-10-09T02:25:06.419Z [DEBUG] getPluginSkills: Processing 2 enabled plugins
+2026-10-09T02:25:06.419Z [DEBUG] Checking plugin cc-plugin-agents-md: skillsPath=none, skillsPaths=0 paths
+2026-10-09T02:25:06.419Z [DEBUG] Checking plugin cc-plugin-plugin-authoring: skillsPath=none, skillsPaths=0 paths
+2026-10-09T02:25:06.419Z [DEBUG] Total plugin workflows loaded: 0
+2026-10-09T02:25:06.419Z [DEBUG] Total plugin commands loaded: 0
+2026-10-09T02:25:06.419Z [DEBUG] Total plugin skills loaded: 0 (0 duplicate/user-owned entries skipped)
+2026-10-09T02:25:06.419Z [DEBUG] Total plugin agents loaded: 0
+2026-10-09T02:25:06.420Z [DEBUG] Failed to stat directory /Library/Application Support/ClaudeCode/.claude/commands: ENOENT: no such file or directory, stat '/Library/Application Support/ClaudeCode/.claude/commands'
+2026-10-09T02:25:06.420Z [DEBUG] Loaded 0 unique skills (0 unconditional, 0 conditional, managed: 0, user: 0, project: 0, additional: 0, legacy commands: 0)
+2026-10-09T02:25:06.422Z [INFO] [uds-messaging] Listening: /tmp/cc-socks/76545.sock
+2026-10-09T02:25:06.422Z [INFO] [uds-messaging] Inject messages (auth line optional here): { echo '{"type":"auth","token":"[REDACTED]"$CLAUDE_CODE_MESSAGING_TOKEN"'"}'; echo '{"type":"user","message":{"role":"user","content":"hello"}}'; } | socat - UNIX-CONNECT:/tmp/cc-socks/76545.sock
+2026-10-09T02:25:06.425Z [INFO] [uds-messaging] Connect when the data is ready (e.g. out=$(cmd); printf '%s\n' "$out" | nc -U "$CLAUDE_CODE_MESSAGING_SOCKET" — or the socat form above): a connection that sends no complete line within 30000 ms is closed
+2026-10-09T02:25:06.425Z [DEBUG] Error log sink initialized
+2026-10-09T02:25:06.427Z [DEBUG] cc-plugin-sec-default@builtin not seated: no managed settings and not a Team or Enterprise organization (none)
+2026-10-09T02:25:06.428Z [DEBUG] [STARTUP] setup() completed in 16ms
+2026-10-09T02:25:06.428Z [DEBUG] Cleared mTLS configuration cache
+2026-10-09T02:25:06.428Z [DEBUG] Cleared proxy agent cache
+2026-10-09T02:25:06.428Z [DEBUG] mTLS: Creating HTTPS agent with custom certificates
+2026-10-09T02:25:06.430Z [DEBUG] [STARTUP] Loading commands and agents...
+2026-10-09T02:25:06.431Z [DEBUG] getSkills returning: 0 skill dir commands, 0 plugin skills, 39 bundled skills, 1 builtin plugin skills
+2026-10-09T02:25:06.434Z [DEBUG] [STARTUP] Commands and agents loaded in 4ms
+2026-10-09T02:25:06.436Z [DEBUG] [LSP MANAGER] initializeLspServerManager() called
+2026-10-09T02:25:06.436Z [DEBUG] [LSP MANAGER] Created manager instance, state=pending
+2026-10-09T02:25:06.436Z [DEBUG] [LSP MANAGER] Starting async initialization (generation 1)
+2026-10-09T02:25:06.436Z [DEBUG] Starting background startup prefetches
+2026-10-09T02:25:06.436Z [DEBUG] [Bootstrap] Skipped: Nonessential traffic disabled
+2026-10-09T02:25:06.452Z [DEBUG] [STARTUP] MCP configs resolved in 1ms (awaited at +42ms)
+2026-10-09T02:25:06.454Z [DEBUG] Cleared mTLS configuration cache
+2026-10-09T02:25:06.454Z [DEBUG] Cleared proxy agent cache
+2026-10-09T02:25:06.454Z [DEBUG] mTLS: Creating HTTPS agent with custom certificates
+2026-10-09T02:25:06.455Z [DEBUG] Total LSP servers loaded: 0
+2026-10-09T02:25:06.455Z [DEBUG] Initialized versioned plugins system with 0 plugins
+2026-10-09T02:25:06.456Z [DEBUG] [LSP SERVER MANAGER] getAllLspServers returned 0 server(s)
+2026-10-09T02:25:06.456Z [DEBUG] LSP manager initialized with 0 servers
+2026-10-09T02:25:06.456Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.457Z [DEBUG] [MCP] --mcp-config servers running fully async (nonblocking)
+2026-10-09T02:25:06.457Z [DEBUG] [MCP] claude.ai connectors running fully async (nonblocking)
+2026-10-09T02:25:06.457Z [DEBUG] LSP server manager initialized successfully
+2026-10-09T02:25:06.457Z [DEBUG] LSP notification handlers registered successfully for all 0 server(s)
+2026-10-09T02:25:06.459Z [DEBUG] [auto-mode] verifyAutoModeGateAccess: enabledState=enabled disabledBySettings=false model=claude-sonnet-4-5 modelSupported=false disableFastModeBreakerFires=false carouselAvailable=false canEnterAuto=false
+2026-10-09T02:25:06.459Z [WARN] auto mode disabled: model claude-sonnet-4-5 does not support auto mode
+2026-10-09T02:25:06.459Z [DEBUG] [auto-mode] kickOutOfAutoIfNeeded applying: ctx.mode=bypassPermissions ctx.prePlanMode=undefined reason=model
+2026-10-09T02:25:06.459Z [DEBUG] [auto-mode] verifyAutoModeGateAccess setAvailable: true -> false
+2026-10-09T02:25:06.459Z [DEBUG] [servedCatalog] off (essential_traffic)
+2026-10-09T02:25:06.460Z [DEBUG] [Perfetto] initializePerfettoTracing called, env value: undefined
+2026-10-09T02:25:06.460Z [DEBUG] [3P telemetry] isTelemetryEnabled=false (CLAUDE_CODE_ENABLE_TELEMETRY=undefined)
+2026-10-09T02:25:06.468Z [DEBUG] Plugin autoupdate: command-source refresh disabled by tengu_plugin_command_source_refresh (still excluding command-sourced plugins from the regular pass)
+2026-10-09T02:25:06.468Z [DEBUG] [3P telemetry] Event dropped (no event logger initialized): plugin_loaded
+2026-10-09T02:25:06.469Z [DEBUG] Plugin autoupdate: skipped (auto-updater disabled)
+2026-10-09T02:25:06.470Z [DEBUG] plugin cc-plugin-agents-md: no pluginConfigs["agents-md@builtin" or "cc-plugin-agents-md@builtin"].options in user, --settings or managed settings (project settings are not read); every option is its default
+2026-10-09T02:25:06.471Z [DEBUG] hooks module cc-plugin-agents-md@builtin loaded (native, environment 1, tier builtin); events: session.start,prompt.context,command.run,session.compact,prompt.submit,turn.start,turn.complete,agent.spawn,tool.call,prompt.mention
+2026-10-09T02:25:06.472Z [DEBUG] engine.create: no plugin-provided interfaces; $ built for cc-plugin-agents-md
+2026-10-09T02:25:06.472Z [DEBUG] plugin.register: cc-plugin-agents-md (builtin, cc-plugin-agents-md@builtin), judged by core alone: admitted
+2026-10-09T02:25:06.473Z [DEBUG] Registered 0 hooks from 2 plugins
+2026-10-09T02:25:06.478Z [DEBUG] [ScheduledTasks] scheduler start() — enabled=false, hasTasks=false
+2026-10-09T02:25:06.479Z [DEBUG] session.start: raised (surface none, not interactive)
+2026-10-09T02:25:06.480Z [DEBUG] [claudeai-mcp] Disabled: API-key auth precedence active
+2026-10-09T02:25:06.481Z [DEBUG] hooks module cc-plugin-agents-md@builtin session.start settled in 1.6ms (native link, next() included)
+2026-10-09T02:25:06.483Z [DEBUG] installPluginsForHeadless: starting
+2026-10-09T02:25:06.483Z [DEBUG] installPluginsForHeadless: no marketplaces declared
+2026-10-09T02:25:06.483Z [DEBUG] memory index backfill: ENOENT: no such file or directory, scandir '/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/projects/-private-tmp-native-mcp-tool-result-presence-295-cwd-xfj7d4u2/memory/'
+2026-10-09T02:25:06.486Z [DEBUG] [sessionRegistry] sweep permitted (domain darwin)
+2026-10-09T02:25:06.487Z [DEBUG] mcp runtime arm: v2 (source: default)
+2026-10-09T02:25:06.496Z [DEBUG] Ripgrep first use test: PASSED (mode=embedded, path=/Users/luolingfeng/.local/share/claude/versions/2.1.295)
+2026-10-09T02:25:06.496Z [DEBUG] "rg error (signal=undefined, code=2, stderr: rg: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/plugins/cache: IO error for operation on /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/plugins/cache: No such file or directory (os error 2)\n), 0 results"
+2026-10-09T02:25:06.496Z [DEBUG] MCP server "fixture": Starting connection with timeout of 30000ms
+2026-10-09T02:25:06.498Z [DEBUG] Preserving file permissions: 100600
+2026-10-09T02:25:06.498Z [DEBUG] Writing to temp file: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.5b14e3af4f8c
+2026-10-09T02:25:06.498Z [DEBUG] Watching /private/tmp/native-mcp-tool-result-presence-295-cwd-xfj7d4u2 for /private/tmp/native-mcp-tool-result-presence-295-cwd-xfj7d4u2/.claude to appear
+2026-10-09T02:25:06.498Z [DEBUG] Watching for changes in setting files /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/settings.json...
+2026-10-09T02:25:06.498Z [DEBUG] $.fs.ancestors (cc-plugin-agents-md): CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md found 0 of 3 directories
+2026-10-09T02:25:06.499Z [DEBUG] Applied original permissions to temp file
+2026-10-09T02:25:06.499Z [DEBUG] Temp file written successfully, size: 423 bytes
+2026-10-09T02:25:06.500Z [DEBUG] Renaming /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.5b14e3af4f8c to /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json
+2026-10-09T02:25:06.500Z [DEBUG] $.fs.ancestors (cc-plugin-agents-md): AGENTS.md, .claude/AGENTS.md found 0 of 3 directories
+2026-10-09T02:25:06.500Z [DEBUG] hooks module cc-plugin-agents-md@builtin prompt.context settled in 15.2ms (native link, next() included)
+2026-10-09T02:25:06.500Z [DEBUG] File /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json written atomically
+2026-10-09T02:25:06.501Z [DEBUG] Preserving file permissions: 100600
+2026-10-09T02:25:06.501Z [DEBUG] Writing to temp file: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.0d2744241582
+2026-10-09T02:25:06.501Z [DEBUG] Applied original permissions to temp file
+2026-10-09T02:25:06.501Z [DEBUG] Temp file written successfully, size: 719 bytes
+2026-10-09T02:25:06.501Z [DEBUG] Renaming /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json.tmp.76545.0d2744241582 to /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json
+2026-10-09T02:25:06.502Z [DEBUG] File /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/config/.claude.json written atomically
+2026-10-09T02:25:06.509Z [DEBUG] Git remote URL: null
+2026-10-09T02:25:06.509Z [DEBUG] No git remote URL found
+2026-10-09T02:25:06.526Z [DEBUG] MCP server "fixture": Successfully connected (transport: stdio) in 32ms
+2026-10-09T02:25:06.526Z [DEBUG] MCP server "fixture": no auto-opened subscriptions/listen on a modern connection; running the listen open through the reopen machinery (no-op if the server advertises no listChanged capability)
+2026-10-09T02:25:06.526Z [DEBUG] MCP server "fixture": Connection established with capabilities: {"hasTools":true,"hasPrompts":true,"hasResources":true,"hasResourceSubscribe":false,"serverVersion":{"name":"tool-result-presence-fixture","version":"1.0.0"},"protocolEra":"modern","negotiatedProtocolVersion":"2026-07-28"}
+2026-10-09T02:25:06.526Z [DEBUG] [MCP] Server "fixture" connected with subscribe=false
+2026-10-09T02:25:06.534Z [DEBUG] Failed to stat directory /Library/Application Support/ClaudeCode/.claude/output-styles: ENOENT: no such file or directory, stat '/Library/Application Support/ClaudeCode/.claude/output-styles'
+2026-10-09T02:25:06.534Z [DEBUG] Total plugin output styles loaded: 0
+2026-10-09T02:25:06.535Z [DEBUG] act_dont_rederive_arm_active source=growthbook
+2026-10-09T02:25:06.538Z [DEBUG] LSP Diagnostics: getLSPDiagnosticAttachments called
+2026-10-09T02:25:06.538Z [DEBUG] LSP Diagnostics: Checking registry - 0 pending
+2026-10-09T02:25:06.538Z [DEBUG] Hooks: Found 0 total hooks in registry
+2026-10-09T02:25:06.538Z [DEBUG] Sending 13 skills via attachment (initial)
+2026-10-09T02:25:06.539Z [DEBUG] Hooks: checkForNewResponses returning 0 responses
+2026-10-09T02:25:06.544Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.544Z [DEBUG] [session-notices] advertise=false mode=bypassPermissions flag=false(disabled) pollChannel=false ownEventsOnly=false remote=false remoteEnv=false nonInteractive=true
+2026-10-09T02:25:06.546Z [DEBUG] [engine] turn 1 start
+2026-10-09T02:25:06.548Z [DEBUG] hooks module cc-plugin-agents-md@builtin turn.start settled in 2.3ms (native link, next() included)
+2026-10-09T02:25:06.548Z [DEBUG] hooks module cc-plugin-agents-md@builtin prompt.submit settled in 6.9ms (native link, next() included)
+2026-10-09T02:25:06.559Z [DEBUG] attribution header x-anthropic-billing-header: cc_version=2.1.295.960; cc_entrypoint=sdk-cli;
+2026-10-09T02:25:06.560Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.561Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.562Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.563Z [DEBUG] [API:timing] dispatching to firstParty model=claude-sonnet-4-5
+2026-10-09T02:25:06.563Z [DEBUG] [API REQUEST] /v1/messages source=sdk
+2026-10-09T02:25:06.567Z [DEBUG] Stream started - received first chunk
+2026-10-09T02:25:06.567Z [DEBUG] [API:timing] first byte after 5ms
+2026-10-09T02:25:06.571Z [INFO] [Stall] tool_dispatch_start tool=mcp_tool toolUseId=toolu_native_iserror_omitted_295 permissionDecisionMs=0
+2026-10-09T02:25:06.571Z [DEBUG] MCP server "fixture": Calling MCP tool: result_omitted
+2026-10-09T02:25:06.575Z [DEBUG] MCP server "fixture": Tool 'result_omitted' completed successfully in 4ms
+2026-10-09T02:25:06.575Z [INFO] [Stall] tool_dispatch_end tool=mcp_tool toolUseId=toolu_native_iserror_omitted_295 outcome=ok durationMs=4
+2026-10-09T02:25:06.577Z [DEBUG] LSP Diagnostics: getLSPDiagnosticAttachments called
+2026-10-09T02:25:06.577Z [DEBUG] LSP Diagnostics: Checking registry - 0 pending
+2026-10-09T02:25:06.577Z [DEBUG] Hooks: Found 0 total hooks in registry
+2026-10-09T02:25:06.578Z [DEBUG] Hooks: checkForNewResponses returning 0 responses
+2026-10-09T02:25:06.581Z [DEBUG] attribution header x-anthropic-billing-header: cc_version=2.1.295.960; cc_entrypoint=sdk-cli;
+2026-10-09T02:25:06.581Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.581Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.582Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.582Z [DEBUG] [API:timing] dispatching to firstParty model=claude-sonnet-4-5
+2026-10-09T02:25:06.583Z [DEBUG] [API REQUEST] /v1/messages source=sdk
+2026-10-09T02:25:06.585Z [DEBUG] Stream started - received first chunk
+2026-10-09T02:25:06.585Z [DEBUG] [API:timing] first byte after 3ms
+2026-10-09T02:25:06.586Z [INFO] [Stall] tool_dispatch_start tool=mcp_tool toolUseId=toolu_native_iserror_false_295 permissionDecisionMs=0
+2026-10-09T02:25:06.586Z [DEBUG] MCP server "fixture": Calling MCP tool: result_false
+2026-10-09T02:25:06.588Z [DEBUG] MCP server "fixture": Tool 'result_false' completed successfully in 2ms
+2026-10-09T02:25:06.588Z [INFO] [Stall] tool_dispatch_end tool=mcp_tool toolUseId=toolu_native_iserror_false_295 outcome=ok durationMs=2
+2026-10-09T02:25:06.589Z [DEBUG] LSP Diagnostics: getLSPDiagnosticAttachments called
+2026-10-09T02:25:06.589Z [DEBUG] LSP Diagnostics: Checking registry - 0 pending
+2026-10-09T02:25:06.589Z [DEBUG] Hooks: Found 0 total hooks in registry
+2026-10-09T02:25:06.589Z [DEBUG] Hooks: checkForNewResponses returning 0 responses
+2026-10-09T02:25:06.591Z [DEBUG] attribution header x-anthropic-billing-header: cc_version=2.1.295.960; cc_entrypoint=sdk-cli;
+2026-10-09T02:25:06.591Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.591Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.592Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.592Z [DEBUG] [API:timing] dispatching to firstParty model=claude-sonnet-4-5
+2026-10-09T02:25:06.592Z [DEBUG] [API REQUEST] /v1/messages source=sdk
+2026-10-09T02:25:06.595Z [DEBUG] Stream started - received first chunk
+2026-10-09T02:25:06.595Z [DEBUG] [API:timing] first byte after 3ms
+2026-10-09T02:25:06.596Z [INFO] [Stall] tool_dispatch_start tool=mcp_tool toolUseId=toolu_native_iserror_true_295 permissionDecisionMs=0
+2026-10-09T02:25:06.596Z [DEBUG] MCP server "fixture": Calling MCP tool: result_true
+2026-10-09T02:25:06.598Z [ERROR] MCP server "fixture" MCP_RESULT_ISERROR_TRUE
+2026-10-09T02:25:06.598Z [DEBUG] MCP server "fixture": Tool 'result_true' failed after 0s: MCP_RESULT_ISERROR_TRUE
+2026-10-09T02:25:06.598Z [WARN] [Stall] tool_dispatch_end tool=mcp_tool toolUseId=toolu_native_iserror_true_295 outcome=error durationMs=2
+2026-10-09T02:25:06.598Z [DEBUG] mcp_tool tool error (2ms): code=tool_mcp_call_error type=McpToolCallError errorChars=23
+2026-10-09T02:25:06.600Z [DEBUG] LSP Diagnostics: getLSPDiagnosticAttachments called
+2026-10-09T02:25:06.600Z [DEBUG] LSP Diagnostics: Checking registry - 0 pending
+2026-10-09T02:25:06.600Z [DEBUG] Hooks: Found 0 total hooks in registry
+2026-10-09T02:25:06.600Z [DEBUG] Hooks: checkForNewResponses returning 0 responses
+2026-10-09T02:25:06.602Z [DEBUG] attribution header x-anthropic-billing-header: cc_version=2.1.295.960; cc_entrypoint=sdk-cli;
+2026-10-09T02:25:06.602Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.602Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.603Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.603Z [DEBUG] [API:timing] dispatching to firstParty model=claude-sonnet-4-5
+2026-10-09T02:25:06.603Z [DEBUG] [API REQUEST] /v1/messages source=sdk
+2026-10-09T02:25:06.606Z [DEBUG] Stream started - received first chunk
+2026-10-09T02:25:06.606Z [DEBUG] [API:timing] first byte after 3ms
+2026-10-09T02:25:06.608Z [DEBUG] [engine] turn 1 end (turns=4 usage in=40 out=20 cost=$0.0004 api=29ms stop=end_turn resultLen=40)
+2026-10-09T02:25:06.608Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-10-09T02:25:06.610Z [DEBUG] hooks module cc-plugin-agents-md@builtin turn.complete settled in 0.1ms (native link, next() included)
+2026-10-09T02:25:06.611Z [DEBUG] MCP server "fixture": Sending SIGINT to MCP server process
+2026-10-09T02:25:06.630Z [DEBUG] MCP server "fixture": UNKNOWN connection closed after 0s (cleanly)
+2026-10-09T02:25:06.631Z [DEBUG] MCP server "fixture": Cleared connection cache for reconnection
+2026-10-09T02:25:06.662Z [DEBUG] MCP server "fixture": MCP server process exited cleanly
+2026-10-09T02:25:06.663Z [DEBUG] [uds-messaging] Shutting down
+2026-10-09T02:25:06.665Z [DEBUG] LSP server manager shut down successfully

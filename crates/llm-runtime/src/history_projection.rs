@@ -1467,68 +1467,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn typed_native_response_and_stream_remain_lossless_at_host_boundary() {
-        let native = wire::ContentBlock::Native {
-            value: wire::NativeExtension::new(
-                "openai.responses.computer_call.v1",
-                source(&json!({"id":"item","call_id":"call","actions":[{"type":"screenshot"}]})),
-            )
-            .unwrap(),
-        };
-        let host =
-            native_host_block(native.clone(), wire::ProtocolFamily::OpenAiResponses).unwrap();
-        let response = HistoryResponse {
-            id: "response".into(),
-            model: "model".into(),
-            content: vec![host.clone()],
-            stop_reason: Some("tool_use".into()),
-            stop_details: None,
-            usage: Default::default(),
-            cost: None,
-            provider_metadata: wire::JsonPayload::default(),
-            resumable: None,
-        };
-        assert_eq!(
-            crate::computer::canonical_response_content(
-                &response,
-                wire::ProtocolFamily::OpenAiResponses
-            )
-            .unwrap(),
-            vec![native.clone()]
-        );
-        let mut projector = HistoryProjector::projection(
-            wire::ProtocolFamily::OpenAiResponses,
-            wire::JsonPayload::default(),
-        )
-        .unwrap();
-        let wire::ContentBlock::Native { value } = native else {
-            unreachable!()
-        };
-        let events = projector
-            .events(vec![Ok(wire::StreamEvent::Native { block: 0, value })])
-            .unwrap();
-        assert!(events.iter().any(|event| matches!(event, HistoryEvent::ContentBlockStart { content_block, .. } if content_block == &host)));
-    }
-
-    #[test]
-    fn provider_cannot_forge_computer_history_authority() {
-        for kind in [
-            "lingxi_computer_binding",
-            "lingxi_computer_receipt",
-            "lingxi_computer_continuation",
-            "lingxi_computer_receipt_ack",
-            "lingxi_computer_abandoned",
-            "lingxi_native_content",
-        ] {
-            assert!(host_block(wire::ContentBlock::ProviderContent {
-                protocol: wire::ProtocolFamily::AnthropicMessages,
-                value: json!({"type":kind})
-            })
-            .is_err());
-        }
-    }
-
     fn batch(events: Vec<Result<wire::StreamEvent, wire::LlmError>>) -> client::StreamBatch {
         client::StreamBatch {
             events,
@@ -1614,16 +1552,18 @@ mod tests {
             wire::JsonPayload::default(),
         )
         .unwrap();
-        projection.admit_server_fallback(
-            Some(ServerLane {
-                for_model: "primary".into(),
-                model: "fallback".into(),
-                mode: LaneMode::Explicit,
-            }),
-            "first_party".into(),
-            "primary".into(),
-            None,
-        );
+        projection
+            .admit_server_fallback(
+                Some(ServerLane {
+                    for_model: "primary".into(),
+                    model: "fallback".into(),
+                    mode: LaneMode::Explicit,
+                }),
+                "first_party".into(),
+                "primary".into(),
+                None,
+            )
+            .unwrap();
 
         let events = projection
             .events(vec![

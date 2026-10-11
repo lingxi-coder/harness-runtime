@@ -10,12 +10,11 @@
 //! (the provider router only substitutes configured `routing.aliases`). See
 //! [`resolve_agent_model`].
 //!
-//! ## Precedence (`getAgentModel`, agent.ts:43-94)
-//! 1. **`LINGXI_SUBAGENT_MODEL`** env override (HIGHEST) → resolved via
-//!    `parseUserSpecifiedModel`, bypassing the Bedrock region prefix (the TS
-//!    early-return at agent.ts:43-45 returns before `applyParentRegionPrefix`).
-//!    The TS guard `if (process.env.LINGXI_SUBAGENT_MODEL)` is falsy for
-//!    BOTH unset and empty-string, hence the `.filter(|s| !s.is_empty())`.
+//! ## Precedence (Native `getAgentModel`, agent.ts:43-94, plus the LingXi env override)
+//! 1. **LingXi-only `LINGXI_SUBAGENT_MODEL`** env override (HIGHEST) → resolved
+//!    via `parseUserSpecifiedModel` and returned before Bedrock region-prefix
+//!    inheritance. This variable is not attributed to Native's TypeScript
+//!    environment; this Rust port treats both unset and empty values as absent.
 //! 2. **`toolSpecifiedModel`** (agent.ts:70-76) — NOT separately ported here.
 //!    The LingXi spawn path (`handle.rs::spawn`) already converts AgentTool's
 //!    per-call `model` field into `AgentModel::Alias` and passes it as the
@@ -842,11 +841,34 @@ pub fn resolve_user_specified_model(
                 profile: context.route.profile.clone(),
             })
     };
+    let family_default_or_catalog_alias = |family: &str| {
+        if let Some(model) = context.family_defaults.get(family) {
+            return Ok(append_1m_suffix(model.to_owned(), has_1m_tag));
+        }
+        if let Some(model) = resolve_configured_catalog_alias(family, context, has_1m_tag)? {
+            return Ok(model);
+        }
+        Err(ModelResolutionError::MissingFamilyDefault {
+            family: family.to_string(),
+            profile: context.route.profile.clone(),
+        })
+    };
 
     match base.as_str() {
-        "opusplan" | "sonnet" => Ok(append_1m_suffix(family_default("sonnet")?, has_1m_tag)),
-        "haiku" => Ok(append_1m_suffix(family_default("haiku")?, has_1m_tag)),
-        "opus" => Ok(append_1m_suffix(family_default("opus")?, has_1m_tag)),
+        "opusplan" => {
+            if let Some(model) = context.family_defaults.get("sonnet") {
+                Ok(append_1m_suffix(model.to_owned(), has_1m_tag))
+            } else if let Some(model) =
+                resolve_configured_catalog_alias("opusplan", context, has_1m_tag)?
+            {
+                Ok(model)
+            } else {
+                family_default("sonnet")
+            }
+        }
+        "sonnet" => family_default_or_catalog_alias("sonnet"),
+        "haiku" => family_default_or_catalog_alias("haiku"),
+        "opus" => family_default_or_catalog_alias("opus"),
         "fable" => {
             if context.fable_strategy_available == Some(false) {
                 return Err(ModelResolutionError::MissingFamilyDefault {
@@ -857,15 +879,22 @@ pub fn resolve_user_specified_model(
             // Native has an additional dynamic endpoint/catalog gate for Fable
             // and 1M. The host has no trusted source for those facts yet, so it
             // keeps an explicitly supplied suffix and does not claim parity.
-            Ok(append_1m_suffix(family_default("fable")?, has_1m_tag))
+            family_default_or_catalog_alias("fable")
         }
         "best" => {
             // The Native `kI()` strategy/catalog lookup and entitlement overlay
             // are not available in this runtime. Use a trusted host best model
-            // when supplied; otherwise preserve the current host Opus fallback.
+            // when supplied; otherwise honor an explicit non-first-party route
+            // alias before preserving the current host Opus fallback.
             match context.best_model.as_ref() {
                 Some(model) => Ok(model.clone()),
-                None => family_default("opus"),
+                None => match resolve_configured_catalog_alias("best", context, false)? {
+                    Some(model) => Ok(model),
+                    // Keep Native's existing `best[1m]` fallback behavior:
+                    // when no trusted best/catalog alias exists, use the Opus
+                    // default verbatim without adding a 1M suffix.
+                    None => family_default("opus"),
+                },
             }
         }
         _ if is_legacy_opus_id(&base)
@@ -886,6 +915,37 @@ pub fn resolve_user_specified_model(
                 Ok(trimmed.to_string())
             }
         }
+    }
+}
+
+/// Resolve a unique alias supplied by a non-first-party route's model catalog.
+/// Native first-party aliases keep their dedicated strategy/family behavior;
+/// provider-local aliases are used for other routes only when the host has
+/// supplied exactly one concrete target. Ambiguous or empty candidate sets
+/// fail closed rather than choosing a model by iteration order.
+fn resolve_configured_catalog_alias(
+    alias: &str,
+    context: &ModelResolutionContext,
+    has_1m_tag: bool,
+) -> Result<Option<String>, ModelResolutionError> {
+    if context.route.provider == Some(ModelProviderKind::FirstParty) {
+        return Ok(None);
+    }
+    let Some(candidates) = context.catalog_aliases.get(alias) else {
+        return Ok(None);
+    };
+    match candidates.as_slice() {
+        [model] => Ok(Some(append_1m_suffix(model.clone(), has_1m_tag))),
+        [] => Err(ModelResolutionError::RouteUnavailable {
+            model: alias.to_string(),
+            profile: context.route.profile.clone(),
+            reason: "configured catalog alias has no target".to_string(),
+        }),
+        _ => Err(ModelResolutionError::RouteUnavailable {
+            model: alias.to_string(),
+            profile: context.route.profile.clone(),
+            reason: format!("configured catalog alias has {} targets", candidates.len()),
+        }),
     }
 }
 
@@ -926,32 +986,43 @@ pub fn resolve_agent_model_restricted_with_context(
         if plan
             && !model_setting
                 .is_some_and(|setting| setting == "opusplan" || setting == "opusplan[1m]")
+            && model_setting == Some("haiku")
         {
-            if model_setting == Some("haiku") {
-                let upgrade = resolve_user_specified_model("sonnet", context)?;
-                if restriction_bars(restriction, &upgrade) {
-                    if let Some((allow, overrides, catalog)) =
-                        restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
-                    {
-                        if let Some(newest) = allowlist::newest_permitted_in_family(
-                            "sonnet",
-                            catalog,
-                            Some(allow),
-                            Some(overrides),
-                        ) {
-                            warn(allowlist::warnings::PLAN_HAIKU_NEWEST);
-                            return Ok(newest);
-                        }
+            let upgrade = resolve_user_specified_model("sonnet", context)?;
+            if restriction_bars(restriction, &upgrade) {
+                if let Some((allow, overrides, catalog)) =
+                    restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
+                {
+                    if let Some(newest) = allowlist::newest_permitted_in_family(
+                        "sonnet",
+                        catalog,
+                        Some(allow),
+                        Some(overrides),
+                    ) {
+                        warn(allowlist::warnings::PLAN_HAIKU_NEWEST);
+                        return Ok(newest);
                     }
-                    warn(allowlist::warnings::PLAN_HAIKU_RESTING);
-                    return resolve_user_specified_model("haiku", context);
                 }
-                return Ok(upgrade);
+                warn(allowlist::warnings::PLAN_HAIKU_RESTING);
+                return resolve_user_specified_model("haiku", context);
             }
+            return Ok(upgrade);
         }
         if plan && (model_setting == Some("opusplan") || model_setting == Some("opusplan[1m]")) {
             let one_m = model_setting == Some("opusplan[1m]");
-            let mut upgrade = resolve_user_specified_model("opus", context)?;
+            // `opusplan` upgrades to the Opus family when that route provides
+            // one. If the selected non-first-party route has no Opus default,
+            // an explicit route-local `opusplan` alias can provide its target.
+            let mut upgrade = match resolve_user_specified_model("opus", context) {
+                Ok(model) => model,
+                Err(error @ ModelResolutionError::MissingFamilyDefault { .. }) => {
+                    match resolve_configured_catalog_alias("opusplan", context, one_m)? {
+                        Some(model) => model,
+                        None => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             if one_m && !upgrade.to_lowercase().ends_with("[1m]") {
                 upgrade.push_str("[1m]");
             }
@@ -1271,10 +1342,10 @@ pub fn resolve_agent_model(
 }
 
 /// [`resolve_agent_model`] with the managed-allowlist subagent gate the binary
-/// `ble`/`Qly` applies. When a subagent's EXPLICITLY-requested (or
-/// `LINGXI_SUBAGENT_MODEL`-env) model resolves to an id BARRED by the managed
-/// allowlist, the request is dropped and the subagent inherits the parent /
-/// runtime main-loop model (itself plan-mode-gated), emitting the byte-exact
+/// `ble`/`Qly` applies. When a subagent's explicitly requested model, including
+/// the LingXi-only `LINGXI_SUBAGENT_MODEL` override, resolves to an id BARRED
+/// by the managed allowlist, the request is dropped and the subagent inherits
+/// the parent / runtime main-loop model (itself plan-mode-gated), emitting the byte-exact
 /// `Subagent model "<m>" is not in the availableModels allowlist; inheriting the
 /// parent model instead` warning through `warn` (the caller de-duplicates,
 /// mirroring the binary `SN` set).
@@ -1314,9 +1385,9 @@ pub fn resolve_agent_model_restricted(
         ));
     };
 
-    // 1. LINGXI_SUBAGENT_MODEL env override (HIGHEST). The TS guard is falsy
-    //    for both unset AND empty-string. This branch bypasses the Bedrock prefix
-    //    (the TS early-return precedes applyParentRegionPrefix).
+    // 1. LingXi-only LINGXI_SUBAGENT_MODEL env override (HIGHEST). This port
+    //    treats unset and empty as absent and returns before Bedrock prefix
+    //    inheritance; neither detail is attributed to a Native TS env guard.
     if let Some(v) = std::env::var("LINGXI_SUBAGENT_MODEL")
         .ok()
         .filter(|s| !s.is_empty())
@@ -2181,6 +2252,166 @@ mod tests {
     }
 
     #[test]
+    fn non_first_party_reserved_aliases_use_the_route_catalog() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _subagent = clear_subagent_env();
+        let context = ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: "gpt-model".into(),
+                profile: Some("openai".into()),
+                provider: Some(ModelProviderKind::Other),
+                ..Default::default()
+            },
+            catalog_aliases: std::collections::BTreeMap::from([
+                ("best".into(), vec!["gpt-model".into()]),
+                ("opusplan".into(), vec!["gpt-model".into()]),
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_user_specified_model("best", &context).unwrap(),
+            "gpt-model"
+        );
+        assert_eq!(
+            resolve_user_specified_model("opusplan", &context).unwrap(),
+            "gpt-model"
+        );
+        assert_eq!(
+            resolve_user_specified_model("opusplan[1m]", &context).unwrap(),
+            "gpt-model[1m]"
+        );
+        assert_eq!(
+            resolve_agent_model_with_context(
+                &AgentModel::Inherit,
+                "gpt-model",
+                PermissionMode::Plan,
+                Some("opusplan"),
+                &context,
+            )
+            .unwrap(),
+            "gpt-model",
+            "Plan mode must use the configured route alias when no Opus default exists"
+        );
+
+        let configured_families = ModelResolutionContext {
+            family_defaults: FamilyModelDefaults {
+                opus: Some("route-opus".into()),
+                sonnet: Some("route-sonnet".into()),
+                ..Default::default()
+            },
+            ..context.clone()
+        };
+        assert_eq!(
+            resolve_user_specified_model("opusplan", &configured_families).unwrap(),
+            "route-sonnet",
+            "the route's Sonnet default remains the non-Plan opusplan behavior"
+        );
+        assert_eq!(
+            resolve_agent_model_with_context(
+                &AgentModel::Inherit,
+                "gpt-model",
+                PermissionMode::Plan,
+                Some("opusplan"),
+                &configured_families,
+            )
+            .unwrap(),
+            "route-opus",
+            "the route's Opus default takes precedence over its opusplan alias"
+        );
+    }
+
+    #[test]
+    fn ambiguous_non_first_party_catalog_alias_does_not_fall_back() {
+        let context = ModelResolutionContext {
+            route: ModelRouteFacts {
+                profile: Some("openai".into()),
+                provider: Some(ModelProviderKind::Other),
+                ..Default::default()
+            },
+            family_defaults: FamilyModelDefaults {
+                opus: Some("fallback-opus".into()),
+                ..Default::default()
+            },
+            catalog_aliases: std::collections::BTreeMap::from([(
+                "best".into(),
+                vec!["model-a".into(), "model-b".into()],
+            )]),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            resolve_user_specified_model("best", &context),
+            Err(ModelResolutionError::RouteUnavailable {
+                model,
+                profile: Some(profile),
+                reason,
+            }) if model == "best"
+                && profile == "openai"
+                && reason == "configured catalog alias has 2 targets"
+        ));
+    }
+
+    #[test]
+    fn first_party_reserved_aliases_keep_native_family_and_strategy_resolution() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _subagent = clear_subagent_env();
+        let context = ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: "claude-sonnet-5".into(),
+                profile: Some("anthropic".into()),
+                provider: Some(ModelProviderKind::FirstParty),
+                ..Default::default()
+            },
+            family_defaults: FamilyModelDefaults {
+                opus: Some("claude-opus-4-8".into()),
+                sonnet: Some("claude-sonnet-5".into()),
+                ..Default::default()
+            },
+            catalog_aliases: std::collections::BTreeMap::from([
+                ("best".into(), vec!["configured-best".into()]),
+                ("opusplan".into(), vec!["configured-opusplan".into()]),
+            ]),
+            best_model: Some("native-best".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_user_specified_model("best", &context).unwrap(),
+            "native-best"
+        );
+        assert_eq!(
+            resolve_user_specified_model("opusplan", &context).unwrap(),
+            "claude-sonnet-5"
+        );
+        assert_eq!(
+            resolve_agent_model_with_context(
+                &AgentModel::Inherit,
+                "claude-sonnet-5",
+                PermissionMode::Plan,
+                Some("opusplan"),
+                &context,
+            )
+            .unwrap(),
+            "claude-opus-4-8"
+        );
+
+        let no_trusted_best = ModelResolutionContext {
+            best_model: None,
+            catalog_aliases: std::collections::BTreeMap::from([
+                ("best".into(), vec!["configured-best".into()]),
+                ("opus".into(), vec!["catalog-opus".into()]),
+            ]),
+            ..context
+        };
+        assert_eq!(
+            resolve_user_specified_model("best[1m]", &no_trusted_best).unwrap(),
+            "claude-opus-4-8",
+            "Native best fallback uses the Opus default without a 1M suffix or catalog-opus alias"
+        );
+    }
+
+    #[test]
     fn model_alias_trim_matches_ecmascript_whitespace_not_rust_whitespace() {
         let context = ModelResolutionContext {
             family_defaults: FamilyModelDefaults {
@@ -2429,10 +2660,14 @@ mod tests {
             .into_iter()
             .find(|d| d.agent_type == "statusline-setup")
             .unwrap();
-        assert!(matches!(
-            resolve_builtin_explore_model(&statusline, "claude-fable-5-1", true),
-            AgentModel::Alias(ref a) if a == "sonnet"
-        ));
+        assert!(matches!(statusline.model, AgentModel::Inherit));
+        assert!(
+            matches!(
+                resolve_builtin_explore_model(&statusline, "claude-fable-5-1", true),
+                AgentModel::Inherit
+            ),
+            "a non-Explore built-in keeps its declared model"
+        );
         // A USER-DEFINED agent literally named "Explore": source != built-in →
         // untouched (GAe early-return on source).
         let mut user_explore = builtin_explore_def();

@@ -4,7 +4,6 @@
 //! fixtures also exercise removal, reconnect, cache gates and old transcripts.
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 
 const KIND: &str = "mcp_instructions_delta";
@@ -283,6 +282,7 @@ pub(crate) fn render_source(attachment: &Utf16JsonProjection) -> Option<Utf16Jso
 /// Render one attachment payload into the exact model-visible reminder.
 /// Replay tolerates non-string array members by dropping those members, as the
 /// upstream `mi` helper does. An empty attachment produces no model message.
+#[cfg(test)]
 pub(crate) fn render(attachment: &Utf16JsonProjection) -> Option<String> {
     render_source(attachment).and_then(|source| source.string_at("").map(str::to_owned))
 }
@@ -290,7 +290,7 @@ pub(crate) fn render(attachment: &Utf16JsonProjection) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn projection(value: &Value) -> Utf16JsonProjection {
         Utf16JsonProjection::from_serde_value(value).unwrap()

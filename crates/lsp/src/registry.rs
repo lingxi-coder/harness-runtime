@@ -1353,7 +1353,6 @@ mod routing_tests {
     use async_trait::async_trait;
     use jsonrpc::Connection;
     use lingxi_core::host::{LspRawConnection, LspServerCapabilities};
-    use serde_json::Value;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
 

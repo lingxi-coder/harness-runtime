@@ -253,7 +253,11 @@ pub fn missed_one_shots_prompt(missed: &[crate::tasks_file::CronTask]) -> Utf16J
         "The following one-shot scheduled task{} missed while Claude was not running. {} already been removed from .claude/scheduled_tasks.json.\n\nDo NOT execute {} yet. First use the AskUserQuestion tool to ask whether to run {} now. Only execute if the user confirms.",
         if plural { "s were" } else { " was" },
         if plural { "They have" } else { "It has" },
-        if plural { "these prompts" } else { "this prompt" },
+        if plural {
+            "these prompts"
+        } else {
+            "this prompt"
+        },
         if plural { "each one" } else { "it" },
     );
     let mut units: Vec<u16> = format!("{head}\n\n").encode_utf16().collect();
@@ -624,7 +628,7 @@ async fn persist_automation_outcome(
     match outcome {
         AutomationCommit::Settled => return Ok(()),
         AutomationCommit::AwaitingOutcome => {
-            return Err("Execution has not released its outcome".into())
+            return Err("Execution has not released its outcome".into());
         }
         AutomationCommit::Pending {
             result,
@@ -718,6 +722,7 @@ fn is_loop_default_source(prompt: &Utf16JsonProjection) -> bool {
         || source_string_equals(prompt, crate::LOOP_FILE_DYNAMIC_SENTINEL)
 }
 
+#[cfg(test)]
 fn source_display(prompt: &Utf16JsonProjection) -> String {
     String::from_utf16_lossy(&prompt.string_units("").unwrap_or_default())
 }
@@ -3280,7 +3285,10 @@ mod scheduler_tick_tests {
             .await
             .unwrap();
         let bytes = fs.get(TASKS_PATH).await.unwrap();
-        assert_eq!(bytes, "{\n  \"tasks\": [\n    {\n      \"id\": \"same\",\n      \"cron\": \"* * * * *\",\n      \"prompt\": \"session\",\n      \"createdAt\": 1,\n      \"recurring\": true\n    }\n  ]\n}\n");
+        assert_eq!(
+            bytes,
+            "{\n  \"tasks\": [\n    {\n      \"id\": \"same\",\n      \"cron\": \"* * * * *\",\n      \"prompt\": \"session\",\n      \"createdAt\": 1,\n      \"recurring\": true\n    }\n  ]\n}\n"
+        );
         assert_eq!(fs.get(AUTOMATION_PATH).await.unwrap(), center);
         crate::tasks_file::write_automation_tasks_body(fs.as_ref(), root, "{\"tasks\":[]}")
             .await

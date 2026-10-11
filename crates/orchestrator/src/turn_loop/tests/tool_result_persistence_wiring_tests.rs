@@ -185,6 +185,7 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
             provider_id: None,
         }],
         resumable: None,
+        per_turn_effort: None,
     };
     orch.persist_message_to_jsonl(&assistant).await;
     let (results, ..) = dispatch_tool_uses_tracked(&orch, &[call], None)
@@ -199,7 +200,7 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
     let history =
         crate::resume::state_from_messages(uuid::Uuid::nil(), &loaded.messages_in_order).history;
     let messages = llm_runtime::convert::to_llm_messages(history).unwrap();
-    let (input, overrides) = llm_runtime::convert::history_input(
+    let (input, _overrides) = llm_runtime::convert::history_input(
         "claude-opus-4-7",
         &messages,
         &[],
@@ -220,16 +221,8 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
                 &sdk::CodecContext::new(&profile, &input.model, mode),
             )
             .unwrap();
-        let body = serde_json::from_slice(&encoded.body).unwrap();
-        let wire = String::from_utf8(
-            sdk::exact_json::serialize(
-                &body,
-                &overrides,
-                sdk::exact_json::JsonEncoding::JavaScript,
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        let wire = String::from_utf8(encoded.body.to_vec())
+            .expect("SDK request body is UTF-8 JSON and retains exact escaped UTF-16");
         assert!(
             wire.contains("\\ud83d\\n..."),
             "exact JS surrogate must reach wire: {wire}"

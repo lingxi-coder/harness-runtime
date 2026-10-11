@@ -148,7 +148,9 @@ impl PendingRequestBroker {
 /// orphan recovery applies the rewritten tool input.
 #[derive(Debug)]
 pub struct OrphanedPermission {
+    /// Tool invocation whose permission waiter no longer exists.
     pub tool_use_id: lingxi_core::types::ToolUseId,
+    /// Exact decision projection retained for orphan recovery.
     pub permission_decision: Utf16JsonProjection,
 }
 
@@ -306,12 +308,16 @@ impl StdioControlPlane {
         }
     }
 
+    /// Associate the SDK MCP transport used by this control plane.
+    ///
+    /// The plane stores a weak reference and keeps the first association.
     pub fn set_sdk_mcp_transport(
         &self,
         transport: std::sync::Weak<crate::headless::sdk_mcp_transport::SdkMcpTransport>,
     ) {
         let _ = self.sdk_mcp_transport.set(transport);
     }
+    /// Upgrade and return the associated SDK MCP transport when it is still alive.
     pub fn sdk_mcp_transport(
         &self,
     ) -> Option<Arc<crate::headless::sdk_mcp_transport::SdkMcpTransport>> {
@@ -409,6 +415,9 @@ impl StdioControlPlane {
     pub async fn lock_operation(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.operation_gate.clone().lock_owned().await
     }
+    /// Try to acquire the exclusive operation lease without waiting.
+    ///
+    /// Returns `None` when another operation currently owns the lease.
     pub fn try_lock_operation(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         self.operation_gate.clone().try_lock_owned().ok()
     }
@@ -511,6 +520,9 @@ impl StdioControlPlane {
     pub async fn pending_permission_requests(&self) -> Vec<Utf16JsonProjection> {
         self.broker.snapshots("can_use_tool").await
     }
+    /// Return pending `request_user_dialog` frames in admission order.
+    ///
+    /// Each returned projection preserves the host's exact request payload.
     pub async fn pending_user_dialog_requests(&self) -> Vec<Utf16JsonProjection> {
         self.broker.snapshots("request_user_dialog").await
     }
@@ -2312,7 +2324,12 @@ mod tests {
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[0].rule.value.tool_name, "Bash");
         assert_eq!(
-            updates[0].rule.value.rule_content.as_deref(),
+            updates[0]
+                .rule
+                .value
+                .rule_content
+                .as_ref()
+                .and_then(|content| content.string_at("")),
             Some("npm install")
         );
         assert_eq!(updates[0].rule.behavior, PermissionBehavior::Allow);
@@ -2445,7 +2462,7 @@ mod tests {
                 permission_updates, ..
             } => {
                 assert_eq!(permission_updates.len(), 1);
-                assert_eq!(permission_updates[0]["type"], "addRules");
+                assert_eq!(permission_updates[0].string_at("/type"), Some("addRules"));
             }
             other => panic!("expected Allow with permission_updates, got {other:?}"),
         }

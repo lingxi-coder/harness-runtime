@@ -473,8 +473,15 @@ mod tests {
             .await
             .unwrap();
         let src_sid = src.to_string();
-        let line = user_line("11111111-1111-1111-1111-111111111111", &src_sid, None, "plot it");
-        tokio::fs::write(&source, format!("{line}\n")).await.unwrap();
+        let line = user_line(
+            "11111111-1111-1111-1111-111111111111",
+            &src_sid,
+            None,
+            "plot it",
+        );
+        tokio::fs::write(&source, format!("{line}\n"))
+            .await
+            .unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
         let store = visualization::VisualizationStore::new(fs.clone(), home.path().to_path_buf());
         let reference = store
@@ -491,11 +498,19 @@ mod tests {
             .await
             .unwrap()
             .reference;
-        store.write_state(src, &reference, 0, "1", "null").await.unwrap();
+        store
+            .write_state(src, &reference, 0, "1", "null")
+            .await
+            .unwrap();
 
-        let fork = create_branch(home.path(), cwd, src, None, fs).await.unwrap();
+        let fork = create_branch(home.path(), cwd, src, None, fs)
+            .await
+            .unwrap();
 
-        let copied = store.read_revision(fork.new_session_id, &reference).await.unwrap();
+        let copied = store
+            .read_revision(fork.new_session_id, &reference)
+            .await
+            .unwrap();
         assert_eq!(copied.fragment, "<p>x</p>");
         store
             .write_state(fork.new_session_id, &reference, 1, "2", "null")

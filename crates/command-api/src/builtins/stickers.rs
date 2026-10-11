@@ -51,7 +51,6 @@ impl BuiltinCommandHandler for StickersHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     /// URL opened by the TS `/stickers` command.
     const STICKERS_URL: &str = "https://www.stickermule.com/claudecode";

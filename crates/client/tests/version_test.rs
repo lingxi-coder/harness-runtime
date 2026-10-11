@@ -33,17 +33,16 @@ fn version_is_semver() {
     }
 }
 
-/// Major 22 carries exact prompt/slash inputs, command catalog fields and
-/// agent/compaction summaries through `ClientTextDto`. The protocol bindings
-/// and host must advance together; this is a deliberate second lock beyond the
-/// structural guard.
+/// Major 23 carries the retyped SkillAdmin target through `ClientTextDto`.
+/// The protocol bindings and host must advance together; this is a deliberate
+/// second lock beyond the structural guard.
 ///
 /// This test is the deliberate second lock on the version: the structural guard
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_twenty_two_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "22.0.0");
+fn version_is_twenty_three_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "23.0.0");
 }
 
 fn repository_root() -> PathBuf {

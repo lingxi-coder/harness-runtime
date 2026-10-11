@@ -5,6 +5,7 @@
 /// Sum `+`/`-` lines across a `structuredPatch` hunk array. A `+`-prefixed line
 /// is an addition, `-` a removal; context lines (` `) and anything else are
 /// ignored. Non-array / absent input yields `(0, 0)`.
+#[cfg(test)]
 pub(crate) fn count_structured_patch_lines(structured_patch: &serde_json::Value) -> (u64, u64) {
     let Some(hunks) = structured_patch.as_array() else {
         return (0, 0);

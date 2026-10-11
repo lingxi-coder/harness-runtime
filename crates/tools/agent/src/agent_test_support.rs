@@ -16,7 +16,6 @@ use lingxi_core::host::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
-use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,6 +48,10 @@ pub struct MockSubagentSpawner {
     /// Optional scripted `SelectedAgentMeta` for `resolve_selection` (G11 — the
     /// `tengu_agent_tool_selected` event). `None` ⇒ the default minimal meta.
     selection: Mutex<Option<lingxi_core::host::subagent_spawn::SelectedAgentMeta>>,
+    /// Recorded `(type, model, profile)` arguments passed to selection.
+    selection_requests: Mutex<Vec<(String, Option<String>, Option<String>)>>,
+    /// Scripted resolved model by explicit provider profile.
+    profile_resolved_models: Mutex<HashMap<String, String>>,
     /// Captured `register_name(name, agent_id)` calls (G14) so tests can assert
     /// that a name-carrying spawn registered the mapping.
     registered_names: Mutex<Vec<(String, lingxi_core::types::AgentId)>>,
@@ -119,6 +122,8 @@ impl MockSubagentSpawner {
             handback: Mutex::new(None),
             required_mcp_servers: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
+            selection_requests: Mutex::new(Vec::new()),
+            profile_resolved_models: Mutex::new(HashMap::new()),
             registered_names: Mutex::new(Vec::new()),
             async_unwired: Mutex::new(false),
             concurrent_subagents: AtomicUsize::new(0),
@@ -199,6 +204,19 @@ impl MockSubagentSpawner {
     /// Script the `SelectedAgentMeta` the next `resolve_selection` returns (G11).
     pub fn script_selection(&self, meta: lingxi_core::host::subagent_spawn::SelectedAgentMeta) {
         *self.selection.lock().unwrap() = Some(meta);
+    }
+
+    /// Script the selected model surfaced for an explicit profile.
+    pub fn script_profile_resolved_model(&self, profile: &str, model: &str) {
+        self.profile_resolved_models
+            .lock()
+            .unwrap()
+            .insert(profile.to_string(), model.to_string());
+    }
+
+    /// Return the selection inputs observed by this mock.
+    pub fn selection_requests(&self) -> Vec<(String, Option<String>, Option<String>)> {
+        self.selection_requests.lock().unwrap().clone()
     }
 
     /// Drain and return the captured `register_name` calls (G14).
@@ -527,14 +545,30 @@ impl SubagentSpawner for MockSubagentSpawner {
     async fn resolve_selection(
         &self,
         subagent_type: &str,
-        _model: Option<&str>,
+        model: Option<&str>,
+        model_profile: Option<&str>,
     ) -> lingxi_core::host::subagent_spawn::SelectedAgentMeta {
-        self.selection.lock().unwrap().clone().unwrap_or(
+        self.selection_requests.lock().unwrap().push((
+            subagent_type.to_string(),
+            model.map(str::to_owned),
+            model_profile.map(str::to_owned),
+        ));
+        let mut selected = self.selection.lock().unwrap().clone().unwrap_or(
             lingxi_core::host::subagent_spawn::SelectedAgentMeta {
                 agent_type: subagent_type.to_string(),
                 ..lingxi_core::host::subagent_spawn::SelectedAgentMeta::default()
             },
-        )
+        );
+        if let Some(resolved_model) = model_profile.and_then(|profile| {
+            self.profile_resolved_models
+                .lock()
+                .unwrap()
+                .get(profile)
+                .cloned()
+        }) {
+            selected.resolved_model = resolved_model;
+        }
+        selected
     }
 
     /// Capture `register_name` calls (G14) so tests can assert the registration.

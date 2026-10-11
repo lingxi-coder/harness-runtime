@@ -17,7 +17,6 @@ use orchestrator::prompt::{
     assemble_system_prompt, assemble_system_prompt_with_style, env_meta, ActiveOutputStyle,
     FileTree, SystemPromptContext,
 };
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tool_api::tool_trait::{
     ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,

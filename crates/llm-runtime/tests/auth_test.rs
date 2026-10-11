@@ -60,7 +60,6 @@ fn authenticate(
     }))
     .unwrap();
     let mut request = lingxi_llm_client::HttpRequest {
-        http1_header_layout: None,
         method: "POST".into(),
         url: "https://example.test/messages".into(),
         headers,

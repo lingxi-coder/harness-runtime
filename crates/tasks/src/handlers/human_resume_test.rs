@@ -280,12 +280,27 @@ async fn handback_stopped_restore_preserves_exact_surrogates_and_rejects_hidden_
                 agent_id: recipient,
             },
         );
+        // Build the Native persisted shape from display strings, then restore
+        // only the exact string leaves through the side table below. Source
+        // projections must not be materialized through `serde_json::Value`.
         let row = json!({
             "type": "attachment",
             "uuid": envelope.receipt.message_id,
             "agent_id": recipient,
-            "message": envelope.model_message(),
-            "attachment": {"type": "subagent_handback", "envelope": envelope},
+            "message": {
+                "role": "user",
+                "id": envelope.receipt.message_id,
+                "content": [{"type": "text", "text": envelope.model_message_text()}],
+                "is_meta": true
+            },
+            "attachment": {
+                "type": "subagent_handback",
+                "envelope": {
+                    "receipt": serde_json::to_value(&envelope.receipt).unwrap(),
+                    "origin": serde_json::to_value(&envelope.origin).unwrap(),
+                    "body": envelope.body.string_at("").unwrap()
+                }
+            },
         });
         let mut overrides = envelope.transcript_utf16_overrides();
         if forged {

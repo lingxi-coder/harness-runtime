@@ -1,0 +1,29 @@
+{
+  "customApiKeyResponses": {
+    "approved": [],
+    "rejected": [
+      "th-fixture-dummy-key"
+    ]
+  },
+  "firstStartTime": "2026-10-08T17:22:13.160Z",
+  "firstStartVersion": "2.1.293",
+  "machineID": "6c9b8b87df1647db99a116f8e8f32f314f7eb77de1074481dbb8797b5141dbf7",
+  "opusProMigrationComplete": true,
+  "sonnet1m45MigrationComplete": true,
+  "seenNotifications": {},
+  "hasResetAutoModeOptInForDefaultOffer": true,
+  "migrationVersion": 14,
+  "userID": "205b3af80b7f76fe11b243ba41487c38bf6e31d6feea0d43afbed244af35aac2",
+  "pluginUsage": {
+    "cc-plugin-agents-md@builtin": {
+      "usageCount": 0,
+      "lastUsedAt": 1791480133497,
+      "lastUsedNumStartups": 0
+    },
+    "cc-plugin-plugin-authoring@builtin": {
+      "usageCount": 0,
+      "lastUsedAt": 1791480133497,
+      "lastUsedNumStartups": 0
+    }
+  }
+}

@@ -30,13 +30,17 @@ impl PermissionGate for ReviewGate {
     fn permission_mode(&self) -> Option<String> {
         Some("auto".into())
     }
-    async fn check(&self, _: &str, _: &serde_json::Value) -> PermissionDecision {
+    async fn check(
+        &self,
+        _: &str,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionDecision {
         PermissionDecision::Allow
     }
     async fn check_classifier_only_with_context_or_abort(
         &self,
         name: &str,
-        _: &serde_json::Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &PermissionCheckContext,
         _: ClassifierOnlyPolicy,
         _: &ClassifierOnlyReviewRequest,
@@ -68,7 +72,7 @@ fn response(content: llm_runtime::ContentBlock, stop: &str) -> llm_runtime::Hist
         stop_details: None,
         usage: Default::default(),
         cost: None,
-        provider_metadata: llm_runtime::JsonPayload::default(),
+        provider_metadata: lingxi_llm_client::protocol::JsonPayload::default(),
         resumable: None,
     }
 }
@@ -109,12 +113,15 @@ impl agent::SubagentApiClient for Model {
                     "end_turn",
                 ))
             } else {
-                assert!(tools.iter().any(|tool| tool["name"] == HANDBACK_TOOL_NAME));
+                assert!(tools.iter().any(|tool| tool.name == HANDBACK_TOOL_NAME));
                 Ok(response(
                     llm_runtime::ContentBlock::ToolCall {
                         id: "restored-handback".into(),
                         name: HANDBACK_TOOL_NAME.into(),
-                        input: serde_json::json!({"message":"fresh report from restored child"}),
+                        input: lingxi_llm_client::protocol::JsonPayload::parse(
+                            r#"{"message":"fresh report from restored child"}"#,
+                        )
+                        .unwrap(),
                     },
                     "tool_use",
                 ))
@@ -417,7 +424,7 @@ async fn actual_cold_batch_retains_later_caller_and_inactive_archive_without_reu
     assert_eq!(fresh.disposition, Some(HandbackDisposition::Send));
     assert_eq!(
         fresh.report.as_ref().unwrap().text,
-        "fresh report from restored child"
+        "fresh report from restored child".into()
     );
     assert!(
         main.reports.lock().unwrap().is_empty(),

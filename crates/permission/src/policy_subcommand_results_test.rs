@@ -223,7 +223,10 @@ fn unmatched_sibling_keeps_the_preliminary_ask_in_a_compound_tree() {
         panic!("Native retains a tree when another Ot part is passthrough: {reason:?}");
     };
     assert_eq!(reasons.len(), 2);
-    assert_eq!(prompt.message.string_at("").unwrap_or_default(), "This Bash command contains multiple operations. The following parts require approval: rm -rf build, curl https://x");
+    assert_eq!(
+        prompt.message.string_at("").unwrap_or_default(),
+        "This Bash command contains multiple operations. The following parts require approval: rm -rf build, curl https://x"
+    );
     assert_eq!(
         first_subcommand_rule_for_behavior(reasons, PermissionBehavior::Ask)
             .unwrap()
@@ -272,9 +275,11 @@ fn recovered_open_if_keeps_original_pipeline_segments_in_policy_results() {
         panic!("the recovered pipeline must retain its child results: {reason:?}");
     };
     assert_eq!(reason_keys(&reasons), ["if true; then echo ok", "cat"]);
-    assert!(reasons.iter().all(|(command, _)| command
-        .string_at("")
-        .is_some_and(|text| !text.contains("\nfi"))));
+    assert!(reasons.iter().all(|(command, _)| {
+        command
+            .string_at("")
+            .is_some_and(|text| !text.contains("\nfi"))
+    }));
 }
 
 #[cfg(feature = "bash-ast")]
@@ -547,7 +552,10 @@ fn pipeline_keeps_the_single_preliminary_ask_in_its_tree() {
         reason,
         PermissionDecisionReason::SubcommandResults { .. }
     ));
-    assert_eq!(prompt.message.string_at("").unwrap_or_default(), "This Bash command contains multiple operations. The following part requires approval: rm -rf build");
+    assert_eq!(
+        prompt.message.string_at("").unwrap_or_default(),
+        "This Bash command contains multiple operations. The following part requires approval: rm -rf build"
+    );
 }
 
 #[test]
@@ -798,5 +806,8 @@ fn global_stdin_guard_precedes_child_read_path_denial() {
         panic!("Native a6t returns the complete-input stdin guard first");
     };
     assert!(crate::read_block::is_outside_reads_blocked(&reason));
-    assert_eq!(prompt.message.string_at("").unwrap_or_default(), "code on stdin cannot be checked against the read block; under the read block (permissions.blockReadsOutsideWorkingDirectories) a command the shell parser cannot analyze asks the person");
+    assert_eq!(
+        prompt.message.string_at("").unwrap_or_default(),
+        "code on stdin cannot be checked against the read block; under the read block (permissions.blockReadsOutsideWorkingDirectories) a command the shell parser cannot analyze asks the person"
+    );
 }

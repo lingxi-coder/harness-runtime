@@ -29,7 +29,7 @@
 //! m3-02 plan invented one). `enabled == false` keeps the whole subsystem inert,
 //! so the ~4000 locked fixtures stay byte-identical.
 
-use crate::file::{parse_markdown_with_frontmatter, MemoryError, MemoryFrontmatter};
+use crate::file::{MemoryError, MemoryFrontmatter};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ConversationMessage, MessageId};
 use sidequery::{CacheSafeParams, ForkPurpose, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
@@ -310,9 +310,7 @@ impl SessionMemoryExtractor {
             .run(request)
             .await
             .map_err(|e| MemoryError::SelectorUnavailable(e.to_string()))?;
-        Ok(normalize_session_memory_document_source(
-            &result.final_text,
-        )?)
+        normalize_session_memory_document_source(&result.final_text)
     }
 
     /// Persist a previously generated extraction and advance its coverage
@@ -753,6 +751,7 @@ const SESSION_MEMORY_EXTRACTION_PROMPT: &str = "Distil durable, reusable notes f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file::parse_markdown_with_frontmatter;
     use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
     use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
     use std::sync::Arc;
@@ -778,7 +777,6 @@ mod tests {
     fn assistant_tools(n: usize) -> ConversationMessage {
         let content = (0..n)
             .map(|i| ContentBlock::ToolUse {
-                input_projection: None,
                 id: ToolUseId::new(),
                 provider_id: None,
                 name: format!("Tool{i}"),
@@ -810,6 +808,7 @@ mod tests {
     #[test]
     fn system_prompt_threshold_counts_javascript_utf16_code_units() {
         let history = [ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: "😀".into(),
             subtype: None,
@@ -883,6 +882,7 @@ mod tests {
         assert!(!ex.should_extract(std::slice::from_ref(&tool_turn)));
 
         let natural_turn = ConversationMessage::Assistant {
+            resumable: None,
             per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {

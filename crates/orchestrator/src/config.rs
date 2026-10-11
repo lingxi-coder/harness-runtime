@@ -605,6 +605,8 @@ mod tests {
     fn config_round_trips_through_json() {
         let cfg = OrchestratorConfig {
             max_turns: 5,
+            max_structured_output_retries: default_max_structured_output_retries(),
+            structured_output_enabled: false,
             model: "x".into(),
             fallback_model: Some("claude-sonnet-4-6".into()),
             system_prompt_override: Some("custom".into()),
@@ -659,8 +661,7 @@ mod tests {
         assert_eq!(
             back.system_prompt_override
                 .as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+                .and_then(|prompt| prompt.string_at("")),
             Some("custom")
         );
         assert!(back.interactive_permissions);

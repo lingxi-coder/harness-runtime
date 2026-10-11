@@ -394,7 +394,7 @@ impl PosixMcpTransport {
                 None => {
                     return Err(McpError::Connection(
                         format!("no such connection: {id}").into(),
-                    ))
+                    ));
                 }
             }
         };
@@ -495,7 +495,7 @@ impl PosixMcpTransport {
                     RouterError::Deserialize(_) | RouterError::WrongResponseId { .. },
                 )) => return Ok((None, false)),
                 Err(ConnectionError::Router(RouterError::WriterClosed)) if rpc.is_closed() => {
-                    return Ok((None, false))
+                    return Ok((None, false));
                 }
                 Err(ConnectionError::Router(RouterError::Timeout(_))) => return Ok((None, true)),
                 Err(error) => return Err(map_call_err(&error)),
@@ -1785,7 +1785,6 @@ mod initialize_params_tests {
     use super::{initialize_params, CLIENT_DESCRIPTION, MCP_PROTOCOL_VERSION};
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
-    use serde_json::json;
     // Imported here, not at file scope: the lib target has no other user, so a
     // file-level `use` reads as an unused import and gets deleted — which then
     // breaks these tests, since they reached it through `super::`.

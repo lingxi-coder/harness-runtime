@@ -111,29 +111,6 @@ pub(crate) struct ModResultStage {
 }
 
 impl ModResultStage {
-    pub(crate) fn mod_answer_projection(
-        &self,
-        display: &Source,
-    ) -> Result<Source, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
-        let data = self
-            .tool_use_result
-            .clone()
-            .unwrap_or_else(|| display.clone());
-        let text = self
-            .frame
-            .as_ref()
-            .map(|frame| frame.model_text.clone())
-            .unwrap_or_else(|| display.clone());
-        if !text.semantically_eq(display) {
-            return Err(
-                lingxi_core::types::utf16_json::Utf16JsonProjectionError::InvalidProjection(
-                    "Mod result text association changed",
-                ),
-            );
-        }
-        Source::object(vec![("result".into(), data), ("text".into(), text)])
-    }
-
     pub(crate) fn denial_kind(&self) -> Option<&str> {
         self.denial_kind.as_deref()
     }
@@ -386,6 +363,35 @@ fn mod_append_message(message: &ConversationMessage) -> Source {
             .unwrap();
     }
     result
+}
+
+fn compact_summary_content_source_if_unmodified(
+    original: &ConversationMessage,
+    rewritten: &ConversationMessage,
+    compact_summary: bool,
+) -> Option<Source> {
+    if !compact_summary || original != rewritten || !original.is_compact_summary() {
+        return None;
+    }
+    let ConversationMessage::User { content, .. } = original else {
+        return None;
+    };
+    let [block] = content.as_slice() else {
+        return None;
+    };
+    let units = match block {
+        lingxi_core::types::ContentBlock::Text {
+            text,
+            citations: None,
+        } => text.encode_utf16().collect(),
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
+            utf16_code_units,
+            citations: None,
+            ..
+        } => utf16_code_units.clone(),
+        _ => return None,
+    };
+    Source::root_string(String::from_utf16_lossy(&units), units).ok()
 }
 
 fn mod_append_block_matches(
@@ -780,6 +786,7 @@ fn mod_append_rewrite_preserves_message_metadata_and_system_source() {
         id: MessageId::new(),
         content: "before".into(),
         subtype: Some("fixture".into()),
+        api_system: None,
         compact_metadata: None,
         model_fallback: None,
         refusal_fallback: None,
@@ -796,6 +803,116 @@ fn mod_append_rewrite_preserves_message_metadata_and_system_source() {
     };
     assert_eq!(content.string_units(""), Some(vec![0xd800, 10, 0xd801]));
     assert_eq!(subtype.as_deref(), Some("fixture"));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn compact_summary_source_override_preserves_session_append_rewrites() {
+    use hooks::mods::ModHost;
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+    use platform_posix::fs::PosixFileSystem;
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir().expect("temporary compact-summary root");
+    let transcript_path = root.path().join("session.jsonl");
+    let writer = Arc::new(session::JsonlWriter::new(
+        transcript_path.clone(),
+        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+    ));
+    let module_path = root.path().join("compact-summary-append.js");
+    std::fs::write(
+        &module_path,
+        r#"
+        export function register(on) {
+          on('session.append', ($, event, next) => {
+            if (event.door !== 'compaction') return next(event);
+            const content = event.message.content.map(block =>
+              block.type === 'text' && block.text === 'source to rewrite'
+                ? { ...block, text: 'rewritten by Mod' }
+                : block
+            );
+            return next({ ...event, message: { ...event.message, content } });
+          });
+        }
+        "#,
+    )
+    .expect("write compact-summary Mod fixture");
+    let host = ModHost::start(None)
+        .await
+        .expect("start session.append Mod host");
+    host.load(
+        "compact-summary-rewrite",
+        root.path(),
+        &module_path,
+        Source::parse("{}").unwrap(),
+    )
+    .await
+    .expect("load compact-summary Mod");
+    let mut hook_registry = hooks::HookRegistry::new();
+    hook_registry.set_mod_host(host);
+    let orchestrator = ConversationOrchestrator::new(
+        crate::OrchestratorConfig::default(),
+        Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        crate::test_support::noop_hook_executor(),
+        Arc::new(crate::test_support::NoOpPermissionGate),
+        Arc::new(crate::test_support::MockOutputStream::new()),
+        Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+        root.path().to_path_buf(),
+    )
+    .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hook_registry)))
+    .with_jsonl_writer(writer);
+
+    let exact_units = vec![65, 0xd800, 66];
+    let summary = |id, content| ConversationMessage::User {
+        id,
+        content: vec![content],
+        is_meta: false,
+        is_compact_summary: true,
+        is_visible_in_transcript_only: true,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
+        api_message_override: None,
+    };
+    let source_summary = summary(
+        MessageId::new(),
+        ContentBlock::TextJsUtf16 {
+            text: String::from_utf16_lossy(&exact_units),
+            utf16_code_units: exact_units.clone(),
+            citations: None,
+        },
+    );
+    let rewritten_summary = summary(
+        MessageId::new(),
+        ContentBlock::Text {
+            text: "source to rewrite".into(),
+            citations: None,
+        },
+    );
+    orchestrator
+        .persist_message_to_jsonl_inner(&source_summary, None, None, true)
+        .await;
+    orchestrator
+        .persist_message_to_jsonl_inner(&rewritten_summary, None, None, true)
+        .await;
+
+    let raw = std::fs::read_to_string(&transcript_path).expect("session transcript");
+    let rows = raw
+        .lines()
+        .map(|line| Source::parse(line).expect("valid JSONL row"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].string_units("/message/content"), Some(exact_units));
+    assert_eq!(
+        rows[1].at_pointer("/message/content").unwrap().array_len(),
+        Some(1)
+    );
+    assert_eq!(
+        rows[1].string_at("/message/content/0/text"),
+        Some("rewritten by Mod")
+    );
 }
 
 impl ConversationOrchestrator {
@@ -1201,8 +1318,8 @@ impl ConversationOrchestrator {
                         .filter_map(|line| Source::parse(line).ok())
                         .collect();
                     if let Some(start) = rows.iter().rposition(|row| {
-                        row.string_at("/type").as_deref() == Some("system")
-                            && row.string_at("/subtype").as_deref() == Some("scheduled_task_fire")
+                        row.string_at("/type") == Some("system")
+                            && row.string_at("/subtype") == Some("scheduled_task_fire")
                     }) {
                         uuids = rows[start..]
                             .iter()
@@ -1494,6 +1611,7 @@ impl ConversationOrchestrator {
     /// buffered. A tool that never dispatched (queued, then cancelled) has no
     /// buffered frame and still gets one, which is the case that previously
     /// emitted nothing at all.
+    #[cfg(test)]
     pub(crate) async fn release_tool_frame(
         &self,
         id: &lingxi_core::types::ToolUseId,
@@ -1554,7 +1672,7 @@ impl ConversationOrchestrator {
             },
         };
         let result = result_from_side_table
-            .or_else(|| if substituted { None } else { pending_result })
+            .or(if substituted { None } else { pending_result })
             .unwrap_or_else(|| source_object([("error", content.clone())]));
         let result = if is_error && result.object_entries().is_none() {
             source_object([("error", content.clone())])
@@ -1982,14 +2100,10 @@ impl ConversationOrchestrator {
         api_error: Option<&ApiErrorEnvelope>,
     ) -> session::JsonlMessage {
         let (mut kind, mut inner_message) = match msg {
-            ConversationMessage::User { content, .. } => {
+            ConversationMessage::User { .. } => {
                 ("user", serde_json::json!({ "role": "user", "content": [] }))
             }
-            ConversationMessage::Assistant {
-                content,
-                stop_reason,
-                ..
-            } => {
+            ConversationMessage::Assistant { stop_reason, .. } => {
                 let inner = if let Some(model) = assistant_model {
                     // Build in the BetaMessage key order (`id` first); the block
                     // below re-stamps the shared `id` idempotently.
@@ -2120,13 +2234,13 @@ impl ConversationOrchestrator {
                 ("assistant", inner)
             }
             ConversationMessage::System {
-                api_system: Some(message),
+                api_system: Some(_),
                 ..
             } => (
                 "system",
                 serde_json::json!({"role":"system","content":null}),
             ),
-            ConversationMessage::System { content, .. } => (
+            ConversationMessage::System { .. } => (
                 "system",
                 serde_json::json!({ "role": "system", "content": null }),
             ),
@@ -3306,7 +3420,11 @@ impl ConversationOrchestrator {
     }
 
     /// Retract a rejected attempt from live display, active history and disk.
-    pub(crate) async fn discard_retry_attempt(&self, assistant_id: MessageId) {
+    pub(crate) async fn discard_retry_attempt(
+        &self,
+        assistant_id: MessageId,
+        persisted_row_ids: &[MessageId],
+    ) {
         self.session
             .lock()
             .await
@@ -3314,10 +3432,10 @@ impl ConversationOrchestrator {
             .retain(|message| message.id() != assistant_id);
         self.output.emit_message_retracted(&assistant_id).await;
         if let Some(writer) = self.transcript.jsonl_writer.as_ref() {
-            match writer
-                .remove_retry_attempt(&assistant_id.as_uuid().to_string())
-                .await
-            {
+            let mut message_ids = Vec::with_capacity(persisted_row_ids.len() + 1);
+            message_ids.push(assistant_id.as_uuid().to_string());
+            message_ids.extend(persisted_row_ids.iter().map(|id| id.as_uuid().to_string()));
+            match writer.remove_retry_attempt_rows(&message_ids).await {
                 Ok(tail) => *self.transcript.last_jsonl_uuid.lock().await = tail,
                 Err(error) => tracing::warn!(%error, "failed to remove rejected retry attempt"),
             }
@@ -3445,6 +3563,8 @@ impl ConversationOrchestrator {
         } else {
             self.mod_session_append_row(msg, None, true, None).await
         };
+        let compact_summary_content =
+            compact_summary_content_source_if_unmodified(msg, &rewritten, compact_summary);
         let msg = &rewritten;
         self.note_assistant_commit(msg).await;
         if matches!(msg, ConversationMessage::Assistant { .. }) {
@@ -3509,6 +3629,11 @@ impl ConversationOrchestrator {
             None,
             api_error.as_ref(),
         );
+        if let Some(content) = compact_summary_content {
+            jmsg.message
+                .set_field("content", content)
+                .expect("compact summary message is an object");
+        }
         if let Some(metadata) = preappended {
             jmsg.timestamp = metadata.timestamp.to_owned();
             if let Some(row) = metadata.api_error {
@@ -4788,9 +4913,9 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         source_content.get(1),
         Some(ContentBlock::ProviderContent { protocol, value })
             if protocol == "anthropic_messages"
-                && value.string_at("/text").as_deref() == Some("source cited text")
+                && value.string_at("/text") == Some("source cited text")
                 && value.subprojection("/citations").unwrap() == Source::from_serde_value(&citations).unwrap()
-                && value.string_at("/provider_metadata/keep").as_deref() == Some("native")
+                && value.string_at("/provider_metadata/keep") == Some("native")
     ));
     let transcript_path =
         session::jsonl::session_path(root.path(), &cwd, &session_id.as_uuid().to_string());
@@ -4903,6 +5028,7 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         .expect("decoded ToolUse has a paired result");
     let tool_use_wire_id = tool_use_id.to_string();
     let mut assistant_row = crate::streaming_loop::CompletedAssistantRow {
+        per_turn_effort: None,
         stream_order: 0,
         row_id: MessageId::new(),
         provider_message_id: "assistant-presence-row".into(),
@@ -4947,6 +5073,7 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
     );
 
     let tool_result = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
             tool_use_id,
@@ -4978,7 +5105,7 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
     assert_eq!(loaded.len(), 3, "prompt, accepted assistant, paired result");
     let accepted_assistant = &loaded[1].message;
     assert_eq!(
-        accepted_assistant.string_at("/stop_reason").as_deref(),
+        accepted_assistant.string_at("/stop_reason"),
         Some("tool_use")
     );
     assert_eq!(accepted_assistant.array_len("/content"), Some(3));
@@ -4989,11 +5116,11 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         .unwrap()
         .is_null());
     assert_eq!(
-        accepted_assistant.string_at("/content/1/type").as_deref(),
+        accepted_assistant.string_at("/content/1/type"),
         Some("text")
     );
     assert_eq!(
-        accepted_assistant.string_at("/content/1/text").as_deref(),
+        accepted_assistant.string_at("/content/1/text"),
         Some("accepted Mod cited text")
     );
     assert!(accepted_assistant
@@ -5006,7 +5133,7 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         .subprojection("/content/1/provider_metadata")
         .is_err());
     assert_eq!(
-        accepted_assistant.string_at("/content/2/id").as_deref(),
+        accepted_assistant.string_at("/content/2/id"),
         Some(tool_use_wire_id.as_str())
     );
     assert!(loaded[2]
@@ -5014,10 +5141,7 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         .subprojection("/content/0/is_error")
         .is_err());
     assert_eq!(
-        loaded[2]
-            .message
-            .string_at("/content/0/tool_use_id")
-            .as_deref(),
+        loaded[2].message.string_at("/content/0/tool_use_id"),
         Some(tool_use_wire_id.as_str())
     );
 
@@ -5217,6 +5341,7 @@ export function register(on) {
         .push(prompt.clone());
     orchestrator.persist_message_to_jsonl(&prompt).await;
     let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::TextJsUtf16 {
             text: source_text.clone(),

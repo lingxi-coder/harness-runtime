@@ -32,7 +32,7 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -226,7 +226,7 @@ impl Tool for PushNotificationTool {
         output: &Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ToolError> {
         let invalid = || invalid_tool_input("PushNotification returned invalid output");
-        let message = output
+        output
             .get_property("message")
             .filter(|value| value.code_units().is_some())
             .ok_or_else(invalid)?;
@@ -536,6 +536,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use mobile_linux_api::ProcessOutput;
+    use serde_json::Value;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn fixture(value: Value) -> Utf16JsonProjection {

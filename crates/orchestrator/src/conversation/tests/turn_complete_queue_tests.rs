@@ -107,6 +107,7 @@ async fn settle_main_turn(
     let question: lingxi_core::types::utf16_json::Utf16JsonProjection = "question".into();
     orchestrator.fire_mod_turn_start(&question, turn_id).await;
     let response = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: answer.to_owned(),

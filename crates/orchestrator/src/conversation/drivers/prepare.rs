@@ -27,6 +27,10 @@ pub(crate) struct PreparedTurnStep {
     /// result. It is applied to the API clone and never persisted in history.
     pub(crate) tool_result_reminder_suffixes:
         Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
+    /// Trusted Native classifier facts captured from the live permission gate
+    /// for this main request; kept outside conversation history.
+    pub(crate) native_anthropic_request_context:
+        Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     /// Keep async-hook producer generations through PTL/fallback snapshot
     /// rebuilds so reset can remove an old completion at model admission.
     pub(crate) guarded_async_hook_reminders:
@@ -82,6 +86,7 @@ impl ConversationOrchestrator {
             outgoing_history_rewriter: call.outgoing_history_rewriter,
             turn_reminders,
             tool_result_reminder_suffixes,
+            native_anthropic_request_context: previous.native_anthropic_request_context.clone(),
             guarded_async_hook_reminders,
             context_announcements: previous.context_announcements.clone(),
             wire_tools: previous.wire_tools.clone(),
@@ -286,6 +291,30 @@ impl ConversationOrchestrator {
         self.screen_mod_persisted_attachments(&mut snapshot).await;
         let tool_result_reminder_suffixes =
             self.tool_result_reminder_suffixes_for_snapshot(&snapshot);
+        // Native's server classifier is attached only to the selected
+        // first-party Anthropic or Foundry Claude route. Resolve provider
+        // identity instead of inferring eligibility from the model string.
+        let first_party_anthropic = self
+            .api
+            .is_first_party_route(&prepared_call.model, prepared_call.model_profile.as_deref());
+        let native_classifier_route = self
+            .api
+            .protocol_for_model(&prepared_call.model, prepared_call.model_profile.as_deref())
+            .as_ref()
+            .is_some_and(|protocol| {
+                super::super::native_classifier_context::supports_native_classifier_route(
+                    protocol,
+                    first_party_anthropic,
+                )
+            });
+        let native_anthropic_request_context = if native_classifier_route {
+            super::super::native_classifier_context::request_context(
+                self.perms.permission_policy_snapshot(),
+            )
+            .await
+        } else {
+            None
+        };
         crate::prompt::async_hook_response::retain_current_async_hook_reminders(
             &mut snapshot,
             &mut turn_reminders,
@@ -299,6 +328,7 @@ impl ConversationOrchestrator {
             outgoing_history_rewriter: prepared_call.outgoing_history_rewriter,
             turn_reminders,
             tool_result_reminder_suffixes,
+            native_anthropic_request_context,
             guarded_async_hook_reminders,
             context_announcements,
             wire_tools,

@@ -1932,7 +1932,7 @@ impl LocalAppsHostBroker {
                     return Err(
                         "create_staging_evidence_invalid: staged designSpecSha256 is not a string"
                             .to_string(),
-                    )
+                    );
                 }
             };
         if recorded_design_sha256 != design_spec_sha256.as_deref() {
@@ -3230,14 +3230,18 @@ fn formal_workspace_contract(
                 _ => "",
             };
             let engine_rule = match binding.family {
-                local_apps::AppRuntimeProfile::Canvas2d =>
-                    "- This is a Canvas 2D profile: use the checked-in `lib/frame-loop.js` helper and the Canvas 2D APIs; do not add a game engine or physics library.",
-                local_apps::AppRuntimeProfile::Three3d =>
-                    "- This is a Three.js profile: import the locked `three` package directly and use the checked-in `lib/frame-loop.js` helper; do not add React Three Fiber, drei, or an external physics library.",
-                local_apps::AppRuntimeProfile::Phaser2d =>
-                    "- This is a Phaser profile: use the locked `phaser` package through the checked-in `lib/phaser-runtime.js` adapter; do not replace it with `createFrameLoop`, another engine, or an external physics library.",
-                local_apps::AppRuntimeProfile::Babylon3d =>
-                    "- This is a Babylon.js profile: use the locked Babylon packages through the checked-in `lib/babylon-runtime.js` adapter; do not replace it with `createFrameLoop`, React Three Fiber, or an external physics library.",
+                local_apps::AppRuntimeProfile::Canvas2d => {
+                    "- This is a Canvas 2D profile: use the checked-in `lib/frame-loop.js` helper and the Canvas 2D APIs; do not add a game engine or physics library."
+                }
+                local_apps::AppRuntimeProfile::Three3d => {
+                    "- This is a Three.js profile: import the locked `three` package directly and use the checked-in `lib/frame-loop.js` helper; do not add React Three Fiber, drei, or an external physics library."
+                }
+                local_apps::AppRuntimeProfile::Phaser2d => {
+                    "- This is a Phaser profile: use the locked `phaser` package through the checked-in `lib/phaser-runtime.js` adapter; do not replace it with `createFrameLoop`, another engine, or an external physics library."
+                }
+                local_apps::AppRuntimeProfile::Babylon3d => {
+                    "- This is a Babylon.js profile: use the locked Babylon packages through the checked-in `lib/babylon-runtime.js` adapter; do not replace it with `createFrameLoop`, React Three Fiber, or an external physics library."
+                }
                 local_apps::AppRuntimeProfile::ReactDom => unreachable!(),
             };
             format!(

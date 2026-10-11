@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -2878,6 +2878,24 @@ fn escape_attachment_banner(banner: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
@@ -3446,7 +3464,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
         assert!(msg.contains("exceeds maximum allowed size"), "got: {msg}");
         assert!(msg.contains("Use offset and limit"), "got: {msg}");
     }
@@ -3502,7 +3520,7 @@ mod tests {
             )
             .await
             .expect_err("oversize single-line range must fail without loading the whole line");
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
         assert!(msg.contains("line longer than"), "got: {msg}");
         assert!(msg.contains("Use Grep"), "got: {msg}");
     }
@@ -3528,7 +3546,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
         assert!(msg.contains("exceeds maximum allowed size"), "got: {msg}");
         assert!(msg.contains("Use offset and limit"), "got: {msg}");
     }
@@ -3553,8 +3571,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err
-            .to_string()
+        assert!(source_text(&err.model_facing_message())
             .contains("This tool cannot read binary files."));
     }
 
@@ -3577,9 +3594,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        // `ToolError::Io`'s Display prepends "io: "; assert the message tail.
+        // The model-facing source preserves the exact tail; Display is only a logging label.
         assert!(
-            err.to_string().ends_with(
+            source_text(&err.model_facing_message()).ends_with(
                 "This tool cannot read binary files. The file appears to be a binary .bin file. Please use appropriate tools for binary file analysis."
             ),
             "got: {err}"
@@ -4285,7 +4302,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("Notebook file is not valid JSON (it may be truncated, corrupted, or still being written):"),
+            source_text(&err.model_facing_message()).contains("Notebook file is not valid JSON (it may be truncated, corrupted, or still being written):"),
             "got: {err}"
         );
     }
@@ -4791,7 +4808,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
         assert!(
             msg.contains("exceeds maximum allowed tokens (25000)"),
             "got: {msg}"
@@ -5541,7 +5558,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("exceeds maximum"), "got: {err}");
+        assert!(
+            source_text(&err.model_facing_message()).contains("exceeds maximum"),
+            "got: {err}"
+        );
     }
 
     #[cfg(feature = "pdf-read")]
@@ -5563,7 +5583,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("not a valid PDF"), "got: {err}");
+        assert!(
+            source_text(&err.model_facing_message()).contains("not a valid PDF"),
+            "got: {err}"
+        );
     }
 
     #[cfg(feature = "pdf-read")]
@@ -5628,7 +5651,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains(
+            source_text(&err.model_facing_message()).contains(
                 "Reading full PDFs is not supported with this model. Use a newer model (Sonnet 3.5 v2 or later), or use the pages parameter to read specific page ranges (e.g., pages: \"1-5\", maximum 20 pages per request). Page extraction requires poppler-utils: install with `brew install poppler` on macOS or `apt-get install poppler-utils` on Debian/Ubuntu."
             ),
             "got: {err}"
@@ -5696,7 +5719,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string()
+            source_text(&err.model_facing_message())
                 .contains("PDF file exceeds maximum allowed size of 20MB."),
             "got: {err}"
         );
@@ -5826,7 +5849,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
         // Full message: base cwd-note + the sibling suggestion suffix.
         let cwd = std::fs::canonicalize(tmp.path()).unwrap();
         assert!(
@@ -5899,7 +5922,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
 
         // Base cwd-note message: cwd = canonicalized base/repo.
         let cwd = std::fs::canonicalize(&repo).unwrap();
@@ -5941,7 +5964,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
         // Base cwd-note message — the cwd is the (canonicalized) workspace = tmp.
         let cwd = std::fs::canonicalize(tmp.path()).unwrap();
         assert!(
@@ -5981,7 +6004,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
         // The note shows the canonicalized LIVE cwd (tmp/sub), ending in `/sub.`.
         let canon_sub = std::fs::canonicalize(&sub).unwrap();
         assert!(

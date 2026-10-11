@@ -46,13 +46,20 @@ async fn ordinary_stdio_tool_uses_registered_roots_and_elicitation_counter() {
     ));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let captured = requests.clone();
-    let peer = tokio::spawn(async move {
+    let mut peer = tokio::spawn(async move {
         let mut lines = BufReader::new(peer_read).lines();
         for round in 0..2 {
             let request: Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(request["method"], "tools/call");
             captured.lock().unwrap().push(request.clone());
+            if round == 0 {
+                let capabilities =
+                    &request["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"];
+                assert_eq!(capabilities["roots"]["listChanged"], true);
+                assert_eq!(capabilities["elicitation"]["form"], json!({}));
+                assert_eq!(capabilities["elicitation"]["url"], json!({}));
+            }
             let result = if round == 0 {
                 json!({"resultType":"input_required","requestState":"opaque","inputRequests":{"roots-key":{"id":"forged","jsonrpc":"bad","method":"roots/list"},"elicit-key":{"method":"elicitation/create","params":{"message":"Choose","requestedSchema":{"type":"object","properties":{"selected":{"type":"string"}}}}}}})
             } else {
@@ -102,7 +109,7 @@ async fn ordinary_stdio_tool_uses_registered_roots_and_elicitation_counter() {
         }),
     );
     let c = client.clone();
-    let call = tokio::spawn(async move {
+    let mut call = tokio::spawn(async move {
         c.call_tool_with_timeout(
             "mcp__s__worker",
             source(&json!({"question":"original"})),
@@ -110,7 +117,17 @@ async fn ordinary_stdio_tool_uses_registered_roots_and_elicitation_counter() {
         )
         .await
     });
-    entered.notified().await;
+    tokio::select! {
+        call_result = &mut call => panic!(
+            "elicitation hook was not entered; MCP call completed first: {call_result:?}"
+        ),
+        peer_result = &mut peer => panic!(
+            "elicitation hook was not entered; stdio peer completed first: {peer_result:?}"
+        ),
+        entered = tokio::time::timeout(Duration::from_secs(3), entered.notified()) => {
+            assert!(entered.is_ok(), "elicitation hook was not entered within 3 seconds");
+        }
+    }
     assert!(client.has_pending_elicitation());
     release.notify_one();
     let result = call.await.unwrap().unwrap();
@@ -127,7 +144,7 @@ async fn cancelling_embedded_elicitation_releases_existing_pending_counter() {
         client_read,
         client_write,
     ));
-    let peer = tokio::spawn(async move {
+    let mut peer = tokio::spawn(async move {
         let mut lines = BufReader::new(peer_read).lines();
         let request: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
@@ -153,11 +170,21 @@ async fn cancelling_embedded_elicitation_releases_existing_pending_counter() {
         }),
     );
     let c = client.clone();
-    let call = tokio::spawn(async move {
+    let mut call = tokio::spawn(async move {
         c.call_tool_with_timeout("mcp__s__worker", source(&json!({})), Duration::from_secs(2))
             .await
     });
-    entered.notified().await;
+    tokio::select! {
+        call_result = &mut call => panic!(
+            "elicitation hook was not entered before cancellation; MCP call completed first: {call_result:?}"
+        ),
+        peer_result = &mut peer => panic!(
+            "elicitation hook was not entered before cancellation; stdio peer completed first: {peer_result:?}"
+        ),
+        entered = tokio::time::timeout(Duration::from_secs(3), entered.notified()) => {
+            assert!(entered.is_ok(), "elicitation hook was not entered within 3 seconds");
+        }
+    }
     assert!(client.has_pending_elicitation());
     call.abort();
     let _ = call.await;

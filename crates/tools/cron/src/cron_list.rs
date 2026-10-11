@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{CRON_LIST_COMPLETED, CRON_LIST_STARTED};
 use unicode_segmentation::UnicodeSegmentation;
@@ -437,6 +437,7 @@ impl Tool for CronListTool {
 mod tests {
     use super::*;
     use mobile_linux_api::ProcessOutput;
+    use serde_json::Value;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
 
     fn fixture(value: Value) -> Utf16JsonProjection {

@@ -35,6 +35,7 @@ pub(crate) fn trimmed_string_field_projection(
 /// Match JavaScript primitive stringification for a source value used by a
 /// permission rule's generic field matcher. Strings with isolated surrogates
 /// have no exact Rust string form and therefore cannot match a string rule.
+#[cfg(test)]
 pub(crate) fn stringify_primitive(value: JsonValueView<'_>) -> Option<String> {
     if let Some(text) = exact_string(value) {
         return Some(text.to_owned());
@@ -234,6 +235,7 @@ pub(crate) fn starts_with_text(value: &Utf16JsonProjection, prefix: &str) -> boo
 }
 
 /// Search for host-authored text inside a source root string by UTF-16 units.
+#[cfg(test)]
 pub(crate) fn contains_text(value: &Utf16JsonProjection, needle: &str) -> bool {
     let Some(units) = value.string_units("") else {
         return false;

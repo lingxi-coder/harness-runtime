@@ -222,11 +222,9 @@ mod tests {
 
     #[test]
     fn prompt_appendix_unrestricted_is_empty() {
-        assert!(
-            WorkflowSizeGuideline::Unrestricted
-                .prompt_appendix()
-                .is_empty()
-        );
+        assert!(WorkflowSizeGuideline::Unrestricted
+            .prompt_appendix()
+            .is_empty());
         // The free helper agrees for unrestricted + unknown.
         assert!(prompt_appendix_for("unrestricted").is_empty());
         assert!(prompt_appendix_for("bogus").is_empty());

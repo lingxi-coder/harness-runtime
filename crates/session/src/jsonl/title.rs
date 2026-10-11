@@ -290,7 +290,10 @@ fn extract_tag(text: &str, re: &Regex) -> Option<String> {
 /// Read a boolean outer field (e.g. `isMeta`, `isCompactSummary`) from
 /// `JsonlMessage::extra`; missing / non-bool ⇒ `false`.
 fn extra_flag(m: &JsonlMessage, key: &str) -> bool {
-    m.extra.get_property(key).and_then(JsonValueView::as_bool).unwrap_or(false)
+    m.extra
+        .get_property(key)
+        .and_then(JsonValueView::as_bool)
+        .unwrap_or(false)
 }
 
 /// Truncate `s` to [`TITLE_MAX_CHARS`] `char`s, trimming the slice and appending

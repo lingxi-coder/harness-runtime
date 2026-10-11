@@ -1958,8 +1958,8 @@ mod tests {
 
     #[tokio::test]
     async fn packaged_bun_compiler_path_works_without_path_lookup() {
-        const CHILD: &str = concat!(branding::ENV_PREFIX, "TEST_PACKAGED_BUN_COMPILER_CHILD");
-        if std::env::var_os(CHILD).is_some() {
+        let child_env = format!("{}TEST_PACKAGED_BUN_COMPILER_CHILD", branding::ENV_PREFIX);
+        if std::env::var_os(&child_env).is_some() {
             let directory = tempdir().unwrap();
             fs::write(
                 directory.path().join("register.tsx"),
@@ -2009,7 +2009,7 @@ mod tests {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args(["--exact", &test_name, "--nocapture"])
-            .env(CHILD, "1")
+            .env(&child_env, "1")
             .env(MOD_BUN_EXECUTABLE_ENV, compiler)
             .env("PATH", directory.path().join("no-system-tools"))
             .kill_on_drop(true);

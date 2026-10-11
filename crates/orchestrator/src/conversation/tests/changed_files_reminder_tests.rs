@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tool_api::registry::ToolRegistry;
-use tool_api::Tool;
 
 fn orch() -> ConversationOrchestrator {
     let cwd = PathBuf::from("/work/repo");
@@ -257,7 +256,7 @@ async fn actual_read_image_result_is_carried_typed_but_default_native_renderer_i
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5,
         0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc,
-        0xff, 0x1f, 0x00, 0x03, 0x03, 0x02, 0x00, 0xef, 0x9a, 0x49, 0xf5, 0x00, 0x00, 0x00, 0x00,
+        0xff, 0x1f, 0x00, 0x03, 0x03, 0x02, 0x00, 0xef, 0xa2, 0xa7, 0x5b, 0x00, 0x00, 0x00, 0x00,
         0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
     std::fs::write(&path, PNG_1X1).unwrap();
@@ -304,7 +303,11 @@ async fn actual_read_image_result_is_carried_typed_but_default_native_renderer_i
         Err(error) => {
             // In builds without the image-read feature, current Read keeps its
             // native binary refusal and NTr has no image result to render.
-            assert!(error.to_string().contains("binary"), "got: {error}");
+            let message = error.model_facing_message();
+            let message = message
+                .string_at("")
+                .expect("binary refusal is a displayable source message");
+            assert!(message.contains("binary"), "got: {message}");
             assert!(orch.changed_files_reminder_messages(None).await.is_empty());
         }
     }
@@ -979,9 +982,7 @@ async fn prepare_turn_step_forwards_cancellation_into_changed_file_producers() {
 
 #[tokio::test]
 async fn current_rootless_policy_unavailable_preserves_pre_seam_reminder_behavior() {
-    use lingxi_core::host::permission_gate::{
-        PermissionGate as _, ReadPathPolicyMatch, ReadPathPolicySnapshot as _,
-    };
+    use lingxi_core::host::permission_gate::{PermissionGate as _, ReadPathPolicyMatch};
 
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("a.rs");

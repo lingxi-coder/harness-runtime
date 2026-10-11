@@ -16,7 +16,6 @@ use lingxi_core::host::process::{ProcessHandle, ProcessRunner};
 use lingxi_core::host::sandbox::SandboxedCommand;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use mobile_linux_api::{ProcessError, ProcessOutput};
-use serde_json::json;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

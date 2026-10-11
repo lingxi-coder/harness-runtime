@@ -1,0 +1,310 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "c3cda3e82840dee2ffb2a1d5b7a915f3727394e4b81afb4e8625a8f3ca82ab8f",
+  "stdio_server_sha256": "f6fa169e10a15fb35b97deccb5b0e2b076d2b8db0aaa9c1224d2e5776030d35e",
+  "hook_script_sha256": "528486862adf08e33f7cd3eda057291adb4bb6fce05405b104586af01cad30bf",
+  "fixture_sha256": "2386a57f7d40ba48a0f149a08a6ec190259178e4cae08f9fc8c76e7ecea9ebb3",
+  "native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "public_entrypoint": "Native 2.1.295 --print --output-format json, strict isolated --mcp-config, local stdio MCP, loopback Messages stub",
+  "fixed_inputs": {
+    "native_version": "2.1.295",
+    "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "session_id": "00000000-0000-4000-8000-000000002352",
+    "model": "claude-sonnet-4-5",
+    "server_name": "fixture",
+    "prompt": "Call the fixture MCP error tool once, then finish with the fixed response.",
+    "final_text": "NATIVE_MCP_ERROR_TEXT_HOOK_FINISHED",
+    "timeout_seconds": 45,
+    "capture_cold_resume": false,
+    "tool_cases": [
+      {
+        "name": "error_text_hook",
+        "tool_use_id": "toolu_native_error_text_hook_295",
+        "marker": "MCP_ERROR_TEXT_HOOK_MARKER",
+        "is_error": true,
+        "content": [
+          {
+            "type": "text",
+            "text": " \n\t "
+          },
+          {
+            "type": "text",
+            "text": "  FIRST_LINE \n"
+          },
+          {
+            "type": "text",
+            "text": "\nSECOND_LINE\t \n  "
+          },
+          {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jH0sAAAAASUVORK5CYII=",
+            "mimeType": "image/png"
+          }
+        ],
+        "expected_raw_text_join": " \n\t \n  FIRST_LINE \n\n\nSECOND_LINE\t \n  ",
+        "expected_outer_trim": "FIRST_LINE \n\n\nSECOND_LINE"
+      }
+    ]
+  },
+  "hook_settings": {
+    "path": "settings.json",
+    "sha256": "6e1f018a21e2de6ed1e548f929826765908a0539e78e531672b5dc4495b9af35",
+    "settings": {
+      "hooks": {
+        "PostToolUse": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "/bin/sh",
+                "args": [
+                  "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/error-text-hook/capture-hook.sh",
+                  "PostToolUse",
+                  "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/error-text-hook/run-output/native-mcp-error-text-hook-295-rsu55ozv/post-tool-use-hook-input.raw.json"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "PostToolUseFailure": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "/bin/sh",
+                "args": [
+                  "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/error-text-hook/capture-hook.sh",
+                  "PostToolUseFailure",
+                  "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/error-text-hook/run-output/native-mcp-error-text-hook-295-rsu55ozv/post-tool-use-failure-hook-input.raw.json"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "network_boundary": {
+    "model_endpoint": "127.0.0.1 loopback only",
+    "mcp_transport": "local stdio subprocess only",
+    "dummy_api_key_only": true,
+    "isolated_home_config": true,
+    "no_upstream_relay": true
+  },
+  "elapsed_seconds": 1.117,
+  "timeout_seconds": 45,
+  "timed_out": false,
+  "native_exit_code": 0,
+  "native_result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "NATIVE_MCP_ERROR_TEXT_HOOK_FINISHED",
+    "num_turns": 2,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-4000-8000-000000002352"
+  },
+  "cold_resume": {
+    "exit_code": null,
+    "timed_out": false,
+    "tool_result_observations": {},
+    "stdout": null,
+    "stderr": null
+  },
+  "native_stdout": {
+    "path": "native.stdout.raw.json",
+    "bytes": 1600,
+    "sha256": "81eb0af1110ad89c9ad89c9549147e1e7ee6a10556528ab4b05f6fdbf86aa8fc"
+  },
+  "native_stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "mcp": {
+    "incoming": {
+      "path": "mcp-trace/mcp-stdio-in.raw.jsonl",
+      "bytes": 2325,
+      "sha256": "357c7899424163cfc51c158d547bb89271806140b4deb1c440d0b03a55f4687d"
+    },
+    "outgoing": {
+      "path": "mcp-trace/mcp-stdio-out.raw.jsonl",
+      "bytes": 1322,
+      "sha256": "7623140c3981f8abbab633f4ce2deaf0d1503d359925cb492ed058e1c3f98ec0"
+    },
+    "tools_call_count": 1
+  },
+  "anthropic_messages_requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "phase": "initial",
+      "dummy_key_matched": true,
+      "request_bytes": 114994,
+      "request_sha256": "db51097660e14ce237624b75f7f0102652873ab1efc1b5493170aa19032ade29",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "target_tool_name": "mcp__fixture__error_text_hook",
+      "target_tool_present": true
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "phase": "initial",
+      "dummy_key_matched": true,
+      "request_bytes": 115410,
+      "request_sha256": "32f4f52b61e33b0285ef57cdafc36956d18247ea4ef5f283a10d75cf2e60857f",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "all_expected_tool_results_present": true
+    }
+  ],
+  "anthropic_messages_responses": [
+    {
+      "index": 1,
+      "kind": "tool_use",
+      "name": "mcp__fixture__error_text_hook",
+      "tool_use_id": "toolu_native_error_text_hook_295",
+      "bytes": 899,
+      "sha256": "834efca66fe7f4f426c4e19ef5d467099ce6ca2dfff3dec7ad827b441377e46c"
+    },
+    {
+      "index": 2,
+      "kind": "final",
+      "bytes": 810,
+      "sha256": "ec9273addf0ebce5127084152c8d60dd1ec65214f241afdd97e8087d370dc908"
+    }
+  ],
+  "tool_result_observations": {
+    "error_text_hook": {
+      "path": "mcp/error-text-hook/run-output/native-mcp-error-text-hook-295-rsu55ozv/model-tool-result-error_text_hook.raw.json",
+      "bytes": 257,
+      "sha256": "0bdb7cd134e9a1d512218622beae1c24c3bd693baf9802b2b133b1bfab9f4e13",
+      "key_order": [
+        "type",
+        "content",
+        "is_error",
+        "tool_use_id",
+        "cache_control"
+      ],
+      "is_error_present": true,
+      "is_error_value": true,
+      "tool_use_id": "toolu_native_error_text_hook_295",
+      "content": "FIRST_LINE \n\n\nSECOND_LINE\n\n<system-reminder>\n<total_tokens>14999985 tokens left</total_tokens>\n</system-reminder>"
+    }
+  },
+  "hook_observations": {
+    "PostToolUse": {
+      "ran": false
+    },
+    "PostToolUseFailure": {
+      "ran": true,
+      "path": "post-tool-use-failure-hook-input.raw.json",
+      "bytes": 870,
+      "sha256": "d8433168140e88e4bff08ec309cfa97fecb81ae500660488fe8e0b913b062052",
+      "marker_path": "post-tool-use-failure-hook-input.raw.json.event",
+      "marker_sha256": "8775a3685ecc11e7dc95e89b79ee2f014aacbee51f360cdf1f5258999b824cc3",
+      "event_marker": "PostToolUseFailure",
+      "event_input_json": {
+        "hook_event_name": "PostToolUseFailure",
+        "tool_name": "mcp__fixture__error_text_hook",
+        "tool_input": {
+          "case": "error_text_hook"
+        },
+        "error": "FIRST_LINE \n\n\nSECOND_LINE"
+      },
+      "top_level_key_order": [
+        "session_id",
+        "transcript_path",
+        "cwd",
+        "prompt_id",
+        "permission_mode",
+        "hook_event_name",
+        "tool_name",
+        "tool_input",
+        "tool_use_id",
+        "error",
+        "is_interrupt",
+        "duration_ms",
+        "mcp_server"
+      ]
+    }
+  },
+  "checks": {
+    "native_exited_zero": true,
+    "exactly_two_initial_model_requests": true,
+    "exactly_one_mcp_tools_call": true,
+    "model_tool_result_captured": true,
+    "persisted_tool_result_captured": true,
+    "post_tool_use_hook_ran": false,
+    "post_tool_use_failure_hook_ran": true
+  },
+  "native_session": {
+    "path": "native-session.raw.jsonl",
+    "bytes": 218245,
+    "sha256": "1fe62d4bbfb72aaf0a62003a0bb09971bb17351823c798eebde8426ddfeeb2de"
+  },
+  "native_user_tool_result": {
+    "row": {
+      "path": "native-user-tool-result-row.raw.jsonl",
+      "bytes": 795,
+      "sha256": "09d8e7faf8cc890d797e485578994548df93d20c4469641e11e1dfea811c8a5c",
+      "top_level_key_order": [
+        "parentUuid",
+        "isSidechain",
+        "promptId",
+        "type",
+        "message",
+        "uuid",
+        "timestamp",
+        "toolUseResult",
+        "sourceToolAssistantUUID",
+        "permissionDecision",
+        "userType",
+        "entrypoint",
+        "cwd",
+        "sessionId",
+        "version",
+        "gitBranch"
+      ],
+      "message_key_order": [
+        "role",
+        "content"
+      ],
+      "content_block_key_order": [
+        "type",
+        "content",
+        "is_error",
+        "tool_use_id"
+      ]
+    },
+    "toolUseResult": {
+      "path": "native-user-toolUseResult.raw.json",
+      "bytes": 37,
+      "sha256": "9c96daeac598539baa94fc3fa172d77573af9a515d46c6ac2f3e8e72bfe29b7d",
+      "value": "Error: FIRST_LINE \n\n\nSECOND_LINE"
+    },
+    "tool_result_block": {
+      "path": "native-user-tool-result-block.raw.json",
+      "bytes": 128,
+      "sha256": "b87f3ce1b76b61683d30e8a8e256bf76014e670ecfde255550bbee248ace4caa",
+      "value": {
+        "type": "tool_result",
+        "content": "FIRST_LINE \n\n\nSECOND_LINE",
+        "is_error": true,
+        "tool_use_id": "toolu_native_error_text_hook_295"
+      }
+    }
+  },
+  "native_mcp_debug": {
+    "path": "native-mcp-debug.raw.jsonl",
+    "bytes": 2773,
+    "sha256": "bccb5264f8795e39decf287f5f66ce0f26cc85f9b6fe69b23678acd7115e3451"
+  },
+  "raw_outputs_relative_path": "mcp/error-text-hook/run-output/native-mcp-error-text-hook-295-rsu55ozv"
+}

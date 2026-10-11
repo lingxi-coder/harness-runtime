@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","content":[{"type":"text","text":" \n\t "},{"type":"text","text":"  FIRST_LINE \n"},{"type":"text","text":"\nSECOND_LINE\t \n  "},{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jH0sAAAAASUVORK5CYII=","mimeType":"image/png"}],"isError":true}}

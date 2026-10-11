@@ -278,6 +278,8 @@ platform-ios = { path = "../platforms/ios", optional = true }
 platform-android = { path = "../platforms/android", optional = true }
 
 [dev-dependencies]
+# Shared host-side filesystem fixtures also run with only the mobile feature.
+platform-posix = { path = "../platforms/posix" }
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 toml = "0.8"
 async-trait = { workspace = true }

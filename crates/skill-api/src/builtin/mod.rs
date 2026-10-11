@@ -151,7 +151,7 @@ mod tests {
         assert!(skill
             .content
             .string_at("")
-            .is_some_and(|content| content.contains(".lingxi-plugin/plugin.json")));
+            .is_some_and(|content| content.contains(".lingxi-plugin/\n    plugin.json")));
         assert!(registry
             .discover("write a LingXi plugin with a hooks module")
             .iter()

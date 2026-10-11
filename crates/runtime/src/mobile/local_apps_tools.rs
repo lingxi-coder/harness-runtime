@@ -1017,8 +1017,8 @@ mod tests {
             json_value(&projected[0])["source"]["media_type"],
             "image/webp"
         );
-        let summary = tool_api::tool_result_media::ephemeral_summary(&out.data)
-            .unwrap()
+        let summary_source = tool_api::tool_result_media::ephemeral_summary(&out.data).unwrap();
+        let summary = summary_source
             .string_at("")
             .expect("ephemeral summary is source text");
         for identity in ["ev-capture-9", "checkout", "ipad", "event-9", "artifact-9"] {
@@ -1222,7 +1222,11 @@ mod tests {
             .find(|t| t.name() == "LocalAppList")
             .expect("LocalAppList");
         assert!(list.should_defer(), "LocalAppList must stay deferred");
-        assert_eq!(list.search_hint(), Some("discover existing local apps"));
+        let search_hint = list.search_hint().expect("deferred tool has a search hint");
+        assert_eq!(
+            search_hint.string_at(""),
+            Some("discover existing local apps")
+        );
     }
 
     /// The name table here and the rows in `permission::defaults_per_tool` are
@@ -1375,7 +1379,7 @@ mod tests {
             home: None,
             lingxi_home: root.path().to_path_buf(),
         };
-        let input = serde_json::json!({"app_id": app_id});
+        let input = projection(serde_json::json!({"app_id": app_id}));
 
         for &(name, _, _) in LOCAL_APP_TOOLS {
             let expected = LEASE_AUTHORIZED.contains(&name);
@@ -1387,7 +1391,7 @@ mod tests {
         }
         // Vacuity guard: the mismatched app_id path of the same production
         // call must still refuse, proving `input` above was actually load-bearing.
-        let wrong_app_input = serde_json::json!({"app_id": "someone-elses-app"});
+        let wrong_app_input = projection(serde_json::json!({"app_id": "someone-elses-app"}));
         assert!(
             !registry.allows_for_token(token, "LocalAppBuild", &wrong_app_input, &roots),
             "a mismatched app_id must never be authorized by this lease"
@@ -1431,13 +1435,14 @@ mod tests {
         assert!(ctx.cwd.is_none(), "the main turn loop supplies no cwd");
         let refused = query
             .call(
-                serde_json::json!({"app_id": "app-b", "collection": "journal"}),
+                projection(serde_json::json!({"app_id": "app-b", "collection": "journal"})),
                 ctx.clone(),
                 tool_api::test_support::fresh_tx(),
             )
             .await;
         match refused {
             Err(ToolError::InvalidInput(message)) => {
+                let message = message.string_at("").expect("refusal is source text");
                 assert!(
                     message.contains("app-b") && message.contains("app-a"),
                     "the refusal must name both ids: {message}"
@@ -1453,13 +1458,13 @@ mod tests {
         hostile_ctx.cwd = Some(root.path().join("apps/app-b/workspace"));
         let refused = query
             .call(
-                serde_json::json!({"app_id": "app-b", "collection": "journal"}),
+                projection(serde_json::json!({"app_id": "app-b", "collection": "journal"})),
                 hostile_ctx,
                 tool_api::test_support::fresh_tx(),
             )
             .await;
         assert!(
-            matches!(&refused, Err(ToolError::InvalidInput(message)) if message.contains("app-b") && message.contains("app-a")),
+            matches!(&refused, Err(ToolError::InvalidInput(message)) if message.string_at("").is_some_and(|text| text.contains("app-b") && text.contains("app-a"))),
             "call-time cwd must not replace the Host-resolved binding: {refused:?}"
         );
 
@@ -1467,13 +1472,13 @@ mod tests {
         // absent service — which proves the guard let it through).
         let own = query
             .call(
-                serde_json::json!({"app_id": "app-a", "collection": "journal"}),
+                projection(serde_json::json!({"app_id": "app-a", "collection": "journal"})),
                 ctx,
                 tool_api::test_support::fresh_tx(),
             )
             .await;
         assert!(
-            !matches!(&own, Err(ToolError::InvalidInput(m)) if m.contains("does not belong")),
+            !matches!(&own, Err(ToolError::InvalidInput(m)) if m.string_at("").is_some_and(|text| text.contains("does not belong"))),
             "the session's own app must pass the binding, got {own:?}"
         );
     }
@@ -1513,7 +1518,7 @@ mod tests {
             let tool = tools.iter().find(|tool| tool.name() == name).expect("tool");
             let decision = tool
                 .check_permissions(
-                    &serde_json::json!({"app_id": "app-a"}),
+                    &projection(serde_json::json!({"app_id": "app-a"})),
                     &tool_api::test_support::fresh_ctx(),
                 )
                 .await;
@@ -1532,7 +1537,7 @@ mod tests {
         let built = local_app_builtin_tools(&transport, Some("app-a".into()));
         let by_name: std::collections::BTreeMap<&str, &Arc<dyn Tool>> =
             built.iter().map(|t| (t.name(), t)).collect();
-        let empty = serde_json::json!({});
+        let empty = projection(serde_json::json!({}));
         assert!(by_name["LocalAppLogs"].is_read_only(&empty));
         assert!(by_name["LocalAppQueryData"].is_read_only(&empty));
         assert!(!by_name["LocalAppBuild"].is_read_only(&empty));
@@ -1569,7 +1574,7 @@ mod tests {
             "the shell's only way out must be in the eager tool set"
         );
         assert!(
-            !scaffold.is_read_only(&serde_json::json!({})),
+            !scaffold.is_read_only(&projection(serde_json::json!({}))),
             "scaffolding writes an app's entire initial source tree"
         );
     }
@@ -1602,7 +1607,12 @@ mod tests {
             .expect("LocalAppScaffold");
         let decision = scaffold
             .check_permissions(
-                &serde_json::json!({"app_id": "app-a", "name": "N", "brief": "b", "surface": "dom"}),
+                &projection(serde_json::json!({
+                    "app_id": "app-a",
+                    "name": "N",
+                    "brief": "b",
+                    "surface": "dom"
+                })),
                 &tool_api::test_support::fresh_ctx(),
             )
             .await;
@@ -1627,7 +1637,8 @@ mod tests {
             .iter()
             .find(|tool| tool.name() == "LocalAppScaffold")
             .expect("LocalAppScaffold");
-        let schema = scaffold.input_schema().to_string().to_lowercase();
+        let schema_value = json_value(scaffold.input_schema());
+        let schema = schema_value.to_string().to_lowercase();
         // The five banned symbols, spelled out rather than counted.
         for banned in [
             "template",
@@ -1642,7 +1653,7 @@ mod tests {
         // what `LocalAppTool` stores, so read it through the public accessor.
         let description = scaffold
             .description(
-                &serde_json::json!({}),
+                &projection(serde_json::json!({})),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -1664,10 +1675,10 @@ mod tests {
         // Runtime identity is no longer model-selectable at scaffold time.
         // The native confirmation receipt is the only authority that reaches
         // this tool, and direct surface/profile fields remain absent.
-        assert!(scaffold.input_schema()["properties"]["surface"].is_null());
-        assert!(scaffold.input_schema()["properties"]["runtime_profile"].is_null());
+        assert!(schema_value["properties"]["surface"].is_null());
+        assert!(schema_value["properties"]["runtime_profile"].is_null());
         assert_eq!(
-            scaffold.input_schema()["required"],
+            schema_value["required"],
             serde_json::json!(["app_id", "name", "brief", "workflow_run_id", "receipt_id"])
         );
     }

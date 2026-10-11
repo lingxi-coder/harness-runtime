@@ -114,7 +114,7 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::result::{PermissionPrompt, SandboxOverrideReason};
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -718,7 +718,7 @@ fn bash_model_content_source(
 
     fn normalized_stdout(units: &[u16]) -> &[u16] {
         let display = String::from_utf16_lossy(units);
-        let mut prefix_is_whitespace = true;
+        let prefix_is_whitespace = true;
         let mut cut_units = 0usize;
         for character in display.chars() {
             if character == '\n' {
@@ -726,7 +726,6 @@ fn bash_model_content_source(
             } else if character.is_whitespace() && prefix_is_whitespace {
                 cut_units += character.len_utf16();
             } else {
-                prefix_is_whitespace = false;
                 break;
             }
         }
@@ -4078,6 +4077,7 @@ mod tests {
 
     use super::*;
     use mobile_linux_api::ProcessOutput;
+    use serde_json::Value;
     use tool_api::test_support::{fresh_tx, shell_test_ctx};
 
     fn use_ctx() -> ToolUseContext {

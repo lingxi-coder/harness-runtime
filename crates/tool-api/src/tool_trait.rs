@@ -989,18 +989,7 @@ impl ToolError {
             | ToolError::Io(message)
             | ToolError::LspFailure(message) => message.clone(),
             ToolError::SubagentFailed { reason, .. } => reason.clone(),
-            ToolError::McpFailure {
-                server,
-                tool,
-                detail,
-            } => {
-                let mut units = format!("MCP tool error: {server}/{tool}: ")
-                    .encode_utf16()
-                    .collect::<Vec<_>>();
-                units.extend(detail.string_units("").unwrap_or_default());
-                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
-                    .expect("MCP error message is a valid source string")
-            }
+            ToolError::McpFailure { detail, .. } => detail.clone(),
             // Single-string variants whose `Display` prepends a non-meaningful
             // prefix: the inner string is the claude `error.message`.
             ToolError::NotFound(s) | ToolError::Internal(s) | ToolError::InteractionRequired(s) => {
@@ -1142,11 +1131,7 @@ mod m4_01_error_variant_tests {
             detail,
         }
         .model_facing_message();
-        let mut expected = "MCP tool error: srv/read: "
-            .encode_utf16()
-            .collect::<Vec<_>>();
-        expected.push(0xDFFF);
-        assert_eq!(message.string_units(""), Some(expected));
+        assert_eq!(message.string_units(""), Some(vec![0xDFFF]));
     }
 }
 

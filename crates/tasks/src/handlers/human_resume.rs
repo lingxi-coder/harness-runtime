@@ -77,24 +77,34 @@ impl LocalAgentHandler {
                     || attachment.get("envelope").is_some()
             }) {
                 use lingxi_core::host::handback::{HandbackEnvelope, HandbackRecipient};
-                let envelope: HandbackEnvelope = serde_json::from_value(
-                    attachment.get("envelope").cloned().ok_or_else(|| {
-                        TaskError::Internal(
-                            "peer report transcript row is missing its envelope".into(),
-                        )
-                    })?,
-                )
-                .map_err(|error| {
+                let envelope_source =
+                    source
+                        .subprojection("/attachment/envelope")
+                        .map_err(|error| {
+                            TaskError::Internal(format!(
+                                "peer report transcript row is missing its envelope: {error}"
+                            ))
+                        })?;
+                let envelope_json = envelope_source.to_json_string().map_err(|error| {
                     TaskError::Internal(format!("invalid peer report transcript envelope: {error}"))
                 })?;
+                let envelope: HandbackEnvelope =
+                    serde_json::from_str(&envelope_json).map_err(|error| {
+                        TaskError::Internal(format!(
+                            "invalid peer report transcript envelope: {error}"
+                        ))
+                    })?;
                 let expected = envelope.model_message();
+                let message_source = source.subprojection("/message").map_err(|error| {
+                    TaskError::Internal(format!(
+                        "peer report transcript row is missing its model projection: {error}"
+                    ))
+                })?;
+                let message_json = message_source.to_json_string().map_err(|error| {
+                    TaskError::Internal(format!("invalid peer report transcript message: {error}"))
+                })?;
                 let message: lingxi_core::types::ConversationMessage =
-                    serde_json::from_value(value.get("message").cloned().ok_or_else(|| {
-                        TaskError::Internal(
-                            "peer report transcript row is missing its model projection".into(),
-                        )
-                    })?)
-                    .map_err(|error| {
+                    serde_json::from_str(&message_json).map_err(|error| {
                         TaskError::Internal(format!(
                             "invalid peer report transcript message: {error}"
                         ))

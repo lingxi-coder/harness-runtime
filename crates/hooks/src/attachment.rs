@@ -556,7 +556,7 @@ pub fn stopped_continuation_attachment(
 /// [`crate::AggregateHookResult::system_messages`]'s doc comment already says.
 #[must_use]
 pub fn system_message_attachment(id: &HookAttachmentIdentity, content: &ExactHookText) -> HookJson {
-    let mut fields = vec![
+    let fields = vec![
         ("type", json_string("hook_system_message")),
         ("content", content.json_projection()),
         ("hookName", json_string(&id.hook_name)),

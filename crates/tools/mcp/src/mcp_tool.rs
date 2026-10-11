@@ -613,25 +613,20 @@ async fn emit_auto_background_outcome(bus: &Arc<AnalyticsBus>, outcome: AutoBack
     }
 }
 
-/// Produce the `(now_millis, rand_tag)` seed for a blob `persistId`, mirroring
+/// Produce the `(now_millis, rand_tag)` seed for one persisted blob, mirroring
 /// the TS `Date.now()` + `Math.random().toString(36).slice(2, 8)` pair that
 /// `persistBlobToTextBlock` feeds into its persistId template
-/// (`client.ts:2604`). The exact value is non-load-bearing (it only has to be
-/// unique per blob); only the *template shape* (`mcp-<server>-blob-<now>-<rand>`)
-/// is locked, and that lives in `transform_result::persist_blob_to_text_block`.
-/// Mirrors the private `mcp::client::persist_id_seed` (kept in sync; no RNG dep).
+/// (`client.ts:2604`). The random tag uses UUIDv4 entropy already provided by
+/// `core`, then takes six base36 digits to preserve the observed filename
+/// shape. The random bytes are not intended to match Native; the tag only
+/// distinguishes blobs that share a MIME-derived extension.
 fn persist_id_seed() -> (u128, String) {
     const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let now_millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::from(d.subsec_nanos()))
-        .unwrap_or(0)
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1_442_695_040_888_963_407);
+    let mut seed = lingxi_core::types::MessageId::new().as_uuid().as_u128();
     let mut tag = String::with_capacity(6);
     for _ in 0..6 {
         tag.push(ALPHABET[(seed % 36) as usize] as char);
@@ -1066,9 +1061,9 @@ async fn process_mcp_call_result(
             // (`client.ts:3124-3148`) which fires BEFORE COMPLETED telemetry /
             // result transform. We lift the first content block's `text` (else
             // `"Unknown error"`) into the error message and emit MCP_FAILED.
-            // The orchestrator derives block-level is_error purely from Ok/Err,
-            // so returning `Err` renders the model "Error: <text>" — matching
-            // the TS throw — instead of silently embedding `is_error` as data.
+            // The orchestrator keeps the thrown MCP failure typed so its main
+            // model frame can carry the server's bare `error.message`, while
+            // the separate `toolUseResult` retains Native's `Error: ` prefix.
             if dto.is_error {
                 let error_details = first_content_block_text(&dto.content)
                     .unwrap_or_else(|| "Unknown error".into());
@@ -1125,7 +1120,12 @@ async fn process_mcp_call_result(
                 });
             }
 
-            let (now_millis, rand_tag) = persist_id_seed();
+            // Large-result persistence keeps its response-level timestamp;
+            // individual binary blobs obtain independent seeds below.
+            let now_millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
             // MCP.2: structuredContent takes PRIORITY over `content` for the
             // model (transformMCPResult, `client.ts:2675-2684`): when the
             // server returns `structuredContent` we hand the model
@@ -1141,8 +1141,7 @@ async fn process_mcp_call_result(
             // `content` is walked — a bare value is forwarded verbatim (MCP-5e).
             let persist_ctx = crate::transform_result::PersistContext {
                 output_dir: &output_dir,
-                now_millis,
-                rand_tag: &rand_tag,
+                seed_factory: &persist_id_seed,
             };
             let (model_content, large_result_type) = match &dto.structured_content {
                 Some(sc) => {
@@ -6637,6 +6636,19 @@ mod cached_resource_tool_tests {
     };
     use telemetry::InMemorySink;
 
+    fn model_facing_text(error: &ToolError) -> String {
+        let message = error.model_facing_message();
+        let display = message
+            .string_at("")
+            .expect("model-facing tool error is a root string")
+            .to_owned();
+        let units = message
+            .string_units("")
+            .expect("model-facing tool error retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        display
+    }
+
     async fn call_list_tool(
         registry: Arc<McpRegistry>,
         input: UJP,
@@ -6754,7 +6766,7 @@ mod cached_resource_tool_tests {
             )
             .await
             .expect_err("lazy dial failure must hard-fail named server");
-        assert!(format!("{err}").contains("dial exploded"));
+        assert!(model_facing_text(&err).contains("dial exploded"));
 
         let events = sink.events().await;
         assert_eq!(
@@ -6797,7 +6809,7 @@ mod cached_resource_tool_tests {
         )
         .await
         .expect_err("live capability downgrade must fail named list");
-        assert!(format!("{err}").contains("does not support resources"));
+        assert!(model_facing_text(&err).contains("does not support resources"));
         assert_eq!(transport.connect_calls("cached"), 1);
         assert_eq!(
             transport.rpc_call_count("cached", "transport::list_resources"),
@@ -6962,7 +6974,7 @@ mod cached_resource_tool_tests {
         )
         .await
         .expect_err("scoped-only entry must not satisfy shared lookup");
-        assert!(format!("{err}").contains("is not registered"));
+        assert!(model_facing_text(&err).contains("is not registered"));
 
         let err = call_read_tool(
             registry,
@@ -6970,7 +6982,7 @@ mod cached_resource_tool_tests {
         )
         .await
         .expect_err("scoped-only entry must not satisfy shared lookup");
-        assert!(format!("{err}").contains("is not registered"));
+        assert!(model_facing_text(&err).contains("is not registered"));
     }
 
     #[tokio::test]
@@ -7057,7 +7069,7 @@ mod cached_resource_tool_tests {
         )
         .await
         .expect_err("colliding normalized alias must fail closed");
-        let err_text = format!("{err}");
+        let err_text = model_facing_text(&err);
         assert!(err_text.contains("ambiguous"));
         assert!(err_text.contains("my.server"));
         assert!(err_text.contains("my_server"));
@@ -7269,7 +7281,7 @@ mod cached_resource_tool_tests {
         )
         .await
         .expect_err("colliding normalized alias must fail closed");
-        let err_text = format!("{err}");
+        let err_text = model_facing_text(&err);
         assert!(err_text.contains("ambiguous"));
         assert!(err_text.contains("my.server"));
         assert!(err_text.contains("my_server"));
@@ -7303,7 +7315,7 @@ mod cached_resource_tool_tests {
         )
         .await
         .expect_err("live capability downgrade must fail read");
-        assert!(format!("{err}").contains("does not support resources"));
+        assert!(model_facing_text(&err).contains("does not support resources"));
         assert_eq!(transport.connect_calls("cached"), 1);
         assert_eq!(transport.rpc_call_count("cached", "resources/read"), 0);
     }

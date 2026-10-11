@@ -36,7 +36,7 @@ use batch_hooks::post_tool_batch_identity;
 pub(crate) use batch_hooks::resolve_model_context_modifier;
 pub(crate) use batch_hooks::run_post_tool_batch_hooks;
 pub(crate) use batch_hooks::run_post_tool_batch_hooks_after_turn_end;
-pub(crate) use batch_hooks::{PostToolBatchDispatch, PostToolBatchOutcome};
+pub(crate) use batch_hooks::PostToolBatchDispatch;
 pub(crate) use error_reporting::clear_goal_after_unrecoverable_error;
 #[cfg(test)]
 use error_reporting::goal_clear_bucket;
@@ -66,10 +66,12 @@ pub(crate) use response::prior_assistant_used_structured_output;
 pub(crate) use response::translate_response_blocks;
 #[cfg(test)]
 use tool_dispatch::accumulate_code_change;
+#[cfg(test)]
 pub(crate) use tool_dispatch::dispatch_streaming_tool_use;
 #[cfg(test)]
 pub(crate) use tool_dispatch::dispatch_tool_uses;
 pub(crate) use tool_dispatch::dispatch_tool_uses_tracked;
+#[cfg(test)]
 pub(crate) use tool_dispatch::dispatch_tool_uses_tracked_deferred;
 pub(crate) use tool_dispatch::generation_bound_mod_session_context;
 pub(crate) use tool_dispatch::normalize_lexically;
@@ -340,7 +342,10 @@ pub(crate) enum NativeQueryTransition {
     NextTurn,
     /// Local retries keep the current query depth.
     InPlaceRetry,
-    /// Native's resumeActive request is an in-place re-entry.
+    /// Native's resumeActive request is an in-place re-entry. Retained as a
+    /// test oracle case; current production transitions are NextTurn and
+    /// InPlaceRetry, so this does not establish a Native producer route.
+    #[cfg(test)]
     ResumeIncompleteThinking,
 }
 
@@ -351,9 +356,9 @@ pub(crate) const fn native_query_depth_after(
 ) -> u32 {
     match transition {
         NativeQueryTransition::NextTurn => current_depth.saturating_add(1),
-        NativeQueryTransition::InPlaceRetry | NativeQueryTransition::ResumeIncompleteThinking => {
-            current_depth
-        }
+        NativeQueryTransition::InPlaceRetry => current_depth,
+        #[cfg(test)]
+        NativeQueryTransition::ResumeIncompleteThinking => current_depth,
     }
 }
 
@@ -490,6 +495,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     // fallback only for a fully synthetic Mod response. Successful physical
     // requests carry their own post-PTL/compact message snapshot below.
     let outgoing_history_rewriter = prepared.outgoing_history_rewriter;
+    let native_anthropic_request_context = prepared.native_anthropic_request_context;
     let mut turn_reminders = prepared.turn_reminders;
     let mut guarded_async_hook_reminders = prepared.guarded_async_hook_reminders;
     let context_announcements = prepared.context_announcements;
@@ -583,6 +589,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         guarded_async_hook_reminders: guarded_async_hook_reminders.clone(),
                         context_announcements: context_announcements.clone(),
                         cost_scope: cost_scope.clone(),
+                        native_anthropic_request_context: native_anthropic_request_context.clone(),
                         turn_id: turn_id.to_owned(),
                         index,
                         effort,
@@ -642,6 +649,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         &mut guarded_async_hook_reminders,
                         &context_announcements,
                         cost_scope.as_ref(),
+                        native_anthropic_request_context.clone(),
                     ),
                 )
                 .await

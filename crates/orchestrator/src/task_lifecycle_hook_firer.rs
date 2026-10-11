@@ -333,7 +333,10 @@ mod tests {
     struct SafetyRunner;
     #[async_trait]
     impl HookPromptRunner for SafetyRunner {
-        async fn run(&self, _req: PromptHookRequest) -> Result<String, PromptHookError> {
+        async fn run(
+            &self,
+            _req: PromptHookRequest,
+        ) -> Result<Utf16JsonProjection, PromptHookError> {
             lingxi_core::host::model_safety::current_model_safety_observer()
                 .expect("hook admission retained its cost authority")
                 .record(lingxi_core::host::model_safety::ModelSafetyStop::Refusal);
@@ -377,7 +380,7 @@ mod tests {
         let event = || HookEvent::TaskCreated {
             task_id: "t1".into(),
             task_type: "test".into(),
-            description: String::new(),
+            description: String::new().into(),
             teammate_name: None,
             team_name: None,
         };

@@ -494,6 +494,24 @@ mod tests {
     }
 
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use mobile_linux_api::ProcessOutput;
     use std::ffi::OsString;
     use std::sync::Mutex;
@@ -722,7 +740,7 @@ mod tests {
             )
             .await;
         assert!(r.is_err());
-        let msg = r.unwrap_err().to_string();
+        let msg = source_text(&r.unwrap_err().0);
         assert!(msg.contains("600000"), "got: {msg}");
     }
 
@@ -746,7 +764,7 @@ mod tests {
             )
             .await;
         let err = r.expect_err("pwsh missing");
-        let msg = err.to_string();
+        let msg = source_text(&err.model_facing_message());
         assert!(msg.contains("pwsh not found in PATH"), "got: {msg}");
     }
 

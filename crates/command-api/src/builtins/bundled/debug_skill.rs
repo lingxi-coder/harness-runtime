@@ -163,7 +163,6 @@ impl BundledPromptFn for DebugPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     fn render_display(home: &Path, args: &str, project_dir: &Path) -> String {
         render(home, &args.into(), project_dir)

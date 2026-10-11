@@ -1,0 +1,134 @@
+{
+  "artifact": "Native Claude Code compact-summary raw fixtures",
+  "scope": "Native 2.1.295 oracle captures only; these fixtures do not claim Harness parity.",
+  "native": {
+    "version": "2.1.295 (Claude Code)",
+    "binary_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "capture_index": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/compact-summary-295/capture-summary.json",
+    "sha256": "c802a6193201d5ae5faf24e5c8735c63627bb7e388517bcf78d83519db649b1f",
+    "ordinary_original_receipt": {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/compact-summary-295/run-output-ordinary-onboarded-r8/native-receipt.json",
+      "sha256": "b3613db34a3f41a81bc99fa20375e960ef2e7f547307d49547c0355cd85b8ad6",
+      "reported_result": "unverified",
+      "runner_sha256": "b8de4a2a2b90b133c4fa8cf4f7b3ec0565d51b52c1ba04c1212712aa403c50c5",
+      "note": "This ordinary receipt predates isCompactSummary row classification and remains untouched."
+    },
+    "d800_original_receipt": {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/compact-summary-295/run-output-d800-onboarded-r1/native-receipt.json",
+      "sha256": "c9d45512f7db73b1a92b63dde1db28e0371a4a6c68ea93fd919e02bf4eba9dde",
+      "reported_result": "observed",
+      "runner_sha256": "12a8bb1bc46d4101d17ad4d34c8139bc273912d379286dda79a94d24c40bedeb",
+      "note": "The updated runner classified the synthetic user row directly."
+    }
+  },
+  "provenance": "Each response file is a byte-for-byte copy of response-03.sse.raw. Each JSONL row is an exact byte slice (including its original line ending) from the persisted Native session transcript: line 18 is compact_boundary; line 19 is the synthetic compact-summary row. No transcript/SSE payload was parsed and reserialized for the copies.",
+  "fixed_content": {
+    "ordinary": {
+      "text": "AordinaryB",
+      "utf16_units": [
+        65,
+        111,
+        114,
+        100,
+        105,
+        110,
+        97,
+        114,
+        121,
+        66
+      ]
+    },
+    "d800": {
+      "json_escaped_text": "A\\ud800B",
+      "utf16_units": [
+        65,
+        55296,
+        66
+      ]
+    }
+  },
+  "dynamic_fields": [
+    "summary uuid",
+    "parentUuid",
+    "promptId",
+    "sessionId/session_id",
+    "timestamp",
+    "slug",
+    "cwd/runtime paths",
+    "debug log filename",
+    "compact duration and token accounting"
+  ],
+  "structural_relationships": [
+    "summary parentUuid equals the manual compact_boundary uuid",
+    "summary promptId equals the /compact command promptId",
+    "compact_boundary logicalParentUuid equals the /compact command parentUuid",
+    "do not compare dynamic identity/accounting fields across independent Native sessions"
+  ],
+  "capture_files": {
+    "ordinary": {
+      "boundary": {
+        "file": "native-ordinary-boundary-row.jsonl",
+        "bytes": 636,
+        "sha256": "1d9045b1248b44141b468448ce12914a506e13f90f2265bd489d8c2d336f0381",
+        "source": "/private/tmp/claude-alignment-compact-295-ordinary-onboarded-r8/config/projects/-private-tmp-claude-alignment-compact-295-ordinary-onboarded-r8-cwd/d1f398f3-0189-40a5-b3cf-56db72c28da1.jsonl",
+        "source_line_1based": 18,
+        "source_sha256": "1d9045b1248b44141b468448ce12914a506e13f90f2265bd489d8c2d336f0381",
+        "byte_equal_to_source": true
+      },
+      "summary": {
+        "file": "native-ordinary-summary-row.jsonl",
+        "bytes": 1456,
+        "sha256": "5ac30502ab247286688449c49208bf7310cfd59324618fa36b3c1db62e8def54",
+        "source": "/private/tmp/claude-alignment-compact-295-ordinary-onboarded-r8/config/projects/-private-tmp-claude-alignment-compact-295-ordinary-onboarded-r8-cwd/d1f398f3-0189-40a5-b3cf-56db72c28da1.jsonl",
+        "source_line_1based": 19,
+        "source_sha256": "5ac30502ab247286688449c49208bf7310cfd59324618fa36b3c1db62e8def54",
+        "byte_equal_to_source": true
+      },
+      "response": {
+        "file": "native-ordinary-response-03.sse.raw",
+        "bytes": 781,
+        "sha256": "3a423265118e7a0c101421e7a4df2c89c907311fd6fe0d9a51e15f49b37a5d87",
+        "source": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/compact-summary-295/run-output-ordinary-onboarded-r8/response-03.sse.raw",
+        "source_line_1based": null,
+        "source_sha256": "3a423265118e7a0c101421e7a4df2c89c907311fd6fe0d9a51e15f49b37a5d87",
+        "byte_equal_to_source": true
+      }
+    },
+    "d800": {
+      "boundary": {
+        "file": "native-d800-boundary-row.jsonl",
+        "bytes": 628,
+        "sha256": "986248e171d38773ae249f6de740ee04d0a26f36ab5be29df9e7ff1604ea94c3",
+        "source": "/private/tmp/claude-alignment-compact-295-d800-onboarded-r1/config/projects/-private-tmp-claude-alignment-compact-295-d800-onboarded-r1-cwd/c57440a2-e397-4798-90fb-68a5fe9f3463.jsonl",
+        "source_line_1based": 18,
+        "source_sha256": "986248e171d38773ae249f6de740ee04d0a26f36ab5be29df9e7ff1604ea94c3",
+        "byte_equal_to_source": true
+      },
+      "summary": {
+        "file": "native-d800-summary-row.jsonl",
+        "bytes": 1438,
+        "sha256": "6fc694fa045729421cd8fdbda83a7e803fea7940ab34098f1ae77fdb86c2d744",
+        "source": "/private/tmp/claude-alignment-compact-295-d800-onboarded-r1/config/projects/-private-tmp-claude-alignment-compact-295-d800-onboarded-r1-cwd/c57440a2-e397-4798-90fb-68a5fe9f3463.jsonl",
+        "source_line_1based": 19,
+        "source_sha256": "6fc694fa045729421cd8fdbda83a7e803fea7940ab34098f1ae77fdb86c2d744",
+        "byte_equal_to_source": true
+      },
+      "response": {
+        "file": "native-d800-response-03.sse.raw",
+        "bytes": 774,
+        "sha256": "e03dddfff3803a113701a87c0f76a73ec8c0ab284f40929a285c0702aa43839d",
+        "source": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/compact-summary-295/run-output-d800-onboarded-r1/response-03.sse.raw",
+        "source_line_1based": null,
+        "source_sha256": "e03dddfff3803a113701a87c0f76a73ec8c0ab284f40929a285c0702aa43839d",
+        "byte_equal_to_source": true
+      }
+    }
+  },
+  "capture_interpretation": {
+    "ordinary": "Raw provider response and persisted compact-summary row were observed; the original runner receipt remains reported as unverified and was not modified.",
+    "d800": "Raw provider response and persisted compact-summary row were observed with UTF-16 units [65, 55296, 66] and JSON escape \\ud800."
+  }
+}

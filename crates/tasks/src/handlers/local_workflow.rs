@@ -1402,8 +1402,11 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         &self,
         subagent_type: &str,
         model: Option<&str>,
+        model_profile: Option<&str>,
     ) -> SelectedAgentMeta {
-        self.inner.resolve_selection(subagent_type, model).await
+        self.inner
+            .resolve_selection(subagent_type, model, model_profile)
+            .await
     }
 
     async fn register_name(&self, name: &str, agent_id: lingxi_core::types::AgentId) {

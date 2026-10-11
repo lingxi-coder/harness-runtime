@@ -7,6 +7,7 @@ use lingxi_core::host::{
     Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox, SlashCommandDispatcher,
     SlashDispatchResult, WorktreeManager,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use session::jsonl::SessionMode;
 use tool_api::tool_trait::ToolStaticContext;
 
@@ -28,6 +29,17 @@ const DEVICE_TOOLS: &[&str] = &[
 ];
 
 const DEVICE_SKILLS: &[&str] = &["mobile-device", "mobile-media", "mobile-personal-context"];
+
+fn source_text_contains(value: &Utf16JsonProjection, needle: &str) -> bool {
+    let Some(units) = value.string_units("") else {
+        return false;
+    };
+    let needle = needle.encode_utf16().collect::<Vec<_>>();
+    !needle.is_empty()
+        && units
+            .windows(needle.len())
+            .any(|candidate| candidate == needle.as_slice())
+}
 
 struct NativeDevice;
 
@@ -119,7 +131,8 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
                 .iter()
                 .find(|tool| tool.name() == name)
                 .unwrap_or_else(|| panic!("{name} must be available in {mode:?}"));
-            let input = serde_json::json!({});
+            let input = Utf16JsonProjection::from_serde_value(&serde_json::json!({}))
+                .expect("empty tool input is valid JSON");
             let ctx = tool_api::test_support::fresh_ctx();
             let permission = tool.check_permissions(&input, &ctx).await;
             if name == "location" {
@@ -136,12 +149,15 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
             let (progress, _receiver) = tool_api::progress::progress_channel();
             let result = tool.call(input, ctx, progress).await.expect("native call");
             if name == "device_status" {
-                assert_eq!(result.data["battery_percent"], 73.0);
-                assert_eq!(result.data["network"], "wifi");
-                assert!(result.data["low_power_mode"].is_null());
+                assert_eq!(result.data.number_at("/battery_percent"), Some(73.0));
+                assert_eq!(result.data.string_at("/network"), Some("wifi"));
+                assert!(result
+                    .data
+                    .at_pointer("/low_power_mode")
+                    .is_some_and(|value| value.is_null()));
             } else {
-                assert_eq!(result.data["latitude"], 37.5);
-                assert_eq!(result.data["accuracy_m"], 8.0);
+                assert_eq!(result.data.number_at("/latitude"), Some(37.5));
+                assert_eq!(result.data.number_at("/accuracy_m"), Some(8.0));
             }
         }
 
@@ -155,7 +171,10 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
                     .await
                     .expect("disable unrelated Local App plugin");
                 assert!(matches!(
-                    runtime.dispatcher.dispatch("/reload-skills").await,
+                    runtime
+                        .dispatcher
+                        .dispatch(Utf16JsonProjection::from("/reload-skills"))
+                        .await,
                     SlashDispatchResult::Handled { .. }
                 ));
             }
@@ -172,7 +191,7 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
                 );
                 let skill = runtime
                     .wired_skill_loader
-                    .load(name)
+                    .load(&Utf16JsonProjection::from(name))
                     .await
                     .expect("load skill")
                     .expect("native skill present");
@@ -180,9 +199,15 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
                     skill.allowed_tools.is_empty(),
                     "a skill must not grant permissions"
                 );
-                let body = skill.dynamic_body.expect("native prompt").build("");
-                assert!(body.contains(&format!("## {section}\n")));
-                assert!(!body.contains(&format!("## {absent_section}\n")));
+                let body = skill
+                    .dynamic_body
+                    .expect("native prompt")
+                    .build(&Utf16JsonProjection::from(""));
+                assert!(source_text_contains(&body, &format!("## {section}\n")));
+                assert!(!source_text_contains(
+                    &body,
+                    &format!("## {absent_section}\n")
+                ));
             }
             assert!(!listing
                 .iter()
@@ -212,7 +237,10 @@ async fn missing_device_backends_do_not_advertise_tools_or_skills() {
             .iter()
             .all(|tool| !DEVICE_TOOLS.contains(&tool.name())));
         assert!(matches!(
-            runtime.dispatcher.dispatch("/reload-skills").await,
+            runtime
+                .dispatcher
+                .dispatch(Utf16JsonProjection::from("/reload-skills"))
+                .await,
             SlashDispatchResult::Handled { .. }
         ));
         let listing = runtime.wired_skill_listing_provider.skill_entries().await;
@@ -222,7 +250,7 @@ async fn missing_device_backends_do_not_advertise_tools_or_skills() {
                 .any(|entry| entry.name.string_at("") == Some(*name)));
             assert!(runtime
                 .wired_skill_loader
-                .load(name)
+                .load(&Utf16JsonProjection::from(*name))
                 .await
                 .expect("load absent native skill")
                 .is_none());

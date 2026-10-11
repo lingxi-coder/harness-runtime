@@ -152,8 +152,9 @@ where
 {
     fields
         .remove(name)
-        .map(|raw| serde_json::from_str(raw.get()).map_err(E::custom))
+        .map(|raw| serde_json::from_str::<Option<T>>(raw.get()).map_err(E::custom))
         .transpose()
+        .map(Option::flatten)
 }
 
 fn raw_projection<E>(
@@ -173,7 +174,7 @@ where
 {
     if let Some(field) = duplicates
         .iter()
-        .find(|field| known.iter().any(|known| field.as_str() == *known))
+        .find(|field| known.contains(&field.as_str()))
     {
         return Err(E::custom(format!("duplicate field `{field}`")));
     }
@@ -328,6 +329,37 @@ mod serialization_tests {
             ParentToWorker::SendMessageResult { result, .. } => assert_eq!(result, expected),
             other => panic!("unexpected round-tripped parent frame: {other:?}"),
         }
+    }
+
+    #[test]
+    fn worker_state_error_accepts_absent_null_and_string_values() {
+        for source in [
+            r#"{"type":"state","status":"running","awaiting_plan_approval":false}"#,
+            r#"{"type":"state","status":"running","error":null,"awaiting_plan_approval":false}"#,
+        ] {
+            let parsed: WorkerToParent = serde_json::from_slice(&frame(source)).unwrap();
+            assert!(matches!(
+                parsed,
+                WorkerToParent::State {
+                    status,
+                    error: None,
+                    awaiting_plan_approval: false,
+                } if status == "running"
+            ));
+        }
+
+        let parsed: WorkerToParent = serde_json::from_slice(&frame(
+            r#"{"type":"state","status":"failed","error":"startup failed","awaiting_plan_approval":false}"#,
+        ))
+        .unwrap();
+        assert!(matches!(
+            parsed,
+            WorkerToParent::State {
+                status,
+                error: Some(error),
+                awaiting_plan_approval: false,
+            } if status == "failed" && error == "startup failed"
+        ));
     }
 
     #[test]

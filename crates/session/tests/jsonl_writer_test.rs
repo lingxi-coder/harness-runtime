@@ -4,14 +4,15 @@
 use lingxi_core::host::FileSystem;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use platform_posix::fs::PosixFileSystem;
-use serde_json::{json, Map};
+use serde_json::json;
 use session::jsonl::schema::JsonlMessage;
 use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::tempdir;
 
 fn make_msg(uuid: &str, parent: Option<&str>, n: u8) -> JsonlMessage {
-    JsonlMessage {         message_type: "user".into(),
+    JsonlMessage {
+        message_type: "user".into(),
         uuid: uuid.into(),
         parent_uuid: parent.map(str::to_string),
         session_id: "11111111-2222-3333-4444-555555555555".into(),
@@ -29,7 +30,8 @@ fn make_msg(uuid: &str, parent: Option<&str>, n: u8) -> JsonlMessage {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty JSON object"),
 
         attachment_projection: None,
         tool_use_result_projection: None,
@@ -129,7 +131,8 @@ async fn attachment_append_keeps_deep_raw_json_and_exact_surrogates() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty JSON object"),
         attachment_projection: Some(attachment),
         tool_use_result_projection: None,
         mcp_meta_projection: None,
@@ -149,8 +152,8 @@ async fn attachment_append_keeps_deep_raw_json_and_exact_surrogates() {
     let type_position = line.find("\"type\":\"attachment\"").unwrap();
     assert!(attachment_position < type_position, "{line}");
     assert!(line.contains(r#""content":"before\ud800after""#));
-    assert!(line.contains(r#""wide":null""#));
-    assert!(line.contains(r#""zero":0""#));
+    assert!(line.contains(r#""wide":null"#), "{line}");
+    assert!(line.contains(r#""zero":0"#));
 
     let loaded = session::jsonl::reader::route_lines(line);
     assert_eq!(loaded.malformed_line_count, 0);

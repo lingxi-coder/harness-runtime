@@ -102,8 +102,8 @@ mod tests {
             self.0.lock().unwrap().push((event.clone(), ctx.clone()));
             hooks::HookResult {
                 outcome: hooks::HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: None,
                 response: None,
             }
@@ -207,6 +207,7 @@ mod tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
         let mut executor = hooks::HookExecutorImpl::new(
             Arc::new(tokio::sync::RwLock::new(registry)),

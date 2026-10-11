@@ -765,6 +765,12 @@ impl TeamSpawnSeam for PaneTeammateSpawner {
         }
         result
     }
+    async fn resolved_model_selection(
+        &self,
+        task_id: &str,
+    ) -> Result<TeammateModelSelection, TeamSpawnError> {
+        self.registry.resolved_model_selection(task_id).await
+    }
     async fn pane_metadata(&self, task_id: &str) -> Option<PaneLaunchMetadata> {
         self.tasks
             .lock()
@@ -1841,7 +1847,7 @@ mod tests {
             .unwrap();
         let tool = SendMessageTool::new(team.clone(), tool_ui::send_message::truncate_preview)
             .with_spawn_seam(spawner.clone());
-        let mut context = ToolUseContext::model_seed("test-model".into(), None);
+        let mut context = ToolUseContext::model_seed("test-model".into());
         context.agent_id = Some(agent_id);
         let (progress, _events) = tool_api::progress::progress_channel();
         let error = tool
@@ -1928,11 +1934,12 @@ mod tests {
         assert_eq!(backend.killed.load(Ordering::SeqCst), 2);
         let terminated = mailbox.drain();
         assert_eq!(terminated.len(), 1);
+        let terminated_frame = terminated[0]
+            .content
+            .string_at("")
+            .expect("departure notification is the JSON-text frame source");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                &terminated[0].content.to_json_string().unwrap()
-            )
-            .unwrap()["type"],
+            serde_json::from_str::<serde_json::Value>(terminated_frame).unwrap()["type"],
             "teammate_terminated"
         );
 

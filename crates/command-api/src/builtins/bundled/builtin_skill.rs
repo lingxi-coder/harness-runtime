@@ -10,6 +10,7 @@ pub struct DesktopBuiltinSkillPromptFn {
 }
 
 impl DesktopBuiltinSkillPromptFn {
+    /// Construct a prompt adapter for a registered desktop skill name.
     pub const fn new(name: &'static str) -> Self {
         Self { name }
     }
@@ -25,13 +26,12 @@ impl BundledPromptFn for DesktopBuiltinSkillPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     #[test]
     fn slash_bodies_share_the_registered_skill_source() {
         for (name, expected_marker) in [
             ("claude-api", "Anthropic 1.x SDK surface"),
-            ("plugin-authoring", ".lingxi-plugin/plugin.json"),
+            ("plugin-authoring", ".lingxi-plugin/\n    plugin.json"),
         ] {
             let prompt = DesktopBuiltinSkillPromptFn::new(name).build(&"".into());
             let skill = skill_api::desktop_builtin_skill(name).expect("desktop builtin skill");

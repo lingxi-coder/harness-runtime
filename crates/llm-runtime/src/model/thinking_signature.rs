@@ -329,7 +329,6 @@ mod tests {
                 text("   "),
                 text("keep me"),
                 ContentBlock::ToolCall {
-                    input_projection: None,
                     id: "t1".into(),
                     name: "Echo".into(),
                     input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
@@ -348,7 +347,6 @@ mod tests {
             vec![
                 text("keep me"),
                 ContentBlock::ToolCall {
-                    input_projection: None,
                     id: "t1".into(),
                     name: "Echo".into(),
                     input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),

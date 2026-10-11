@@ -71,19 +71,17 @@ use telemetry::tengu::tool::{
     ASK_USER_QUESTION_COMPLETED, ASK_USER_QUESTION_FAILED, ASK_USER_QUESTION_STARTED,
 };
 use telemetry::AnalyticsBus;
-use tool_api::ask_user_question::{
-    join_answer_labels, AskOption, AskQuestion, AskUserQuestionExchange,
-};
+use tool_api::ask_user_question::{AskOption, AskQuestion, AskUserQuestionExchange};
 
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use tokio::sync::mpsc;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    generated_builtin_result, generated_builtin_schema, source_text_projection,
-    source_text_projection_units, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
-    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
-    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection_units,
+    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
+    ValidationError,
 };
 
 // -- Wire identifier locks ---------------------------------------------------
@@ -1122,7 +1120,6 @@ impl Tool for AskUserQuestionTool {
 #[derive(Debug)]
 struct TestAskUserQuestionResult {
     data: Value,
-    model_content: Option<String>,
 }
 
 #[cfg(test)]
@@ -1159,15 +1156,7 @@ impl AskUserQuestionTool {
                 .expect("test result projection serializes"),
         )
         .expect("test result JSON parses");
-        let model_content = result
-            .model_content
-            .as_ref()
-            .and_then(|value| value.string_at(""))
-            .map(str::to_owned);
-        Ok(TestAskUserQuestionResult {
-            data,
-            model_content,
-        })
+        Ok(TestAskUserQuestionResult { data })
     }
 }
 
@@ -1179,8 +1168,28 @@ fn invalid_tool_input(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use mobile_linux_api::ProcessOutput;
+    use tool_api::ask_user_question::join_answer_labels;
     use tool_api::test_support::{fresh_ctx, fresh_ctx_cancelled, fresh_tx, shell_test_ctx};
+    use tool_api::tool_trait::source_text_projection;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -1291,14 +1300,14 @@ mod tests {
             .collect();
         let input = json!({ "questions": qs });
         let err = validate_input_internal(&input).unwrap_err();
-        assert!(format!("{err}").contains("exceeds max 4"));
+        assert!(source_text(&err.model_facing_message()).contains("exceeds max 4"));
     }
 
     #[test]
     fn zero_questions_rejected() {
         let input = json!({ "questions": [] });
         let err = validate_input_internal(&input).unwrap_err();
-        assert!(format!("{err}").contains("at least 1 question"));
+        assert!(source_text(&err.model_facing_message()).contains("at least 1 question"));
     }
 
     // --- option-count bounds ---
@@ -1320,7 +1329,7 @@ mod tests {
             "questions": [{ "question": "Q?", "header": "H", "options": [opt("A", "a")] }]
         });
         let err = validate_input_internal(&input).unwrap_err();
-        assert!(format!("{err}").contains("at least 2 options"));
+        assert!(source_text(&err.model_facing_message()).contains("at least 2 options"));
     }
 
     #[test]
@@ -1330,7 +1339,7 @@ mod tests {
             "questions": [{ "question": "Q?", "header": "H", "options": opts }]
         });
         let err = validate_input_internal(&input).unwrap_err();
-        assert!(format!("{err}").contains("exceeds max 4"));
+        assert!(source_text(&err.model_facing_message()).contains("exceeds max 4"));
     }
 
     // --- uniqueness refine ---
@@ -1344,7 +1353,7 @@ mod tests {
             ]
         });
         let err = validate_input_internal(&input).unwrap_err();
-        assert!(format!("{err}").ends_with(UNIQUENESS_REFINE_MESSAGE));
+        assert!(source_text(&err.model_facing_message()).ends_with(UNIQUENESS_REFINE_MESSAGE));
         let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
         assert_eq!(
             tool.input_validation_issues(&input),
@@ -1372,7 +1381,7 @@ mod tests {
             }]
         });
         let err = validate_input_internal(&input).unwrap_err();
-        assert!(format!("{err}").ends_with(UNIQUENESS_REFINE_MESSAGE));
+        assert!(source_text(&err.model_facing_message()).ends_with(UNIQUENESS_REFINE_MESSAGE));
     }
 
     #[test]
@@ -1682,7 +1691,7 @@ mod tests {
             .call(json!({}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing questions");
-        assert!(format!("{err}").contains("missing or non-array questions"));
+        assert!(source_text(&err.model_facing_message()).contains("missing or non-array questions"));
     }
 
     #[tokio::test]
@@ -1699,7 +1708,7 @@ mod tests {
             .call(input, fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing label");
-        assert!(format!("{err}").contains("label must be a string"));
+        assert!(source_text(&err.model_facing_message()).contains("label must be a string"));
     }
 
     #[test]

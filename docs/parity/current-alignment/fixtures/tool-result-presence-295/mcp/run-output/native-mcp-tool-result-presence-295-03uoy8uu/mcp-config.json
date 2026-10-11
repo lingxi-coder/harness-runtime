@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "fixture": {
+      "command": "/opt/homebrew/opt/python@3.14/bin/python3.14",
+      "args": [
+        "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/stdio_server.py"
+      ],
+      "env": {
+        "MCP_RESULT_TRACE_DIR": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/run-output/native-mcp-tool-result-presence-295-03uoy8uu/mcp-trace",
+        "MCP_RESULT_CASES_PATH": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/cases.json"
+      }
+    }
+  }
+}

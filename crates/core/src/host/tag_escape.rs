@@ -206,12 +206,13 @@ pub fn escape_closing_tag_utf16(tag: &str, text: &[u16]) -> Vec<u16> {
     let mut output = Vec::with_capacity(text.len());
     let mut index = 0;
     while index < tokens.len() {
-        if OPEN_BRACKETS.contains(&chars[index]) && chars.get(index + 1) != Some(&'\\') {
-            if match_tag(&chars, index + 1, &name, true).is_some() {
-                output.extend([b'<' as u16, b'\\' as u16]);
-                index += 1;
-                continue;
-            }
+        if OPEN_BRACKETS.contains(&chars[index])
+            && chars.get(index + 1) != Some(&'\\')
+            && match_tag(&chars, index + 1, &name, true).is_some()
+        {
+            output.extend([b'<' as u16, b'\\' as u16]);
+            index += 1;
+            continue;
         }
         output.extend_from_slice(&tokens[index].1);
         index += 1;

@@ -518,9 +518,9 @@ impl HookRegistry {
             // TS `getMatchingHooks`: only apply the tool-name matcher filter when
             // the event yields a `matchQuery`; otherwise every subscribed hook
             // passes. A hook with no matcher always passes.
-            let tool_name_ok = h.matcher().map_or(true, |matcher| {
-                Self::matches_event_matcher(event, matcher, comma_mode)
-            });
+            let tool_name_ok = h
+                .matcher()
+                .is_none_or(|matcher| Self::matches_event_matcher(event, matcher, comma_mode));
             if !tool_name_ok {
                 return false;
             }
@@ -616,9 +616,9 @@ impl HookRegistry {
             if !h.events.contains(&et) {
                 return false;
             }
-            let tool_name_ok = h.matcher().map_or(true, |matcher| {
-                Self::matches_event_matcher(event, matcher, comma_mode)
-            });
+            let tool_name_ok = h
+                .matcher()
+                .is_none_or(|matcher| Self::matches_event_matcher(event, matcher, comma_mode));
             if !tool_name_ok {
                 return false;
             }
@@ -667,9 +667,9 @@ impl HookRegistry {
             if !h.events.contains(&et) {
                 return false;
             }
-            let tool_name_ok = h.matcher().map_or(true, |matcher| {
-                Self::matches_event_matcher(event, matcher, comma_mode)
-            });
+            let tool_name_ok = h
+                .matcher()
+                .is_none_or(|matcher| Self::matches_event_matcher(event, matcher, comma_mode));
             if !tool_name_ok {
                 return false;
             }
@@ -2187,8 +2187,8 @@ mod match_event_matcher_tests {
     #[test]
     #[ignore = "run with the shared Native matcher corpus configured"]
     fn shared_native_matcher_corpus_matches_through_hook_registry() {
-        const CORPUS_ENV: &str = concat!(branding::ENV_PREFIX, "HOOK_MATCHER_CORPUS");
-        let path = std::env::var_os(CORPUS_ENV)
+        let corpus_env = format!("{}HOOK_MATCHER_CORPUS", branding::ENV_PREFIX);
+        let path = std::env::var_os(&corpus_env)
             .expect("set the shared Native matcher corpus environment value");
         let source = std::fs::read_to_string(path).expect("read shared Native matcher corpus");
         let corpus: NativeMatcherCorpus =

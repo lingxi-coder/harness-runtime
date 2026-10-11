@@ -28,17 +28,16 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::path::PathBuf;
 
 use tool_api::artifact_gate;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    generated_builtin_result, generated_builtin_schema, source_text_projection,
-    source_text_projection_units, DescriptionOptions, PromptOptions, Tool, ToolCallResult,
-    ToolError, ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
-    ToolStaticContext, ValidationError,
+    generated_builtin_schema, source_text_projection, DescriptionOptions, PromptOptions, Tool,
+    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::BuiltinToolContext;
 
@@ -572,7 +571,9 @@ fn invalid_tool_input(message: impl Into<String>) -> ToolError {
 mod tests {
     use super::*;
     use mobile_linux_api::ProcessOutput;
+    use serde_json::Value;
     use tool_api::test_support::{fresh_ctx, shell_test_ctx};
+    use tool_api::tool_trait::{generated_builtin_result, source_text_projection_units};
 
     fn fixture(value: Value) -> Utf16JsonProjection {
         generated_builtin_result(&value)

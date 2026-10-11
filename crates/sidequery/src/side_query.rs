@@ -25,7 +25,9 @@ fn deserialize_optional_string_source<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    let source = Option::<Utf16JsonProjection>::deserialize(deserializer)?;
+    let source = Option::<Box<serde_json::value::RawValue>>::deserialize(deserializer)?
+        .map(|raw| Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom))
+        .transpose()?;
     if source
         .as_ref()
         .is_some_and(|value| value.string_units("").is_none())
@@ -53,7 +55,11 @@ pub struct SideQueryRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// Optional system prompt; when `None` the provider default applies.
-    #[serde(default, deserialize_with = "deserialize_optional_string_source")]
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "deserialize_optional_string_source"
+    )]
     pub system_prompt: Option<Utf16JsonProjection>,
     /// Host-captured provider system structure for forked requests; not part of
     /// the serialized model-facing side-query payload.
@@ -303,6 +309,11 @@ mod source_system_prompt_tests {
                 .and_then(|source| source.string_units("")),
             Some(units)
         );
+
+        let absent_serialized = serde_json::to_string(&request(None)).unwrap();
+        assert!(absent_serialized.contains(r#""system_prompt":null"#));
+        let absent_decoded: SideQueryRequest = serde_json::from_str(&absent_serialized).unwrap();
+        assert!(absent_decoded.system_prompt.is_none());
     }
 
     #[test]

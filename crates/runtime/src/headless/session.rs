@@ -13,17 +13,26 @@ use platform_posix::PosixFileSystem as HostFileSystem;
 #[cfg(windows)]
 use platform_windows::WindowsFileSystem as HostFileSystem;
 
+/// Selects which persisted conversation, if any, a headless run starts from.
 #[derive(Clone, Debug, Default)]
 pub enum SessionStart {
+    /// Start a new session without loading history.
     #[default]
     New,
+    /// Resume the specified persisted session.
     Resume {
+        /// UUID of the session to resume.
         session_id: Uuid,
+        /// Optional message boundary for truncating the resumed transcript.
         resume_session_at: Option<String>,
+        /// Optional turn boundary to discard while preparing the resume.
         resume_drops_turn: Option<String>,
+        /// Create a forked session identity from the selected history.
         fork: bool,
     },
+    /// Continue the most recent session for the configured working directory.
     Continue {
+        /// Create a forked session identity instead of continuing in place.
         fork: bool,
     },
 }
@@ -40,6 +49,14 @@ pub struct PreparedSession {
     explicit_permission_mode: bool,
 }
 
+/// Load and prepare the selected resume/continue session before runtime assembly.
+///
+/// New sessions return `Ok(None)`. Existing sessions load their transcript once,
+/// configure the session identity and writer lease, and return the prepared history.
+///
+/// # Errors
+///
+/// Returns an error when the requested session or history cannot be found or read.
 pub async fn prepare(
     config: &mut DesktopConfig,
     start: &SessionStart,
@@ -179,10 +196,14 @@ fn claim_session(home: &Path, session_id: Uuid) -> Result<SharedSessionWriterLea
         .map_err(|error| format!("session writer claim failed: {error}"))
 }
 
+/// Assembly failure together with the status of draining a partially built runtime.
 #[derive(Debug)]
 pub struct HeadlessBuildError {
+    /// The original desktop runtime build failure.
     pub error: BuildError,
+    /// Retained cleanup owner when shutdown did not complete.
     pub cleanup: Option<super::HeadlessCleanup>,
+    /// Shutdown result for the partially assembled runtime.
     pub shutdown: super::HeadlessShutdownStatus,
 }
 
@@ -324,6 +345,15 @@ async fn mount_prepared(
     Ok(())
 }
 
+/// Restore file snapshots to the selected user message in a prepared resume.
+///
+/// This operation requires a non-new prepared session and a user-message UUID
+/// present in that session's loaded history.
+///
+/// # Errors
+///
+/// Returns an error when no session was prepared, the message is not a user
+/// message in the session, or the file-history restore fails.
 pub async fn rewind_files(
     config: &DesktopConfig,
     prepared: Option<&PreparedSession>,

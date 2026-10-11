@@ -243,7 +243,11 @@ pub(crate) fn is_simple_pattern_units(units: &[u16], comma_mode: bool) -> bool {
         })
 }
 
-pub(crate) fn trim_js_units(mut units: &[u16]) -> &[u16] {
+/// Trim the exact UTF-16 code units removed by JavaScript `String.trim()`.
+///
+/// Callers that cross into an OS string API should apply this before converting
+/// the remaining units to that API's string representation.
+pub fn trim_js_units(mut units: &[u16]) -> &[u16] {
     while units.first().is_some_and(|unit| is_js_trim_unit(*unit)) {
         units = &units[1..];
     }
@@ -291,10 +295,6 @@ fn js_regexp_test(
         js_string_literal(&input)
     );
     eval_hook_regexp(&program)
-}
-
-pub(crate) fn is_valid_hook_regexp(pattern: &str) -> bool {
-    is_valid_hook_regexp_projection(&Utf16JsonProjection::from(pattern))
 }
 
 pub(crate) fn is_valid_hook_regexp_projection(pattern: &Utf16JsonProjection) -> bool {

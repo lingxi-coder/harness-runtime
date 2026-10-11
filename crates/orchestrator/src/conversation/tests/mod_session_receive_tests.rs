@@ -1,6 +1,8 @@
 use super::*;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    content_block_start_tool_use, content_block_stop, input_json_delta, message_delta_stop,
+    message_start, message_stop, noop_hook_executor, MockApiClient, MockOutputStream,
+    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use std::sync::Arc;
 
@@ -90,9 +92,112 @@ impl crate::prompt::mid_turn_input::MidTurnInputSource for ReceivedMidTurnBatch 
 
     async fn take_mid_turn_batch(
         &self,
-    ) -> Option<Vec<crate::prompt::mid_turn_input::MidTurnInput>> {
-        self.0.lock().unwrap().take()
+    ) -> Result<Option<Vec<crate::prompt::mid_turn_input::MidTurnInput>>, String> {
+        Ok(self.0.lock().unwrap().take())
     }
+}
+
+struct FailingAfterToolsSource {
+    take_count: std::sync::atomic::AtomicUsize,
+    consumed_count: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::prompt::mid_turn_input::MidTurnInputSource for FailingAfterToolsSource {
+    fn admits_at(&self, point: crate::prompt::mid_turn_input::MidTurnInputPoint) -> bool {
+        point == crate::prompt::mid_turn_input::MidTurnInputPoint::AfterTools
+    }
+
+    async fn take_mid_turn_input(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        None
+    }
+
+    async fn take_mid_turn_batch(
+        &self,
+    ) -> Result<Option<Vec<crate::prompt::mid_turn_input::MidTurnInput>>, String> {
+        self.take_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err("after-tools input delivery failed".into())
+    }
+
+    async fn input_consumed(
+        &self,
+        _inputs: &[crate::prompt::mid_turn_input::MidTurnInput],
+    ) -> Result<(), String> {
+        self.consumed_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn after_tools_batch_error_reaches_driver_before_consumption_ack() {
+    use lingxi_core::types::ToolUseId;
+
+    let dir = tempfile::tempdir().unwrap();
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![
+        crate::scripted![
+            message_start("msg_tool", "claude-sonnet-5-5"),
+            content_block_start_tool_use(
+                0,
+                ToolUseId::from("fixture_tool"),
+                "UnavailableFixtureTool"
+            ),
+            input_json_delta(0, "{}"),
+            content_block_stop(0),
+            message_delta_stop("tool_use"),
+            message_stop(),
+        ],
+        crate::scripted![
+            message_start("msg_final", "claude-sonnet-5-5"),
+            crate::test_support::content_block_start_text(0),
+            crate::test_support::text_delta(0, "must not be requested"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ],
+    ]));
+    let source = Arc::new(FailingAfterToolsSource {
+        take_count: std::sync::atomic::AtomicUsize::new(0),
+        consumed_count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_mid_turn_input(source.clone()),
+    );
+
+    let error = orch
+        .run_turn_streaming("run the requested tool")
+        .await
+        .expect_err("after-tools source error must stop the driver");
+    assert!(matches!(
+        error,
+        crate::OrchestratorError::Internal(message)
+            if message == "after-tools input delivery failed"
+    ));
+    assert_eq!(
+        source.take_count.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        source
+            .consumed_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(streaming.captured_calls().await.len(), 1);
 }
 
 #[tokio::test]
@@ -137,19 +242,28 @@ async fn mid_turn_peer_arrivals_are_screened_before_joining_with_human_input() {
             MidTurnInput {
                 text: source_text("hello"),
                 origin_kind: Some("peer"),
+                projected_content: None,
+                source_message_uuid: None,
+                queue_delivery: None,
             },
             MidTurnInput {
                 text: source_text("muted"),
                 origin_kind: Some("peer"),
+                projected_content: None,
+                source_message_uuid: None,
+                queue_delivery: None,
             },
             MidTurnInput {
                 text: source_text("human"),
                 origin_kind: None,
+                projected_content: None,
+                source_message_uuid: None,
+                queue_delivery: None,
             },
         ],
     )))));
 
-    assert!(orch.drain_mid_turn_input().await);
+    assert!(orch.drain_mid_turn_input().await.unwrap());
     let session = orch.session.lock().await;
     let text = session.history.last().unwrap().text_content();
     assert!(text.starts_with(
@@ -318,6 +432,14 @@ async fn external_prompts_are_received_before_prompt_submit_and_model_request() 
             message_delta_stop("end_turn"),
             message_stop(),
         ],
+        crate::scripted![
+            message_start("msg_local", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "local answer"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ],
     ]));
     let orch = ConversationOrchestrator::into_shared(
         ConversationOrchestrator::new_with_streaming(
@@ -361,9 +483,10 @@ async fn external_prompts_are_received_before_prompt_submit_and_model_request() 
     )
     .await
     .unwrap();
+    orch.run_turn_streaming("raw local").await.unwrap();
 
     let calls = streaming.captured_calls().await;
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 3);
     assert!(calls[0]
         .messages
         .iter()
@@ -376,4 +499,8 @@ async fn external_prompts_are_received_before_prompt_submit_and_model_request() 
         .messages
         .iter()
         .any(|message| message.text_content() == "bridge received submitted"));
+    assert!(calls[2]
+        .messages
+        .iter()
+        .any(|message| message.text_content() == "raw local submitted"));
 }

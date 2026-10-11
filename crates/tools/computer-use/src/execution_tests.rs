@@ -433,7 +433,7 @@ async fn batch_observation_rejects_a_removed_final_image_or_rewritten_geometry()
             .as_ref()
             .expect("model text is present");
         let mut model_text = original_model_text.clone();
-        let text = test_model_text(Some(original_model_text)).unwrap();
+        test_model_text(Some(original_model_text)).unwrap();
         let mut blocks = tool_api::tool_result_media::media_content_blocks_for_tool(
             "computer",
             &result.data,
@@ -441,10 +441,22 @@ async fn batch_observation_rejects_a_removed_final_image_or_rewritten_geometry()
         )
         .unwrap();
         if change_geometry {
-            let one = Utf16JsonProjection::parse("1").expect("integer source");
-            model_text
-                .replace_pointer_projection("/results/1/result/computer_frame/width", one)
-                .expect("width pointer exists");
+            let nested_json = model_text
+                .string_units("")
+                .expect("computer batch model content is a JSON string");
+            let mut metadata = Utf16JsonProjection::parse_utf16_json(&nested_json)
+                .expect("computer batch model text contains valid metadata JSON");
+            metadata
+                .replace_pointer_projection(
+                    "/results/1/result/computer_frame/width",
+                    Utf16JsonProjection::parse("1").expect("integer source"),
+                )
+                .expect("width pointer exists in nested metadata");
+            model_text = Utf16JsonProjection::from(
+                metadata
+                    .to_json_string()
+                    .expect("mutated metadata remains valid JSON"),
+            );
         } else {
             // The two screenshots have identical pixels. An earlier image
             // alone still cannot stand in for the batch's final capture.

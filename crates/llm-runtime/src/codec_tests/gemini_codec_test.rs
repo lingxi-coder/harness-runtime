@@ -261,7 +261,6 @@ fn encode_tool_result_error_uses_error_response_shape() {
         api_output_config: None,
         role: "assistant".to_string(),
         content: vec![ContentBlock::ToolCall {
-            input_projection: None,
             id: "call_0".to_string(),
             name: "Bash".to_string(),
             input: super::json_payload(serde_json::json!({"command":"ls"})),
@@ -271,7 +270,6 @@ fn encode_tool_result_error_uses_error_response_shape() {
         api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
-            output_projection: None,
             tool_call_id: "call_0".to_string(),
             output: super::json_payload(serde_json::json!("command failed")),
             is_error: Some(true),
@@ -296,7 +294,6 @@ fn encode_tool_result_uses_prior_tool_call_name() {
         api_output_config: None,
         role: "assistant".to_string(),
         content: vec![ContentBlock::ToolCall {
-            input_projection: None,
             id: "call_1".to_string(),
             name: "Bash".to_string(),
             input: super::json_payload(serde_json::json!({"command":"ls"})),
@@ -306,7 +303,6 @@ fn encode_tool_result_uses_prior_tool_call_name() {
         api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
-            output_projection: None,
             tool_call_id: "call_1".to_string(),
             output: super::json_payload(serde_json::json!("done")),
             is_error: Some(false),
@@ -514,7 +510,6 @@ fn encode_tool_result_with_unknown_call_id_is_rejected() {
         api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
-            output_projection: None,
             tool_call_id: "call_unseen".to_string(),
             output: super::json_payload(serde_json::json!("done")),
             is_error: Some(false),
@@ -663,7 +658,6 @@ async fn signed_text_and_tools_survive_both_response_paths_and_replay_once() {
             api_output_config: None,
             role: "user".into(),
             content: vec![ContentBlock::ToolResult {
-                output_projection: None,
                 tool_call_id: calls[0].clone(),
                 output: super::json_payload(serde_json::json!({"ok":true})),
                 is_error: Some(false),

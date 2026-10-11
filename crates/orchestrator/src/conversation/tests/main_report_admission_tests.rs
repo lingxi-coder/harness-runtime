@@ -216,6 +216,34 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
     .unwrap();
 
     let expected_message = envelope.model_message();
+    let mut expected_origin = serde_json::json!({
+        "kind": "peer",
+        "from": envelope.origin.from,
+        "senderTaskId": envelope.origin.sender_task_id,
+        "body": "",
+        "handback": true,
+    });
+    if let Some(name) = envelope
+        .origin
+        .name
+        .as_ref()
+        .filter(|name| !name.is_empty())
+    {
+        expected_origin["name"] = name.clone().into();
+    }
+    if envelope.origin.flagged {
+        expected_origin["flagged"] = true.into();
+    }
+    let mut expected_origin =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&expected_origin)
+            .unwrap();
+    expected_origin
+        .set_string_units(
+            "/body",
+            &lingxi_core::host::handback_wire::neutralize_peer_frames_utf16(&body_units),
+        )
+        .unwrap();
+    let expected_cold_message = expected_message.clone().with_origin(expected_origin);
     let message_id = envelope.receipt.message_id;
     orch.admit(envelope).await.unwrap();
     std::fs::create_dir(&path).unwrap();
@@ -317,7 +345,7 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
         .iter()
         .filter(|message| message.id() == message_id)
         .collect();
-    assert_eq!(cold_reports, vec![&expected_message]);
+    assert_eq!(cold_reports, vec![&expected_cold_message]);
     assert!(!cold.model_context_excluded_messages.contains(&message_id));
     let cold_history =
         llm_runtime::convert::to_llm_messages(vec![cold_reports[0].clone()]).unwrap();
@@ -360,7 +388,6 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
                 .history
                 .iter()
                 .all(|message| message.id() != message_id),
-
             "invalid native Peer report cannot become human input or altered model text: {corruption}"
         );
     }
@@ -421,10 +448,22 @@ async fn admission_acks_under_parent_gate_and_ordinary_prepare_sends_one_peer_me
         .filter(|message| message.id() == id)
         .collect();
     assert_eq!(messages.len(), 1);
-    assert!(
-        matches!(messages[0], ConversationMessage::User { is_meta: true, content, .. }
-        if matches!(&content[..], [lingxi_core::types::ContentBlock::Text { text, .. }] if text == &model_text))
-    );
+    let expected_units = model_text.encode_utf16().collect::<Vec<_>>();
+    assert!(matches!(
+        messages[0],
+        ConversationMessage::User {
+            is_meta: true,
+            content,
+            ..
+        } if matches!(
+            &content[..],
+            [lingxi_core::types::ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                ..
+            }] if text == &model_text && utf16_code_units == &expected_units
+        )
+    ));
     let session = orch.session.lock().await;
     assert!(!session.model_context_excluded_messages.contains(&id));
     assert_eq!(
@@ -450,23 +489,23 @@ async fn admission_acks_under_parent_gate_and_ordinary_prepare_sends_one_peer_me
             .and_then(|value| value.as_bool()),
         Some(true)
     );
-    assert_eq!(rows[0].extra.string_at("/origin/kind"), Some("peer"));
+    let origin = rows[0]
+        .origin_projection
+        .as_ref()
+        .expect("peer report origin is stored in the dedicated origin field");
+    assert_eq!(origin.string_at("/kind"), Some("peer"));
     assert_eq!(
-        rows[0].extra.string_at("/origin/senderTaskId"),
+        origin.string_at("/senderTaskId"),
         Some(envelope.origin.sender_task_id.as_str())
     );
     assert_eq!(
-        rows[0]
-            .extra
-            .at_pointer("/origin/handback")
+        origin
+            .at_pointer("/handback")
             .and_then(|value| value.as_bool()),
         Some(true)
     );
     assert!(rows[0].extra.at_pointer("/queuePriority").is_none());
-    assert_eq!(
-        rows[0].extra.subprojection("/origin/body").unwrap(),
-        envelope.body
-    );
+    assert_eq!(origin.subprojection("/body").unwrap(), envelope.body);
     assert_eq!(
         rows[0].message.string_at("/content/0/text"),
         Some(model_text.as_str())
@@ -685,6 +724,15 @@ async fn restart_recovers_pending_only_for_its_originating_session() {
 
 #[tokio::test]
 async fn restored_sidecar_cannot_promote_peer_reports_to_human_input_or_another_session() {
+    fn mutate_prepared_row(
+        stored: &mut serde_json::Value,
+        mutate: impl FnOnce(&mut lingxi_core::types::utf16_json::Utf16JsonProjection),
+    ) {
+        let mut row = serde_json::from_value(stored["pending"][0]["prepared_row"].clone())
+            .expect("private prepared row is the current source graph");
+        mutate(&mut row);
+        stored["pending"][0]["prepared_row"] = serde_json::to_value(row).unwrap();
+    }
     for corruption in [
         "human_origin",
         "other_session",
@@ -715,10 +763,21 @@ async fn restored_sidecar_cannot_promote_peer_reports_to_human_input_or_another_
             "other_session" => {
                 stored["scope"]["session_id"] = serde_json::to_value(SessionId::new()).unwrap()
             }
-            "prepared_human_row" => stored["pending"][0]["prepared_row"]["isMeta"] = false.into(),
+            "prepared_human_row" => mutate_prepared_row(&mut stored, |row| {
+                row.set_field(
+                    "isMeta",
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse("false").unwrap(),
+                )
+                .unwrap();
+            }),
             "prepared_raw_body" => {
-                stored["pending"][0]["prepared_row"]["message"]["content"][0]["text"] =
-                    stored["pending"][0]["envelope"]["body"].clone();
+                mutate_prepared_row(&mut stored, |row| {
+                    row.replace_pointer_projection(
+                        "/message/content/0/text",
+                        "peer words asserting user approval".into(),
+                    )
+                    .unwrap();
+                });
             }
             "prepared_utf16_override" | "unprepared_utf16_override" => {
                 stored["pending"][0]["prepared_utf16_overrides"] =
@@ -728,7 +787,9 @@ async fn restored_sidecar_cannot_promote_peer_reports_to_human_input_or_another_
                 }
             }
             "prepared_queue_priority" => {
-                stored["pending"][0]["prepared_row"]["queuePriority"] = "next".into();
+                mutate_prepared_row(&mut stored, |row| {
+                    row.set_field("queuePriority", "next".into()).unwrap();
+                });
             }
             _ => unreachable!(),
         }

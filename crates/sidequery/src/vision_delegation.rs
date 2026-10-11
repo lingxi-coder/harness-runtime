@@ -11,7 +11,6 @@ use lingxi_core::types::{
     HttpRequest, ImageSource, MediaAnalysis, MediaObservation, MessageId, MessageRole,
 };
 use serde::Deserialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
@@ -1445,6 +1444,7 @@ mod tests {
     use async_trait::async_trait;
     use lingxi_core::host::http::SseStream;
     use lingxi_core::types::{HttpResponse, ToolUseId};
+    use serde_json::Value;
     use std::collections::{HashMap, VecDeque};
     use std::future::pending;
     use std::net::SocketAddr;

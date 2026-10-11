@@ -471,10 +471,10 @@ pub struct LoadedTranscript {
     pub worktree_states: HashMap<String, Value>,
     /// Flattened session-level `content-replacement` entries keyed by `sessionId`.
     /// Each new line appends its `replacements` array onto the accumulated tail.
-    pub content_replacements: HashMap<String, Vec<Value>>,
+    pub content_replacements: HashMap<String, Vec<Utf16JsonProjection>>,
     /// Flattened agent-level `content-replacement` entries keyed by `agentId`.
     /// Each new line appends its `replacements` array onto the accumulated tail.
-    pub agent_content_replacements: HashMap<String, Vec<Value>>,
+    pub agent_content_replacements: HashMap<String, Vec<Utf16JsonProjection>>,
     /// Latest non-empty `relocatedCwd` per session, used by `/branch` and
     /// resume-time cwd recovery. Empty writes do not clear the previous value.
     pub relocated_cwds: HashMap<String, String>,
@@ -605,6 +605,19 @@ impl JsonlReader {
     }
 }
 
+fn source_array_items(
+    source: &Utf16JsonProjection,
+    pointer: &str,
+) -> Option<Vec<Utf16JsonProjection>> {
+    let array = source.subprojection(pointer).ok()?;
+    let length = array.at_pointer("")?.array_len()?;
+    let mut items = Vec::with_capacity(length);
+    for index in 0..length {
+        items.push(array.subprojection(&format!("/{index}")).ok()?);
+    }
+    Some(items)
+}
+
 /// Route every non-empty line of a JSONL transcript into a [`LoadedTranscript`]
 /// — the pure core of [`JsonlReader::read_routed`] (kept free-standing so it can
 /// be unit-tested without a `FileSystem`). Two-phase, byte-for-byte faithful to
@@ -696,9 +709,39 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
             continue;
         }
 
+        // Content replacements can contain source strings that Rust String
+        // cannot represent. Keep each replacement in the flat source carrier.
+        if ty == "content-replacement" {
+            let replacements = source_array_items(&row, "/replacements");
+            if let Some(units) = row.string_units("/agentId") {
+                let Ok(agent_id) = String::from_utf16(&units) else {
+                    out.malformed_line_count += 1;
+                    continue;
+                };
+                if let Some(replacements) = replacements {
+                    out.agent_content_replacements
+                        .entry(agent_id)
+                        .or_default()
+                        .extend(replacements);
+                }
+            } else if let Some(units) = row.string_units("/sessionId") {
+                let Ok(session_id) = String::from_utf16(&units) else {
+                    out.malformed_line_count += 1;
+                    continue;
+                };
+                if let Some(replacements) = replacements {
+                    out.content_replacements
+                        .entry(session_id)
+                        .or_default()
+                        .extend(replacements);
+                }
+            }
+            continue;
+        }
+
         // The remaining side-record variants have named, bounded consumers;
         // this compatibility projection is confined to those legacy DTOs.
-        // Transcript rows above never pass through serde_json::Value.
+        // Transcript rows and content-replacement payloads stay source-backed.
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             out.malformed_line_count += 1;
             continue;
@@ -860,22 +903,6 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
             ) {
                 out.worktree_states.insert(sid.to_string(), ws.clone());
             }
-        } else if ty == "content-replacement" {
-            if let Some(agent_id) = value.get("agentId").and_then(Value::as_str) {
-                if let Some(replacements) = value.get("replacements").and_then(Value::as_array) {
-                    out.agent_content_replacements
-                        .entry(agent_id.to_string())
-                        .or_default()
-                        .extend(replacements.iter().cloned());
-                }
-            } else if let Some(session_id) = value.get("sessionId").and_then(Value::as_str) {
-                if let Some(replacements) = value.get("replacements").and_then(Value::as_array) {
-                    out.content_replacements
-                        .entry(session_id.to_string())
-                        .or_default()
-                        .extend(replacements.iter().cloned());
-                }
-            }
         } else if ty == "relocated" {
             if let (Some(session_id), Some(relocated_cwd)) = (
                 value.get("sessionId").and_then(Value::as_str),
@@ -969,8 +996,13 @@ mod native_attachment_projection_tests {
     use super::*;
 
     fn attachment_row(payload_member: &str) -> String {
+        let payload_member = if payload_member.is_empty() {
+            String::new()
+        } else {
+            format!(",{payload_member}")
+        };
         format!(
-            r#"{{"parentUuid":null,"isSidechain":false,{payload_member},"type":"attachment","uuid":"u-attachment","timestamp":"2026-10-06T00:00:00.000Z","sessionId":"s"}}"#
+            r#"{{"parentUuid":null,"isSidechain":false{payload_member},"type":"attachment","uuid":"u-attachment","timestamp":"2026-10-06T00:00:00.000Z","sessionId":"s"}}"#
         )
     }
 
@@ -1016,9 +1048,9 @@ mod native_attachment_projection_tests {
         let type_position = encoded.find("\"type\":\"attachment\"").unwrap();
         assert!(attachment_position < type_position, "{encoded}");
         assert!(encoded.contains(r#""content":"before\ud800after""#));
-        assert!(encoded.contains(r#""wide":null""#));
-        assert!(encoded.contains(r#""underflow":0""#));
-        assert!(encoded.contains(r#""zero":0""#));
+        assert!(encoded.contains(r#""wide":null"#));
+        assert!(encoded.contains(r#""underflow":0"#));
+        assert!(encoded.contains(r#""zero":0"#));
 
         let direct = route_lines(&line)
             .messages_in_order

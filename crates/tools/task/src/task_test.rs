@@ -4,6 +4,24 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn checked_source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use serde_json::Map;
 
     fn source_value(value: &Value) -> Utf16JsonProjection {
@@ -438,7 +456,6 @@ Running background agents: a1b2c3d4e (survey the crate)"
     async fn the_tools_expose_coercion_and_steering_through_the_trait() {
         use telemetry::AnalyticsBus;
         use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, make_dummy_fs};
-        use tool_api::tool_trait::Tool;
         let ctx = ctx_for_file_tools(
             make_dummy_fs(),
             Arc::new(AnalyticsBus::new()),
@@ -1303,7 +1320,12 @@ Running background agents: a1b2c3d4e (survey the crate)"
             assert_eq!(from, "scribe", "from = acting teammate display name");
             assert_ne!(from, &sender.to_string(), "sender is NOT the agent:<uuid>");
 
-            let body: Value = serde_json::from_str(&msg.content.to_json_string().unwrap()).unwrap();
+            let body: Value = serde_json::from_str(
+                msg.content
+                    .string_at("")
+                    .expect("assignment message is JSON text"),
+            )
+            .expect("assignment JSON text parses");
             assert_eq!(body["type"], "task_assignment");
             assert_eq!(body["taskId"], id);
             assert_eq!(body["subject"], "Ship the feature");
@@ -1345,7 +1367,12 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 from, "team-lead",
                 "unnamed sender → literal team-lead label"
             );
-            let body: Value = serde_json::from_str(&msg.content.to_json_string().unwrap()).unwrap();
+            let body: Value = serde_json::from_str(
+                msg.content
+                    .string_at("")
+                    .expect("assignment message is JSON text"),
+            )
+            .expect("assignment JSON text parses");
             assert_eq!(body["assignedBy"], "team-lead");
         }
 
@@ -2106,15 +2133,15 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 .await
                 .expect_err("a blocking TaskCreated hook must error the create");
             match err {
-                ToolError::Internal(s) => {
-                    // T24: the blocking reason is prefixed `TaskCreated hook
-                    // feedback:\n` (claude-code `getTaskCreatedHookMessage`).
-                    assert_eq!(
-                        s, "TaskCreated hook feedback:\ncreation blocked by policy",
-                        "the hook reason surfaces with the TaskCreated feedback prefix"
-                    )
+                ToolError::InvalidInput(message) => {
+                    // The hook block is a model-facing input failure. Preserve
+                    // its exact source text and UTF-16 units through the error.
+                    let expected = "TaskCreated hook feedback:\ncreation blocked by policy";
+                    let (display, units) = checked_source(&message);
+                    assert_eq!(display, expected);
+                    assert_eq!(units, expected.encode_utf16().collect::<Vec<_>>());
                 }
-                other => panic!("expected Internal(reason), got {other:?}"),
+                other => panic!("expected InvalidInput(message), got {other:?}"),
             }
             // The fire saw the (task_id, subject, description) payload.
             let (_id, subj, desc, _tm, _team) = firer.last_created.lock().unwrap().clone().unwrap();
@@ -3629,7 +3656,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             )
             .await
             .expect_err("a non-owner must be refused");
-            let message = format!("{err}");
+            let message = checked_source_text(&err.model_facing_message());
             assert!(
                 message.contains(&format!(
                     "is owned by {owner}; agent {intruder} cannot stop it."
@@ -3669,7 +3696,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 .await
                 .expect_err("an agent may not stop an ownerless task");
             assert!(
-                format!("{err}").contains("is owned by main session;"),
+                checked_source_text(&err.model_facing_message())
+                    .contains("is owned by main session;"),
                 "got: {err}"
             );
         }
@@ -3687,7 +3715,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             )
             .await
             .expect_err("a finished task cannot be stopped");
-            let message = format!("{err}");
+            let message = checked_source_text(&err.model_facing_message());
             assert!(
                 message.contains("is not running (status: completed)"),
                 "got: {message}"

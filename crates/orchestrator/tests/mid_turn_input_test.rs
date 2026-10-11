@@ -131,7 +131,7 @@ impl Tool for CancelBlockingTool {
     }
 }
 
-fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
+fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> Arc<ConversationOrchestrator> {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let mut registry = ToolRegistry::new();
@@ -139,7 +139,7 @@ fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> Conversation
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
-    ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api,
@@ -149,7 +149,7 @@ fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> Conversation
         output,
         memory,
         PathBuf::from("/tmp"),
-    )
+    ))
 }
 
 /// Whether `session.history` carries any user message text mentioning the
@@ -165,21 +165,21 @@ async fn history_has_interrupt(orch: &ConversationOrchestrator) -> bool {
     })
 }
 
-fn build_orch(api: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
+fn build_orch(api: Arc<MockStreamingApiClient>) -> Arc<ConversationOrchestrator> {
     build_orch_with_config(api, OrchestratorConfig::default())
 }
 
 fn build_orch_with_config(
     api: Arc<MockStreamingApiClient>,
     config: OrchestratorConfig,
-) -> ConversationOrchestrator {
+) -> Arc<ConversationOrchestrator> {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let tools = Arc::new(ToolRegistry::new());
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
-    ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         config,
         batched,
         api,
@@ -189,7 +189,7 @@ fn build_orch_with_config(
         output,
         memory,
         PathBuf::from("/tmp"),
-    )
+    ))
 }
 
 /// A `MidTurnInputSource` that yields its texts one call at a time, then `None`.
@@ -241,6 +241,23 @@ impl MidTurnInputSource for DelayedOnceSource {
     }
 }
 
+// These fixtures contain well-formed text. Validate the exact source carrier
+// before using its display view in the existing lifecycle assertions.
+fn exact_fixture_text(block: &ContentBlock) -> Option<&str> {
+    match block {
+        ContentBlock::Text { text, .. } => Some(text),
+        ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => {
+            assert_eq!(utf16_code_units, &text.encode_utf16().collect::<Vec<_>>());
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
 /// Collect the text of every user message in the FIRST captured model request.
 async fn first_request_user_texts(api: &MockStreamingApiClient) -> Vec<String> {
     let calls = api.captured_calls().await;
@@ -252,10 +269,7 @@ async fn first_request_user_texts(api: &MockStreamingApiClient) -> Vec<String> {
             ConversationMessage::User { content, .. } => {
                 let joined: String = content
                     .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text, .. } => Some(text.clone()),
-                        _ => None,
-                    })
+                    .filter_map(exact_fixture_text)
                     .collect::<Vec<_>>()
                     .join("");
                 Some(joined)
@@ -352,10 +366,7 @@ async fn mid_turn_input_arriving_during_final_response_continues_the_turn() {
             ConversationMessage::User { content, .. } => Some(
                 content
                     .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
+                    .filter_map(exact_fixture_text)
                     .collect::<Vec<_>>()
                     .join(""),
             ),
@@ -448,11 +459,8 @@ async fn mid_turn_input_is_preserved_when_max_turns_ends_streaming_loop() {
         s.history.iter().any(|message| matches!(
             message,
             ConversationMessage::User { content, .. }
-                if content.iter().any(|block| matches!(
-                    block,
-                    ContentBlock::Text { text, .. }
-                        if text.contains("please preserve this message")
-                ))
+                if content.iter().any(|block| exact_fixture_text(block)
+                    .is_some_and(|text| text.contains("please preserve this message")))
         )),
         "the queued mid-turn message must remain in history when max_turns ends the loop"
     );
@@ -489,7 +497,7 @@ fn fire_cancel_soon(cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
 #[tokio::test]
 async fn now_command_abort_does_not_inject_interrupt_message() {
     let api = one_cancel_tool_turn();
-    let orch = Arc::new(build_orch_with_cancel_tool(api.clone()));
+    let orch = build_orch_with_cancel_tool(api.clone());
     let reason = CancelReasonFlag::new();
     reason.set(CancelReason::QueueNowCommand);
     orch.set_cancel_reason(reason);
@@ -515,7 +523,7 @@ async fn now_command_abort_does_not_inject_interrupt_message() {
 #[tokio::test]
 async fn user_interrupt_default_injects_interrupt_message() {
     let api = one_cancel_tool_turn();
-    let orch = Arc::new(build_orch_with_cancel_tool(api.clone()));
+    let orch = build_orch_with_cancel_tool(api.clone());
     // No cancel-reason flag wired ⇒ defaults to UserInterrupt.
 
     let cancel = CancellationToken::new();

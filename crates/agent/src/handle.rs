@@ -2132,12 +2132,13 @@ impl SubagentSpawner for PoolSubagentSpawner {
     /// G11: surface the pre-spawn selection metadata for the
     /// `tengu_agent_tool_selected` event (claude `AgentTool.tsx:419-428`):
     /// resolve the definition, map its [`AgentSource`] to claude's source string,
-    /// resolve the concrete model (honoring the caller's optional `model`
-    /// family override), pull the `color`, and flag `is_built_in`.
+    /// resolve the concrete model (honoring the caller's optional `model` and
+    /// `model_profile` pair), pull the `color`, and flag `is_built_in`.
     async fn resolve_selection(
         &self,
         subagent_type: &str,
         model: Option<&str>,
+        model_profile: Option<&str>,
     ) -> lingxi_core::host::subagent_spawn::SelectedAgentMeta {
         let def = self.lookup_definition(subagent_type).await;
         let observer = if crate::observer::observer_agents_enabled() && def.observer.is_some() {
@@ -2185,29 +2186,56 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // itself uses the immediate-parent route via `build_subagent_context`.)
         let resolved_model = match self.resolved_default_selection() {
             Ok(Some(selection)) => {
-                let parent = selection.model;
-                let pref = match model {
-                    Some(m) => AgentModel::Alias(m.to_string()),
-                    // 2.1.198 `GAe`: same session-model derivation for the
-                    // built-in Explore definition as the spawn path, so the
-                    // `tengu_agent_tool_selected` metadata reports the model
-                    // the spawn will actually use.
-                    None => crate::model_resolution::resolve_builtin_explore_model(
-                        &def,
+                if let (Some(model), Some(model_profile)) = (model, model_profile) {
+                    // Use the same route-aware selection path as child context
+                    // construction. A model alias is scoped by the explicit
+                    // profile, and the selected model/profile pair stays
+                    // together for selection telemetry.
+                    match self.resolve_child_model_selection(
+                        &AgentModel::Alias(model.to_owned()),
+                        Some(&selection),
+                        Some(model_profile),
+                    ) {
+                        Ok(Some(selected)) => selected.model,
+                        Ok(None) => String::new(),
+                        Err(error) => {
+                            tracing::warn!(
+                                subagent_type,
+                                error = %error,
+                                "agent selection model route is unavailable"
+                            );
+                            String::new()
+                        }
+                    }
+                } else {
+                    let parent = selection.model;
+                    let pref = match model {
+                        Some(m) => AgentModel::Alias(m.to_string()),
+                        // 2.1.198 `GAe`: same session-model derivation for the
+                        // built-in Explore definition as the spawn path, so the
+                        // `tengu_agent_tool_selected` metadata reports the model
+                        // the spawn will actually use.
+                        None => crate::model_resolution::resolve_builtin_explore_model(
+                            &def,
+                            &parent,
+                            selection.model_resolution_context.route.provider
+                                == Some(crate::model_resolution::ModelProviderKind::FirstParty),
+                        ),
+                    };
+                    match self.resolve_model_pref(
+                        &pref,
                         &parent,
-                        selection.model_resolution_context.route.provider
-                            == Some(crate::model_resolution::ModelProviderKind::FirstParty),
-                    ),
-                };
-                match self.resolve_model_pref(&pref, &parent, &selection.model_resolution_context) {
-                    Ok(model) => model,
-                    Err(error) => {
-                        tracing::warn!(
-                            subagent_type,
-                            error = %error,
-                            "agent selection model route is unavailable"
-                        );
-                        String::new()
+                        &selection.model_resolution_context,
+                    ) {
+                        Ok(model) => model,
+                        Err(error) => {
+                            tracing::warn!(
+                                subagent_type,
+                                error = %error,
+                                "agent selection model route is unavailable"
+                            );
+                            String::new()
+                        }
                     }
                 }
             }
@@ -2454,16 +2482,6 @@ impl PoolSubagentSpawner {
             let mut recorded_cumulative = SubagentUsage::default();
             let mut recorded_duration_ms = 0_u64;
             while let Some(event) = rx.recv().await {
-                if let Some(token) = &agent_spawn_token {
-                    match &event {
-                        SubagentEvent::Completed { .. } => token.completed(),
-                        SubagentEvent::Failed { .. } => token.failed(),
-                        SubagentEvent::Killed { .. } => {
-                            token.killed(lingxi_core::host::agent_statistics::AgentKillReason::User)
-                        }
-                        _ => {}
-                    }
-                }
                 if let Some(firer) = stop_firer.as_ref() {
                     let status = match &event {
                         SubagentEvent::Completed { .. } => {

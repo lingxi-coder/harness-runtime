@@ -703,7 +703,13 @@ for line in sys.stdin:
             .collect();
         let attachment = rows
             .iter()
-            .find(|row| row.extra.string_at("/attachment/type") == Some("mcp_instructions_delta"))
+            .find(|row| {
+                row.attachment_projection
+                    .as_ref()
+                    .is_some_and(|attachment| {
+                        attachment.string_at("/type") == Some("mcp_instructions_delta")
+                    })
+            })
             .unwrap();
         assert_eq!(attachment.message_type, "attachment");
         assert!(attachment

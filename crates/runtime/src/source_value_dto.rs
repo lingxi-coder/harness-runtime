@@ -219,7 +219,7 @@ mod tests {
         assert!(json.len() < 200_000);
 
         let input = projection
-            .at_pointer(&format!("{}", "/0".repeat(2048)))
+            .at_pointer(&"/0".repeat(2048))
             .expect("nested object");
         let keys: Vec<Vec<u16>> = input
             .object_entries()

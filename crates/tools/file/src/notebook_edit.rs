@@ -642,6 +642,24 @@ Usage:\n\
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
@@ -795,7 +813,9 @@ mod tests {
             .unwrap()
             .requested_path_groups(&key);
         assert!(
-            routes.iter().any(|route| route == &[target.clone()]),
+            routes
+                .iter()
+                .any(|route| route == std::slice::from_ref(&target)),
             "the model route is captured as the resolved session-cwd spelling: {routes:?}"
         );
     }
@@ -1132,7 +1152,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("does not exist in notebook"));
+        assert!(source_text(&err.model_facing_message()).contains("does not exist in notebook"));
     }
 
     // ───────────────────────── NB.4: cell_type on insert ────────────────────
@@ -1191,8 +1211,8 @@ mod tests {
             .unwrap_err();
         // Byte-faithful to NotebookEditTool.ts:213.
         assert_eq!(
-            err.to_string(),
-            "invalid input: Cell type is required when using edit_mode=insert."
+            source_text(&err.model_facing_message()),
+            "Cell type is required when using edit_mode=insert."
         );
     }
 
@@ -1264,8 +1284,7 @@ mod tests {
             .await
             .unwrap_err();
         // Byte-faithful to NotebookEditTool.ts:264.
-        assert!(err
-            .to_string()
+        assert!(source_text(&err.model_facing_message())
             .contains("Cell ID must be specified when not inserting a new cell."));
     }
 
@@ -1460,6 +1479,6 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("not found"));
+        assert!(source_text(&err.model_facing_message()).contains("not found"));
     }
 }

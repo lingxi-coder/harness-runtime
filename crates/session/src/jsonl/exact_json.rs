@@ -10,6 +10,44 @@ use std::fmt::Display;
 /// on read and omitted by the `JsonlMessage` native serializer.
 pub(crate) const PRIVATE_UTF16_KEY: &str = "lingxi_exact_json_utf16";
 
+/// Reserved in-memory carrier for the original outer JSONL property order.
+/// It stores only exact UTF-16 key strings, never a source row or its values.
+pub(crate) const PRIVATE_SOURCE_KEY_ORDER_KEY: &str = "lingxi_jsonl_source_key_order";
+
+/// Recover the source row's exact ordered top-level key units.
+#[must_use]
+pub(crate) fn message_source_key_order(
+    message: &super::schema::JsonlMessage,
+) -> Option<Vec<Vec<u16>>> {
+    let value = message.extra.get_property(PRIVATE_SOURCE_KEY_ORDER_KEY)?;
+    let length = value.array_len()?;
+    let mut order = Vec::with_capacity(length);
+    for index in 0..length {
+        order.push(value.get_index(index)?.code_units()?.to_vec());
+    }
+    Some(order)
+}
+
+/// Attach reader-generated key order without retaining any row payload.
+pub(crate) fn set_message_source_key_order(
+    message: &mut super::schema::JsonlMessage,
+    order: Vec<Vec<u16>>,
+) {
+    let keys = order
+        .into_iter()
+        .map(|code_units| {
+            let display = String::from_utf16_lossy(&code_units);
+            Utf16JsonProjection::root_string(display, code_units)
+                .expect("source property key display matches its UTF-16 units")
+        })
+        .collect();
+    let order = Utf16JsonProjection::array(keys).expect("source key order is a JSON array");
+    message
+        .extra
+        .set_field(PRIVATE_SOURCE_KEY_ORDER_KEY, order)
+        .expect("extra is a JSON object");
+}
+
 /// Recover private exact string leaves retained by the generic JSONL reader.
 #[must_use]
 pub fn message_utf16_overrides(message: &super::schema::JsonlMessage) -> Utf16Overrides {
@@ -164,22 +202,20 @@ mod tests {
             .zip(bodies)
         {
             let overrides = message_utf16_overrides(message);
-            assert_eq!(message.extra.string_at("/origin/kind"), Some("peer"));
-            assert_eq!(
-                message.extra.string_units("/origin/body"),
-                Some(units.clone())
-            );
+            let origin = message.origin_projection.as_ref().unwrap();
+            assert_eq!(origin.string_at("/kind"), Some("peer"));
+            assert_eq!(origin.string_units("/body"), Some(units.clone()));
             if String::from_utf16(&units).is_err() {
                 assert_eq!(overrides["/origin/body"], units);
                 assert_eq!(loaded.utf16_by_uuid[&message.uuid], overrides);
             } else {
                 assert!(overrides.is_empty());
             }
-            let value = serde_json::to_value(message).unwrap();
-            assert!(value.get(PRIVATE_UTF16_KEY).is_none());
-            assert!(value.get("deliveryId").is_none());
+            let serialized = native_message_projection(message).unwrap();
+            assert!(!serialized.contains_property(PRIVATE_UTF16_KEY));
+            assert!(!serialized.contains_property("deliveryId"));
             assert_eq!(
-                to_vec_with_overrides(&value, &overrides).unwrap(),
+                serialized.to_json_string().unwrap().as_bytes(),
                 native.as_bytes()
             );
         }

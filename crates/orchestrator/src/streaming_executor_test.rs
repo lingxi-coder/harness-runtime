@@ -28,7 +28,7 @@ mod tests {
             panic!()
         };
         assert_eq!(
-            content.string_at("").as_deref(),
+            content.string_at(""),
             Some(
                 "<tool_use_error>Error: Streaming fallback - tool execution discarded</tool_use_error>"
             )
@@ -85,6 +85,27 @@ mod tests {
 
     fn project_test_tool_input(value: impl IntoTestToolInput) -> Utf16JsonProjection {
         value.into_test_tool_input()
+    }
+
+    fn streaming_test_route(
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<agent::ModelResolutionContext, agent::ModelResolutionError> {
+        Ok(agent::ModelResolutionContext {
+            route: agent::ModelRouteFacts {
+                model: model.to_owned(),
+                profile: profile.map(str::to_owned),
+                provider: Some(agent::ModelProviderKind::Other),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    fn with_streaming_test_route_resolver(
+        orchestrator: ConversationOrchestrator,
+    ) -> ConversationOrchestrator {
+        orchestrator.with_model_resolution_context_provider(Arc::new(streaming_test_route))
     }
 
     macro_rules! source_json {
@@ -884,7 +905,7 @@ mod tests {
             input: &Utf16JsonProjection,
             ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
-            if input.string_at("/step").as_deref() == Some("first") {
+            if input.string_at("/step") == Some("first") {
                 self.first_permission_waiting.notify_one();
                 let cancellation = ctx
                     .cancel
@@ -932,10 +953,10 @@ mod tests {
         async fn call(
             &self,
             input: Utf16JsonProjection,
-            ctx: ToolUseContext,
+            _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            if input.string_at("/step").as_deref() == Some("second") {
+            if input.string_at("/step") == Some("second") {
                 self.second_call_started.notify_one();
             }
             Ok(ToolCallResult::from_data(source_json!({ "content": "ok" })))
@@ -1514,8 +1535,6 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_async_post_hook_rewakes_after_normal_executor_close() {
-        use hooks::attachment::HookPublicationGuard;
-
         let (
             hook_executor,
             mut completion_rx,
@@ -2164,7 +2183,9 @@ mod tests {
         assert!(is_error.unwrap_or(false));
         assert_eq!(
             content.string_at(""),
-            Some("<tool_use_error>Error: No such tool available: Read. Read is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead.</tool_use_error>")
+            Some(
+                "<tool_use_error>Error: No such tool available: Read. Read is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead.</tool_use_error>"
+            )
         );
     }
 
@@ -2519,94 +2540,6 @@ mod tests {
         assert!(!can_execute(&[true, true], false)); // many safe running, unsafe candidate → no
     }
 
-    /// A minimal concurrency-UNSAFE tool for ordering/barrier tests.
-    struct UnsafeTool;
-
-    #[async_trait]
-    impl Tool for UnsafeTool {
-        fn name(&self) -> &str {
-            "UnsafeTool"
-        }
-        fn input_schema(&self) -> &Utf16JsonProjection {
-            static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
-                once_cell::sync::Lazy::new(|| {
-                    Utf16JsonProjection::from_serde_value(
-                        &json!({ "type": "object", "properties": {} }),
-                    )
-                    .unwrap()
-                });
-            &SCHEMA
-        }
-
-        fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
-            ToolInputRepairMetadata::Known {
-                schema: ToolInputRepairSchema::Advertised,
-                schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
-                exempt_top_level_keys: None,
-            }
-        }
-        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
-            true
-        }
-        fn max_result_size_chars(&self) -> usize {
-            1024 * 1024
-        }
-        fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
-            false
-        }
-        fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
-            false
-        }
-        async fn validate_input(
-            &self,
-            _input: &Utf16JsonProjection,
-            _ctx: &ToolUseContext,
-        ) -> Result<(), ValidationError> {
-            Ok(())
-        }
-        async fn check_permissions(
-            &self,
-            _input: &Utf16JsonProjection,
-            _ctx: &ToolUseContext,
-        ) -> permission::PermissionResult {
-            permission::PermissionResult::Allow {
-                reason: permission::PermissionDecisionReason::Other {
-                    reason: "test".into(),
-                },
-                updated_input: None,
-                update_destination: None,
-                metadata: permission::result::PermissionMetadata::default(),
-            }
-        }
-        async fn description(
-            &self,
-            _input: &Utf16JsonProjection,
-            _opts: &DescriptionOptions,
-        ) -> String {
-            "unsafe-tool".into()
-        }
-        async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
-            Utf16JsonProjection::from("")
-        }
-        async fn call(
-            &self,
-            _input: Utf16JsonProjection,
-            _ctx: ToolUseContext,
-            _tx: ToolProgressSender,
-        ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
-                data: source_json!({ "content": "ok" }),
-
-                model_content: None,
-                new_messages: vec![],
-                context_modifier: None,
-                is_error: false,
-                mcp_meta: None,
-                subagent_hooks_fired: false,
-            })
-        }
-    }
-
     struct StreamBoundarySerialTool {
         release_first: Arc<Notify>,
         second_started: Arc<Notify>,
@@ -2691,7 +2624,7 @@ mod tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            match input.string_at("/step").as_deref() {
+            match input.string_at("/step") {
                 Some("first") => self.release_first.notified().await,
                 Some("second") => {
                     self.second_started.notify_one();
@@ -2755,23 +2688,6 @@ mod tests {
             _cost: &lingxi_core::host::orchestrator::CostSnapshot,
         ) {
         }
-    }
-
-    /// Build an orchestrator with both SafeTool and UnsafeTool.
-    fn orch_with_both_tools() -> ConversationOrchestrator {
-        let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(SafeTool::default()) as Arc<dyn Tool>);
-        registry.register_builtin(Arc::new(UnsafeTool) as Arc<dyn Tool>);
-        ConversationOrchestrator::new(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(vec![])),
-            Arc::new(registry),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
     }
 
     async fn next_actor_start(
@@ -3232,7 +3148,7 @@ mod tests {
             is_error.unwrap_or(false),
             "user-interrupted result must be an error"
         );
-        assert_eq!(content.string_at("").as_deref(), Some(REJECT_MESSAGE));
+        assert_eq!(content.string_at(""), Some(REJECT_MESSAGE));
         assert!(
             !content
                 .string_at("")
@@ -3418,7 +3334,7 @@ mod tests {
         assert_eq!(finished.len(), 1);
         assert!(matches!(
             &finished[0].block,
-            ContentBlock::ToolResult { tool_use_id, is_error: Some(false), .. }
+            ContentBlock::ToolResult { tool_use_id, is_error: None, .. }
                 if tool_use_id.as_str() == completed_id.as_str()
         ));
 
@@ -3457,7 +3373,7 @@ mod tests {
             else {
                 panic!("expected ToolResult block")
             };
-            assert_eq!(content.string_at("").as_deref(), Some(expected.as_str()));
+            assert_eq!(content.string_at(""), Some(expected.as_str()));
             assert!(is_error.unwrap_or(false));
             assert!(matches!(
                 &result.tool_use_result,
@@ -3877,7 +3793,7 @@ mod tests {
             panic!()
         };
         assert!(is_error.unwrap_or(false));
-        assert_eq!(content.string_at("").as_deref(), Some(REJECT_MESSAGE));
+        assert_eq!(content.string_at(""), Some(REJECT_MESSAGE));
     }
 
     #[tokio::test]
@@ -3914,7 +3830,9 @@ mod tests {
         assert!(is_error.unwrap_or(false));
         assert_eq!(
             content.string_at(""),
-            Some("Error: The tool call was interrupted before a result was received. It may or may not have completed on the server — verify before assuming it succeeded, and retry if needed.")
+            Some(
+                "Error: The tool call was interrupted before a result was received. It may or may not have completed on the server — verify before assuming it succeeded, and retry if needed."
+            )
         );
     }
 
@@ -4266,7 +4184,7 @@ mod tests {
             panic!("expected a tool result");
         };
         assert!(is_error.unwrap_or(false));
-        assert_eq!(content.string_at("").as_deref(), Some(REJECT_MESSAGE));
+        assert_eq!(content.string_at(""), Some(REJECT_MESSAGE));
     }
 
     #[tokio::test]
@@ -5105,15 +5023,17 @@ mod tests {
             call_returned: call_returned.clone(),
             return_context_layer: true,
         }));
-        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(vec![])),
-            Arc::new(registry),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
+        let orch = ConversationOrchestrator::into_shared(with_streaming_test_route_resolver(
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(registry),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ),
         ));
         let query_history = vec![lingxi_core::types::ConversationMessage::user(
             MessageId::new(),
@@ -5132,7 +5052,7 @@ mod tests {
         });
         let second_input = json!({"hold": false});
         let full_row = lingxi_core::types::ConversationMessage::Assistant {
-            id: assistant_id.clone(),
+            id: assistant_id,
             content: vec![
                 ContentBlock::Text {
                     text: "prefix before tools".into(),
@@ -5154,6 +5074,7 @@ mod tests {
             ],
             stop_reason: None,
             resumable: None,
+            per_turn_effort: None,
         };
 
         tokio::time::timeout(
@@ -5163,7 +5084,7 @@ mod tests {
                 "W1Capture".into(),
                 project_test_tool_input(first_input),
                 None,
-                assistant_id.clone(),
+                assistant_id,
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: 0,
 
@@ -5188,7 +5109,7 @@ mod tests {
                 "W1Capture".into(),
                 project_test_tool_input(second_input),
                 None,
-                assistant_id.clone(),
+                assistant_id,
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: 0,
                     query_history: query_history.clone(),
@@ -5227,8 +5148,8 @@ mod tests {
             assert_eq!(captured.len(), 2);
             assert_eq!(captured[0].messages, query_history);
             assert_eq!(captured[1].messages, query_history);
-            assert_eq!(captured[0].assistant_message_id, Some(assistant_id.clone()));
-            assert_eq!(captured[1].assistant_message_id, Some(assistant_id.clone()));
+            assert_eq!(captured[0].assistant_message_id, Some(assistant_id));
+            assert_eq!(captured[1].assistant_message_id, Some(assistant_id));
             assert_eq!(captured[1].tool_use_id.as_ref(), Some(&second_id));
             for call in captured.iter() {
                 assert!(
@@ -5304,18 +5225,20 @@ mod tests {
             call_returned: call_returned.clone(),
             return_context_layer: true,
         }));
-        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
-            OrchestratorConfig {
-                model: "reset-base-model".into(),
-                ..OrchestratorConfig::default()
-            },
-            Arc::new(MockApiClient::new(vec![])),
-            Arc::new(registry),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
+        let orch = ConversationOrchestrator::into_shared(with_streaming_test_route_resolver(
+            ConversationOrchestrator::new(
+                OrchestratorConfig {
+                    model: "reset-base-model".into(),
+                    ..OrchestratorConfig::default()
+                },
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(registry),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ),
         ));
         let query_history = vec![lingxi_core::types::ConversationMessage::user(
             MessageId::new(),
@@ -5339,6 +5262,7 @@ mod tests {
             }],
             stop_reason: None,
             resumable: None,
+            per_turn_effort: None,
         };
         executor
             .add_tool_with_context_owned(
@@ -5387,6 +5311,7 @@ mod tests {
             }],
             stop_reason: None,
             resumable: None,
+            per_turn_effort: None,
         };
         executor
             .add_tool_with_context_owned(
@@ -5557,6 +5482,7 @@ mod tests {
                             }],
                             stop_reason: None,
                             resumable: None,
+                            per_turn_effort: None,
                         },
                         same_turn_tool_uses: Vec::new(),
                     },
@@ -5613,18 +5539,20 @@ mod tests {
             observed_models: observed_models.clone(),
             modifier_applications: modifier_applications.clone(),
         }));
-        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
-            OrchestratorConfig {
-                model: "reset-base-model".into(),
-                ..OrchestratorConfig::default()
-            },
-            Arc::new(MockApiClient::new(vec![])),
-            Arc::new(registry),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            sink.clone(),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
+        let orch = ConversationOrchestrator::into_shared(with_streaming_test_route_resolver(
+            ConversationOrchestrator::new(
+                OrchestratorConfig {
+                    model: "reset-base-model".into(),
+                    ..OrchestratorConfig::default()
+                },
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(registry),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                sink.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ),
         ));
         orch.set_tool_frame_buffering(true).await;
         let mut old_executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)

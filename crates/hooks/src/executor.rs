@@ -1535,7 +1535,7 @@ impl HookExecutorImpl {
             match self.take_agent_stop_snapshot(
                 ctx.session_id,
                 exclude_agent_id,
-                ctx.subagent_stop_epoch.clone(),
+                ctx.subagent_stop_epoch,
                 ctx.publication_guard.as_deref(),
             ) {
                 Some((model_selection, transcript, metadata)) => {
@@ -1696,7 +1696,27 @@ impl HookExecutorImpl {
             }
             let _ = published_tx.send((attachments, outputs));
         };
-        if commit_hook_mutation(publication_guard, publication).await {
+        let admitted = if sink.is_some() {
+            // A configured sink can perform durable I/O, so reset must admit
+            // and wait for that mutation under the generation lease.
+            commit_hook_mutation(publication_guard, publication).await
+        } else {
+            // With no sink, this only prepares private aggregate values. Keep
+            // generation checks around preparation without reserving a durable
+            // lease for work that has no external side effect.
+            match publication_guard {
+                Some(guard) if !guard.is_current() => false,
+                Some(guard) => {
+                    publication.await;
+                    guard.is_current()
+                }
+                None => {
+                    publication.await;
+                    true
+                }
+            }
+        };
+        if admitted {
             if let Ok((attachments, outputs)) = published_rx.await {
                 agg.hook_attachments.extend(attachments);
                 return Some(outputs);
@@ -4538,10 +4558,8 @@ fn expand_mcp_hook_string(
                     "Infinity".to_string()
                 } else if number == f64::NEG_INFINITY {
                     "-Infinity".to_string()
-                } else if let Ok(serialized) = value.to_json_string() {
-                    serialized
                 } else {
-                    String::new()
+                    value.to_json_string().unwrap_or_default()
                 };
                 output.extend(rendered.encode_utf16());
             } else if let Ok(serialized) = value.to_json_string() {

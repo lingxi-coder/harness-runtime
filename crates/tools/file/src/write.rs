@@ -733,24 +733,17 @@ mod tests {
 
     #[test]
     fn write_resolution_messages_are_byte_exact() {
-        assert_eq!(
-            write_resolution_error(
-                "/tmp/link.txt",
-                lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink
-            )
-            .to_string()
-            .strip_prefix("invalid input: ")
-            .unwrap_or_default(),
-            "Refusing to write /tmp/link.txt: it is a symbolic link. Write to the link's target path instead."
-        );
-        assert_eq!(
-            write_resolution_error(
-                "/tmp/link.txt",
-                lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
-            )
-            .to_string(),
-            "invalid input: Refusing to write /tmp/link.txt: its parent-directory symlink resolution changed after permission was checked."
-        );
+        for (reason, expected) in [
+            (lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink,
+             "Refusing to write /tmp/link.txt: it is a symbolic link. Write to the link's target path instead."),
+            (lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
+             "Refusing to write /tmp/link.txt: its parent-directory symlink resolution changed after permission was checked."),
+        ] {
+            let error = write_resolution_error("/tmp/link.txt", reason);
+            assert!(matches!(error, ToolError::InvalidInput(_)));
+            assert_eq!(error.model_facing_message().string_units(""),
+                       Some(expected.encode_utf16().collect::<Vec<_>>()));
+        }
     }
 
     /// S2 (PathAtlas): a Write to a guest path lands the bytes in the

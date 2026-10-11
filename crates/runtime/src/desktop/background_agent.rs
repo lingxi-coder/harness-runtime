@@ -471,8 +471,11 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         &self,
         subagent_type: &str,
         model: Option<&str>,
+        model_profile: Option<&str>,
     ) -> SelectedAgentMeta {
-        self.inner.resolve_selection(subagent_type, model).await
+        self.inner
+            .resolve_selection(subagent_type, model, model_profile)
+            .await
     }
 
     async fn register_name(&self, name: &str, agent_id: AgentId) {
@@ -965,6 +968,7 @@ mod tests {
     fn request(name: Option<&str>) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
             agent_spawn_token: None,
+            stop_hook_scope: Default::default(),
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
             parent_native_query_depth: None,

@@ -201,10 +201,7 @@ fn text_of(msg: &ConversationMessage) -> String {
         ConversationMessage::User { content, .. }
         | ConversationMessage::Assistant { content, .. } => content
             .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
+            .filter_map(ContentBlock::visible_text)
             .collect::<Vec<_>>()
             .join(""),
         ConversationMessage::System { content, .. } => {

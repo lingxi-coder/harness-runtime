@@ -17,7 +17,7 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{BRIEF_COMPLETED, BRIEF_FAILED, BRIEF_STARTED};
@@ -368,7 +368,7 @@ impl Tool for BriefTool {
         let attachment_paths: Vec<String> = input
             .array_len("/attachments")
             .into_iter()
-            .flat_map(|count| (0..count))
+            .flat_map(|count| 0..count)
             .filter_map(|index| {
                 input
                     .at_pointer("/attachments")?
@@ -446,7 +446,26 @@ fn invalid_tool_input(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use mobile_linux_api::ProcessOutput;
+    use serde_json::Value;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn fixture(value: Value) -> Utf16JsonProjection {
@@ -677,7 +696,7 @@ mod tests {
             )
             .await
             .expect_err("missing");
-        assert!(format!("{err}").contains("missing or non-string message"));
+        assert!(source_text(&err.model_facing_message()).contains("missing or non-string message"));
     }
 
     #[tokio::test]

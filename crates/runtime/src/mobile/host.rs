@@ -1282,7 +1282,7 @@ pub struct MobileEngineHandle {
     /// engine outlives any single FFI call and F3-05's `submit(SendPrompt)` can
     /// `spawn` a streaming turn that returns promptly while results stream to the
     /// listener. F3-07 registers this runtime as the foreign async executor.
-    runtime: tokio::runtime::Runtime,
+    runtime: Option<tokio::runtime::Runtime>,
     /// The fully-wired mobile runtime: orchestrator + dispatcher + auth + the
     /// connection-scoped [`AdapterPermissionGate`] + the registered listener.
     inner: MobileRuntime,
@@ -1532,6 +1532,12 @@ impl Drop for MobileEngineHandle {
         });
         // Drop the strong observer after unregistering its weak fanout entry.
         self.app_domain_observer.take();
+        // The last field drop would synchronously join this per-handle runtime.
+        // Foreign disposal must not wait for tasks gated on a platform UI
+        // executor, so transfer shutdown ownership to Tokio's background path.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
@@ -1683,6 +1689,7 @@ mod session_agent_exact_utf16_tests {
                 "uuid":"agent-message-1",
                 "message":{
                     "role":"user",
+                    "id":"11111111-2222-4333-8444-555555555555",
                     "content":[{"type":"text","text":"ctx�"}],
                     "is_meta":true,
                     "is_compact_summary":false,
@@ -2012,8 +2019,6 @@ fn live_session_agent_activity(
         lingxi_core::types::ConversationMessage::System { content, .. } => {
             summarize_projection(content)
         }
-
-        _ => None,
     }
 }
 
@@ -3204,7 +3209,7 @@ impl MobileEngineHandle {
     #[must_use]
     pub fn skill_count(&self) -> u32 {
         let count = self
-            .runtime
+            .runtime()
             .block_on(mobile_live_plugin_skill_count(&self.inner.slash_registry));
         u32::try_from(count).unwrap_or(u32::MAX)
     }
@@ -3238,7 +3243,9 @@ impl MobileEngineHandle {
     /// F3-07 registers it as the foreign async executor).
     #[must_use]
     pub fn runtime(&self) -> &tokio::runtime::Runtime {
-        &self.runtime
+        self.runtime
+            .as_ref()
+            .expect("engine runtime is present while the handle is live")
     }
 
     /// The identity of the handle-owned tokio runtime (F3-07), as a stable
@@ -3257,7 +3264,7 @@ impl MobileEngineHandle {
     #[doc(hidden)]
     #[must_use]
     pub fn runtime_id(&self) -> String {
-        format!("{:?}", self.runtime.handle().id())
+        format!("{:?}", self.runtime().handle().id())
     }
 
     /// Borrow the wired [`MobileRuntime`] (orchestrator / dispatcher / auth /
@@ -4182,7 +4189,7 @@ impl MobileEngineHandle {
         let task_turn = turn.clone();
         let loop_scheduler = self.inner.wakeup_scheduler.get().cloned();
         let cancel_reason = self.cancel_reason.clone();
-        let task = self.runtime.spawn(async move {
+        let task = self.runtime().spawn(async move {
             let result = orch
                 .run_turn_streaming_with_cancel(&text, task_turn.cancel.clone())
                 .await;
@@ -8570,7 +8577,7 @@ impl MobileEngineHandle {
             self.fs.clone(),
             &self.lingxi_home,
             &origin,
-            self.runtime.handle().clone(),
+            self.runtime().handle().clone(),
         )
         .map(Arc::new)
     }

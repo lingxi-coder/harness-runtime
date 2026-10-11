@@ -36,7 +36,7 @@ use crate::source::PluginSource;
 use crate::strict_policy::StrictPluginOnlyPolicy;
 use crate::theme_registry::PluginThemeRegistry;
 use crate::user_config;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use command_api::CommandRegistry;
 use hooks::mods::{ModReplayFailure, ModReplayModule, ModWorkerFailure};
@@ -89,13 +89,6 @@ fn namespace_command_name(prefix: &str, name: &Utf16JsonProjection) -> Utf16Json
     );
     Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
         .expect("namespaced command name is a root string")
-}
-
-fn command_name_has_server_prefix(name: &Utf16JsonProjection, server: &str) -> bool {
-    let mut prefix = server.encode_utf16().collect::<Vec<_>>();
-    prefix.push(u16::from(b':'));
-    name.string_units("")
-        .is_some_and(|units| units.starts_with(&prefix))
 }
 
 /// Failure modes for [`PluginManager`] operations.
@@ -2112,9 +2105,16 @@ impl PluginManager {
                 .await
                 .insert(manifest.id, names.clone());
             self.mcp_registry.connect_all(mcp_scoped).await;
-            let prompts = command_api::mcp_prompts::mcp_prompt_commands(
-                &self.mcp_registry.connected_prompts().await,
-            );
+            // Scope by the connection's original server identity before
+            // canonical command names sanitize it for the public catalog.
+            let connected_prompts = self
+                .mcp_registry
+                .connected_prompts()
+                .await
+                .into_iter()
+                .filter(|(server, _, _)| names.contains(server))
+                .collect::<Vec<_>>();
+            let prompts = command_api::mcp_prompts::mcp_prompt_commands(&connected_prompts);
             let mut commands = self.command_registry.write().await;
             for (name, managed) in managed_scopes {
                 commands.set_mcp_server_describe_scope(
@@ -2123,11 +2123,7 @@ impl PluginManager {
                 );
             }
             for command in prompts {
-                if names
-                    .iter()
-                    .any(|server| command_name_has_server_prefix(&command.name, server))
-                    && commands.resolve(&command.name).is_none()
-                {
+                if commands.resolve(&command.name).is_none() {
                     commands.register_command(command);
                 }
             }
@@ -2983,7 +2979,6 @@ mod user_config_tests {
     use hooks::events::HookEventType;
     use hooks::{HookDefinition, HookExecutor, HookSource};
     use lingxi_core::types::HookId;
-    use serde_json::json;
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -3873,21 +3868,12 @@ mod telemetry_tests {
     }
 
     #[cfg(unix)]
-    async fn wait_worker_pid(path: &Path, different_from: Option<u32>) -> u32 {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                if let Ok(contents) = fs::read_to_string(path) {
-                    if let Ok(pid) = contents.trim().parse::<u32>() {
-                        if different_from != Some(pid) {
-                            return pid;
-                        }
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("Mod worker wrapper should report its process id")
+    fn latest_worker_pid(path: &Path) -> Option<u32> {
+        fs::read_to_string(path)
+            .ok()?
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .last()
     }
 
     async fn dispatch_mod_tool(
@@ -3956,7 +3942,7 @@ mod telemetry_tests {
         fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nexec {} \"$@\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" >> {}\nexec {} \"$@\"\n",
                 shell_single_quote(&pid_file.to_string_lossy()),
                 shell_single_quote(&bun.to_string_lossy()),
             ),
@@ -3985,18 +3971,39 @@ mod telemetry_tests {
             .await
             .mod_host()
             .expect("enabled Mod installs the session host");
-        let first_pid = wait_worker_pid(&pid_file, None).await;
-        assert_eq!(
-            dispatch_mod_tool(&host, "Read").await.unwrap()["result"],
-            "alive",
-            "the original worker dispatches the registered Mod hook"
-        );
-
         let kill = if Path::new("/bin/kill").is_file() {
             "/bin/kill"
         } else {
             "/usr/bin/kill"
         };
+        let (first_pid, first_generation) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let generation_before_read = host.registration_identity();
+                    if let Some(pid_before_read) = latest_worker_pid(&pid_file) {
+                        if let Ok(result) = dispatch_mod_tool(&host, "Read").await {
+                            let generation_after_read = host.registration_identity();
+                            let pid_after_read = latest_worker_pid(&pid_file);
+                            let alive = std::process::Command::new(kill)
+                                .arg("-0")
+                                .arg(pid_before_read.to_string())
+                                .status()
+                                .is_ok_and(|status| status.success());
+                            if result["result"] == "alive"
+                                && generation_after_read == generation_before_read
+                                && pid_after_read == Some(pid_before_read)
+                                && alive
+                            {
+                                break (pid_before_read, generation_before_read);
+                            }
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the manager exposes one live worker generation that serves Read");
+
         let killed = std::process::Command::new(kill)
             .arg("-KILL")
             .arg(first_pid.to_string())
@@ -4004,21 +4011,38 @@ mod telemetry_tests {
             .expect("send SIGKILL to the wrapper's Bun worker");
         assert!(killed.success(), "worker kill command failed: {killed}");
 
-        let recovered_pid = wait_worker_pid(&pid_file, Some(first_pid)).await;
-        assert_ne!(first_pid, recovered_pid, "recovery spawns a new worker");
-        let recovered = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                if let Ok(result) = dispatch_mod_tool(&host, "Read").await {
-                    if result["result"] == "alive" {
-                        return result;
+        let (recovered, recovered_pid, recovered_generation) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let generation_before_read = host.registration_identity();
+                    if generation_before_read != first_generation {
+                        if let Some(pid_before_read) = latest_worker_pid(&pid_file) {
+                            if let Ok(result) = dispatch_mod_tool(&host, "Read").await {
+                                let generation_after_read = host.registration_identity();
+                                let pid_after_read = latest_worker_pid(&pid_file);
+                                let alive = std::process::Command::new(kill)
+                                    .arg("-0")
+                                    .arg(pid_before_read.to_string())
+                                    .status()
+                                    .is_ok_and(|status| status.success());
+                                if result["result"] == "alive"
+                                    && generation_after_read == generation_before_read
+                                    && pid_after_read == Some(pid_before_read)
+                                    && alive
+                                {
+                                    break (result, pid_before_read, generation_after_read);
+                                }
+                            }
+                        }
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("Manager recovery re-registers the active Mod hook");
+            })
+            .await
+            .expect("Manager recovery re-registers a stable replacement worker");
         assert_eq!(recovered["result"], "alive");
+        assert_ne!(first_pid, recovered_pid, "recovery spawns a new worker");
+        assert_ne!(recovered_generation, first_generation);
 
         let entered = Arc::new(tokio::sync::Notify::new());
         let entered_for_log = entered.clone();
@@ -4521,7 +4545,7 @@ mod monitor_lifecycle_tests {
         {
             let mut policy = manager.mod_worker_recovery_policy.lock().await;
             policy.unattributed_crashes = 2;
-            policy.mods_off_at = Some(mods_off_marker.clone());
+            policy.mods_off_at = Some(mods_off_marker);
         }
         let lifecycle_guard = manager.monitor_lifecycle.lock().await;
         let caller = manager.clone();

@@ -934,10 +934,7 @@ mod tests {
             checkpoint.prompt.string_units(""),
             Some(prompt_units.clone())
         );
-        assert_eq!(
-            checkpoint.prompt.string_at(""),
-            Some("recover �".to_owned())
-        );
+        assert_eq!(checkpoint.prompt.string_at(""), Some("recover �"));
 
         let (disposition, snapshot) = restarted
             .resume("session", 42)

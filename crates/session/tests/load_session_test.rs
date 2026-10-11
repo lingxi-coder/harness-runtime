@@ -118,11 +118,11 @@ async fn missing_file_returns_session_not_found() {
 // ---- TOLERANCE: former STRICT-error cases now load (no error) -------------
 
 #[tokio::test]
-async fn dangling_parent_link_no_longer_errors_and_returns_newest_branch() {
-    // OLD behavior: m2 whose parentUuid points at a UUID not in the file failed
-    // rule 2 → `ChainBroken`. NEW behavior: the dangling parent makes m2 its own
-    // root; both m1 and m2 are non-sidechain user leaves, and the NEWER one (m2)
-    // anchors the resumed thread. No error.
+async fn dangling_parent_link_rejoins_nearest_preceding_row_at_inclusive_5000ms_boundary() {
+    // Native 2.1.295 falls back when a non-null parent is missing: it selects
+    // the nearest preceding row with the same isSidechain value, valid
+    // timestamps, and a gap no greater than 5000 ms. m1 is exactly at that
+    // inclusive boundary, so it remains in the returned chain before m2.
     let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     let sid = Uuid::new_v4();
     let m1 = Uuid::new_v4();
@@ -140,7 +140,7 @@ async fn dangling_parent_link_no_longer_errors_and_returns_newest_branch() {
         &m2.to_string(),
         Some(&dangling.to_string()),
         &sid.to_string(),
-        "2026-05-25T12:00:05.000Z", // newer → tip
+        "2026-05-25T12:00:05.000Z", // exactly 5000 ms after m1; newest leaf
     ));
     tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
         .await
@@ -149,9 +149,14 @@ async fn dangling_parent_link_no_longer_errors_and_returns_newest_branch() {
     let messages = load_session(&lingxi_home, &cwd, sid, fs)
         .await
         .expect("tolerant load must succeed (no ChainBroken)");
-    // Walk from m2 stops immediately (its parent `dangling` is absent) → just m2.
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].uuid, m2.to_string());
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].uuid, m1.to_string());
+    assert_eq!(messages[1].uuid, m2.to_string());
+    assert_eq!(
+        messages[1].parent_uuid.as_deref(),
+        Some(dangling.to_string().as_str()),
+        "resume fallback must not rewrite the persisted parent link"
+    );
 }
 
 #[tokio::test]

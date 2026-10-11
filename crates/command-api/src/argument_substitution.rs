@@ -1080,7 +1080,7 @@ mod tests {
         let template_units = [
             "$name".encode_utf16().collect::<Vec<_>>(),
             vec![0xd800],
-            " $0".encode_utf16().collect(),
+            " $1".encode_utf16().collect(),
             vec![0xdfff],
             " tail".encode_utf16().collect(),
         ]

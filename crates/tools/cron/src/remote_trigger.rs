@@ -1366,16 +1366,15 @@ impl Tool for RemoteTriggerTool {
                 ));
             }
         }
-        if input.at_pointer("/body").is_some() {
-            if input
+        if input.at_pointer("/body").is_some()
+            && input
                 .at_pointer("/body")
                 .and_then(JsonValueView::object_entries)
                 .is_none()
-            {
-                return Err(ValidationError(
-                    "RemoteTrigger: body must be a JSON object".into(),
-                ));
-            }
+        {
+            return Err(ValidationError(
+                "RemoteTrigger: body must be a JSON object".into(),
+            ));
         }
         Ok(())
     }
@@ -1707,6 +1706,24 @@ fn invalid_tool_input(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn checked_source(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> (String, Vec<u16>) {
+        let display = source
+            .string_at("")
+            .expect("error source is a root string")
+            .to_owned();
+        let units = source
+            .string_units("")
+            .expect("error source retains UTF-16 units");
+        assert_eq!(String::from_utf16_lossy(&units), display);
+        (display, units)
+    }
+
+    fn source_text(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        checked_source(source).0
+    }
+
     use lingxi_core::host::http::{HttpError, HttpTransport, SseStream};
     use mobile_linux_api::ProcessOutput;
     use std::sync::Mutex;
@@ -2066,7 +2083,7 @@ mod tests {
             .call(source_json(r#"{"action":"get"}"#), fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing trigger_id");
-        assert!(format!("{err}").contains("get requires trigger_id"));
+        assert!(source_text(&err.model_facing_message()).contains("get requires trigger_id"));
     }
 
     #[tokio::test]
@@ -2083,7 +2100,7 @@ mod tests {
             )
             .await
             .expect_err("missing body");
-        assert!(format!("{err}").contains("create requires body"));
+        assert!(source_text(&err.model_facing_message()).contains("create requires body"));
     }
 
     #[tokio::test]
@@ -2100,7 +2117,7 @@ mod tests {
             )
             .await
             .expect_err("missing trigger_id");
-        assert!(format!("{err}").contains("update requires trigger_id"));
+        assert!(source_text(&err.model_facing_message()).contains("update requires trigger_id"));
         let err = tool
             .call(
                 source_json(r#"{"action":"update","trigger_id":"t1"}"#),
@@ -2109,7 +2126,7 @@ mod tests {
             )
             .await
             .expect_err("missing body");
-        assert!(format!("{err}").contains("update requires body"));
+        assert!(source_text(&err.model_facing_message()).contains("update requires body"));
     }
 
     #[tokio::test]
@@ -2122,7 +2139,7 @@ mod tests {
             .call(source_json(r#"{"action":"run"}"#), fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing trigger_id");
-        assert!(format!("{err}").contains("run requires trigger_id"));
+        assert!(source_text(&err.model_facing_message()).contains("run requires trigger_id"));
     }
 
     #[tokio::test]

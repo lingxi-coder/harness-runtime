@@ -347,7 +347,7 @@ pub(super) fn normalize_control_request(
     let subtype = request
         .string_at("/subtype")
         .ok_or_else(|| ModError::Hook("Mod UI control request needs a subtype".into()))?;
-    let mut normalized = match subtype {
+    let normalized = match subtype {
         "ui_render" => {
             let mut result = pick_projection_fields(
                 request,
@@ -1460,6 +1460,7 @@ fn client_frame_identity_projections(
     (parent, client)
 }
 
+#[cfg(test)]
 fn set_exact_string_field(
     projection: &mut Utf16JsonProjection,
     field: &str,
@@ -1575,7 +1576,7 @@ fn collect_parent_press_actions(
             }
             return Ok(());
         }
-        let Some(object) = node.object_entries() else {
+        let Some(_object) = node.object_entries() else {
             return Ok(());
         };
         let kind = node
@@ -1811,7 +1812,7 @@ impl ModHost {
             _ => unreachable!("canonical request validator accepted an unknown subtype"),
         };
         Ok(ModUiControlOutcome {
-            response: response,
+            response,
             render_revision,
             client_runtime_epochs,
             client_state_token,
@@ -2120,13 +2121,8 @@ impl ModHost {
             .set_field("props", resolved_props)
             .map_err(|error| ModError::Protocol(error.to_string()))?;
         if !client_modules.is_empty() {
-            let client_modules = Utf16JsonProjection::object(
-                client_modules
-                    .into_iter()
-                    .map(|(plugin, hash)| (plugin, hash))
-                    .collect(),
-            )
-            .map_err(|error| ModError::Protocol(error.to_string()))?;
+            let client_modules = Utf16JsonProjection::object(client_modules.into_iter().collect())
+                .map_err(|error| ModError::Protocol(error.to_string()))?;
             response
                 .set_field("client_modules", client_modules)
                 .map_err(|error| ModError::Protocol(error.to_string()))?;
@@ -3015,7 +3011,7 @@ impl ModHost {
         })?;
         let module_identity =
             ExactHookText::from_json_projection(operation, "/module").expect("validated module");
-        let module = String::from_utf16(module_identity.utf16_code_units.as_slice())
+        let _module = String::from_utf16(module_identity.utf16_code_units.as_slice())
             .map_err(|_| ModError::Hook("Client module identity is not valid host text".into()))?;
         let key_units = operation.string_units("/client").expect("validated client");
         let identity = ClientUiIdentity::new(
@@ -4010,6 +4006,8 @@ mod tests {
     struct UiLifecycleSession {
         root: std::path::PathBuf,
         frames: StdMutex<Vec<(String, Value)>>,
+        raw_frames: StdMutex<Vec<(String, Utf16JsonProjection)>>,
+        allow_non_scalar_frames: bool,
         invalidations: StdMutex<Vec<Value>>,
     }
 
@@ -4036,11 +4034,17 @@ mod tests {
         }
 
         async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
-            // This test adapter uses Value only as a bounded semantic oracle;
-            // production frame routing stays on the exact projection above.
+            // Preserve raw frames for assertions that include lone UTF-16
+            // units. Ordinary tests may still use Value as a semantic oracle.
+            lock(&self.raw_frames).push((runtime_id.to_owned(), frame.clone()));
             let source = frame.to_json_string().expect("valid test frame projection");
-            let frame = serde_json::from_str(&source).expect("bounded valid test frame");
-            lock(&self.frames).push((runtime_id.to_owned(), frame));
+            match serde_json::from_str(&source) {
+                Ok(frame) => lock(&self.frames).push((runtime_id.to_owned(), frame)),
+                Err(error) => assert!(
+                    self.allow_non_scalar_frames,
+                    "test frame must be a serde_json Value: {error}"
+                ),
+            }
         }
 
         async fn emit_mod_ui_invalidate(
@@ -4083,6 +4087,66 @@ mod tests {
             tree.get("children")
                 .and_then(Value::as_array)
                 .and_then(|children| children.iter().find_map(tree_first_held))
+        })
+    }
+
+    fn projection_tree_contains_text(projection: &Utf16JsonProjection, expected: &str) -> bool {
+        use lingxi_core::types::utf16_json::JsonValueView;
+
+        fn contains_text(tree: JsonValueView<'_>, expected: &str) -> bool {
+            if tree.as_str() == Some(expected) {
+                return true;
+            }
+            if let Some(length) = tree.array_len() {
+                return (0..length).any(|index| {
+                    tree.get_index(index)
+                        .is_some_and(|child| contains_text(child, expected))
+                });
+            }
+            tree.object_entries().is_some_and(|entries| {
+                entries
+                    .into_iter()
+                    .any(|entry| contains_text(entry.value, expected))
+            })
+        }
+
+        projection
+            .get_property("tree")
+            .is_some_and(|tree| contains_text(tree, expected))
+    }
+
+    async fn wait_for_exact_client_frame(
+        session: &UiLifecycleSession,
+        runtime_id: &str,
+        stage: &str,
+        predicate: impl Fn(&Utf16JsonProjection) -> bool,
+    ) -> Utf16JsonProjection {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let frame = {
+                    let frames = lock(&session.raw_frames);
+                    frames
+                        .iter()
+                        .rev()
+                        .find(|(seen_runtime, frame)| {
+                            seen_runtime == runtime_id && predicate(frame)
+                        })
+                        .map(|(_, frame)| frame.clone())
+                };
+                if let Some(frame) = frame {
+                    return frame;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let captured = lock(&session.raw_frames)
+                .iter()
+                .filter(|(seen_runtime, _)| seen_runtime == runtime_id)
+                .map(|(_, frame)| frame.clone())
+                .collect::<Vec<_>>();
+            panic!("Client UI frame did not arrive during {stage}; captured frames: {captured:?}")
         })
     }
 
@@ -4761,6 +4825,7 @@ mod tests {
         let host = ModHost::start(None).await.unwrap();
         let session_impl = std::sync::Arc::new(UiLifecycleSession {
             root: directory.path().to_path_buf(),
+            allow_non_scalar_frames: true,
             ..UiLifecycleSession::default()
         });
         let session: std::sync::Arc<dyn ModSessionContext> = session_impl.clone();
@@ -4853,11 +4918,11 @@ mod tests {
         assert_eq!(test_value(&committed)["handled"], true);
 
         let frame =
-            wait_for_client_frame(&session_impl, &runtime_id, "UTF-16 ui.message", |frame| {
-                tree_contains_text(&frame["tree"], "exact-utf16")
+            wait_for_exact_client_frame(&session_impl, &runtime_id, "UTF-16 ui.message", |frame| {
+                projection_tree_contains_text(frame, "exact-utf16")
             })
             .await;
-        assert!(tree_contains_text(&frame["tree"], "exact-utf16"));
+        assert!(projection_tree_contains_text(&frame, "exact-utf16"));
     }
 
     #[test]

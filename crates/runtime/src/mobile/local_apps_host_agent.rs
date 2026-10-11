@@ -1254,15 +1254,16 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        source_text, update_agent_session_after_turn, AgentOutputStream, LocalAppsAgentExecutor,
+        agent_turn_response_source, source_text, update_agent_session_after_turn,
+        AgentOutputStream, LocalAppsAgentExecutor,
     };
     use crate::mobile::local_apps_host::LocalAppsHostBroker;
     use async_trait::async_trait;
     use client::adapter::{ClientEventSink, MockSink};
     use client::protocol::events::ClientEvent;
     use client::protocol::local_apps::{
-        AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto, AppUiActionKindDto,
-        AppUiRequestDto,
+        AppAgentTerminalErrorDto, AppAgentTurnResponseDto, AppBridgeOperationDto,
+        AppBridgeRequestDto, AppEventDto, AppUiActionKindDto, AppUiRequestDto,
     };
     use lingxi_core::host::OutputStream;
     use lingxi_core::types::utf16_json::Utf16JsonProjection;

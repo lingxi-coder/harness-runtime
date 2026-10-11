@@ -210,6 +210,9 @@ pub struct ExecutionContext {
     /// account generation comes from a separate live getter, not from the SDK
     /// credential snapshot.
     pub prompt_cache: Option<PromptCacheRequestContext>,
+    /// Trusted Native Anthropic safeguards and current beta facts, outside
+    /// provider input and persisted conversation metadata.
+    pub native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     /// Host-admitted native server fallback policy, outside provider input.
     pub server_fallback:
         Option<lingxi_llm_client::providers::anthropic::fallback_request::RequestPolicy>,

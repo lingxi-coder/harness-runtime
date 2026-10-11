@@ -931,7 +931,7 @@ pub(crate) fn orchestrator_error_text_source(
                 error
                     .native_anthropic_error_facts()
                     .and_then(|_| match error.http_status() {
-                        Some(400) => Some("API Error: "),
+                        Some(400 | 422) => Some("API Error: "),
                         Some(401 | 403) => Some("Failed to authenticate. API Error: "),
                         _ => None,
                     });

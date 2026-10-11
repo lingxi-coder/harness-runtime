@@ -94,8 +94,10 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
         .filter(|message| message.message_type == "attachment")
         .map(|message| {
             message
-                .extra
-                .string_at("/attachment/type")
+                .attachment_projection
+                .as_ref()
+                .expect("attachment row retains its source projection")
+                .string_at("/type")
                 .expect("attachment row has a typed attachment")
         })
         .collect::<Vec<_>>();
@@ -112,8 +114,10 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     );
     assert_eq!(
         msgs[1]
-            .extra
-            .subprojection("/attachment/context")
+            .attachment_projection
+            .as_ref()
+            .expect("session context attachment")
+            .subprojection("/context")
             .unwrap()
             .to_json_string()
             .unwrap(),
@@ -121,11 +125,17 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
         "empty instruction sources still persist the typed session-context anchor"
     );
     assert!(msgs[2]
-        .extra
-        .at_pointer("/attachment/date")
+        .attachment_projection
+        .as_ref()
+        .expect("date attachment")
+        .at_pointer("/date")
         .is_some_and(|date| date.as_str().is_some()));
     assert_eq!(
-        msgs[4].extra.string_at("/attachment/contextRendering"),
+        msgs[4]
+            .attachment_projection
+            .as_ref()
+            .expect("prompt snapshot attachment")
+            .string_at("/contextRendering"),
         Some("announced"),
         "the one-time prompt snapshot records the selected context rendering"
     );

@@ -355,7 +355,7 @@ pub(super) async fn run(
     let stop_firer = (!spawner_owns_stop
         && request.stop_hook_scope
             == lingxi_core::host::subagent_spawn::SubagentStopScope::Session)
-        .then(|| request.origin_session_id)
+        .then_some(request.origin_session_id)
         .flatten()
         .and_then(|session_id| {
             ctx.task_lifecycle_hooks
@@ -1002,7 +1002,7 @@ mod tests {
         SubagentResult::Completed {
             agent_id: id,
             handback: None,
-            content: serde_json::json!("done"),
+            content: Utf16JsonProjection::from("done"),
             usage: Default::default(),
             cumulative_usage: Default::default(),
             usage_complete: true,

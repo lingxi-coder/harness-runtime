@@ -736,6 +736,18 @@ async fn pre_hook_ask_forces_prompt_over_allow_rule() {
     );
 }
 
+fn has_exact_visible_text(block: &ContentBlock, expected: &str) -> bool {
+    match block {
+        ContentBlock::Text { text, .. } => text == expected,
+        ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => text == expected && utf16_code_units.iter().copied().eq(expected.encode_utf16()),
+        _ => false,
+    }
+}
+
 #[tokio::test]
 async fn pre_tool_additional_context_surfaces_even_when_denied() {
     // HOOK.1 + Fix B (claude.ts `toolExecution.ts:846`): a PreToolUse hook's
@@ -837,7 +849,7 @@ async fn pre_tool_additional_context_surfaces_even_when_denied() {
         .iter()
         .position(|m| {
             matches!(m, ConversationMessage::User { content, .. }
-                if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == ctx_text)))
+                if content.iter().any(|b| has_exact_visible_text(b, ctx_text)))
         })
         .expect("standalone additionalContext message present even though the tool was denied");
 

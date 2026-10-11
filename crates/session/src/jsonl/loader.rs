@@ -2754,7 +2754,7 @@ mod tests {
             Value::Object(compact_metadata),
         );
         JsonlMessage {
-                        message_type: "system".to_string(),
+            message_type: "system".to_string(),
             uuid: uuid.to_string(),
             parent_uuid: None,
             session_id: "11111111-2222-3333-4444-555555555555".to_string(),
@@ -2783,7 +2783,7 @@ mod tests {
 
     fn user_line(uuid: &str) -> JsonlMessage {
         JsonlMessage {
-                        message_type: "user".to_string(),
+            message_type: "user".to_string(),
             uuid: uuid.to_string(),
             parent_uuid: None,
             session_id: "11111111-2222-3333-4444-555555555555".to_string(),

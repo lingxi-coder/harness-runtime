@@ -2054,7 +2054,9 @@ mod tests {
         assert_eq!(seen.tool_use_id.as_deref(), Some("toolu_breaker"));
         assert_eq!(seen.decision_reason_type.as_deref(), Some("classifier"));
         assert_eq!(
-            seen.decision_reason.as_ref().and_then(|text| text.string_at("")),
+            seen.decision_reason
+                .as_ref()
+                .and_then(|text| text.string_at("")),
             Some(
                 "3 consecutive actions were blocked. Please review the transcript before continuing.\n\nLatest blocked action: Auto-mode BLOCK policy matched shell command"
             )
@@ -2729,7 +2731,9 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         // The builder itself, byte-for-byte.
         assert_eq!(
             prompts_unavailable_deny_message(&Utf16JsonProjection::from("<ask>")).string_at(""),
-            Some("Permission for this tool use was denied: it requires interactive approval, and permission prompts are not available in this session. The action was NOT performed. Do not claim it succeeded, and do not retry it in this session \u{2014} report the limitation to the user, or suggest an alternative. What was requested: <ask>")
+            Some(
+                "Permission for this tool use was denied: it requires interactive approval, and permission prompts are not available in this session. The action was NOT performed. Do not claim it succeeded, and do not retry it in this session \u{2014} report the limitation to the user, or suggest an alternative. What was requested: <ask>"
+            )
         );
         assert_eq!(
             PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON,
@@ -2751,7 +2755,8 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         match gate.check_with_context("Bash", &input, &ctx).await {
             PermissionOutcome::Deny { reason } => {
                 assert!(
-                    crate::source_input::starts_with_text(&reason,
+                    crate::source_input::starts_with_text(
+                        &reason,
                         "Permission for this tool use was denied: it requires interactive approval,"
                     ),
                     "deny must carry the Ixf wrapper: {reason:?}"
@@ -3455,11 +3460,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         let outcome = gate
             .consume_auto_outcome(
                 PermissionOutcome::AllowAuto {
-                    updated_input: Some(
-                        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
-                            json!({"command": "echo hi"}),
-                        ),
-                    ),
+                    updated_input: Some(json!({"command": "echo hi"})),
                 },
                 &PermissionCheckContext::default(),
             )
@@ -4008,6 +4009,142 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     }
 
     #[test]
+    fn policy_snapshot_tracks_live_updated_permissions_and_exact_provenance() {
+        let user_source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User);
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                vec![crate::rule::PermissionRule {
+                    value: crate::rule::PermissionRuleValue::from_rule_string("Read"),
+                    behavior: crate::rule::PermissionBehavior::Deny,
+                    source: user_source,
+                }],
+            )
+            .with_roots(FsRoots {
+                cwd: PathBuf::from("/workspace/project"),
+                home: Some(PathBuf::from("/home/tester")),
+                lingxi_home: PathBuf::from("/home/tester/.lingxi"),
+            }),
+        );
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        let mut classifier_settings =
+            core_permission::PermissionClassifierAutoModeSettings::default();
+        classifier_settings.allow.push(
+            Utf16JsonProjection::parse(r#""\ud800""#)
+                .expect("the classifier rule is a valid exact JSON string"),
+        );
+        gate.set_classifier_auto_mode_settings(Some(classifier_settings.clone()));
+
+        let before = gate
+            .permission_policy_snapshot()
+            .expect("policy-backed gate exposes its source facts");
+        assert_eq!(before.permission_mode, "default");
+        assert_eq!(
+            before.classifier_auto_mode_settings,
+            Some(classifier_settings),
+            "the gate snapshot retains trusted AutoMode source facts",
+        );
+        assert_eq!(before.deny_rules.len(), 1);
+        assert_eq!(before.deny_rules[0].rule.string_at(""), Some("Read"));
+        assert_eq!(before.deny_rules[0].source, "userSettings");
+        assert_eq!(before.home_directory, Some(PathBuf::from("/home/tester")));
+        assert_eq!(
+            before.working_directory,
+            Some(PathBuf::from("/workspace/project"))
+        );
+        assert_eq!(
+            before
+                .rule_roots
+                .as_ref()
+                .expect("roots are configured")
+                .iter()
+                .map(|root| (root.source.as_str(), root.path.as_path()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("userSettings", std::path::Path::new("/home/tester/.lingxi")),
+                (
+                    "projectSettings",
+                    std::path::Path::new("/workspace/project")
+                ),
+                ("localSettings", std::path::Path::new("/workspace/project")),
+                ("flagSettings", std::path::Path::new("/workspace/project")),
+                ("policySettings", std::path::Path::new("/workspace/project")),
+                ("cliArg", std::path::Path::new("/workspace/project")),
+                ("command", std::path::Path::new("/workspace/project")),
+                ("session", std::path::Path::new("/workspace/project")),
+                ("toolsNarrowing", std::path::Path::new("/workspace/project")),
+                (
+                    "mcpServerPolicy",
+                    std::path::Path::new("/workspace/project")
+                ),
+                ("hostCredential", std::path::Path::new("/workspace/project")),
+            ]
+        );
+
+        gate.apply_permission_update(
+            &Utf16JsonProjection::parse(
+                r#"{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"\ud800"}],"behavior":"allow","destination":"session"}"#,
+            )
+            .expect("valid updatedPermissions source with an isolated UTF-16 unit"),
+        );
+        gate.apply_permission_update(
+            &Utf16JsonProjection::parse(
+                r#"{"type":"addDirectories","directories":["/workspace/extra"],"destination":"cliArg"}"#,
+            )
+            .expect("valid updatedPermissions directory update"),
+        );
+        gate.apply_permission_update(
+            &Utf16JsonProjection::parse(r#"{"type":"setMode","mode":"plan"}"#)
+                .expect("valid updatedPermissions mode update"),
+        );
+
+        let after = gate
+            .permission_policy_snapshot()
+            .expect("policy-backed gate keeps exposing live facts");
+        assert_eq!(after.permission_mode, "plan");
+        assert_eq!(after.deny_rules[0].source, "userSettings");
+        let added = after
+            .allow_rules
+            .iter()
+            .find(|rule| rule.source == "session")
+            .expect("the live session rule is visible");
+        assert_eq!(
+            added.rule.string_units("").as_deref(),
+            Some(
+                &[
+                    b'B' as u16,
+                    b'a' as u16,
+                    b's' as u16,
+                    b'h' as u16,
+                    b'(' as u16,
+                    0xd800,
+                    b')' as u16
+                ][..]
+            )
+        );
+        assert_eq!(
+            after.additional_working_directories,
+            vec![core_permission::PermissionPolicyWorkingDirectory {
+                path: PathBuf::from("/workspace/extra"),
+                source: "cliArg".to_owned(),
+            }]
+        );
+
+        gate.update_auto_mode_disabled_from_settings(true);
+        let with_live_kill = gate
+            .permission_policy_snapshot()
+            .expect("policy-backed gate exposes current kill state");
+        assert!(with_live_kill.auto_mode_disabled);
+    }
+
+    #[test]
+    fn non_policy_gate_has_no_permission_policy_snapshot() {
+        let gate = RecordingInner::new(PermissionDecision::Allow);
+        assert!(gate.permission_policy_snapshot().is_none());
+    }
+
+    #[test]
     fn apply_permission_updates_folds_over_array() {
         let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
         let gate =
@@ -4316,7 +4453,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         let source = Utf16JsonProjection::parse(r#""Read(src/\uD800/**)""#)
             .expect("a JSON string with a lone surrogate remains valid source JSON");
 
-        gate.set_command_input_denies(&[source.clone()], false);
+        gate.set_command_input_denies(std::slice::from_ref(&source), false);
 
         let retained = gate
             .command_input_denies
@@ -4592,8 +4729,8 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             let bridge = permission_result_to_core(&original);
             let round_trip = permission_result_from_core(&bridge);
             assert_eq!(
-                serde_json::to_value(original).unwrap(),
-                serde_json::to_value(round_trip).unwrap(),
+                serde_json::to_string(&original).unwrap(),
+                serde_json::to_string(&round_trip).unwrap(),
                 "the Mod phase bridge must preserve every result field and presence"
             );
         }
@@ -4656,7 +4793,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     #[test]
     fn read_path_snapshot_uses_live_read_denies_and_not_ask_or_excluded_wide_denies() {
         use lingxi_core::host::permission_gate::{
-            PermissionGate as _, ReadPathPolicyMatch as Match, ReadPathPolicySnapshot,
+            PermissionGate as _, ReadPathPolicyMatch as Match,
         };
 
         let ask_gate = PolicyPermissionGate::new(
@@ -4719,9 +4856,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     #[test]
     fn read_path_snapshot_matches_native_working_dirs_and_hie_carveouts() {
         use crate::working_dirs::AdditionalWorkingDirs;
-        use lingxi_core::host::permission_gate::{
-            ReadPathPolicyMatch as Match, ReadPathPolicySnapshot,
-        };
+        use lingxi_core::host::permission_gate::ReadPathPolicyMatch as Match;
 
         let roots = FsRoots {
             cwd: PathBuf::from("/proj"),

@@ -10,7 +10,6 @@ use lingxi_core::host::{
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

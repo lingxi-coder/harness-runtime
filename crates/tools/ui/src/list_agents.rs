@@ -10,13 +10,13 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
-    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    generated_builtin_schema, source_text_projection, DescriptionOptions, PromptOptions, Tool,
+    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
     ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
@@ -366,6 +366,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::tool_trait::generated_builtin_result;
 
     fn fixture() -> Utf16JsonProjection {
         generated_builtin_result(&json!({}))

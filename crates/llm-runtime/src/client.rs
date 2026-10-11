@@ -57,6 +57,37 @@ fn native_message_effort(
     }
 }
 
+fn supports_native_per_turn_effort_route(
+    provider_id: &ProviderId,
+    protocol: ProtocolFamily,
+) -> bool {
+    protocol == ProtocolFamily::FoundryClaude
+        || (provider_id == &ProviderId::AnthropicFirstParty
+            && protocol == ProtocolFamily::AnthropicMessages)
+}
+
+fn should_project_native_per_turn_effort(
+    provider_id: &ProviderId,
+    protocol: ProtocolFamily,
+    native_route_admitted: bool,
+    request_kind: lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
+    model: &str,
+    experimental_betas_disabled: bool,
+) -> bool {
+    if experimental_betas_disabled
+        || request_kind
+            != lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+        || !lingxi_llm_client::providers::anthropic::supports_per_message_effort(model)
+    {
+        return false;
+    }
+
+    protocol == ProtocolFamily::FoundryClaude
+        || (native_route_admitted
+            && provider_id == &ProviderId::AnthropicFirstParty
+            && protocol == ProtocolFamily::AnthropicMessages)
+}
+
 struct ServiceAuthenticator(ModelRuntime);
 
 #[async_trait::async_trait]
@@ -282,17 +313,20 @@ impl ModelRuntime {
         let route = self
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
-        if route.provider_id != ProviderId::AnthropicFirstParty
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        if !supports_native_per_turn_effort_route(&route.provider_id, entry.protocol)
+            || request.execution.anthropic_request_kind
+                != lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            || crate::structured_output::experimental_betas_disabled()
             || !lingxi_llm_client::providers::anthropic::supports_per_message_effort(
                 &route.request_model,
             )
         {
             return Ok(None);
         }
-        let entry = self
-            .routes
-            .get(&route.profile_name)
-            .ok_or(LlmError::ModelUnavailable)?;
         let admitted = request
             .execution
             .native_anthropic_base_url_fingerprint
@@ -686,14 +720,14 @@ impl ModelRuntime {
             &resolved_route.request_model,
             native_route_admitted,
         );
-        let native_per_turn_effort = (native_route_admitted
-            && request.execution.anthropic_request_kind
-                == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-            && resolved_route.provider_id == ProviderId::AnthropicFirstParty
-            && effective_protocol == ProtocolFamily::AnthropicMessages
-            && lingxi_llm_client::providers::anthropic::supports_per_message_effort(
-                &resolved_route.request_model,
-            ))
+        let native_per_turn_effort = should_project_native_per_turn_effort(
+            &resolved_route.provider_id,
+            effective_protocol,
+            native_route_admitted,
+            request.execution.anthropic_request_kind,
+            &resolved_route.request_model,
+            crate::structured_output::experimental_betas_disabled(),
+        )
         .then(|| {
             effort_policy
                 .as_ref()
@@ -1066,6 +1100,10 @@ impl ModelRuntime {
             wire_call: None,
             registered_attempt: request.execution.model_attempt.is_some(),
             anthropic_request_kind: request.execution.anthropic_request_kind,
+            native_anthropic_request_context: request
+                .execution
+                .native_anthropic_request_context
+                .clone(),
             stream_fallback: request.execution.stream_fallback,
             extra_body,
             effort_policy,
@@ -1693,6 +1731,8 @@ pub struct PreparedLlmCall {
         Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicEffortPolicy>,
     pub(crate) anthropic_request_kind:
         lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
+    pub(crate) native_anthropic_request_context:
+        Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     pub(crate) stream_fallback: bool,
     pub(crate) extra_body: Option<lingxi_llm_client::protocol::JsonPayload>,
     pub(crate) host_failure: crate::execution::HostFailure,
@@ -2248,5 +2288,67 @@ mod shared_client_regression {
             );
         }
         assert_eq!(client.cache.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod native_per_turn_effort_admission_tests {
+    use super::*;
+    use lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind;
+
+    const MODEL: &str = "claude-sonnet-5-5";
+
+    #[test]
+    fn per_turn_projection_is_foundry_main_or_admitted_first_party_only() {
+        assert!(should_project_native_per_turn_effort(
+            &ProviderId::FoundryClaude,
+            ProtocolFamily::FoundryClaude,
+            false,
+            AnthropicRequestKind::Main,
+            MODEL,
+            false,
+        ));
+        assert!(should_project_native_per_turn_effort(
+            &ProviderId::AnthropicFirstParty,
+            ProtocolFamily::AnthropicMessages,
+            true,
+            AnthropicRequestKind::Main,
+            MODEL,
+            false,
+        ));
+        assert!(!should_project_native_per_turn_effort(
+            &ProviderId::AnthropicFirstParty,
+            ProtocolFamily::AnthropicMessages,
+            false,
+            AnthropicRequestKind::Main,
+            MODEL,
+            false,
+        ));
+        assert!(!should_project_native_per_turn_effort(
+            &ProviderId::FoundryClaude,
+            ProtocolFamily::FoundryClaude,
+            false,
+            AnthropicRequestKind::SideQuery,
+            MODEL,
+            false,
+        ));
+        assert!(!should_project_native_per_turn_effort(
+            &ProviderId::FoundryClaude,
+            ProtocolFamily::FoundryClaude,
+            false,
+            AnthropicRequestKind::Main,
+            MODEL,
+            true,
+        ));
+        assert!(!should_project_native_per_turn_effort(
+            &ProviderId::Custom {
+                name: "custom".into()
+            },
+            ProtocolFamily::AnthropicMessages,
+            true,
+            AnthropicRequestKind::Main,
+            MODEL,
+            false,
+        ));
     }
 }

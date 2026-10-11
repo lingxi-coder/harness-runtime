@@ -12,22 +12,25 @@ use std::{path::PathBuf, sync::Arc};
 use tool_api::registry::ToolRegistry;
 
 fn attempt(stop: &str, thinking: bool) -> Vec<HistoryEvent> {
-    vec![
-        message_start("attempt", "claude-opus-4-7"),
-        if thinking {
-            content_block_start_thinking(0)
-        } else {
-            content_block_start_text(0)
-        },
-        if thinking {
-            thinking_delta(0, "private unfinished thought")
-        } else {
-            text_delta(0, "<invoke name=invalid>")
-        },
-        content_block_stop(0),
-        message_delta_stop(stop),
-        message_stop(),
-    ]
+    let mut events = vec![message_start("attempt", "claude-opus-4-7")];
+    if thinking {
+        events.extend([
+            content_block_start_thinking(0),
+            thinking_delta(0, "private unfinished thought"),
+            content_block_stop(0),
+        ]);
+    } else {
+        events.extend([
+            content_block_start_text(0),
+            text_delta(0, "<invoke name=invalid>"),
+            content_block_stop(0),
+            content_block_start_text(1),
+            text_delta(1, "secondary malformed block"),
+            content_block_stop(1),
+        ]);
+    }
+    events.extend([message_delta_stop(stop), message_stop()]);
+    events
 }
 
 #[tokio::test]
@@ -59,7 +62,9 @@ async fn retry_request_omits_malformed_and_thinking_only_attempts() {
             .map(|line| serde_json::from_str(line).unwrap()).collect();
         assert!(!rows.iter().any(|row| row["type"] == "tombstone"), "transient events must not become transcript rows");
         assert!(!std::fs::read_to_string(&path).unwrap().contains("private unfinished thought"));
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("<invoke name=invalid>"));
+        let transcript = std::fs::read_to_string(&path).unwrap();
+        assert!(!transcript.contains("<invoke name=invalid>"));
+        assert!(!transcript.contains("secondary malformed block"));
         let events = output.snapshot().await;
         assert_eq!(events.iter().filter(|event| matches!(event,
             lingxi_core::host::OutputEvent::MessageRetracted { .. })).count(), 1);

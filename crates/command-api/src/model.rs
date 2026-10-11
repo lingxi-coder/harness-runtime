@@ -96,6 +96,7 @@ pub(crate) fn source_concat<'a>(
 }
 
 /// Trim JavaScript whitespace from both ends without decoding the source.
+#[cfg(any(test, feature = "builtin-handlers"))]
 pub(crate) fn trim_source_text(source: &Utf16JsonProjection) -> Utf16JsonProjection {
     let units = source.string_units("").unwrap_or_default();
     let mut start = 0;
@@ -133,6 +134,7 @@ impl SourceTextTestExt for Utf16JsonProjection {
     }
 }
 
+#[cfg(any(test, feature = "builtin-handlers"))]
 fn source_whitespace_unit(unit: u16) -> bool {
     char::from_u32(u32::from(unit)).is_some_and(lingxi_core::host::effort::javascript_whitespace)
 }

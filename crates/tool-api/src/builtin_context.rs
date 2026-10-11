@@ -802,7 +802,6 @@ mod tests {
     use super::*;
     use crate::test_support::{ctx_for_file_tools, make_dummy_fs};
     use lingxi_core::host::permission_gate::PermissionDecision;
-    use serde_json::Value;
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
 

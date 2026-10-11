@@ -24,14 +24,14 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 
-fn build_orch(api: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
+fn build_orch(api: Arc<MockStreamingApiClient>) -> Arc<ConversationOrchestrator> {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let tools = Arc::new(ToolRegistry::new());
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
-    ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api,
@@ -41,7 +41,7 @@ fn build_orch(api: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
         output,
         memory,
         PathBuf::from("/tmp"),
-    )
+    ))
 }
 
 #[tokio::test]
@@ -102,7 +102,7 @@ async fn handle_trait_run_turn_streaming_with_cancel_pre_cancelled_returns_cance
         message_stop(),
     ];
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
-    let orch = Arc::new(build_orch(api));
+    let orch = build_orch(api);
     let handle: Arc<dyn lingxi_core::host::OrchestratorHandle> = orch;
     let cancel = CancellationToken::new();
     cancel.cancel();
@@ -236,7 +236,7 @@ impl Tool for CancelBlockingTool {
     }
 }
 
-fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
+fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> Arc<ConversationOrchestrator> {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let mut registry = ToolRegistry::new();
@@ -244,7 +244,7 @@ fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> Conversation
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
-    ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api,
@@ -254,7 +254,7 @@ fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> Conversation
         output,
         memory,
         PathBuf::from("/tmp"),
-    )
+    ))
 }
 
 /// TDD anchor: a streaming turn emits ONE `tool_use` for a Cancel-behavior tool
@@ -284,7 +284,7 @@ async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_cal
         message_stop(),
     ];
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1]));
-    let orch = Arc::new(build_orch_with_cancel_tool(api.clone()));
+    let orch = build_orch_with_cancel_tool(api.clone());
     let cancel = CancellationToken::new();
 
     // Fire the user-cancel shortly after the turn starts, so the blocking
@@ -362,7 +362,7 @@ async fn user_interrupt_before_tools_stops_turn_top_of_loop() {
         message_stop(),
     ];
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1]));
-    let orch = Arc::new(build_orch(api.clone()));
+    let orch = build_orch(api.clone());
     let cancel = CancellationToken::new();
     cancel.cancel(); // already interrupted — loop must not start a fresh call.
 

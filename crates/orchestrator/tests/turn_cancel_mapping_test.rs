@@ -16,12 +16,13 @@
 //! its work being reported as cancelled — the work is done, persisted, and the
 //! caller is told it did not happen.
 //!
-//! "Late" is made deterministic rather than raced: the provider cancels the
-//! token as a side effect and THEN returns a successful response, so by the time
-//! the step resolves the token is already cancelled. No sleeps, no ordering
-//! assumptions.
+//! "Late" is made deterministic by cancelling from the terminal-output callback,
+//! after the provider step and its cancellation check have completed. No sleeps
+//! or scheduling assumptions are required.
 
 use async_trait::async_trait;
+use lingxi_core::host::{CostSnapshot, OutputStream};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use orchestrator::test_support::{
     mock_message_response, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
@@ -32,29 +33,20 @@ use orchestrator::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tokio_util::sync::CancellationToken as Token;
 use tool_api::registry::ToolRegistry;
 
-/// A provider that cancels the turn's token and then answers successfully.
-///
-/// This is what makes the test deterministic: the cancellation is observable
-/// before the model step resolves, so the step completing and the token being
-/// cancelled are not racing.
-struct CancelsThenSucceeds {
-    token: Token,
+/// A provider that answers successfully without cancelling the in-flight step.
+struct SuccessfulResponse {
     calls: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
-impl OrchestratorApiClient for CancelsThenSucceeds {
+impl OrchestratorApiClient for SuccessfulResponse {
     async fn messages_create(
         &self,
         _request: orchestrator::OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // Fire the cancel BEFORE answering, so the step resolves into an
-        // already-cancelled turn.
-        self.token.cancel();
         Ok(mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "finished the work".into(),
@@ -63,6 +55,47 @@ impl OrchestratorApiClient for CancelsThenSucceeds {
             }],
             Some("end_turn"),
         ))
+    }
+}
+
+/// Fires cancellation only when the successful turn emits its terminal event.
+#[derive(Clone)]
+struct CancelAfterEndTurn {
+    token: CancellationToken,
+    inner: MockOutputStream,
+}
+
+#[async_trait]
+impl OutputStream for CancelAfterEndTurn {
+    async fn emit_text(&self, text: &Utf16JsonProjection) {
+        self.inner.emit_text(text).await;
+    }
+
+    async fn emit_tool_call(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        input: &Utf16JsonProjection,
+    ) {
+        self.inner.emit_tool_call(id, tool, input).await;
+    }
+
+    async fn emit_tool_result(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
+        mcp_meta: Option<&Utf16JsonProjection>,
+    ) {
+        self.inner
+            .emit_tool_result(id, tool, model_text, result, mcp_meta)
+            .await;
+    }
+
+    async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
+        self.inner.emit_end_turn(stop_reason, cost).await;
+        self.token.cancel();
     }
 }
 
@@ -85,9 +118,13 @@ fn a_cancel_arriving_after_the_batched_step_succeeded_keeps_the_end_turn() {
                 .expect("runtime")
                 .block_on(async {
                     let token = CancellationToken::new();
-                    let api = Arc::new(CancelsThenSucceeds {
-                        token: token.clone(),
+                    let api = Arc::new(SuccessfulResponse {
                         calls: std::sync::atomic::AtomicUsize::new(0),
+                    });
+                    let output = MockOutputStream::new();
+                    let cancelling_output = Arc::new(CancelAfterEndTurn {
+                        token: token.clone(),
+                        inner: output,
                     });
                     let orch = ConversationOrchestrator::new(
                         OrchestratorConfig::default(),
@@ -95,7 +132,7 @@ fn a_cancel_arriving_after_the_batched_step_succeeded_keeps_the_end_turn() {
                         Arc::new(ToolRegistry::new()),
                         orchestrator::test_support::noop_hook_executor(),
                         Arc::new(NoOpPermissionGate),
-                        Arc::new(MockOutputStream::new()),
+                        cancelling_output,
                         Arc::new(StaticMemoryProvider::empty()),
                         PathBuf::from("/tmp"),
                     );
@@ -197,17 +234,21 @@ fn a_pre_cancelled_streaming_turn_emits_no_end_event() {
                             message_stop(),
                         ]
                     }
-                    fn build(out: Arc<MockOutputStream>) -> ConversationOrchestrator {
-                        ConversationOrchestrator::new_with_streaming(
-                            OrchestratorConfig::default(),
-                            Arc::new(orchestrator::test_support::MockApiClient::new(Vec::new())),
-                            Arc::new(MockStreamingApiClient::with_turns(vec![round()])),
-                            Arc::new(ToolRegistry::new()),
-                            orchestrator::test_support::noop_hook_executor(),
-                            Arc::new(NoOpPermissionGate),
-                            out,
-                            Arc::new(StaticMemoryProvider::empty()),
-                            PathBuf::from("/tmp"),
+                    fn build(out: Arc<MockOutputStream>) -> Arc<ConversationOrchestrator> {
+                        ConversationOrchestrator::into_shared(
+                            ConversationOrchestrator::new_with_streaming(
+                                OrchestratorConfig::default(),
+                                Arc::new(
+                                    orchestrator::test_support::MockApiClient::new(Vec::new()),
+                                ),
+                                Arc::new(MockStreamingApiClient::with_turns(vec![round()])),
+                                Arc::new(ToolRegistry::new()),
+                                orchestrator::test_support::noop_hook_executor(),
+                                Arc::new(NoOpPermissionGate),
+                                out,
+                                Arc::new(StaticMemoryProvider::empty()),
+                                PathBuf::from("/tmp"),
+                            ),
                         )
                     }
 

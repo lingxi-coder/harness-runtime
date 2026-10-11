@@ -44,18 +44,18 @@ use mcp::normalization::normalize_name_for_mcp;
 use mcp::{binary_blob_saved_message, decode_base64, persist_binary_content, PersistBinaryResult};
 
 /// Side data the blob-persisting cases (`audio`, non-image `resource` blob)
-/// need: where to write decoded bytes, plus the `(now_millis, rand_tag)` seed
-/// that makes each `persistId` unique. Bundled so [`transform_result_content`]
-/// stays a single call and the seed can be fixed in tests.
+/// need: where to write decoded bytes, plus a per-blob `(now_millis, rand_tag)`
+/// seed factory. Bundled so [`transform_result_content`] stays a single call
+/// and tests can provide deterministic seeds.
 #[derive(Clone, Copy)]
 pub struct PersistContext<'a> {
     /// Directory decoded blob bytes are written to (a session/tool-results dir
     /// in production; a `tempfile::TempDir` in tests).
     pub output_dir: &'a Path,
-    /// `Date.now()` analogue feeding the `persistId` template.
-    pub now_millis: u128,
-    /// `Math.random().toString(36).slice(2, 8)` analogue feeding the `persistId`.
-    pub rand_tag: &'a str,
+    /// Produces a fresh `Date.now()` / random-tag pair for every persisted blob.
+    /// Multiple blobs can share a MIME-derived extension, so reusing one seed
+    /// for an entire MCP result would overwrite earlier files.
+    pub seed_factory: &'a (dyn Fn() -> (u128, String) + Send + Sync),
 }
 
 /// MIME types claude-code treats as inline images (binary `Lqd` set). A blob /
@@ -348,12 +348,15 @@ fn persist_blob_to_text_block_source(
         }
     };
 
+    // Persist ids are generated per blob because multiple resources in one
+    // result can map to the same extension and must not overwrite each other.
+    let (now_millis, rand_tag) = (ctx.seed_factory)();
     // persistId = `mcp-${normalizeNameForMCP(serverName)}-blob-${now}-${rand}`
     let persist_id = format!(
         "mcp-{}-blob-{}-{}",
         normalize_name_for_mcp(server_name),
-        ctx.now_millis,
-        ctx.rand_tag
+        now_millis,
+        rand_tag
     );
 
     match persist_binary_content(&bytes, mime_type, &persist_id, ctx.output_dir) {
@@ -454,10 +457,12 @@ mod tests {
     /// A fixed [`PersistContext`] writing into `dir` with a deterministic seed,
     /// so persisted filenames are predictable in assertions.
     fn ctx(dir: &Path) -> PersistContext<'_> {
+        fn fixed_seed() -> (u128, String) {
+            (1700, "abc123".into())
+        }
         PersistContext {
             output_dir: dir,
-            now_millis: 1700,
-            rand_tag: "abc123",
+            seed_factory: &fixed_seed,
         }
     }
 
@@ -752,6 +757,67 @@ mod tests {
             )
         );
         assert_eq!(std::fs::read(&saved_path).unwrap(), payload);
+    }
+
+    #[test]
+    fn same_extension_blobs_get_distinct_persist_ids_and_keep_both_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let next_seed = std::sync::atomic::AtomicUsize::new(0);
+        let seed_factory = || {
+            let index = next_seed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tag = match index {
+                0 => "abc123",
+                1 => "def456",
+                _ => panic!("unexpected extra persisted blob"),
+            };
+            (1700, tag.to_owned())
+        };
+        let content = json!([
+            {
+                "type": "resource",
+                "resource": {
+                    "uri": "mock://first",
+                    "blob": b64(b"first javascript payload"),
+                    "mimeType": "application/javascript"
+                }
+            },
+            {
+                "type": "resource",
+                "resource": {
+                    "uri": "mock://second",
+                    "blob": b64(b"second javascript payload"),
+                    "mimeType": "text/javascript"
+                }
+            }
+        ]);
+        let transformed = transform_result_content(
+            &content,
+            "srv",
+            PersistContext {
+                output_dir: dir.path(),
+                seed_factory: &seed_factory,
+            },
+        );
+
+        let first_path = dir.path().join("mcp-srv-blob-1700-abc123.js");
+        let second_path = dir.path().join("mcp-srv-blob-1700-def456.js");
+        assert_ne!(first_path, second_path);
+        assert!(transformed[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains(first_path.to_str().unwrap()));
+        assert!(transformed[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains(second_path.to_str().unwrap()));
+        assert_eq!(
+            std::fs::read(first_path).unwrap(),
+            b"first javascript payload"
+        );
+        assert_eq!(
+            std::fs::read(second_path).unwrap(),
+            b"second javascript payload"
+        );
     }
 
     #[test]

@@ -558,7 +558,6 @@ impl LoopPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SourceTextTestExt;
 
     fn build_display(args: &str) -> String {
         LoopPromptFn

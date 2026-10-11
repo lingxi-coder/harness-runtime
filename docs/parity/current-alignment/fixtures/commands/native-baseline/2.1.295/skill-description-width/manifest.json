@@ -1,0 +1,88 @@
+{
+  "fixture": "Native Claude Code 2.1.295 Skill description width listing",
+  "native": {
+    "version": "2.1.295 (Claude Code)",
+    "binary": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "runner": "acceptance/skill-description-295/run-native-skill-description-295.py",
+    "runner_sha256": "f62af98b7e90e1e9a58e5387f7cf17afcad1ee874f3eab58f0fc93d7140d39b3"
+  },
+  "capture_summary_sha256": "a7cff8f9dd4d7c7c30aff0e5fc6136cfea51592c64184967de20e17842d30e8e",
+  "source_capture": "acceptance/skill-description-295/capture",
+  "native_listing_path": "$.messages[0].content[3].text",
+  "cases": [
+    {
+      "id": "ascii-250",
+      "native_request_sha256": "2addbfeba164307e7c7b085430b136bc08be0cd914f1fa0e6993aa24b53583a8",
+      "skill_markdown": {
+        "source": "acceptance/skill-description-295/capture/ascii-250/SKILL.md.raw",
+        "fixture": "ascii-250/SKILL.md.raw",
+        "bytes": 338,
+        "sha256": "f7fa404192d46221f2b5b8c8c13ce1a836e7754bb2a6de52c7937d76459ca018"
+      },
+      "listing_line": {
+        "native_source": "acceptance/skill-description-295/capture/ascii-250/request-01.skill-listing-01.raw-line-fragment",
+        "fixture": "ascii-250/skill-listing-line.raw",
+        "bytes": 272,
+        "sha256": "7d17ee2dce1cca092afe120929695301d840b7de3179ef41a0061316d36da920",
+        "description": "250 ASCII a code points / UTF-16 units; full description appears without target-line ellipsis."
+      }
+    },
+    {
+      "id": "unicode-250",
+      "native_request_sha256": "ca4517746d42940ed002ec18e685a4df470af908132f42253b112035a2c21c81",
+      "skill_markdown": {
+        "source": "acceptance/skill-description-295/capture/unicode-250/SKILL.md.raw",
+        "fixture": "unicode-250/SKILL.md.raw",
+        "bytes": 354,
+        "sha256": "c0d27bb5d60392e91c53989039610095b3c2b29e5ed9887bd490673d744b81be"
+      },
+      "listing_line": {
+        "native_source": "acceptance/skill-description-295/capture/unicode-250/request-01.skill-listing-01.raw-line-fragment",
+        "fixture": "unicode-250/skill-listing-line.raw",
+        "bytes": 288,
+        "sha256": "a68909bcc9e3f2641e5b899c5adcb4a9a005e92a37cd25158b89bb228583581d",
+        "description": "250 ASCII a plus U+0301, U+1F469, U+200D, U+1F4BB, and U+FFFD; 255 code points / 257 UTF-16 units; full description appears without target-line ellipsis."
+      }
+    },
+    {
+      "id": "ascii-1200",
+      "native_request_sha256": "d98953b80c35488ddd1f9b67b2b7bf6bc4219110a408f427bac3a585e24755b1",
+      "skill_markdown": {
+        "source": "acceptance/skill-description-295/capture/ascii-1200/SKILL.md.raw",
+        "fixture": "ascii-1200/SKILL.md.raw",
+        "bytes": 1288,
+        "sha256": "4577d58a997cc586f3ad085fdf71c44b5cd82d04d70fda15885173eefaa4291b"
+      },
+      "listing_line": {
+        "native_source": "acceptance/skill-description-295/capture/ascii-1200/request-01.skill-listing-01.raw-line-fragment",
+        "fixture": "ascii-1200/skill-listing-line.raw",
+        "bytes": 1222,
+        "sha256": "ee55bd3eac0921c8fdf355e4d1bceffb4214a92e222d07f3518d2ee9e5757e74",
+        "description": "1,200 ASCII a code points / UTF-16 units; full description appears without target-line ellipsis."
+      }
+    },
+    {
+      "id": "lone-surrogate-escape",
+      "native_request_sha256": "40878334dca01a9762c2ac667a46106852059d1b3a18763df21ffd5a84fd6a9e",
+      "skill_markdown": {
+        "source": "acceptance/skill-description-295/capture/lone-surrogate-escape/SKILL.md.raw",
+        "fixture": "lone-surrogate-escape/SKILL.md.raw",
+        "bytes": 344,
+        "sha256": "8c56bf610b5c3ca9082edc9b916f734db126ca5853f3ad2aafa33ce79e155f5c"
+      },
+      "listing_line": {
+        "native_source": "acceptance/skill-description-295/capture/lone-surrogate-escape/request-01.skill-listing-01.raw-line-fragment",
+        "fixture": "lone-surrogate-escape/skill-listing-line.raw",
+        "bytes": 60,
+        "sha256": "db2b1932ec5b1a7448aec1f8154ce63b9ff2ed852b9a3bbb161b00170722fdba",
+        "description": "YAML description contains the escaped U+D800 followed by 250 ASCII a; the description is absent and the listing uses the body-text fallback."
+      }
+    }
+  ],
+  "validation_boundary": {
+    "native_line_validation": "For each case, the raw line was found exactly once inside the preserved Native JSON-string token; parsing that token as one JSON string and UTF-8 encoding only the selected line reproduced the raw fragment byte-for-byte. The full token and request were intentionally not copied here.",
+    "harness_test_boundary": "The test compares the target line as strict UTF-8 bytes after strictly decoding only that line from the UTF-16 code units in the orchestrator MockApiClient captured message. This validates the outbound ConversationMessage/API-client boundary, not serialized HTTP request bytes or full request parity.",
+    "scope": "Only the native-width-probe listing line is asserted. Reminder wrappers, other skills, ordering, system messages, and tool schemas are outside this fixture assertion."
+  }
+}

@@ -162,8 +162,8 @@ async fn execute_routes_provider_errors_through_taxonomy() {
         .expect_err("must map to taxonomy");
 
     assert!(matches!(
-        error,
-        LlmError::RateLimited { retry_after: Some(after), .. } if after == Duration::from_secs(7)
+        error.classification_source(),
+        LlmError::RateLimited { retry_after: Some(after), .. } if *after == Duration::from_secs(7)
     ));
 }
 

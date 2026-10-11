@@ -118,9 +118,9 @@ pub struct SkillAdminCommandDto {
     /// Correlation id for a mutating operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<u64>,
-    /// Stable skill or trash-entry identifier targeted by the action.
+    /// Exact source skill or trash-entry identifier targeted by the action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
+    pub target: Option<ClientTextDto>,
     /// Writable source scope (`user` or `project`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
@@ -1549,6 +1549,11 @@ impl<'de> Deserialize<'de> for ClientCommand {
             "run_slash_command" => Ok(Self::RunSlashCommand {
                 raw: command_raw_required(&mut fields, "raw")?,
                 turn_id: command_raw_optional(&mut fields, "turn_id")?,
+            }),
+            // Skill ids are source text. Decode the nested DTO from its raw
+            // member so ClientTextDto sees the original JSON string token.
+            "skill_admin" => Ok(Self::SkillAdmin {
+                command: command_raw_required(&mut fields, "command")?,
             }),
             "answer_ask_user_question" => Ok(Self::AnswerAskUserQuestion {
                 request_id: command_raw_required(&mut fields, "request_id")?,

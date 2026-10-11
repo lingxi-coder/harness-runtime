@@ -10,7 +10,6 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_core::host::{IdeEndpointInfo, IdeStatus, IdeTransport, OrchestratorHandle};
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 
 /// Handle for `/ide`, backed by the live orchestrator.
@@ -175,6 +174,7 @@ fn format_endpoint(endpoint: &IdeEndpointInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args(raw: &str) -> ParsedSlashCommand {

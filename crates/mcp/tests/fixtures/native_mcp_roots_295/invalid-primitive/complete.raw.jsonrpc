@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":4,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","content":[{"type":"text","text":"MCP_INPUT_REQUIRED_CASE_FINISHED:invalid_params_string"}]}}

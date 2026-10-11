@@ -292,6 +292,26 @@ impl CronExpression {
         from: SystemTime,
         offset_for: F,
     ) -> Option<SystemTime> {
+        // When DOW is wild, DOM is the sole day constraint. Reject a schedule
+        // only if none of its selected month/DOM pairs can occur in any year.
+        // With both fields restricted the cron day rule is OR, so an
+        // impossible DOM can still match through DOW and must reach the scan.
+        let dom_wild = self.dom.is_wild(1, 31);
+        let dow_wild = self.dow.is_wild(0, 6);
+        if !dom_wild
+            && dow_wild
+            && !self.month.values().iter().any(|month| {
+                let max_dom = match month {
+                    2 => 29,
+                    4 | 6 | 9 | 11 => 30,
+                    _ => 31,
+                };
+                self.dom.values().iter().any(|day| *day <= max_dom)
+            })
+        {
+            return None;
+        }
+
         let from_secs = from
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1001,9 +1021,72 @@ mod tests {
 
     #[test]
     fn next_match_after_impossible_expression_is_none() {
-        // Feb 30 never occurs → no match within the ~366-day horizon.
+        // Feb 30 never occurs, so no match exists in any year.
         let expr = parse_cron("0 0 30 2 *").unwrap();
         assert_eq!(expr.next_match_after_with(at(TUE_2023_11_14), |_| 0), None);
+    }
+
+    #[test]
+    fn impossible_dom_dates_short_circuit_before_timezone_lookup() {
+        for cron in ["0 0 30 2 *", "0 0 31 4 *"] {
+            let expr = parse_cron(cron).unwrap();
+            let offset_calls = std::cell::Cell::new(0_u32);
+            assert_eq!(
+                expr.next_match_after_with(at(TUE_2023_11_14), |_| {
+                    offset_calls.set(offset_calls.get() + 1);
+                    0
+                }),
+                None,
+                "{cron} is impossible in every selected month"
+            );
+            assert_eq!(
+                offset_calls.get(),
+                0,
+                "{cron} should fail in the calendar precheck"
+            );
+        }
+    }
+
+    #[test]
+    fn impossible_dom_precheck_preserves_dom_dow_or_semantics() {
+        // With both fields restricted, Monday matches even though February
+        // never has a 30th. This must not be rejected by the DOM precheck.
+        let expr = parse_cron("0 0 30 2 1").unwrap();
+        let next = expr
+            .next_match_after_with(at(TUE_2023_11_14), |_| 0)
+            .expect("a February Monday satisfies the restricted DOW field");
+        assert!(expr.matches_at_offset(next, 0));
+        let (_, month, _, _, _, _, dow) = decompose(
+            next.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+        assert_eq!((month, dow), (2, 1));
+    }
+
+    #[test]
+    fn february_29_is_not_rejected_by_impossible_dom_precheck() {
+        let expr = parse_cron("0 0 29 2 *").unwrap();
+        let offset_calls = std::cell::Cell::new(0_u32);
+        let next = expr
+            .next_match_after_with(at(TUE_2023_11_14), |_| {
+                offset_calls.set(offset_calls.get() + 1);
+                0
+            })
+            .expect("Feb 29 occurs in leap years");
+        let date = decompose(
+            next.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+        assert_eq!(
+            (date.0, date.1, date.2, date.3, date.4),
+            (2024, 2, 29, 0, 0)
+        );
+        assert!(
+            offset_calls.get() > 0,
+            "valid leap-day schedules still scan"
+        );
     }
 
     // ── local-timezone evaluation (claude-code parity) ────────────────────

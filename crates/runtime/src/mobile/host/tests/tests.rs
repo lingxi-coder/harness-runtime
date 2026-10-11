@@ -17,10 +17,12 @@ use async_trait::async_trait;
 use client::adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
 use client::protocol::events::ClientEvent;
 use client::protocol::listings::SessionModeDto;
+use client::protocol::text::ClientTextDto;
 use lingxi_core::host::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
 use lingxi_core::host::{
     OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::Notify;
 use tool_skill::skill::SkillCommandType;
 
@@ -35,6 +37,60 @@ use super::{
     session_agent_transcript_revision, McpConfigScope, McpRegistry, McpServerConfig, MobileConfig,
     MobileCronStoreHandle, MobileMcpReloadJob, MobileRuntime, MobileSessionAgentObserver,
 };
+
+fn source_text(text: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::from(text)
+}
+
+fn source_value(value: &serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("test JSON value is valid source JSON")
+}
+
+fn source_string_contains(value: &Utf16JsonProjection, needle: &str) -> bool {
+    let Some(units) = value.string_units("") else {
+        return false;
+    };
+    let needle = needle.encode_utf16().collect::<Vec<_>>();
+    if needle.is_empty() {
+        return true;
+    }
+    units
+        .windows(needle.len())
+        .any(|candidate| candidate == needle.as_slice())
+}
+
+fn source_string_starts_with(value: &Utf16JsonProjection, prefix: &str) -> bool {
+    let Some(units) = value.string_units("") else {
+        return false;
+    };
+    let prefix = prefix.encode_utf16().collect::<Vec<_>>();
+    units.starts_with(&prefix)
+}
+
+fn client_text_contains(value: &ClientTextDto, needle: &str) -> bool {
+    let needle = needle.encode_utf16().collect::<Vec<_>>();
+    if needle.is_empty() {
+        return true;
+    }
+    value
+        .code_units
+        .windows(needle.len())
+        .any(|candidate| candidate == needle.as_slice())
+}
+
+fn replayed_session_from_jsonl(raw: &str) -> orchestrator::ReplayedSession {
+    let messages = session::jsonl::reader::route_lines(raw).messages_in_order;
+    let state = orchestrator::state_from_messages(uuid::Uuid::new_v4(), &messages);
+    let runtime_metadata = orchestrator::runtime_metadata_from_messages(&messages);
+    orchestrator::ReplayedSession {
+        display_history: state.history.clone(),
+        state,
+        messages,
+        last_message_uuid: None,
+        runtime_metadata,
+        client_state_tool_results: Default::default(),
+    }
+}
 
 #[test]
 fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
@@ -145,9 +201,9 @@ async fn mobile_workflow_script_path_is_read_gated_before_launcher_io() {
     let runtime = build_mobile(test_config(tmp.path()), platform, listener, permission_sink)
         .await
         .expect("mobile build must succeed without reading scriptPath");
-    let input = serde_json::json!({
+    let input = source_value(&serde_json::json!({
         "scriptPath": script_path.to_string_lossy().into_owned()
-    });
+    }));
     let ctx = tool_api::test_support::fresh_ctx();
 
     runtime
@@ -182,6 +238,8 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
                     text: "nested child".to_string(), citations: None,
                 }],
                 stop_reason: None,
+                resumable: None,
+                per_turn_effort: None,
             }
         }))
         .unwrap()
@@ -212,6 +270,7 @@ fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
             citations: None,
         }],
         stop_reason: None,
+        resumable: None,
     };
     let compact = lingxi_core::types::ConversationMessage::User {
         api_message_override: None,
@@ -223,6 +282,10 @@ fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
         is_meta: false,
         is_compact_summary: true,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     let first = serde_json::to_string(&serde_json::json!({"message": visible})).unwrap() + "\n";
     let second = first.clone()
@@ -253,30 +316,58 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
             citations: None,
         }],
         stop_reason: Some("end_turn".into()),
+        resumable: None,
+        per_turn_effort: None,
     };
     let first_uuid = first_id.as_uuid().to_string();
     let api_uuid = api_row.uuid.as_uuid().to_string();
-    let raw = [
-        serde_json::json!({
-            "type":"assistant", "uuid":first_uuid, "message":first_message
-        }),
-        serde_json::json!({
-            "type":"attachment", "uuid":first_uuid,
-            "message":first_message, "attachment":{"type":"test"}
-        }),
-        serde_json::to_value(&api_row).unwrap(),
-    ]
-    .iter()
-    .map(|row| serde_json::to_string(row).unwrap())
-    .collect::<Vec<_>>()
-    .join("\n");
+    let session_id = "22222222-3333-4333-8444-555555555555";
+    let timestamp = "2026-10-04T00:00:00.000Z";
+    let first_row = serde_json::json!({
+        "type":"assistant",
+        "uuid":first_uuid,
+        "parentUuid":null,
+        "sessionId":session_id,
+        "timestamp":timestamp,
+        "cwd":"/workspace",
+        "version":"test",
+        "isSidechain":false,
+        "message":first_message
+    });
+    let attachment_row = serde_json::json!({
+        "type":"attachment",
+        "uuid":first_uuid,
+        "parentUuid":null,
+        "sessionId":session_id,
+        "timestamp":timestamp,
+        "cwd":"/workspace",
+        "version":"test",
+        "isSidechain":false,
+        "message":first_message,
+        "attachment":{"type":"test"}
+    });
+    let mut api_error_row = serde_json::to_value(&api_row).unwrap();
+    let api_error_object = api_error_row
+        .as_object_mut()
+        .expect("Native API-error row is an object");
+    api_error_object.insert("parentUuid".into(), serde_json::json!(first_uuid));
+    api_error_object.insert("sessionId".into(), serde_json::json!(session_id));
+    api_error_object.insert("cwd".into(), serde_json::json!("/workspace"));
+    api_error_object.insert("version".into(), serde_json::json!("test"));
+    api_error_object.insert("isSidechain".into(), serde_json::json!(false));
+    let raw = [&first_row, &attachment_row, &api_error_row]
+        .iter()
+        .map(|row| serde_json::to_string(row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
     let raw = format!("{raw}\n");
     let identities = session::jsonl::SessionMessageIdentitySnapshot {
         by_uuid: HashMap::from([(first_uuid.clone(), 2), (api_uuid.clone(), 5)]),
         next_message_index: 6,
     };
 
-    let rows = super::parse_main_session_agent_message_rows(raw.as_bytes(), &identities).unwrap();
+    let replayed = replayed_session_from_jsonl(&raw);
+    let rows = super::parse_main_session_agent_message_rows(&replayed, &identities).unwrap();
     assert_eq!(
         rows.len(),
         2,
@@ -291,14 +382,54 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
     );
     let decoded_api_error: lingxi_core::host::ServerFallbackApiErrorRow =
         serde_json::from_str(rows[1].api_error_json.as_deref().unwrap()).unwrap();
-    assert_eq!(decoded_api_error, api_row);
+    assert_eq!(
+        api_error_row["message"]["stop_details"],
+        serde_json::Value::Null
+    );
+    assert!(decoded_api_error
+        .message
+        .stop_details
+        .as_ref()
+        .is_some_and(|details| details.at_pointer("").is_some_and(|root| root.is_null())));
+    let expected_persisted_api_error: lingxi_core::host::ServerFallbackApiErrorRow =
+        serde_json::from_value(api_error_row.clone()).unwrap();
+    assert_eq!(decoded_api_error, expected_persisted_api_error);
     assert_eq!(identities.next_message_index, 6);
+
+    let mut duplicate_api_error_row = api_error_row.clone();
+    let duplicate_api_uuid = MessageId::new().as_uuid().to_string();
+    duplicate_api_error_row["uuid"] = serde_json::json!(duplicate_api_uuid);
+    let ambiguous_raw = [
+        first_row.clone(),
+        attachment_row.clone(),
+        api_error_row.clone(),
+        duplicate_api_error_row,
+    ]
+    .iter()
+    .map(|row| serde_json::to_string(row).unwrap())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let ambiguous_replayed = replayed_session_from_jsonl(&format!("{ambiguous_raw}\n"));
+    let ambiguous_identities = session::jsonl::SessionMessageIdentitySnapshot {
+        by_uuid: HashMap::from([
+            (first_uuid.clone(), 2),
+            (api_uuid.clone(), 5),
+            (duplicate_api_uuid, 6),
+        ]),
+        next_message_index: 7,
+    };
+    let error =
+        super::parse_main_session_agent_message_rows(&ambiguous_replayed, &ambiguous_identities)
+            .expect_err(
+                "duplicate API-error inner IDs must not select an arbitrary outer identity",
+            );
+    assert!(error.contains("ambiguous API-error envelope identity"));
 
     let missing_identity = session::jsonl::SessionMessageIdentitySnapshot {
         by_uuid: HashMap::new(),
         next_message_index: 6,
     };
-    let error = super::parse_main_session_agent_message_rows(raw.as_bytes(), &missing_identity)
+    let error = super::parse_main_session_agent_message_rows(&replayed, &missing_identity)
         .expect_err("a missing main-row identity must not be inferred from visible order");
     assert!(error.contains("stable identity index"));
 }
@@ -369,6 +500,10 @@ fn session_agent_index_excludes_hidden_transcript_records() {
         is_meta: true,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     let hidden_summary = lingxi_core::types::ConversationMessage::User {
         api_message_override: None,
@@ -377,6 +512,10 @@ fn session_agent_index_excludes_hidden_transcript_records() {
         is_meta: false,
         is_compact_summary: true,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     let hidden_transcript_only = lingxi_core::types::ConversationMessage::User {
         api_message_override: None,
@@ -385,12 +524,17 @@ fn session_agent_index_excludes_hidden_transcript_records() {
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: true,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     let visible = lingxi_core::types::ConversationMessage::Assistant {
         per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         stop_reason: None,
+        resumable: None,
     };
     assert!(!session_agent_conversation_is_visible(&hidden_meta));
     assert!(!session_agent_conversation_is_visible(&hidden_summary));
@@ -445,6 +589,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
                     citations: None,
                 }],
                 stop_reason: None,
+                resumable: None,
             },
         })
         .await;
@@ -467,7 +612,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
         ClientEvent::SessionAgentUpdated { session_id, agent }
             if session_id == "session-a"
                 && agent.agent_id == agent_id.to_string()
-                && agent.name == "Design"
+                && agent.name == ClientTextDto::from("Design")
                 && agent.agent_type == "researcher"
                 && agent.status == "running"
     )));
@@ -483,7 +628,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
         ClientEvent::SessionAgentUpdated { session_id, agent }
             if session_id == "session-a"
                 && agent.agent_id == agent_id.to_string()
-                && agent.name == "Design"
+                && agent.name == ClientTextDto::from("Design")
                 && agent.agent_type == "researcher"
                 && agent.status == "completed"
     )));
@@ -568,6 +713,10 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
                 is_meta: true,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             },
         })
         .await;
@@ -596,6 +745,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
                     citations: None,
                 }],
                 stop_reason: None,
+                resumable: None,
             },
         })
         .await;
@@ -666,7 +816,7 @@ async fn session_agent_fallback_row_keeps_envelope_and_tombstone_leaves_index_ga
                 model: Some(api_error.message.model.clone()),
                 stop_reason: Some(api_error.message.stop_reason.clone()),
                 stop_details: api_error.message.stop_details.clone(),
-                usage: Some(api_error.message.usage.clone()),
+                usage: Some(source_value(&api_error.message.usage)),
                 content: api_error.message.content.clone(),
                 is_api_error_message: Some(true),
                 supersedes_uuids: None,
@@ -748,7 +898,7 @@ async fn session_agent_summary_uses_metadata_type_when_name_is_missing() {
         .await
         .expect("summary");
     assert_eq!(summary.agent_type, "researcher");
-    assert_eq!(summary.name, "researcher");
+    assert_eq!(summary.name, ClientTextDto::from("researcher"));
     assert_eq!(summary.model.as_deref(), Some("deepseek-flash"));
     assert_eq!(summary.model_profile.as_deref(), Some("deepseek"));
 }
@@ -1088,7 +1238,7 @@ async fn build_mobile_constructs_orchestrator() {
     let registry = rt.slash_registry.read().await;
     for name in &expected_names {
         assert!(
-            registry.resolve(name).is_some(),
+            registry.resolve(&source_text(name)).is_some(),
             "compiled-in mobile skill {name:?} must be present in the live slash registry"
         );
     }
@@ -1291,8 +1441,8 @@ async fn mobile_local_app_listing_keeps_chat_visibility_and_other_plugins() {
             .write()
             .await
             .register_command(command_api::SlashCommand {
-                name: name.to_string(),
-                description: "router".to_string(),
+                name: source_text(name),
+                description: source_text("router"),
                 source: command_api::CommandSource::Plugin,
                 kind: command_api::SlashCommandKind::Markdown {
                     file_path: std::path::PathBuf::from("/virtual/SKILL.md"),
@@ -1412,7 +1562,7 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
             "live mobile listing must contain {name:?}: {listed_names:?}"
         );
         let desc = loader
-            .load(name)
+            .load(&source_text(name))
             .await
             .expect("load ok")
             .unwrap_or_else(|| panic!("listed skill {name:?} must resolve through Skill"));
@@ -1423,26 +1573,26 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         );
     }
     let foo_v1 = loader
-        .load("foo")
+        .load(&source_text("foo"))
         .await
         .expect("load ok")
         .expect("foo present");
-    assert!(foo_v1.body.contains("FOO BODY v1"));
+    assert!(source_string_contains(&foo_v1.body, "FOO BODY v1"));
     let frontend_design_name = format!(
         "{}:frontend-design",
         crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
     );
     let frontend_design = loader
-        .load(&frontend_design_name)
+        .load(&source_text(&frontend_design_name))
         .await
         .expect("load ok")
         .expect("frontend-design present");
     assert!(
-        !frontend_design.body.contains("DECOY FRONTEND DESIGN"),
+        !source_string_contains(&frontend_design.body, "DECOY FRONTEND DESIGN"),
         "same-name disk decoy must not override the file-backed Plugin frontend-design"
     );
     let loop_desc = loader
-        .load("loop")
+        .load(&source_text("loop"))
         .await
         .expect("load ok")
         .expect("loop present");
@@ -1450,13 +1600,15 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         .dynamic_body
         .as_ref()
         .expect("bundled loop stays programmatic")
-        .build("");
+        .build(&source_text(""));
     assert!(
-        !loop_prompt.contains("DECOY LOOP BODY"),
+        !source_string_contains(&loop_prompt, "DECOY LOOP BODY"),
         "same-name disk decoy must not override bundled loop"
     );
     let registry = rt.slash_registry.read().await;
-    let resolved_loop = registry.resolve("loop").expect("loop resolves");
+    let resolved_loop = registry
+        .resolve(&source_text("loop"))
+        .expect("loop resolves");
     assert_eq!(
         resolved_loop.loaded_from.as_deref(),
         Some("bundled"),
@@ -1470,18 +1622,18 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
     assert!(listed_loop.is_bundled, "loop must list as bundled");
 
     write_skill(tmp.path(), "foo", "Foo skill", "FOO BODY v2");
-    match rt.dispatcher.dispatch("/reload-skills").await {
+    match rt.dispatcher.dispatch(source_text("/reload-skills")).await {
         SlashDispatchResult::Handled { .. } => {}
         other => panic!("reload-skills must be handled locally, got {other:?}"),
     }
     let foo_v2 = loader
-        .load("foo")
+        .load(&source_text("foo"))
         .await
         .expect("load ok")
         .expect("foo present after reload");
-    assert!(foo_v2.body.contains("FOO BODY v2"));
+    assert!(source_string_contains(&foo_v2.body, "FOO BODY v2"));
     let loop_after_reload = loader
-        .load("loop")
+        .load(&source_text("loop"))
         .await
         .expect("load ok")
         .expect("loop still present after reload");
@@ -1489,15 +1641,15 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         .dynamic_body
         .as_ref()
         .expect("bundled loop stays programmatic")
-        .build("");
+        .build(&source_text(""));
     assert!(
-        !loop_prompt_after_reload.contains("DECOY LOOP BODY"),
+        !source_string_contains(&loop_prompt_after_reload, "DECOY LOOP BODY"),
         "bundled loop must survive reload precedence"
     );
 
     std::fs::remove_dir_all(tmp.path().join(".lingxi").join("skills").join("foo"))
         .expect("remove foo skill");
-    match rt.dispatcher.dispatch("/reload-skills").await {
+    match rt.dispatcher.dispatch(source_text("/reload-skills")).await {
         SlashDispatchResult::Handled { .. } => {}
         other => panic!("reload-skills must be handled locally, got {other:?}"),
     }
@@ -1511,25 +1663,28 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         "deleted disk skill must disappear from live listing: {listed_after_delete_names:?}"
     );
     assert!(
-        loader.load("foo").await.expect("load ok").is_none(),
+        loader
+            .load(&source_text("foo"))
+            .await
+            .expect("load ok")
+            .is_none(),
         "deleted disk skill must disappear from the shared Skill loader"
     );
     let frontend_design_after_delete = loader
-        .load(&frontend_design_name)
+        .load(&source_text(&frontend_design_name))
         .await
         .expect("load ok")
         .expect("frontend-design still present");
     assert!(
-        !frontend_design_after_delete
-            .body
-            .contains("DECOY FRONTEND DESIGN"),
+        !source_string_contains(&frontend_design_after_delete.body, "DECOY FRONTEND DESIGN"),
         "the file-backed Plugin frontend-design must survive repeated reloads"
     );
-    assert!(!frontend_design_after_delete
-        .body
-        .contains("RESERVED NAMESPACE DECOY"));
+    assert!(!source_string_contains(
+        &frontend_design_after_delete.body,
+        "RESERVED NAMESPACE DECOY"
+    ));
     let loop_after_delete = loader
-        .load("loop")
+        .load(&source_text("loop"))
         .await
         .expect("load ok")
         .expect("loop still present after delete reload");
@@ -1537,14 +1692,14 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         .dynamic_body
         .as_ref()
         .expect("bundled loop stays programmatic")
-        .build("");
+        .build(&source_text(""));
     assert!(
-        !loop_prompt_after_delete.contains("DECOY LOOP BODY"),
+        !source_string_contains(&loop_prompt_after_delete, "DECOY LOOP BODY"),
         "bundled loop precedence must survive repeated reloads"
     );
     let registry_after_delete = rt.slash_registry.read().await;
     let resolved_loop_after_delete = registry_after_delete
-        .resolve("loop")
+        .resolve(&source_text("loop"))
         .expect("loop resolves after reload");
     assert_eq!(
         resolved_loop_after_delete.loaded_from.as_deref(),
@@ -1558,13 +1713,13 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         .disable(&plugin_id)
         .await
         .expect("disable builtin Plugin");
-    match rt.dispatcher.dispatch("/reload-skills").await {
+    match rt.dispatcher.dispatch(source_text("/reload-skills")).await {
         SlashDispatchResult::Handled { .. } => {}
         other => panic!("reload-skills after disable must be handled, got {other:?}"),
     }
     assert!(
         loader
-            .load(&frontend_design_name)
+            .load(&source_text(&frontend_design_name))
             .await
             .expect("load after disable/reload")
             .is_none(),
@@ -1582,11 +1737,14 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         .await
         .expect("re-enable builtin Plugin");
     let restored = loader
-        .load(&frontend_design_name)
+        .load(&source_text(&frontend_design_name))
         .await
         .expect("load after re-enable")
         .expect("Plugin skill restored");
-    assert!(!restored.body.contains("RESERVED NAMESPACE DECOY"));
+    assert!(!source_string_contains(
+        &restored.body,
+        "RESERVED NAMESPACE DECOY"
+    ));
 }
 
 /// Write a minimal fixture plugin directory `root/{plugin_name}` with one
@@ -1712,12 +1870,12 @@ async fn listing_and_invocation_share_one_registry() {
     // which is exactly the split §19.2 forbids.
     let loaded = rt
         .wired_skill_loader
-        .load(&namespaced_cmd)
+        .load(&source_text(&namespaced_cmd))
         .await
         .expect("load ok")
         .unwrap_or_else(|| panic!("plugin command {namespaced_cmd:?} must be invocable"));
     assert!(
-        loaded.body.contains("FIXTURE COMMAND BODY"),
+        source_string_contains(&loaded.body, "FIXTURE COMMAND BODY"),
         "invoked body must be the fixture plugin command's own content: {:?}",
         loaded.body
     );
@@ -1947,7 +2105,7 @@ async fn mobile_boot_materializes_the_builtin_bundle() {
     );
     let loaded_device_skill = rt
         .wired_skill_loader
-        .load(&namespaced_device_skill)
+        .load(&source_text(&namespaced_device_skill))
         .await
         .expect("load ok")
         .unwrap_or_else(|| panic!("{namespaced_device_skill} must be invocable"));
@@ -1955,7 +2113,7 @@ async fn mobile_boot_materializes_the_builtin_bundle() {
     // content this test read directly off the verified root above — not
     // merely both non-empty, but the actual materialized bytes.
     assert!(
-        loaded_device_skill.body.contains(&real_skill_marker),
+        source_string_contains(&loaded_device_skill.body, &real_skill_marker),
         "the live skill body must be the verified root's own real content, got: {:?}",
         loaded_device_skill.body
     );
@@ -1974,7 +2132,7 @@ async fn mobile_boot_materializes_the_builtin_bundle() {
         .expect("Plugin agent bare skill must resolve through its namespace");
     assert!(matches!(
         preloaded.content.as_slice(),
-        [lingxi_core::types::ContentBlock::Text { text, .. }]
+        [lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }]
             if text.contains("# Frontend QA")
                 && text.contains("Verify the running app, not only the build output.")
     ));
@@ -1991,7 +2149,7 @@ async fn mobile_boot_materializes_the_builtin_bundle() {
     );
     assert!(rt
         .wired_skill_loader
-        .load("lingxi-local-app:openai")
+        .load(&source_text("lingxi-local-app:openai"))
         .await
         .expect("load ok")
         .is_none());
@@ -2387,7 +2545,7 @@ async fn mobile_runtime_binds_adapter_sinks() {
     assert!(matches!(
         outcome,
         lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason }
-            if reason.starts_with("Permission to use ExitPlanMode has been denied.")
+            if source_string_starts_with(&reason, "Permission to use ExitPlanMode has been denied.")
     ));
 
     // Drive a `check()` on a spawned task; a deny-by-default tool parks a
@@ -2396,7 +2554,8 @@ async fn mobile_runtime_binds_adapter_sinks() {
     let g = gate.clone();
     let task = tokio::spawn(async move {
         use permission::gate::PermissionGate;
-        g.check("Bash", &serde_json::json!({"command": "ls"})).await
+        g.check("Bash", &source_value(&serde_json::json!({"command": "ls"})))
+            .await
     });
 
     for _ in 0..2000 {
@@ -3207,7 +3366,7 @@ fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
         assert!(handle
             .inner
             .wired_skill_loader
-            .load(namespaced_skill)
+            .load(&source_text(namespaced_skill))
             .await
             .expect("load after disable")
             .is_none());
@@ -3217,7 +3376,7 @@ fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
             .skill_entries()
             .await
             .iter()
-            .any(|entry| entry.name.string_at("") == Some(namespaced_skill.as_str())));
+            .any(|entry| entry.name.string_at("") == Some(namespaced_skill)));
         assert_eq!(
             super::mobile_live_plugin_skill_count(&handle.inner.slash_registry).await,
             0,
@@ -3274,7 +3433,7 @@ fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
         assert!(handle
             .inner
             .wired_skill_loader
-            .load(namespaced_skill)
+            .load(&source_text(namespaced_skill))
             .await
             .expect("load after re-enable")
             .is_some());
@@ -3285,7 +3444,7 @@ fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
                 .skill_entries()
                 .await
                 .iter()
-                .any(|entry| entry.name.string_at("") == Some(namespaced_skill.as_str())),
+                .any(|entry| entry.name.string_at("") == Some(namespaced_skill)),
             "re-enabling must restore the complete live registry without leaking an \
                  app-only skill into this global conversation's listing"
         );
@@ -3838,7 +3997,7 @@ impl lingxi_core::host::McpTransport for BlockingMobileMcpTransport {
         &self,
         _conn: &lingxi_core::host::McpRawConnection,
         _tool: &str,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
     ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
         Err(lingxi_core::host::McpError::Internal(
             "unused test tool call".into(),
@@ -3848,7 +4007,7 @@ impl lingxi_core::host::McpTransport for BlockingMobileMcpTransport {
     async fn read_resource(
         &self,
         _conn: &lingxi_core::host::McpRawConnection,
-        _uri: &str,
+        _uri: &Utf16JsonProjection,
     ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
         Err(lingxi_core::host::McpError::Internal(
             "unused test resource read".into(),
@@ -4908,7 +5067,7 @@ fn submit_lists_and_loads_nested_workflow_agents() {
                 stop_details: None,
                 usage: llm_runtime::ExecutionUsage::default(),
                 cost: None,
-                provider_metadata: llm_runtime::JsonPayload::default(),
+                provider_metadata: lingxi_llm_client::protocol::JsonPayload::default(),
                 resumable: None,
             };
             let events = llm_runtime::stream_accumulator::response_to_stream_events(response);
@@ -4922,9 +5081,10 @@ fn submit_lists_and_loads_nested_workflow_agents() {
         async fn invoke(
             &self,
             _: &str,
-            _: serde_json::Value,
+            _: Utf16JsonProjection,
             _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError>
+        {
             unreachable!("the scripted child response does not call tools")
         }
 
@@ -5139,7 +5299,7 @@ fn submit_task_message_enters_the_real_human_inbox_without_using_model_send() {
                     .collect::<Vec<_>>(),
                 vec![Some("  continue with care\nnext line".encode_utf16().collect())]
             );
-            assert!(listener.received.lock().await.iter().any(|event| matches!(event, Ev::SystemNotice { message, is_error: false } if message.contains(&task.task_id))));
+            assert!(listener.received.lock().await.iter().any(|event| matches!(event, Ev::SystemNotice { message, is_error: false } if client_text_contains(message, &task.task_id))));
         });
 }
 
@@ -5152,9 +5312,10 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         async fn invoke(
             &self,
             _: &str,
-            _: serde_json::Value,
+            _: Utf16JsonProjection,
             _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError>
+        {
             unreachable!("fixture model never calls tools")
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -5386,7 +5547,7 @@ fn submit_task_stop_skips_second_workflow_status_event() {
                     // Not a Local App workflow.
                     scope: None,
                 },
-                "workflow".to_string(),
+                Utf16JsonProjection::from("workflow"),
             )
             .await
             .expect("create workflow placeholder");
@@ -5871,7 +6032,7 @@ impl orchestrator::StreamingApiClient for PendingPromptStreamClient {
         skip_global_cache_for_system_prompt: bool,
         _request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<
-        futures::stream::BoxStream<
+        futures_util::stream::BoxStream<
             'static,
             Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
         >,
@@ -5898,10 +6059,10 @@ impl orchestrator::StreamingApiClient for PendingPromptStreamClient {
         {
             let _ = entered.send(());
         }
-        let stream: futures::stream::BoxStream<
+        let stream: futures_util::stream::BoxStream<
             'static,
             Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
-        > = Box::pin(futures::stream::pending());
+        > = Box::pin(futures_util::stream::pending());
         Ok(stream)
     }
 }
@@ -5909,6 +6070,7 @@ impl orchestrator::StreamingApiClient for PendingPromptStreamClient {
 #[test]
 fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
     use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
     use orchestrator::test_support_stream::{
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
         message_stop, text_delta, MockStreamingApiClient,
@@ -5916,7 +6078,9 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let text = "mobile cold-replay 🚀 prompt".to_owned();
-    let prompt_units = text.encode_utf16().collect::<Vec<_>>();
+    let mut prompt_units = text.encode_utf16().collect::<Vec<_>>();
+    let isolated_surrogate_index = "mobile cold-replay 🚀".encode_utf16().count();
+    prompt_units.insert(isolated_surrogate_index, 0xd800);
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
     let first_listener = Arc::new(FakeListener::default());
@@ -5931,7 +6095,6 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
 
     let first_runtime = first.runtime();
     let first_for_work = first.clone();
-    let initial_text = text.clone();
     let initial_prompt_units = prompt_units.clone();
     let session_id = first_runtime.block_on(async move {
         let first = first_for_work;
@@ -5957,10 +6120,11 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
 
         first
             .submit(client::protocol::commands::ClientCommand::SendPrompt {
-                text: initial_text.clone(),
+                text: ClientTextDto::from_code_units(initial_prompt_units.clone()),
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: Some(246),
+                visualization_context: None,
             })
             .await
             .expect("submit user prompt");
@@ -5971,15 +6135,18 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
 
         let first_calls = pending.captured_calls();
         assert_eq!(first_calls.len(), 1);
-        assert!(first_calls[0].messages.iter().any(|message| matches!(
-            message,
-                lingxi_core::types::ConversationMessage::User { content, .. }
-                if content.iter().any(|block| match block {
-                    lingxi_core::types::ContentBlock::Text { text: actual, .. }
-                    | lingxi_core::types::ContentBlock::TextJsUtf16 { text: actual, .. } => actual == &initial_text,
-                    _ => false,
-                })
-        )), "the original entry prompt must reach the first model request");
+        assert!(
+            first_calls[0].messages.iter().any(|message| matches!(
+                message,
+                ConversationMessage::User { content, .. }
+                    if content.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                            if utf16_code_units == &initial_prompt_units
+                    ))
+            )),
+            "the first model request must preserve the exact prompt source units"
+        );
 
         let checkpoint = first
             .durable_turns
@@ -6059,22 +6226,25 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
 
         let calls = resumed_stream.captured_calls().await;
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].messages.iter().any(|message| matches!(
-            message,
-            lingxi_core::types::ConversationMessage::User { content, .. }
-                if content.iter().any(|block| match block {
-                    lingxi_core::types::ContentBlock::Text { text: actual, .. }
-                    | lingxi_core::types::ContentBlock::TextJsUtf16 { text: actual, .. } => actual == &text,
-                    _ => false,
-                })
-        )), "the restarted model request must contain the original prompt");
+        assert!(
+            calls[0].messages.iter().any(|message| matches!(
+                message,
+                ConversationMessage::User { content, .. }
+                    if content.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                            if utf16_code_units == &prompt_units
+                    ))
+            )),
+            "the resumed model request must preserve the exact prompt source units"
+        );
         assert_eq!(
             resumed
                 .durable_turns
                 .load(&session_id, 246)
                 .expect("read resumed checkpoint")
-            .prompt
-            .string_units(""),
+                .prompt
+                .string_units(""),
             Some(prompt_units.clone())
         );
     });
@@ -6693,7 +6863,7 @@ async fn lifecycle_listener_drops_turn_payload_when_no_turn_is_active() {
 
     listener
         .on_event(Ev::SystemNotice {
-            message: "Message accepted for task a12345678".to_string(),
+            message: ClientTextDto::from("Message accepted for task a12345678"),
             is_error: false,
         })
         .await;
@@ -6702,7 +6872,7 @@ async fn lifecycle_listener_drops_turn_payload_when_no_turn_is_active() {
             messages_before: 2,
             messages_after: 1,
             bytes_saved: 10,
-            summary: "kept context".to_string(),
+            summary: ClientTextDto::from("kept context"),
         })
         .await;
     listener
@@ -6770,7 +6940,7 @@ async fn lifecycle_listener_rewrites_cancelled_terminal_and_drops_late_events() 
         .await;
     listener
         .on_event(Ev::SystemNotice {
-            message: "late notice".to_string(),
+            message: ClientTextDto::from("late notice"),
             is_error: false,
         })
         .await;
@@ -6853,7 +7023,7 @@ async fn lifecycle_listener_drops_unowned_live_payloads_but_forwards_questions()
         .await;
     listener
         .on_event(Ev::SystemNotice {
-            message: "unowned notice".to_string(),
+            message: ClientTextDto::from("unowned notice"),
             is_error: false,
         })
         .await;
@@ -7356,8 +7526,9 @@ fn submit_send_prompt_queues_overlapping_turn() {
             result.is_ok(),
             "overlapping SendPrompt must queue: {result:?}"
         );
+        let queued = handle.message_queue.take_mid_turn_prompt().await;
         assert_eq!(
-            handle.message_queue.take_mid_turn_prompt().await.as_deref(),
+            queued.as_ref().and_then(|prompt| prompt.string_at("")),
             Some("pending guidance")
         );
     });
@@ -8034,7 +8205,8 @@ fn submit_approve_resolves_oneshot() {
         let g = gate.clone();
         let parked = handle.runtime().spawn(async move {
             use permission::gate::PermissionGate;
-            g.check("Bash", &serde_json::json!({"command": "ls"})).await
+            g.check("Bash", &source_value(&serde_json::json!({"command": "ls"})))
+                .await
         });
 
         // Spin until the gate has parked exactly one request (id starts at
@@ -9189,7 +9361,7 @@ fn create_app_is_refused_when_the_builtin_plugin_is_disabled() {
         assert_eq!(code, AppErrorCodeDto::NotYetAvailable);
         assert_eq!(request_id.as_deref(), Some("req-plugin-disabled"));
         assert!(
-            message.contains("plugin"),
+            client_text_contains(&message, "plugin"),
             "failure message should name the plugin as the cause, got {message:?}"
         );
     });
@@ -9236,8 +9408,9 @@ fn local_app_create_tool_is_refused_when_the_builtin_plugin_is_disabled() {
                 .clone()
                 .expect("create returns structured content");
             assert!(
-                structured["app"]["id"].as_str().is_some(),
-                "control create must mint a record: {structured}"
+                structured.string_at("/app/id").is_some(),
+                "control create must mint a record: {}",
+                structured.to_json_string().expect("structured source JSON")
             );
 
             handle
@@ -9262,7 +9435,10 @@ fn local_app_create_tool_is_refused_when_the_builtin_plugin_is_disabled() {
                 refused.is_error,
                 "a disabled plugin must refuse the agent-facing create, got {refused:?}"
             );
-            let text = refused.content.to_string();
+            let text = refused
+                .content
+                .to_json_string()
+                .expect("tool result content is source JSON");
             assert!(
                 text.contains("not_yet_available"),
                 "the refusal must carry the same typed code the ClientCommand                  path reports: {text}"
@@ -9281,8 +9457,10 @@ fn local_app_create_tool_is_refused_when_the_builtin_plugin_is_disabled() {
                 .structured_content
                 .expect("list returns structured content");
             assert_eq!(
-                listed["total"], 1,
-                "a refused create must not mint a second record: {listed}"
+                listed.number_at("/total"),
+                Some(1.0),
+                "a refused create must not mint a second record: {}",
+                listed.to_json_string().expect("listed source JSON")
             );
         });
 }
@@ -10265,11 +10443,11 @@ fn initial_app_cold_boot_exposes_only_its_enabled_managed_mcp() {
             local_apps::AppLayout::new(tmp.path(), record.id.clone()).expect("seed app layout");
         let definition = lingxi_core::host::McpToolDefinitionDto::new(
             "read_value",
-            serde_json::json!({
+            source_value(&serde_json::json!({
                 "type": "object",
                 "properties": {},
                 "additionalProperties": false
-            }),
+            })),
         );
         let catalog = serde_json::json!({
             "appId": record.id.clone(),
@@ -10649,7 +10827,7 @@ fn created_row(
 }
 
 /// The first `AppOperationFailed` in a create's events.
-fn first_failure(events: &[Ev]) -> Option<(AppErrorCodeDto, String, Option<String>)> {
+fn first_failure(events: &[Ev]) -> Option<(AppErrorCodeDto, ClientTextDto, Option<String>)> {
     events.iter().find_map(|event| match event {
         Ev::AppOperationFailed {
             code,
@@ -10787,8 +10965,9 @@ fn create_app_in_shell_mode_rejects_a_surface() {
         });
         assert_eq!(code, AppErrorCodeDto::InvalidRequest);
         assert!(
-            message.contains("surface"),
-            "the failure must name the offending field, got {message}"
+            client_text_contains(&message, "surface"),
+            "the failure must name the offending field, got {:?}",
+            message
         );
         assert_eq!(
             request_id.as_deref(),
@@ -10910,7 +11089,7 @@ fn a_failed_shell_create_reports_the_request_id_the_client_sent() {
         .await;
         let (code, message, request_id) = first_failure(&events)
             .unwrap_or_else(|| panic!("AppOperationFailed must be emitted, got {events:?}"));
-        assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message}");
+        assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message:?}");
         assert_eq!(
             request_id.as_deref(),
             Some("req-9"),
@@ -10941,10 +11120,11 @@ fn a_scaffolded_create_reports_the_request_id_on_app_operation_failed() {
         let (code, message, request_id) = first_failure(&events).unwrap_or_else(|| {
             panic!("a Scaffolded create must fail typed on the v9 shell-only wire, got {events:?}")
         });
-        assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message}");
+        assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message:?}");
         assert!(
-            message.contains("shell"),
-            "the failure must explain that CreateApp is shell-only now, got {message}"
+            client_text_contains(&message, "shell"),
+            "the failure must explain that CreateApp is shell-only now, got {:?}",
+            message
         );
         assert_eq!(
             request_id.as_deref(),
@@ -11006,10 +11186,11 @@ fn create_app_accepts_shell_and_rejects_scaffolded_mode() {
             !shell_workspace.join("package.json").exists(),
             "the Shell branch must lay down no scaffold"
         );
-        assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message}");
+        assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message:?}");
         assert!(
-            message.contains("shell"),
-            "the rejection must explain the shell-only contract, got {message}"
+            client_text_contains(&message, "shell"),
+            "the rejection must explain the shell-only contract, got {:?}",
+            message
         );
     });
 }

@@ -95,6 +95,7 @@ pub fn reset_microcompact_state() {
 ///
 /// Round-half-up over nonnegative integers is `(len + 2) / 4` in integer math.
 #[must_use]
+#[cfg(test)]
 fn rough_token_count_estimation(content: &str) -> u64 {
     crate::post_compact::estimate_content_tokens(content)
 }

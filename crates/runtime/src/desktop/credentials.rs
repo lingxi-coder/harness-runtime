@@ -770,9 +770,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                                         tracing::warn!(%error, "could not persist freshened subscription tier")
                                     }
                                 }
-                                if !refresh_generation.publish_if_current(captured_epoch, snap) {
-                                    return;
-                                }
+                                refresh_generation.publish_if_current(captured_epoch, snap);
                             });
                         }
                     }

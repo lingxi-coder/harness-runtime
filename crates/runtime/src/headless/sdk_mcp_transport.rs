@@ -852,6 +852,80 @@ mod tests {
     use super::*;
     use crate::headless::stream_json::OutboundMsg;
 
+    #[tokio::test]
+    async fn desktop_factory_transport_and_raw_provider_drive_sdk_registry_connection() {
+        use crate::desktop::{DesktopConfig, DesktopMcpServices, DesktopSessionComposition};
+        use crate::headless::io::Output;
+        use crate::headless::session;
+        use crate::headless::stream_json::StreamJsonStream;
+
+        let root = tempfile::tempdir().expect("isolated desktop root");
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut config = DesktopConfig {
+            cwd: cwd.clone(),
+            lingxi_home: root.path().join("home"),
+            isolated_credential_storage: true,
+            use_noop_permission_gate: true,
+            composition: Some(DesktopSessionComposition::HeadlessCli),
+            ..Default::default()
+        };
+        let prepared = session::prepare(&mut config, &crate::headless::SessionStart::New)
+            .await
+            .expect("new session preparation");
+        let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+            tokio::io::sink(),
+        )));
+        let plane = StdioControlPlane::new(stream.outbound_tx());
+        let factory_plane = plane.clone();
+        let factory_cwd = cwd.clone();
+        config.mcp_services_factory = Some(Arc::new(move |base| {
+            let transport = SdkMcpTransport::new(base, factory_plane.clone(), factory_cwd.clone());
+            DesktopMcpServices {
+                transport: transport.clone(),
+                raw_connections: transport,
+            }
+        }));
+
+        let runtime = session::build_prepared(
+            config,
+            prepared,
+            stream.clone(),
+            Arc::new(crate::headless::HeadlessPermissionRequestSink),
+        )
+        .await
+        .expect("desktop assembly");
+        let transport = plane
+            .sdk_mcp_transport()
+            .expect("registry must retain the factory's decorated transport");
+        let manifest = Utf16JsonProjection::parse(
+            r#"{"fixture":{"initializeResult":{"protocolVersion":"2025-11-25","serverInfo":{"name":"fixture","version":"1"},"capabilities":{"tools":{"listChanged":true}}},"toolsListResult":{"tools":[{"name":"factory-backed","inputSchema":{"type":"object"}}]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            transport
+                .park_manifests(&["fixture".into()], Some(&manifest))
+                .unwrap()["fixture"],
+            "parked"
+        );
+        drop(transport); // Only the assembled runtime may retain the decorated transport.
+        let initialize =
+            Utf16JsonProjection::parse(r#"{"request":{"sdkMcpServers":["fixture"]}}"#).unwrap();
+        let configs = sdk_servers_from_initialize(&initialize);
+        assert_eq!(configs.len(), 1);
+
+        runtime.orchestrator.connect_sdk_mcp_servers(configs).await;
+        runtime
+            .mcp_registry
+            .ensure_connected_client("fixture")
+            .await
+            .expect("registry must use the factory's paired raw-connection provider");
+
+        let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
+        assert!(shutdown.complete, "{:?}", shutdown.errors);
+        stream.finish().await.unwrap();
+    }
+
     fn endpoint() -> (Endpoint, mpsc::UnboundedReceiver<jsonrpc::Message>) {
         let (inbound, receiver) = mpsc::unbounded_channel();
         (
@@ -903,7 +977,7 @@ mod tests {
             .unwrap();
         let tools = transport.list_tools(&connection.connection).await.unwrap();
         assert_eq!(tools.len(), 1);
-        let schema = tools[0].input_schema_projection.as_ref().unwrap();
+        let schema = &tools[0].input_schema;
         assert_eq!(
             schema
                 .subprojection("/properties")

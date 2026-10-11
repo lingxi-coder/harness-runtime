@@ -665,7 +665,7 @@ fn json_stringify_projection(value: &Utf16JsonProjection) -> String {
 fn projection_u64(value: &Utf16JsonProjection) -> Option<u64> {
     let number = value.at_pointer("")?.as_number()?;
     (number.is_finite() && number >= 0.0 && number < u64::MAX as f64 && number.fract() == 0.0)
-        .then(|| number as u64)
+        .then_some(number as u64)
         .filter(|integer| *integer as f64 == number)
 }
 
@@ -765,23 +765,6 @@ async fn write_settings_obj(path: &Path, obj: &Utf16JsonProjection) -> Result<us
     Ok(body.len())
 }
 
-/// Merge a nested update object into `target` in place (deep merge of objects,
-/// scalar values overwrite). Mirrors the effect of
-/// `updateSettingsForSource('userSettings', buildNestedObject(path, value))`.
-#[cfg(test)]
-fn merge_into(target: &mut Map<String, Value>, update: &Map<String, Value>) {
-    for (k, v) in update {
-        match (target.get_mut(k), v) {
-            (Some(Value::Object(existing)), Value::Object(incoming)) => {
-                merge_into(existing, incoming);
-            }
-            _ => {
-                target.insert(k.clone(), v.clone());
-            }
-        }
-    }
-}
-
 /// Coerce a boolean-typed value per `ConfigTool.ts:185-201`: a `"true"`/
 /// `"false"` string (lowercased, trimmed) becomes the bool; everything else
 /// passes through unchanged.
@@ -810,12 +793,6 @@ fn js_string(value: &Value) -> String {
         Value::Null => "null".to_string(),
         other => other.to_string(),
     }
-}
-
-/// `jsonStringify(value)` — `JSON.stringify`, used in the `Set X to Y` prompt.
-#[cfg(test)]
-fn json_stringify(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
 }
 
 /// Build the success/error output envelope (`outputSchema`,
@@ -1175,7 +1152,6 @@ impl Tool for ConfigTool {
 #[cfg(test)]
 struct TestConfigCallResult {
     data: Value,
-    model_content: Option<String>,
 }
 
 #[cfg(test)]
@@ -1194,15 +1170,7 @@ impl ConfigTool {
                 .expect("test result projection serializes"),
         )
         .expect("test result JSON parses");
-        let model_content = result
-            .model_content
-            .as_ref()
-            .and_then(|value| value.string_at(""))
-            .map(str::to_owned);
-        Ok(TestConfigCallResult {
-            data,
-            model_content,
-        })
+        Ok(TestConfigCallResult { data })
     }
 }
 

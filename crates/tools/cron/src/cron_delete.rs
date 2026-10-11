@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{CRON_DELETE_COMPLETED, CRON_DELETE_FAILED, CRON_DELETE_STARTED};
@@ -23,10 +23,10 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    generated_builtin_result, generated_builtin_schema, source_text_projection,
-    source_text_projection_units, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
-    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
-    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
+    generated_builtin_schema, source_text_projection, source_text_projection_units,
+    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
+    ValidationError,
 };
 
 use std::path::Path;
@@ -467,7 +467,9 @@ fn invalid_tool_input_projection(message: Utf16JsonProjection) -> ToolError {
 mod tests {
     use super::*;
     use mobile_linux_api::ProcessOutput;
+    use serde_json::Value;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
+    use tool_api::tool_trait::generated_builtin_result;
 
     fn fixture(value: Value) -> Utf16JsonProjection {
         generated_builtin_result(&value)
