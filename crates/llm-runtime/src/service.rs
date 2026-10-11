@@ -1487,6 +1487,25 @@ impl ApiService {
         self.client.credential_source(model, profile).await
     }
 
+    /// Resolve classifier model gates while fencing credential reads against
+    /// the same host account generation used by prompt-cache preparation.
+    pub async fn classifier_model_route_facts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError> {
+        for _ in 0..2 {
+            let epoch = self.prompt_cache_overage.account_epoch();
+            let facts = self.client.classifier_model_route_facts(model, profile).await?;
+            if epoch == self.prompt_cache_overage.account_epoch() {
+                return Ok(facts);
+            }
+        }
+        Err(LlmError::Authentication {
+            message: "account changed while resolving classifier model route".into(),
+        })
+    }
+
     /// Native first-party route identity, without credential or network work.
     pub fn is_first_party_route(
         &self,
@@ -2010,7 +2029,8 @@ impl ApiService {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = thinking;
     }
 
-    fn thinking(&self) -> crate::model::thinking::ThinkingConfig {
+    /// Snapshot the live session policy for a fork that inherits its parent.
+    pub fn thinking(&self) -> crate::model::thinking::ThinkingConfig {
         *self
             .thinking
             .read()
@@ -2498,11 +2518,15 @@ impl ApiService {
             ),
         );
         let request_message_source_ids = messages.contributing_message_ids();
+        let request_message_source_indices = messages.block_sources.iter().enumerate()
+            .flat_map(|(index, blocks)| blocks.iter().flatten().map(move |id| (*id, index)))
+            .collect();
         let mut messages = to_llm_messages(messages.messages)?;
         let tool_decls = to_tool_declarations(tools)?;
 
         let mut req = LlmRequest::new(model);
         req.execution.request_message_source_ids = request_message_source_ids;
+        req.execution.request_message_source_indices = request_message_source_indices;
         req.execution.refusal_fallback_context =
             lingxi_core::host::refusal_driver::current_fallback_target();
         if let Some(p) = profile {
@@ -3396,6 +3420,9 @@ impl ApiService {
         };
         lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy {
             request_kind: prepared.anthropic_request_kind,
+            plain_text_message_content: prepared.classifier_system_blocks,
+            explicit_empty_tools: prepared.anthropic_request_kind
+                == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
             extra_body: prepared.extra_body.clone().unwrap_or_default(),
             body_betas,
             effort: prepared.effort_policy.clone(),
@@ -5528,6 +5555,17 @@ impl ApiService {
         req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         req.execution.query_source = query_source.map(str::to_string);
         self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+        if query_source == Some("agent_classifier") {
+            // Native yF only sends an explicitly supplied temperature and
+            // preserves thinking:false as a disabled protocol block.
+            req.input.temperature = temperature;
+            if req.execution.side_thinking_disabled {
+                req.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+                    mode: Some(lingxi_llm_client::protocol::ThinkingMode::Disabled),
+                    ..Default::default()
+                });
+            }
+        }
         req.set_effort(effort)?;
         Ok(req)
     }
@@ -6536,7 +6574,13 @@ impl ApiService {
                     *self.last_retry_count.lock().unwrap() = retry_scope.retry_count();
                     let mut decoder = crate::history_projection::HistoryProjector::projection(
                         crate::upstream::family(&prepared.route.protocol),
-                        crate::stream_provider_metadata_from_headers(&response_headers),
+                        lingxi_llm_client::providers::response_headers::stream_metadata_for_route(
+                            crate::upstream::family(&prepared.route.protocol),
+                            crate::execution::response_provider_id(
+                                &prepared.route.resolved_route.provider_id,
+                            ),
+                            &response_headers.iter().map(|(key, value)| (key.clone(), value.clone())).collect::<Vec<_>>(),
+                        ),
                     );
                     if let Some(binding) = prepared.computer_binding.as_ref() {
                         crate::history_projection::attach_computer_binding(

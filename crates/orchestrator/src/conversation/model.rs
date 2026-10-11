@@ -3,165 +3,8 @@
 use super::*;
 use lingxi_core::types::ContentBlock;
 
-const PROMPT_SUGGESTION_XML_RE: &str = r"(?is)^<(suggestion|response|output|answer|result)>([\s\S]*)</(suggestion|response|output|answer|result)>$";
-const PROMPT_SUGGESTION_LABEL_RE: &str = r"(?is)^\s*(suggested\s+(response|reply|input|prompt)|suggestion|response|reply|answer|output|result)\s*:\s*";
-const PROMPT_SUGGESTION_SILENCE_RE: &str = r"(?i)\bsilence is\b|\bstay(s|ing)? silent\b";
-const PROMPT_SUGGESTION_BARE_SILENCE_RE: &str = r"(?i)^\W*silence\W*$";
-const PROMPT_SUGGESTION_WRAPPER_RE: &str = r#"^\(.*\)$|^\[.*\]$"#;
-// JavaScript's non-`u` `\w` is ASCII-only; Rust regex defaults to Unicode.
-const PROMPT_SUGGESTION_SPEAKER_RE: &str = r"^(?-u:\w)+:\s";
-const PROMPT_SUGGESTION_MULTIPLE_SENTENCES_RE: &str = r"[.!?]\s+[A-Z]";
-const PROMPT_SUGGESTION_EVALUATIVE_RE: &str = r"(?i)thanks|thank you|looks good|sounds good|that works|that worked|that's all|nice|great|perfect|makes sense|awesome|excellent";
-const PROMPT_SUGGESTION_CLAUDE_VOICE_RE: &str = r"(?i)^(let me|i'll|i've|i'm|i can|i would|i think|i notice|here's|here is|here are|that's|this is|this will|you can|you should|you could|sure,|of course|certainly)";
-
-const PROMPT_SUGGESTION_SINGLE_WORD_ALLOWLIST: &[&str] = &[
-    "yes", "yeah", "yep", "yea", "yup", "sure", "ok", "okay", "push", "commit", "deploy", "stop",
-    "continue", "check", "exit", "quit", "no",
-];
-
-fn last_response_is_api_error(history: &[ConversationMessage]) -> bool {
-    history.iter().rev().find_map(|message| match message {
-        ConversationMessage::Assistant { stop_reason, .. } => Some(matches!(
-            stop_reason.as_deref(),
-            Some("model_error" | "max_tokens" | "model_context_window_exceeded" | "refusal")
-        )),
-        _ => None,
-    }) == Some(true)
-}
-
-fn parse_prompt_suggestion_response(raw: &str) -> Option<String> {
-    let xml = regex::Regex::new(PROMPT_SUGGESTION_XML_RE).expect("valid xml regex");
-    let labeled = regex::Regex::new(PROMPT_SUGGESTION_LABEL_RE).expect("valid label regex");
-    let silence = regex::Regex::new(PROMPT_SUGGESTION_SILENCE_RE).expect("valid silence regex");
-    let bare_silence =
-        regex::Regex::new(PROMPT_SUGGESTION_BARE_SILENCE_RE).expect("valid bare silence regex");
-    let wrappers = regex::Regex::new(PROMPT_SUGGESTION_WRAPPER_RE).expect("valid wrapper regex");
-    let speaker = regex::Regex::new(PROMPT_SUGGESTION_SPEAKER_RE).expect("valid speaker regex");
-    let multiple_sentences = regex::Regex::new(PROMPT_SUGGESTION_MULTIPLE_SENTENCES_RE)
-        .expect("valid multiple-sentences regex");
-    let evaluative =
-        regex::Regex::new(PROMPT_SUGGESTION_EVALUATIVE_RE).expect("valid evaluative regex");
-    let claude_voice =
-        regex::Regex::new(PROMPT_SUGGESTION_CLAUDE_VOICE_RE).expect("valid claude-voice regex");
-
-    let mut suggestion = raw.trim();
-    if suggestion.is_empty() {
-        return None;
-    }
-    if let Some(caps) = xml.captures(suggestion) {
-        let opening = caps.get(1).map_or("", |m| m.as_str());
-        let inner = caps.get(2).map_or("", |m| m.as_str());
-        let closing = caps.get(3).map_or("", |m| m.as_str());
-        let nested_lower = format!("</{}>", opening.to_ascii_lowercase());
-        let nested_upper = format!("</{}>", opening.to_ascii_uppercase());
-        if opening.eq_ignore_ascii_case(closing)
-            && !inner.contains(&nested_lower)
-            && !inner.contains(&nested_upper)
-        {
-            suggestion = inner.trim();
-        }
-    }
-    let labeled_str = labeled.replace(suggestion, "").into_owned();
-    suggestion = labeled_str.trim();
-    if suggestion.is_empty() {
-        return None;
-    }
-
-    let lowered = suggestion.to_ascii_lowercase();
-    if matches!(
-        lowered.as_str(),
-        "done" | "nothing found" | "nothing found."
-    ) || silence.is_match(suggestion)
-        || bare_silence.is_match(suggestion)
-        || lowered.starts_with("nothing to suggest")
-        || lowered.starts_with("no suggestion")
-        || wrappers.is_match(suggestion)
-        || lowered.starts_with("api error:")
-        || lowered.starts_with("prompt is too long")
-        || lowered.starts_with("request timed out")
-        || lowered.starts_with("invalid api key")
-        || lowered.starts_with("image was too large")
-        || speaker.is_match(suggestion)
-        || prompt_suggestion_word_weight(suggestion) > 12
-        || suggestion.encode_utf16().count() >= 100
-        || multiple_sentences.is_match(suggestion)
-        || suggestion.contains('\n')
-        || suggestion.contains('*')
-        || evaluative.is_match(suggestion)
-        || claude_voice.is_match(suggestion)
-    {
-        return None;
-    }
-
-    let weighted_words = prompt_suggestion_word_weight(suggestion);
-    if weighted_words < 2 && !suggestion.starts_with('/') {
-        let cjk = prompt_suggestion_cjk_count(suggestion);
-        if cjk > 0 {
-            if cjk < 2 {
-                return None;
-            }
-        } else if !PROMPT_SUGGESTION_SINGLE_WORD_ALLOWLIST.contains(&lowered.as_str()) {
-            return None;
-        }
-    }
-
-    Some(suggestion.to_string())
-}
-
-fn prompt_suggestion_script_counts(text: &str) -> (u32, u32, u32, u32) {
-    let han = regex::Regex::new(r"\p{Han}").expect("han script");
-    let phonetic = regex::Regex::new(
-        r"[\p{Hiragana}\p{Katakana}\u{30FC}\u{FF70}\p{Thai}\p{Lao}\p{Khmer}\p{Myanmar}]",
-    )
-    .expect("phonetic scripts");
-    let hangul = regex::Regex::new(r"\p{Hangul}").expect("hangul script");
-    let letter_or_number = regex::Regex::new(r"[\p{L}\p{N}]").expect("letter or number");
-    let mut han_n = 0;
-    let mut phonetic_n = 0;
-    let mut hangul_n = 0;
-    let mut other_n = 0;
-    let mut buf = [0u8; 4];
-    for c in text.chars() {
-        let s = c.encode_utf8(&mut buf);
-        if han.is_match(s) {
-            han_n += 1;
-        } else if phonetic.is_match(s) {
-            phonetic_n += 1;
-        } else if hangul.is_match(s) {
-            hangul_n += 1;
-        } else if letter_or_number.is_match(s) {
-            other_n += 1;
-        }
-    }
-    (han_n, phonetic_n, hangul_n, other_n)
-}
-
-/// Oracle `PQn`: whitespace tokens, with Han/kana/Thai weighted so CJK
-/// suggestions are not dropped as "one English word".
-fn prompt_suggestion_word_weight(text: &str) -> usize {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return 0;
-    }
-    let mut weight = 0.0_f64;
-    for token in trimmed.split_whitespace() {
-        let (han, phonetic, hangul, other) = prompt_suggestion_script_counts(token);
-        weight += if han == 0 && phonetic == 0 {
-            1.0
-        } else {
-            let mixed = if other + hangul > 0 { 1.0 } else { 0.0 };
-            mixed + f64::from(han) / 2.0 + f64::from(phonetic) / 4.0
-        };
-    }
-    weight.ceil() as usize
-}
-
-/// Oracle `RQn`: Han + kana/Thai + Hangul count. A CJK token with ≥2 of these
-/// letters is kept even when the whitespace word count is 1.
-fn prompt_suggestion_cjk_count(text: &str) -> u32 {
-    let (han, phonetic, hangul, _) = prompt_suggestion_script_counts(text);
-    han + phonetic + hangul
-}
+#[cfg(test)]
+use super::prompt_suggestion::parse_prompt_suggestion_response;
 
 fn is_cross_device(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(17) | Some(18))
@@ -1536,39 +1379,6 @@ impl ConversationOrchestrator {
     /// JSON object with a single `name` field; this side query is history-inert
     /// and tool-less, sharing the same fork runner as `/recap`.
     pub(crate) const SESSION_NAME_PROMPT: &str = "Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation. Use lowercase words separated by hyphens. Examples: \"fix-login-bug\", \"add-auth-feature\", \"refactor-api-client\", \"debug-test-failures\". Return JSON with a \"name\" field.";
-    pub(crate) const PROMPT_SUGGESTION_PROMPT: &str = r#"[SUGGESTION MODE: Suggest what the user might naturally type next in this conversation.]
-
-FIRST: Look at the user's recent messages and original request.
-
-Your job is to predict what THEY would type - not what you think they should do.
-
-THE TEST: Would they think "I was just about to type that"?
-
-EXAMPLES:
-User asked "fix the bug and run tests", bug is fixed → "run the tests"
-After code written → "try it out"
-The assistant offers options → suggest the one the user would likely pick, based on conversation
-The assistant asks to continue → "yes" or "go ahead"
-Task complete, obvious follow-up → "commit this" or "push it"
-After error or misunderstanding → silence (let them assess/correct)
-
-Be specific: "run the tests" beats "continue".
-
-NEVER SUGGEST:
-- Evaluative ("looks good", "thanks")
-- Questions ("what about...?")
-- Assistant-voice ("Let me...", "I'll...", "Here's...")
-- New ideas they didn't ask about
-- Multiple sentences
-
-Stay silent if the next step isn't obvious from what the user said.
-
-Stay silent if a suggestion could be unsafe or inappropriate — including any sensitive topic (security incidents, credentials, harm, private data). Even when the user is doing legitimate security or cybersecurity work, do not predict potentially unsafe actions.
-
-Format: 2-12 words, match the user's style. Or nothing.
-
-Reply with ONLY the suggestion, no quotes or explanation."#;
-
     pub(crate) async fn generate_session_name_query(
         &self,
         cancel: tokio_util::sync::CancellationToken,
@@ -1616,92 +1426,6 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                     .ok_or_else(|| lingxi_core::host::HandleError::ActionFailed(
                         "session name response did not contain a non-empty name".into()
                     )),
-                Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error.to_string())),
-            }
-        }
-    }
-
-    /// Run the history-inert post-turn prompt-suggestion side query.
-    pub async fn generate_prompt_suggestion_query(
-        &self,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<Option<String>, lingxi_core::host::HandleError> {
-        let safety_observer = self.model_safety_observer().await;
-        let runner = self.recap_runner.clone().ok_or_else(|| {
-            lingxi_core::host::HandleError::ActionFailed(
-                "prompt suggestion generation unavailable".into(),
-            )
-        })?;
-        let Some(mut params) = self
-            .model_runtime
-            .cache_safe_slot
-            .as_ref()
-            .ok_or_else(|| {
-                lingxi_core::host::HandleError::ActionFailed(
-                    "prompt suggestion generation unavailable".into(),
-                )
-            })?
-            .get_last()
-            .await
-        else {
-            return Ok(None);
-        };
-
-        // The cache-safe slot is captured before the current assistant reply is
-        // appended. Prompt suggestions run after the turn, so extend the
-        // prefix with the live tail exactly as the oracle's post-turn `tce(e)`
-        // snapshot does.
-        let history = self.session.lock().await.model_context_history();
-        extend_session_memory_fork_context(&mut params.fork_context_messages, &history);
-        if history
-            .iter()
-            .filter(|message| matches!(message, ConversationMessage::Assistant { .. }))
-            .count()
-            < 2
-        {
-            return Ok(None);
-        }
-        if last_response_is_api_error(&history) {
-            return Ok(None);
-        }
-        if self.permission_mode().as_deref() == Some("plan") {
-            return Ok(None);
-        }
-        if self
-            .snapshot_cost_real()
-            .await
-            .current_usage
-            .is_some_and(|usage| {
-                usage
-                    .input_tokens
-                    .saturating_add(usage.cache_creation_input_tokens)
-                    .saturating_add(usage.output_tokens)
-                    > 10_000
-            })
-        {
-            return Ok(None);
-        }
-
-        if cancel.is_cancelled() {
-            return Ok(None);
-        }
-
-        let req = sidequery::ForkedAgentRequest {
-            prompt_messages: vec![ConversationMessage::user(
-                MessageId::new(),
-                Self::PROMPT_SUGGESTION_PROMPT.to_string(),
-            )],
-            cache_safe_params: params,
-            fork_label: "prompt_suggestion".into(),
-            query_source: sidequery::QuerySource::PromptSuggestion,
-            max_output_tokens: None,
-        };
-
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => Ok(None),
-            result = lingxi_core::host::model_safety::bind_model_safety(safety_observer, runner.run(req)) => match result {
-                Ok(result) => Ok(parse_prompt_suggestion_response(&result.final_text)),
                 Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error.to_string())),
             }
         }
@@ -3838,7 +3562,7 @@ mod live_permission_mode_tests;
 #[cfg(test)]
 mod session_sidecar_tests {
     use super::{
-        copy_then_cleanup_with, last_response_is_api_error, move_session_sidecar_best_effort,
+        copy_then_cleanup_with, move_session_sidecar_best_effort,
         parse_prompt_suggestion_response, SidecarCopyError,
     };
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
@@ -4073,20 +3797,7 @@ mod session_sidecar_tests {
         );
     }
 
-    #[test]
-    fn prompt_suggestion_gate_recognizes_synthetic_api_error_assistants() {
-        let assistant = |reason: &str| ConversationMessage::Assistant { per_turn_effort: None,
-            id: MessageId::new(),
-            content: vec![ContentBlock::Text {
-                text: "response".to_string(),
-                citations: None,
-            }],
-            stop_reason: Some(reason.to_string()),
-        };
-        assert!(last_response_is_api_error(&[assistant("model_error")]));
-        assert!(last_response_is_api_error(&[assistant("refusal")]));
-        assert!(!last_response_is_api_error(&[assistant("end_turn")]));
-    }
+
 }
 
 #[cfg(test)]

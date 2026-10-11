@@ -758,6 +758,16 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<crate::protocol::message::VisualizationRefDto>,
     },
+    PromptSuggestion {
+        suggestion: String,
+        uuid: String,
+        session_id: String,
+    },
+    /// Composer state for attached hosts; never emitted on the native SDK stream.
+    PromptSuggestionState {
+        enabled: bool,
+        notice: Option<String>,
+    },
 }
 /// The provider-message portion of a fallback tombstone row. `content_json`
 /// retains every provider block without imposing the narrower display-block

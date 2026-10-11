@@ -724,6 +724,10 @@ impl AdapterPermissionGate {
 
 #[async_trait]
 impl PermissionGate for AdapterPermissionGate {
+    async fn has_pending_request(&self) -> bool {
+        self.pending_count().await > 0
+    }
+
     fn set_permission_persistence_enabled(&self, enabled: bool) {
         self.persistence_enabled.store(enabled, Ordering::Release);
     }

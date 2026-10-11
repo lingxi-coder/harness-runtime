@@ -1364,6 +1364,16 @@ impl McpRegistry {
             .map(|(_, entry)| Arc::clone(&entry.client))
     }
 
+    /// Suggestion generation pauses while a live connected client is eliciting.
+    pub async fn has_pending_elicitation(&self) -> bool {
+        let connections = self.connections.read().await;
+        let clients = self.clients.read().await;
+        clients.iter().any(|(name, entry)| {
+            matches!(connections.get(name), Some(McpConnectionState::Connected { .. }))
+                && entry.client.has_pending_elicitation()
+        })
+    }
+
     /// Return a live [`McpClient`] for `name`, lazily dialing a discovery-cache
     /// hit when needed. `name` is matched by normalized form, exactly like
     /// [`Self::get_client`].

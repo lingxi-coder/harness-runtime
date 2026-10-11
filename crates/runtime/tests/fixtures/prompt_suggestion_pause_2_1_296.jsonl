@@ -1,0 +1,8 @@
+{"type":"control_response","response":{"subtype":"error","request_id":"pause-0","error":"Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received undefined"}}
+{"type":"control_response","response":{"subtype":"error","request_id":"pause-1","error":"Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received string"}}
+{"type":"control_response","response":{"subtype":"error","request_id":"pause-2","error":"Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received null"}}
+{"type":"control_response","response":{"subtype":"success","request_id":"pause-3"}}
+{"type":"control_response","response":{"subtype":"success","request_id":"pause-4"}}
+{"type":"control_response","response":{"subtype":"error","request_id":"pause-5","error":"Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received array"}}
+{"type":"control_response","response":{"subtype":"error","request_id":"pause-6","error":"Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received object"}}
+{"type":"control_response","response":{"subtype":"error","request_id":"pause-7","error":"Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received number"}}

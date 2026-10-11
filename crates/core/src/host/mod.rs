@@ -308,7 +308,7 @@ pub use orchestrator::{
     ModelBillingMode, ModelCapabilities, ModelListing, ModelMetadata, ModelPricing,
     ModelPricingTier, ModelProvenance, ModelUsageRow, OrchestratorHandle, OutputEvent,
     OutputStream, OutputStyleListing, PermissionControlState, PermissionModeAvailability,
-    PlanSnapshot, PromptSnapshot, PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange,
+    PlanSnapshot, PromptSnapshot, PromptSuggestionContext, PromptSuggestionResult, PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange,
     ReasoningControlSpec, ReasoningSelection, RecapOutcome, RefusalContinuationJoin,
     RefusalContinuationPhase, RegisterRepoRootOutcome, RegisterRepoRootRequest,
     ResumeRuntimeSnapshot, RewindRowData, ServerFallbackTombstoneMessage, SkillInfo,

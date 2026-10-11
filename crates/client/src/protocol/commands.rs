@@ -810,6 +810,21 @@ pub enum ClientCommand {
         request_id: String,
         operation_json: String,
     },
+    /// Ephemeral composer observations; independent of the native SDK stream.
+    UpdatePromptSuggestionContext {
+        session_id: String,
+        focus: String,
+        input_empty: bool,
+        pending_permission: bool,
+        elicitation_active: bool,
+    },
+    PromptSuggestionFeedback {
+        session_id: String,
+        uuid: String,
+        action: String,
+    },
+    /// Admission of a command executed entirely by the attached frontend.
+    RecordPromptSuggestionSubmission { text: String },
 }
 
 /// A settings tier the user can WRITE to, as named on the wire.

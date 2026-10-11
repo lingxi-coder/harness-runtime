@@ -1,43 +1,15 @@
-//! Forked-agent runner: full agent loop rooted at the parent's cache-safe
-//! prompt prefix.
+//! Isolated auxiliary forks rooted in the parent's cache-safe prompt prefix.
 //!
-//! **The multi-turn, tool-using fork lives elsewhere — by design.** The full
-//! parent-prefix-rooted, tool-iterating forked subagent loop is implemented and
-//! wired via the `Agent` tool's fork path, NOT through this runner:
-//! `tool_agent::AgentTool::call` (`subagent_type == "fork"`) → `SubagentSpawner`
-//! → `agent::PoolSubagentSpawner::spawn` → `StateMachinePool::allocate` →
-//! `agent::runner::run_subagent_loop` (the real `loop` to `end_turn`/`max_turns`).
-//! All the claude-code fork parity bits are there: the `FORK_AGENT` builtin with
-//! `use_exact_tools`, `lingxi_core::host::fork_subagent::build_forked_messages` for the
-//! cache-safe prefix, the verbatim parent system prompt, and the
-//! `is_in_fork_child` recursion guard. A forked agent that runs tools therefore
-//! goes through `AgentTool`, where that guard and the exact-tools pool apply.
-//!
-//! **This runner is the SINGLE-TURN summarization helper.** It is intentionally
-//! one-shot: when a [`SideQueryClient`] is wired via
-//! [`ForkedAgentRunner::with_side_query_client`], [`ForkedAgentRunner::run`]
-//! replays the parent's cache-safe prefix
-//! (`cache_safe_params.fork_context_messages`) ahead of the fork's own
-//! `prompt_messages` so Anthropic's prompt cache hits the shared prefix, then
-//! issues ONE stateless LLM call and returns the assistant text + usage. No tool
-//! loop runs here — its consumers are summarization-shaped (autocompaction and
-//! the post-session memory extraction). When no client is wired, [`run`] returns
-//! [`ForkError::MissingBackend`] without producing text or usage.
-//!
-//! **Cycle note:** `lingxi-sidequery` deliberately does not depend on
-//! `lingxi-agent` (the cycle would be `agent → memory → sidequery`). The
-//! multi-turn, tool-using fork loop therefore lives in `AgentTool`
-//! (`StateMachinePool::run_subagent_loop`), not here; this runner is the
-//! single-turn (summarization-shaped) path only. A future *sidequery-level*
-//! multi-turn consumer that genuinely cannot reach `AgentTool` would need its
-//! own slot-allocation seam wired in at that point.
-//!
-//! [`run`]: ForkedAgentRunner::run
+//! Summarization-shaped callers issue one model request. Prompt suggestions
+//! use Native's 50-turn bound and deny every requested tool, then continue
+//! with the explicit denial while retaining ordered text candidates. This
+//! runner never executes tools or writes the parent transcript/cache snapshot.
+//! Full tool-executing subagents use the `Agent` tool and its runner instead.
 
 use crate::cache_safe_params::CacheSafeParams;
 use crate::purposes::QuerySource;
 use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
-use lingxi_core::types::ConversationMessage;
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -94,6 +66,11 @@ pub struct ForkedAgentRequest {
 pub struct ForkedAgentResult {
     /// Aggregated final assistant text.
     pub final_text: String,
+    /// Native text candidates, in assistant emission order. Prompt suggestion
+    /// normalization selects the first candidate that passes its text rules.
+    pub candidates: Vec<String>,
+    /// HTTP request id of the first assistant, not its provider message id.
+    pub generation_request_id: Option<String>,
     /// Tool calls emitted by the one-shot provider response. The runner does
     /// not execute them, but callers such as `/btw` must be able to render an
     /// explicit denial instead of silently turning a tool-only response into
@@ -121,7 +98,7 @@ pub enum ForkError {
     Internal(String),
 }
 
-/// Runs single-turn forked agents (summarization-shaped side queries).
+/// Runs isolated auxiliary forks, with explicit no-tool suggestion continuations.
 ///
 /// When a [`SideQueryClient`] is wired via [`Self::with_side_query_client`],
 /// [`Self::run`] performs a real single-turn forked call (see the module
@@ -195,6 +172,24 @@ impl ForkedAgentRunner {
         client.query(request).await
     }
 
+    /// Run a utility request preserving ordered system blocks and their cache
+    /// controls through the provider-backed client, without a parent fork.
+    pub async fn query_with_system_blocks(
+        &self,
+        request: SideQueryRequest,
+        system_blocks: Vec<llm_runtime::SystemBlock>,
+    ) -> Result<SideQueryResponse, SideQueryError> {
+        let Some((client, _)) = &self.side_query else {
+            return Err(SideQueryError::InvalidResponse(
+                "side-query client unavailable".into(),
+            ));
+        };
+        Ok(client.query_fork(request, crate::side_query::ForkedSideQueryOptions {
+            system_blocks: Some(system_blocks),
+            ..Default::default()
+        }).await?.response)
+    }
+
     /// Inherit the SESSION thinking configuration on this runner's forked
     /// calls (cc 2.1.198): the composition root passes the same session
     /// `ThinkingConfig` the main-loop `ApiService` holds, so a compaction
@@ -227,7 +222,8 @@ impl ForkedAgentRunner {
     ///    the cache key. Whether a fork may *execute* a tool is a separate
     ///    policy concern: callers such as `/btw` deny every tool and this
     ///    runner never starts a follow-up tool loop.
-    /// 4. Issue exactly one [`SideQueryClient::query`] and map its response.
+    /// 4. Issue a model query. Suggestions continue with explicit tool denials;
+    ///    every other auxiliary purpose remains one-shot.
     ///
     /// When no backend is wired the runner fails without producing a result.
     ///
@@ -269,7 +265,7 @@ impl ForkedAgentRunner {
         // cc 2.1.261 PCo supplies no max_tokens override to the compaction
         // fork. The 20k threshold reserve is not a summarization output cap.
         let max_tokens = req.max_output_tokens.unwrap_or_else(|| {
-            if req.query_source == QuerySource::Compaction {
+            if matches!(req.query_source, QuerySource::Compaction | QuerySource::PromptSuggestion) {
                 u32::try_from(
                     llm_runtime::model::context_window::default_output_tokens_for_model(&model),
                 )
@@ -279,7 +275,7 @@ impl ForkedAgentRunner {
             }
         });
 
-        let request = SideQueryRequest {
+        let mut request = SideQueryRequest {
             model_attempt: None,
             model,
             profile: cp.tool_use_options.model_profile.clone(),
@@ -305,7 +301,7 @@ impl ForkedAgentRunner {
             // cc 2.1.198: the forked (compaction) call inherits the session
             // thinking config wired at the composition root; `None` = legacy.
             thinking: self.session_thinking,
-            effort: if req.query_source == QuerySource::Compaction
+            effort: if matches!(req.query_source, QuerySource::Compaction | QuerySource::PromptSuggestion)
                 || matches!(&req.query_source, QuerySource::Custom(source) if source == "side_question" || source == "hook_prompt")
             {
                 cp.effort.clone()
@@ -319,13 +315,72 @@ impl ForkedAgentRunner {
             skip_system_prompt_prefix: true,
         };
 
-        let resp = client.query(request).await.map_err(ForkError::Api)?;
-
-        Ok(ForkedAgentResult {
-            final_text: resp.text.unwrap_or_default(),
-            tool_calls: resp.tool_calls,
-            usage: resp.usage,
-        })
+        let suggestion = req.query_source == QuerySource::PromptSuggestion;
+        // Native MC defaults to 50 model turns. Suggestion's canUseTool always
+        // denies; the next model turn receives the exact denial string.
+        let max_turns = if suggestion { 50 } else { 1 };
+        let mut result = ForkedAgentResult {
+            final_text: String::new(),
+            candidates: Vec::new(),
+            generation_request_id: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+        };
+        let options = crate::side_query::ForkedSideQueryOptions {
+            fork_point_message_id: cp.fork_context_messages.last().map(ConversationMessage::id),
+            ..Default::default()
+        };
+        for turn in 0..max_turns {
+            let fork = match client.query_fork(request.clone(), options.clone()).await {
+                Ok(response) => response,
+                // Native I skips an API-error assistant but retains candidates
+                // emitted before it; a later failure must not discard them.
+                Err(_) if suggestion && turn > 0 => break,
+                Err(error) => return Err(ForkError::Api(error)),
+            };
+            if turn == 0 {
+                result.generation_request_id = fork.request_id;
+            }
+            result.usage.add(&fork.response.usage);
+            if !suggestion {
+                result.final_text = fork.response.text.unwrap_or_default();
+                result.candidates = fork.candidates;
+                result.tool_calls = fork.response.tool_calls;
+                break;
+            }
+            result.candidates.extend(fork.candidates);
+            let denials: Vec<_> = fork.assistant_content.iter().filter_map(|block| {
+                let ContentBlock::ToolUse { id, provider_id, .. } = block else { return None };
+                Some(ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: "No tools needed for suggestion".into(),
+                    is_error: Some(true),
+                    provider_tool_use_id: provider_id.clone(),
+                    content_blocks: None,
+                    content_projection: None,
+                })
+            }).collect();
+            result.tool_calls.extend(fork.response.tool_calls);
+            if denials.is_empty() { break; }
+            request.messages.push(ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: fork.assistant_content,
+                stop_reason: fork.response.stop_reason,
+                per_turn_effort: None,
+            });
+            request.messages.push(ConversationMessage::User {
+                id: MessageId::new(),
+                content: denials,
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+                api_message_override: None,
+            });
+        }
+        if suggestion {
+            result.final_text = result.candidates.first().cloned().unwrap_or_default();
+        }
+        Ok(result)
     }
 }
 

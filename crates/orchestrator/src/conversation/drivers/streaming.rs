@@ -2626,6 +2626,7 @@ impl StreamingTurnDriver<'_> {
         // assistant row and retains its identity, so this is also the ID sent
         // by the final `MessageIdentity` and persisted below.
         let assistant_msg = pumped_assistant_message(&pumped, assistant_id);
+        orch.note_turn_model_stop_reason(pumped.stop_reason.as_deref());
         let publication_fence = exec.publication_fence();
         let publication_guard = orch
             .prompt_runtime

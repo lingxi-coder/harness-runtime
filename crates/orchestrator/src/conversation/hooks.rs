@@ -3071,6 +3071,7 @@ impl ConversationOrchestrator {
     }
 
     pub async fn fire_session_end(&self, reason: &str) {
+        self.cancel_prompt_suggestion();
         let session_id = { self.session.lock().await.session_id };
         let mut ended = self.session_end_fired.lock().await;
         let session_id_text = session_id.to_string();

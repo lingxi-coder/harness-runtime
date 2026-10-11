@@ -910,6 +910,7 @@ impl ConversationOrchestrator {
     }
 
     fn main_loop_activity(&self, user_interaction: bool) -> MainLoopActivityGuard {
+        self.cancel_prompt_suggestion();
         let provider = self.prompt_runtime.task_notifications.clone();
         let interactive = self.prompt_is_interactive();
         if let Some(provider) = &provider {
@@ -2152,6 +2153,15 @@ impl ConversationOrchestrator {
         row_token: Option<String>,
         projected_content: Option<ProjectedUserContent>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        let suggestion_origin = queued_inputs.as_ref()
+            .and_then(|inputs| inputs.iter().rev().find(|input| !input.is_meta))
+            .and_then(|input| input.mod_origin.as_ref())
+            .and_then(|origin| origin.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|kind| !matches!(*kind, "user" | "human"))
+            .map(str::to_owned)
+            .or_else(|| (!in_human_turn).then(|| "task_notification".into()));
+        self.begin_prompt_suggestion_turn(prompt, in_human_turn, suggestion_origin).await;
         if !transient_rewake {
             self.begin_turn_metrics();
         }
@@ -2186,6 +2196,11 @@ impl ConversationOrchestrator {
         .await;
         if !transient_rewake {
             self.complete_turn_metrics(&result);
+            if matches!(&result, Ok(ConversationOutcome::EndTurn { .. }))
+                && !completion_cancel.as_ref().is_some_and(CancellationToken::is_cancelled)
+            {
+                self.spawn_prompt_suggestion().await;
+            }
         }
         result
     }

@@ -96,6 +96,7 @@ impl ConversationOrchestrator {
     /// these caches would make the new session depend on the previously mounted
     /// transcript.
     async fn reset_session_scoped_runtime(&self) {
+        self.reset_prompt_suggestion_session();
         // Retire session-owned async hook completions before clearing or
         // restoring the transcript. The token is cancelled before waiting for
         // already-admitted durable attachment commits, so stale producers are
@@ -612,6 +613,7 @@ impl ConversationOrchestrator {
         let prepared_transcript = self.prepare_transcript_switch(session_id, durable_lock)?;
         prepared_transcript.prepare_legacy().await;
         self.reset_session_scoped_runtime().await;
+        self.restore_prompt_suggestion_api_errors(runtime.api_error_message_ids.iter().copied());
         self.restore_response_usage(runtime.current_usage);
         self.prompt_runtime
             .prompt_snapshot_resume
@@ -851,11 +853,31 @@ impl ConversationOrchestrator {
 
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
+    async fn record_prompt_suggestion_submission(&self, text: &str) -> Result<(), HandleError> {
+        self.record_prompt_suggestion_submission_inner(text).await;
+        Ok(())
+    }
+
+    async fn update_prompt_suggestion_context(&self, context: lingxi_core::host::PromptSuggestionContext) -> Result<(), HandleError> {
+        self.apply_prompt_suggestion_context(context).await;
+        Ok(())
+    }
+
+    async fn prompt_suggestion_feedback(&self, session_id: &str, uuid: &str, action: &str) -> Result<(), HandleError> {
+        self.apply_prompt_suggestion_feedback(session_id, uuid, action).await;
+        Ok(())
+    }
+
+    async fn prompt_suggestion_setting_changed(&self, enabled: bool) -> Result<(), HandleError> {
+        self.apply_prompt_suggestion_setting(enabled).await;
+        Ok(())
+    }
     async fn current_session_id(&self) -> lingxi_core::types::SessionId {
         self.session.lock().await.session_id
     }
 
     async fn clear_session(&self) -> Result<(), HandleError> {
+        self.cancel_prompt_suggestion();
         self.run_owned_session_switch(OwnedSessionSwitch::Clear)
             .await
     }
@@ -881,6 +903,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         active_goal: Option<ActiveGoalSnapshot>,
         runtime: lingxi_core::host::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
+        self.cancel_prompt_suggestion();
         self.run_owned_session_switch(OwnedSessionSwitch::Resume {
             session_id,
             history,

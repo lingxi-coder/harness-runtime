@@ -62,9 +62,8 @@ use super::{
     AsyncHookResponseBuffer, BootPermissionTiers, BuildError,
     CoordinatorTeammateDefinitionResolver, CoordinatorWiring, CredentialStoreAuthProvider,
     DeferredToolInvoker, DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker,
-    DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle,
-    DesktopWorkflowEvent, DesktopWorkflowEventSink,
-    DesktopWorktreeCommandHandler, FusionCatalogRefreshingChatGptConnect,
+    DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle, DesktopWorkflowEvent,
+    DesktopWorkflowEventSink, DesktopWorktreeCommandHandler, FusionCatalogRefreshingChatGptConnect,
     FusionCatalogRefreshingCopilotConnect, FusionCatalogRefreshingCredentialWriter,
     FusionCatalogRefreshingOAuthConnect, JsonlWorktreeStatePersister, LlmStack,
     OrchestratorTeammatePromptRenderer, OutputRetryReporter, PluginRuntime,
@@ -751,6 +750,10 @@ pub async fn build_with_credential_stack(
     // TPM-C: use the bare id produced by parse_model_ref (strips a profile/ prefix
     // so a qualified default_model like "openai/gpt-4o" never reaches the wire).
     orch_cfg.model.clone_from(&default_model_id);
+    orch_cfg.classifier_model_explicit = Some(
+        cfg.default_model_explicit || cfg.default_model_env_pinned
+            || effective_settings.as_ref().is_some_and(|settings| settings.settings.model.is_some())
+    );
     // Opus-fallback hop: thread the (already print-mode-gated) fallback model
     // into `OrchestratorConfig.fallback_model`. `None` keeps the turn_loop's
     // 529-overload interception a strict no-op (`turn_loop.rs:496`).

@@ -14,6 +14,7 @@ pub mod remote_ui;
 pub mod resume_truncation;
 mod run;
 mod sdk_mcp_transport;
+mod sdk_prompt_suggestions;
 pub mod session;
 mod stdio;
 pub mod stream_json;

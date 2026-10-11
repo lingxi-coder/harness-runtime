@@ -671,6 +671,8 @@ where
 /// the JSONL loader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumeRuntimeSnapshot {
+    /// Native isApiErrorMessage identities retained independently of provider stop reasons.
+    pub api_error_message_ids: Vec<crate::types::MessageId>,
     /// Latest real assistant usage in the restored, post-compaction chain.
     pub current_usage: Option<CurrentUsageSnapshot>,
     /// Resolved session model to adopt on in-place resume. Empty means "leave
@@ -2329,10 +2331,45 @@ pub struct ModUiSelection {
     pub request_id: Option<String>,
 }
 
+/// Ephemeral UI-host facts. This is a host command, not an SDK output frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptSuggestionContext {
+    pub session_id: String,
+    pub focus: String,
+    pub input_empty: bool,
+    pub pending_permission: bool,
+    pub elicitation_active: bool,
+}
+
+/// The native suggestion query result; the HTTP request id is internal telemetry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSuggestionResult {
+    pub suggestion: String,
+    pub generation_request_id: Option<String>,
+}
+
 /// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
 /// `ConversationOrchestrator` does NOT yet implement it.
 #[async_trait]
 pub trait OrchestratorHandle: Send + Sync {
+    /// Account for a real composer submission before slash-command dispatch.
+    async fn record_prompt_suggestion_submission(&self, _text: &str) -> Result<(), HandleError> {
+        Ok(())
+    }
+    /// Refresh the attached composer's transient suggestion context.
+    async fn update_prompt_suggestion_context(&self, _context: PromptSuggestionContext) -> Result<(), HandleError> {
+        Ok(())
+    }
+
+    /// Acknowledge actual presentation/acceptance, scoped to the current proposal.
+    async fn prompt_suggestion_feedback(&self, _session_id: &str, _uuid: &str, _action: &str) -> Result<(), HandleError> {
+        Ok(())
+    }
+
+    /// Apply the live config toggle and reset the native unused streak on enable.
+    async fn prompt_suggestion_setting_changed(&self, _enabled: bool) -> Result<(), HandleError> {
+        Ok(())
+    }
     /// The session id currently driving the conversation.
     async fn current_session_id(&self) -> SessionId;
 
@@ -3897,6 +3934,23 @@ pub trait OutputStream: Send + Sync {
 
     /// Emit the end-of-turn marker with the cost snapshot.
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot);
+
+    /// Interactive composers opt in; headless owns its explicit suggestion flag.
+    fn wants_prompt_suggestions(&self) -> bool {
+        false
+    }
+
+    /// Host-only composer state; SDK sinks deliberately leave this unimplemented.
+    async fn emit_prompt_suggestion_state(&self, _enabled: bool, _notice: Option<&str>) {}
+
+    /// Ephemeral completion of a background query, anchored to its parent reply.
+    async fn emit_prompt_suggestion(
+        &self,
+        _session_id: &str,
+        _uuid: &str,
+        _suggestion: &str,
+    ) {
+    }
 
     /// Emit when compaction has STARTED (before the summarizer call). The
     /// consumer (TUI / CLI / bridge) should display a progress indicator

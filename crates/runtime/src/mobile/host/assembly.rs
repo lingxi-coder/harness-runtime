@@ -2260,6 +2260,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         // `cwd` is reused below by the batch-8 registration, so clone here.
         cwd.clone(),
     )
+    .with_mod_settings_reader(Arc::new(super::settings_commands::MobileModSettingsReader::new(
+        cfg.lingxi_home.clone(), cwd.clone(),
+    )))
     .with_hook_agent_inheritance(parked_agent_restore_inheritance.clone())
     .with_dynamic_workflows_gate(dynamic_workflows_gate)
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())

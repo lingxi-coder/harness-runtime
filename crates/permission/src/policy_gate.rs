@@ -2597,6 +2597,8 @@ fn is_negated_path_rule(spec: &str) -> bool {
 
 #[async_trait]
 impl PermissionGate for PolicyPermissionGate {
+    async fn has_pending_request(&self) -> bool { self.inner.has_pending_request().await }
+
     async fn check_classifier_only_with_context_or_abort(
         &self,
         name: &str,

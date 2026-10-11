@@ -98,6 +98,15 @@ pub struct OrchestratorConfig {
     /// `AnthropicProvider::messages_create_non_stream`).
     pub model: String,
 
+    /// Native Ah presence for classifier small-fast model selection.
+    /// None lets a host without boot provenance resolve live settings.
+    #[serde(default)]
+    pub classifier_model_explicit: Option<bool>,
+    /// A host-admitted ANTHROPIC_DEFAULT_MODEL default (Native S8), distinct
+    /// from ANTHROPIC_MODEL or per-family override environment variables.
+    #[serde(default)]
+    pub classifier_model_default_env: bool,
+
     /// Opus-fallback model (claude-code `--fallback-model`). When `Some(id)`,
     /// the batched turn loop routes its primary API call through the
     /// fallback-aware path so a consecutive-529 gate on a non-custom Opus
@@ -483,6 +492,8 @@ impl Default for OrchestratorConfig {
             max_structured_output_retries: default_max_structured_output_retries(),
             structured_output_enabled: false,
             model: DEFAULT_MODEL.to_string(),
+            classifier_model_explicit: None,
+            classifier_model_default_env: false,
             fallback_model: None,
             system_prompt_override: None,
             context_rendering: lingxi_core::host::instructions::InstructionRendering::Announced,

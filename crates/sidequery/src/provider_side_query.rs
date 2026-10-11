@@ -30,7 +30,7 @@
 //! test.
 
 use crate::side_query::{
-    CanonicalSideQueryRequest, SideQueryClient, SideQueryError, SideQueryEstimate,
+    CanonicalSideQueryRequest, ForkedSideQueryOptions, ForkedSideQueryResponse, SideQueryClient, SideQueryError, SideQueryEstimate,
     SideQueryRequest, SideQueryResponse,
 };
 use async_trait::async_trait;
@@ -329,6 +329,36 @@ fn decode_response(
     }
 }
 
+fn decode_fork_response(
+    resp: llm_runtime::HistoryResponse,
+    want_structured: bool,
+    first_text_only: bool,
+    separate_text_blocks: bool,
+) -> ForkedSideQueryResponse {
+    let request_id = resp.provider_metadata.pointer("/llm_client/http_request_id")
+        .and_then(serde_json::Value::as_str).map(str::to_owned);
+    let single_assistant = resp.provider_metadata.pointer("/llm_client/non_streaming_response")
+        .and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let assistant_content = crate::fork_response::translate_response_blocks(&resp.content);
+    // Native streaming emits one assistant row per completed content block.
+    // I(M) selects that row's first text block, so each text block is a distinct
+    // candidate; candidates must never be concatenated before normalization.
+    let mut candidates: Vec<_> = assistant_content.iter().filter_map(|block| match block {
+        lingxi_core::types::ContentBlock::Text { text, .. }
+        | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => Some(text.clone()),
+        _ => None,
+    }).collect();
+    // Native's non-streaming fallback yields one assistant containing all
+    // blocks; I(M) reads only its first text block in that transport branch.
+    if single_assistant { candidates.truncate(1); }
+    ForkedSideQueryResponse {
+        request_id,
+        assistant_content,
+        candidates,
+        response: decode_response(resp, want_structured, first_text_only, separate_text_blocks),
+    }
+}
+
 #[async_trait]
 impl SideQueryClient for ProviderSideQueryClient {
     fn estimate_request(
@@ -404,7 +434,14 @@ impl SideQueryClient for ProviderSideQueryClient {
     }
 
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
-        let first_text_only = request.query_source == crate::purposes::QuerySource::Compaction;
+        Ok(self.query_fork(request, ForkedSideQueryOptions::default()).await?.response)
+    }
+
+    async fn query_fork(&self, request: SideQueryRequest, options: ForkedSideQueryOptions) -> Result<ForkedSideQueryResponse, SideQueryError> {
+        let prompt_suggestion = request.query_source == crate::purposes::QuerySource::PromptSuggestion;
+        let first_text_only = prompt_suggestion
+            || request.query_source == crate::purposes::QuerySource::Compaction
+            || request.query_source.as_str() == "agent_classifier";
         let separate_text_blocks = matches!(
             &request.query_source,
             crate::purposes::QuerySource::Custom(source) if source == "side_question"
@@ -425,14 +462,39 @@ impl SideQueryClient for ProviderSideQueryClient {
                 Some(request.max_tokens),
                 convert_tool_choice(request.tool_choice.as_ref()),
                 request.stop_sequences,
-                request.thinking,
+                if prompt_suggestion { Some(service.thinking()) } else { request.thinking },
                 request.effort,
                 request.temperature,
                 Some(query_source),
             )?;
             canonical.execution.model_attempt = request.model_attempt;
-            let resp = service.execute_side_query_request(canonical).await?;
-            return Ok(decode_response(
+            canonical.execution.fork_point_message_id = options.fork_point_message_id;
+            if let Some(system_blocks) = options.system_blocks {
+                // The utility caller supplied its complete system wire shape.
+                // Do not reclassify/cache-join it as a main conversation prompt.
+                let family = canonical.execution.input_protocol.ok_or_else(|| {
+                    LlmError::InvalidRequest { message: "side-query protocol was not resolved".into() }
+                })?;
+                let (system_input, _) = llm_runtime::convert::history_input(
+                    &request.model, &[], &system_blocks, &[], family,
+                )?;
+                canonical.input.system = system_input.system;
+                canonical.input.prompt_cache = system_input.prompt_cache;
+                if query_source == "agent_classifier" {
+                    canonical.execution.classifier_system_blocks = true;
+                } else {
+                    canonical.execution.prompt_cache = None;
+                }
+            }
+            let resp = if prompt_suggestion {
+                // Native I -> runForkedAgent -> query uses the main streaming
+                // request policy, with auxiliary ownership and no transcript writes.
+                canonical.execution.anthropic_request_kind = Default::default(); // Main
+                collect_completed_response(service.stream_request(canonical).await?).await?
+            } else {
+                service.execute_side_query_request(canonical).await?
+            };
+            return Ok(decode_fork_response(
                 resp,
                 wants_structured,
                 first_text_only,
@@ -451,11 +513,11 @@ impl SideQueryClient for ProviderSideQueryClient {
         }
 
         // Build the LlmRequest from the SideQueryRequest DTO.
-        let system: Vec<SystemBlock> = request
+        let system: Vec<SystemBlock> = options.system_blocks.unwrap_or_else(|| request
             .system_prompt
             .as_deref()
             .map(|s| vec![SystemBlock::text(s)])
-            .unwrap_or_default();
+            .unwrap_or_default());
 
         // Convert lingxi_core::types::ConversationMessage → llm_runtime::Message.
         // We inline a minimal conversion here so sidequery does not need to
@@ -511,7 +573,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             family,
         )?;
 
-        Ok(decode_response(
+        Ok(decode_fork_response(
             resp,
             request.output_format.is_some(),
             first_text_only,
