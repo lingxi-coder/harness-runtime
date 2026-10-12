@@ -2,7 +2,7 @@
 //! The host owns lifecycle and persistence; shipped JS owns classification,
 //! Unicode truncation and secret redaction. Provider I/O stays in sidequery.
 use super::*;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 #[path = "prompt_suggestion_background_state.rs"]
 pub(super) mod state;
@@ -235,6 +235,9 @@ impl ConversationOrchestrator {
                         model: query_model.clone(),
                         profile: query_profile.clone(),
                         system_prompt: None,
+                        typed_attachment_ids: std::collections::HashSet::new(),
+                        task_deliveries: std::collections::HashMap::new(),
+                        system_prompt_input: None,
                         messages: vec![ConversationMessage::user(MessageId::new(), prompt)],
                         tools: Vec::new(),
                         tool_choice: None,

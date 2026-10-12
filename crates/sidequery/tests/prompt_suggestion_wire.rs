@@ -1,11 +1,12 @@
 //! Suggestion fork uses native streaming, per-block candidates, and request-local metadata.
+use lingxi_llm_client::protocol::JsonPayload;
 use llm_runtime::test_support::{FixtureTransport, FrameStream};
 use llm_runtime::{
     BoxFuture, LlmError, ProviderRequest, ProviderResponse, RawStreamFrame, StreamingResponse,
 };
 use serde_json::{json, Value};
 use sidequery::{ProviderSideQueryClient, QuerySource, SideQueryClient, SideQueryRequest};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 struct Frames(VecDeque<Value>);
 impl FrameStream for Frames {
@@ -19,7 +20,7 @@ impl FrameStream for Frames {
 }
 #[derive(Default)]
 struct Transport {
-    seen: Mutex<Vec<Value>>,
+    seen: Mutex<Vec<String>>,
 }
 impl FixtureTransport for Transport {
     fn execute<'a>(
@@ -32,7 +33,10 @@ impl FixtureTransport for Transport {
         &'a self,
         request: &'a ProviderRequest,
     ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
-        self.seen.lock().unwrap().push(request.body_json.clone());
+        self.seen
+            .lock()
+            .unwrap()
+            .push(request.body_json.as_json_source().to_owned());
         Box::pin(async {
             Ok(StreamingResponse {
                 status: 200,
@@ -86,27 +90,80 @@ async fn session_prompt_suggestion_streams_with_parent_prefix_candidates_and_htt
         telemetry::feature_flags::test_set_flag("tengu_basalt_spur", pin);
         telemetry::feature_flags::test_set_flag("tengu_basalt_scarp", pin);
         let parent_id = lingxi_core::types::MessageId::new();
-        let result=client.query_fork(SideQueryRequest {
-        model_attempt:None,model:"claude-sonnet-4-6".into(),profile:Some("parent".into()),
-        system_prompt:Some("parent system".into()),messages:vec![
-            lingxi_core::types::ConversationMessage::user(lingxi_core::types::MessageId::new(),"parent user".into()),
-            lingxi_core::types::ConversationMessage::Assistant {
-                id:parent_id,
-                content:vec![lingxi_core::types::ContentBlock::Text { text:"parent reply".into(), citations:None }],
-                stop_reason:Some("end_turn".into()),per_turn_effort:None,
-            },
-            lingxi_core::types::ConversationMessage::user(lingxi_core::types::MessageId::new(),"predict my next prompt".into())
-        ],
-        tools:vec![json!({"name":"Read","description":"parent tool","input_schema":{"type":"object","properties":{}}}).into()],
-        tool_choice:None,output_format:None,max_tokens:128,max_retries:0,temperature:None,thinking:None,effort:None,
-        stop_sequences:vec![],query_source:QuerySource::PromptSuggestion,skip_system_prompt_prefix:true,
-    }, sidequery::ForkedSideQueryOptions { fork_point_message_id: Some(parent_id), ..Default::default() }).await.unwrap();
-        assert_eq!(result.response.text.as_deref(), Some("run tests"));
+        let result = client
+            .query_fork(
+                SideQueryRequest {
+                    model_attempt: None,
+                    model: "claude-sonnet-4-6".into(),
+                    profile: Some("parent".into()),
+                    system_prompt: Some("parent system".into()),
+                    system_prompt_input: None,
+                    typed_attachment_ids: HashSet::new(),
+                    task_deliveries: HashMap::new(),
+                    messages: vec![
+                        lingxi_core::types::ConversationMessage::user(
+                            lingxi_core::types::MessageId::new(),
+                            "parent user".into(),
+                        ),
+                        lingxi_core::types::ConversationMessage::Assistant {
+                            id: parent_id,
+                            content: vec![lingxi_core::types::ContentBlock::Text {
+                                text: "parent reply".into(),
+                                citations: None,
+                            }],
+                            stop_reason: Some("end_turn".into()),
+                            per_turn_effort: None,
+                            resumable: None,
+                        },
+                        lingxi_core::types::ConversationMessage::user(
+                            lingxi_core::types::MessageId::new(),
+                            "predict my next prompt".into(),
+                        ),
+                    ],
+                    tools: vec![llm_runtime::ToolDeclaration {
+                        input_schema_projection: None,
+                        name: "Read".into(),
+                        description: JsonPayload::string("parent tool"),
+                        input_schema: JsonPayload::parse(r#"{"type":"object","properties":{}}"#)
+                            .unwrap(),
+                        tool_type: None,
+                        extra: Default::default(),
+                        strict: false,
+                        defer_loading: false,
+                    }],
+                    tool_choice: None,
+                    output_format: None,
+                    max_tokens: 128,
+                    max_retries: 0,
+                    temperature: None,
+                    thinking: None,
+                    effort: None,
+                    stop_sequences: vec![],
+                    query_source: QuerySource::PromptSuggestion,
+                    skip_system_prompt_prefix: true,
+                },
+                sidequery::ForkedSideQueryOptions {
+                    fork_point_message_id: Some(parent_id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .response
+                .text
+                .as_ref()
+                .and_then(|text| text.string_units("")),
+            Some("run tests".encode_utf16().collect())
+        );
         assert_eq!(result.candidates, ["run tests", "must not concatenate"]);
         assert_eq!(result.request_id.as_deref(), Some("req_suggestion_http"));
         let requests = transport.seen.lock().unwrap();
         assert_eq!(requests.len(), 1 + usize::from(pin));
-        let wire = requests.last().unwrap();
+        let wire_source = requests.last().unwrap();
+        let wire: Value = serde_json::from_str(wire_source)
+            .expect("captured provider request source is valid fixture JSON");
         assert_eq!(wire["stream"], true);
         if pin {
             assert_eq!(

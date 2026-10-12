@@ -94,7 +94,6 @@ G1	crates/command-api/src/builtins/bundled/verify_skill.rs	\.lingxi
 G1	crates/command-api/src/builtins/commit_push_pr.rs	LINGXI
 G1	crates/command-api/src/builtins/commit_push_pr.rs	LingXi
 G1	crates/command-api/src/builtins/custom_commands.rs	\.lingxi
-G1	crates/command-api/src/builtins/doctor.rs	LingXi
 G1	crates/command-api/src/builtins/init.rs	LINGXI
 G1	crates/command-api/src/builtins/init_verifiers.rs	\.lingxi
 G1	crates/command-api/src/builtins/insights.rs	LingXi
@@ -446,11 +445,6 @@ G1	crates/runtime/src/desktop/tests/managed_otel_env_tests.rs	LINGXI
 G1	crates/runtime/src/desktop/tests/tests.rs	LINGXI
 G1	crates/runtime/src/desktop/tests/tests.rs	LingXi
 G1	crates/runtime/src/desktop/tests/tests.rs	\.lingxi
-G1	crates/runtime/src/headless/control_plane.rs	\.lingxi
-G1	crates/runtime/src/headless/permission_prompt_notify.rs	LINGXI
-G1	crates/runtime/src/headless/run.rs	LINGXI
-G1	crates/runtime/src/headless/run/control.rs	LINGXI
-G1	crates/runtime/src/headless/stream_json.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/assembly.rs	LINGXI
 G1	crates/runtime/src/mobile/host/automation.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs	\.lingxi
@@ -929,8 +923,6 @@ G3	crates/runtime/src/desktop/tests/bash_edit_diff_wiring_tests.rs	.lingxi
 G3	crates/runtime/src/desktop/tests/tests.rs	.lingxi
 G3	crates/runtime/src/desktop/tests/tests.rs	.lingxi-plugin
 G3	crates/runtime/src/desktop/tests/tests.rs	LINGXI.md
-G3	crates/runtime/src/headless/control_plane.rs	.lingxi
-G3	crates/runtime/src/headless/stream_json.rs	.lingxi
 G3	crates/runtime/src/mobile/host/automation.rs	.lingxi
 G3	crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs	.lingxi
 G3	crates/runtime/src/mobile/host/tests/cron_automation_tests.rs	.lingxi
@@ -1048,3 +1040,32 @@ G7	scripts/tests/mods_native_utf16_citations_289_loopback.mjs	\.claude-plugin
 G1	crates/test-harness/src/parity/fixtures/tui_listings.json	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/test-harness/tests/parity_help_render.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/test-harness/tests/parity_tui_listings.rs	\.claude(?![A-Za-z0-9_.\-])
+
+# 2.1.295 test-only product text and branded path fixtures; preserve their exact inputs.
+G1	crates/command-api/tests/batch_2_e2e.rs	LingXi
+G1	crates/command-api/tests/dispatch_e2e.rs	LingXi
+G1	crates/core/src/settings/raw_layer_stack.rs	\.lingxi
+G3	crates/core/src/settings/raw_layer_stack.rs	.lingxi
+G1	crates/orchestrator/tests/effort_cold_resume_295_test.rs	LINGXI
+G1	crates/orchestrator/tests/fixtures/native_sandbox_instructions_295_goldens.json	LingXi
+G1	crates/orchestrator/tests/prompt_suggestion_background.rs	LINGXI
+G1	crates/runtime/src/headless/run/native_commands_295_replay_test.rs	LINGXI
+G1	crates/runtime/src/headless/run/native_commands_295_replay_test.rs	\.claude(?![A-Za-z0-9_.\-])
+G3	crates/runtime/src/headless/run/native_commands_295_replay_test.rs	LINGXI.md
+G1	crates/runtime/tests/fixtures/native_commands_295/capture-manifest.json	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/runtime/tests/fixtures/native_commands_295/requests/punctuation-skill-name.request-00.json	CLAUDE\.md
+G1	crates/runtime/tests/fixtures/native_commands_295/requests/punctuation-skill-name.request-00.json	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/runtime/tests/fixtures/native_commands_295/requests/slash-only.request-00.json	CLAUDE\.md
+G1	crates/runtime/tests/fixtures/native_commands_295/requests/slash-only.request-00.json	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/runtime/tests/fixtures/native_commands_295/requests/unicode-skill-name.request-00.json	CLAUDE\.md
+G1	crates/runtime/tests/fixtures/native_commands_295/requests/unicode-skill-name.request-00.json	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/runtime/tests/fixtures/native_commands_295/requests/unknown-slash-command.request-00.json	CLAUDE\.md
+G1	crates/runtime/tests/fixtures/native_commands_295/requests/unknown-slash-command.request-00.json	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/runtime/tests/fixtures/native_commands_295/sessions/punctuation-skill-name.jsonl	CLAUDE\.md
+G1	crates/runtime/tests/fixtures/native_commands_295/sessions/punctuation-skill-name.jsonl	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/runtime/tests/fixtures/native_commands_295/sessions/slash-only.jsonl	CLAUDE\.md
+G1	crates/runtime/tests/fixtures/native_commands_295/sessions/slash-only.jsonl	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/runtime/tests/fixtures/native_commands_295/sessions/unicode-skill-name.jsonl	CLAUDE\.md
+G1	crates/runtime/tests/fixtures/native_commands_295/sessions/unicode-skill-name.jsonl	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/runtime/tests/fixtures/native_commands_295/sessions/unknown-slash-command.jsonl	CLAUDE\.md
+G1	crates/runtime/tests/fixtures/native_commands_295/sessions/unknown-slash-command.jsonl	\.claude(?![A-Za-z0-9_.\-])

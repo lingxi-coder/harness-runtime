@@ -1,8 +1,79 @@
 //! Feed native helper-model policy with live host route/catalog/settings facts.
 use super::*;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use llm_runtime::model::classifier_model_policy::{self as policy, ClassifierModelRestriction};
-use serde_json::{Value, json};
 use std::collections::BTreeMap;
+
+fn empty_settings_object() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("{}").expect("empty settings object is valid JSON")
+}
+
+fn settings_request(source: Option<&str>) -> Utf16JsonProjection {
+    match source {
+        Some(source) => {
+            Utf16JsonProjection::parse(source).expect("static settings read request is valid JSON")
+        }
+        None => empty_settings_object(),
+    }
+}
+
+fn setting_string(source: &Utf16JsonProjection, pointer: &str) -> Option<String> {
+    String::from_utf16(&source.string_units(pointer)?).ok()
+}
+
+fn setting_array(source: &Utf16JsonProjection, pointer: &str) -> Option<Utf16JsonProjection> {
+    if source.at_pointer(pointer).is_none() {
+        return None;
+    }
+    let value = source
+        .subprojection(pointer)
+        .unwrap_or_else(|_| Utf16JsonProjection::parse("[]").expect("empty array is JSON"));
+    if value.array_len("").is_some() {
+        Some(value)
+    } else {
+        // Native's managed-settings parser normalizes an invalid
+        // availableModels container to an explicit empty floor.
+        Some(Utf16JsonProjection::parse("[]").expect("empty array is JSON"))
+    }
+}
+
+fn array_scalar_strings(array: &Utf16JsonProjection) -> Vec<String> {
+    let Some(count) = array.array_len("") else {
+        return Vec::new();
+    };
+    (0..count)
+        .filter_map(|index| setting_string(array, &format!("/{index}")))
+        .collect()
+}
+
+fn setting_strings(source: &Utf16JsonProjection, pointer: &str) -> Vec<String> {
+    setting_array(source, pointer)
+        .as_ref()
+        .map(array_scalar_strings)
+        .unwrap_or_default()
+}
+
+fn setting_string_map(source: &Utf16JsonProjection, pointer: &str) -> BTreeMap<String, String> {
+    let Ok(object) = source.subprojection(pointer) else {
+        return BTreeMap::new();
+    };
+    object
+        .object_entries()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            let key = String::from_utf16(entry.code_units).ok()?;
+            let value = String::from_utf16(entry.value.code_units()?).ok()?;
+            Some((key, value))
+        })
+        .collect()
+}
+
+fn exact_setting_string(source: &Utf16JsonProjection, pointer: &str, expected: &str) -> bool {
+    source
+        .string_units(pointer)
+        .is_some_and(|units| units == expected.encode_utf16().collect::<Vec<_>>())
+}
 
 impl ConversationOrchestrator {
     pub(super) async fn background_classifier_model(
@@ -25,41 +96,28 @@ impl ConversationOrchestrator {
             .as_ref()
             .and_then(|resolver| resolver.context_for_route(main, profile).ok());
         let (managed, merged) = if let Some(reader) = &self.mod_settings_reader {
-            let Ok(managed) = reader.read(json!({"source":"policy"})).await else {
+            let Ok(managed) = reader
+                .read(settings_request(Some(r#"{"source":"policy"}"#)))
+                .await
+            else {
                 return (main.into(), owned_profile);
             };
-            let Ok(merged) = reader.read(json!({})).await else {
+            let Ok(merged) = reader.read(settings_request(None)).await else {
                 return (main.into(), owned_profile);
             };
             (managed, merged)
         } else {
-            (json!({}), json!({}))
+            (empty_settings_object(), empty_settings_object())
         };
-        let strings = |value: Option<&Value>| {
-            value
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        };
-        let denied = strings(managed.get("deniedModels"));
-        let overrides: BTreeMap<String, String> = managed
-            .get("modelOverrides")
-            .and_then(Value::as_object)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.into())))
-                    .collect()
-            })
+        let denied = setting_strings(&managed, "/deniedModels");
+        let overrides = setting_string_map(&managed, "/modelOverrides");
+        let exact = exact_setting_string(&managed, "/availableModelsMatch", "exact");
+        let managed_available_models = setting_array(&managed, "/availableModels");
+        let allowed = managed_available_models
+            .as_ref()
+            .map(array_scalar_strings)
             .unwrap_or_default();
-        let exact = managed.get("availableModelsMatch").and_then(Value::as_str) == Some("exact");
-        let allowed = strings(managed.get("availableModels"));
+        let merged_available_models = setting_array(&merged, "/availableModels");
         let resolve = |model: &str| {
             if let (Some(resolver), Some(context)) =
                 (&self.model_resolution_context_provider, &context)
@@ -96,11 +154,7 @@ impl ConversationOrchestrator {
             !policy::classifier_model_denied(&resolved, &denied, &overrides)
                 && llm_runtime::model::allowlist::is_model_allowed(
                     &resolved,
-                    merged
-                        .get("availableModels")
-                        .and_then(Value::as_array)
-                        .map(|_| strings(merged.get("availableModels")))
-                        .as_deref(),
+                    merged_available_models.as_ref(),
                     Some(&overrides),
                 )
         };
@@ -127,14 +181,8 @@ impl ConversationOrchestrator {
                 !matches!(
                     normalized.as_str(),
                     "default" | "inherit" | "haiku" | "opusplan"
-                ) && merged
-                    .get("enforceAvailableModels")
-                    .and_then(Value::as_bool)
-                    != Some(true)
-                    && managed
-                        .get("enforceAvailableModels")
-                        .and_then(Value::as_bool)
-                        != Some(true)
+                ) && setting_bool(&merged, "/enforceAvailableModels") != Some(true)
+                    && setting_bool(&managed, "/enforceAvailableModels") != Some(true)
                     && available(model)
                     && resolve(model).0 == main
             } else {
@@ -150,7 +198,9 @@ impl ConversationOrchestrator {
             sonnet_model: sonnet,
             sonnet_available,
             explicit_model: self.config.classifier_model_explicit.unwrap_or(true)
-                || merged.get("model").is_some_and(|value| !value.is_null())
+                || merged
+                    .at_pointer("/model")
+                    .is_some_and(|value| !value.is_null())
                 || env("ANTHROPIC_MODEL").is_some_and(|model| !model.is_empty()),
             default_model_from_env,
             opus_override: env("ANTHROPIC_DEFAULT_OPUS_MODEL")

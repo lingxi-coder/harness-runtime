@@ -15,3 +15,12 @@ crates/llm-runtime/tests/provider_services.rs:LINGXI_SERVICE_CREDENTIAL_TEST_CHI
 crates/llm-runtime/tests/provider_services.rs:LINGXI_EXACT_AUDIO_CREDENTIAL_SOURCE  # Fixture configures and loads this exact environment credential name to verify source ownership.
 crates/orchestrator/src/conversation/native_classifier_context.rs:.lingxi  # Classifier tests seed the actual branded settings root; retaining branding is an approved difference.
 crates/runtime/src/headless/sdk_input_queue.rs:This is how LingXi  # Headless regression checks the actual branded interruption text; retained product name is intentional.
+
+# Fixed 2.1.295 Native TaskOutput prompt prose and exact Native environment keys.
+crates/core/src/host/task_delivery.rs:Claude Code  # Byte-faithful Native TaskOutput instruction; the phrase is source prose, not a LingXi product label.
+crates/llm-runtime/src/task_delivery.rs:Claude Code  # Byte-faithful Native TaskOutput instruction; preserve the upstream product phrase.
+crates/orchestrator/src/conversation/native_policy_attachments.rs:CLAUDE_CODE_AUTO_MODE_PRIOR_ASSISTANT_CONTEXT  # Exact Native policy input name read by this producer.
+crates/orchestrator/src/conversation/native_policy_attachments.rs:CLAUDE_CODE_COZY_TEAPOT  # Exact Native Bash-first policy input name read by this producer.
+crates/orchestrator/src/conversation/native_policy_attachments.rs:CLAUDE_CODE_DISABLE_PROACTIVITY  # Exact Native proactivity input name read by this producer.
+crates/orchestrator/src/conversation/prompt_suggestion.rs:CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION  # Exact Native prompt-suggestion input name read by this producer.
+crates/platforms/common/src/proxy_auth_helper.rs:CLAUDE_CODE_PROXY_AUTH_HELPER_TTL_MS  # Exact Native proxy-auth helper TTL input name read by this producer.

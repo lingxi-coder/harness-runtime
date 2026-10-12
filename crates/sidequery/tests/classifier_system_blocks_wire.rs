@@ -5,16 +5,20 @@ use serde_json::{json, Value};
 use sidequery::{
     ForkedSideQueryOptions, ProviderSideQueryClient, QuerySource, SideQueryClient, SideQueryRequest,
 };
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
-struct Transport(Mutex<Vec<Value>>);
+struct Transport(Mutex<Vec<String>>);
 impl FixtureTransport for Transport {
     fn execute<'a>(
         &'a self,
         request: &'a ProviderRequest,
     ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
-        self.0.lock().unwrap().push(request.body_json.clone());
+        self.0
+            .lock()
+            .unwrap()
+            .push(request.body_json.as_json_source().to_owned());
         Box::pin(async {
             Ok(ProviderResponse::json(
                 200,
@@ -119,6 +123,9 @@ async fn classifier_keeps_each_system_cache_control_without_implicit_prompt_rewr
                     model: "claude-haiku-4-5".into(),
                     profile: Some("classifier".into()),
                     system_prompt: None,
+                    system_prompt_input: None,
+                    typed_attachment_ids: HashSet::new(),
+                    task_deliveries: HashMap::new(),
                     messages: vec![lingxi_core::types::ConversationMessage::user(
                         lingxi_core::types::MessageId::new(),
                         "transcript".into(),
@@ -143,8 +150,12 @@ async fn classifier_keeps_each_system_cache_control_without_implicit_prompt_rewr
             .await
             .unwrap();
         assert_eq!(
-            response.response.text.as_deref(),
-            Some("first classification")
+            response
+                .response
+                .text
+                .as_ref()
+                .and_then(|text| text.string_units("")),
+            Some("first classification".encode_utf16().collect())
         );
         let mut cache = json!({"type":"ephemeral"});
         if ttl_1h {
@@ -158,14 +169,19 @@ async fn classifier_keeps_each_system_cache_control_without_implicit_prompt_rewr
             .map(|b| json!({"type":"text","text":b.text,"cache_control":cache}))
             .collect();
         let seen = transport.0.lock().unwrap();
-        let wire = seen.last().unwrap();
+        let wire_source = seen.last().unwrap();
+        let wire: Value = serde_json::from_str(wire_source)
+            .expect("captured provider request source is valid fixture JSON");
         assert_eq!(
             serde_json::to_vec(&wire["system"]).unwrap(),
             serde_json::to_vec(&expected).unwrap()
         );
         assert_eq!(wire["model"], "claude-haiku-4-5");
         assert_eq!(wire["max_tokens"], 1024);
-        assert_eq!(wire["messages"], json!([{"role":"user","content":"transcript"}]));
+        assert_eq!(
+            wire["messages"],
+            json!([{"role":"user","content":"transcript"}])
+        );
         assert!(wire["messages"][0]["content"][0]
             .get("cache_control")
             .is_none());

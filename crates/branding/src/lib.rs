@@ -93,6 +93,8 @@ pub const RETRY_WATCHDOG_ENV: &str = "LINGXI_RETRY_WATCHDOG";
 pub const REMOTE_ENV: &str = "LINGXI_REMOTE";
 /// Native nonstream timeout retry ceiling, independent of ordinary retries.
 pub const NONSTREAMING_TIMEOUT_RETRIES_ENV: &str = "LINGXI_NONSTREAMING_TIMEOUT_RETRIES";
+/// Marks child processes launched by LingXi-owned command execution.
+pub const CHILD_SESSION_ENV: &str = "LINGXI_CHILD_SESSION";
 /// Native stream-to-nonstream fallback disable switch.
 pub const DISABLE_NONSTREAMING_FALLBACK_ENV: &str = "LINGXI_DISABLE_NONSTREAMING_FALLBACK";
 /// Native organization-check bypass, excluded for agent-owned remote sessions.
@@ -225,10 +227,12 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     RETRY_WATCHDOG_ENV,
     REMOTE_ENV,
     NONSTREAMING_TIMEOUT_RETRIES_ENV,
+    CHILD_SESSION_ENV,
     DISABLE_NONSTREAMING_FALLBACK_ENV,
     SKIP_FAST_MODE_ORG_CHECK_ENV,
     SKIP_FAST_MODE_NETWORK_ERRORS_ENV,
     DOT_DIR,
+    MANAGED_PREFERENCES_DOMAIN,
     GLOBAL_CONFIG_FILE,
     SESSION_MESSAGE_IDENTITY_LOG_SUFFIX,
     SESSION_MESSAGE_IDENTITY_LOCK_SUFFIX,

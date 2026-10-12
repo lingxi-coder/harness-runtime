@@ -6,12 +6,15 @@ use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection as Sourc
 use std::path::Path;
 
 const WORKTREE_NOTICE: &str = "This is a git worktree \u{2014} an isolated copy of the repository. Run all commands from this directory. Do NOT `cd` to the original repository root.";
-const GIT_STASH_NOTICE: &str = "The git stash stack is shared with the main checkout and all other worktrees, and other LingXi sessions may push or pop it concurrently. Never use bare `git stash` / `git stash pop` \u{2014} you could pop another session's changes. Prefer a temporary WIP commit to set work aside; if you must stash, use `git stash push -u -m \"<unique-tag>\"`, immediately capture your entry's SHA via `git stash list --format='%H %gs'`, restore with `git stash apply <sha>` (not pop), and afterwards drop the entry, re-finding its current `stash@{n}` by tag first.";
 const NO_LONGER_WORKTREE: &str = "The primary working directory is no longer a git worktree.";
 const NO_LONGER_SCRATCHPAD: &str =
     "The scratchpad directory announced earlier is no longer available; use it no further.";
 const GITHUB_CLI_NO_LONGER_ACTIVE: &str =
     "The built-in `gh api` announced earlier is not active in this run; check `command -v gh`.";
+
+fn git_stash_notice() -> String {
+    format!("The git stash stack is shared with the main checkout and all other worktrees, and other {} sessions may push or pop it concurrently. Never use bare `git stash` / `git stash pop` \u{2014} you could pop another session's changes. Prefer a temporary WIP commit to set work aside; if you must stash, use `git stash push -u -m \"<unique-tag>\"`, immediately capture your entry's SHA via `git stash list --format='%H %gs'`, restore with `git stash apply <sha>` (not pop), and afterwards drop the entry, re-finding its current `stash@{{n}}` by tag first.", branding::PRODUCT_NAME)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EnvironmentSnapshot {
@@ -595,7 +598,7 @@ fn render_environment_snapshot(snapshot: &EnvironmentSnapshot) -> String {
         lines.push(format!(" - Primary working directory: {cwd}"));
         if snapshot.is_worktree {
             lines.push(format!(" - {WORKTREE_NOTICE}"));
-            lines.push(format!(" - {GIT_STASH_NOTICE}"));
+            lines.push(format!(" - {}", git_stash_notice()));
         }
         lines.push(format!(" - Is a git repository: {}", snapshot.is_git_repo));
     }
@@ -654,7 +657,7 @@ fn render_environment_changes(
                 if current.working_directory.is_some() {
                     if current.is_worktree {
                         lines.push(format!(" - {WORKTREE_NOTICE}"));
-                        lines.push(format!(" - {GIT_STASH_NOTICE}"));
+                        lines.push(format!(" - {}", git_stash_notice()));
                     } else {
                         lines.push(format!(" - {NO_LONGER_WORKTREE}"));
                     }
@@ -715,7 +718,7 @@ fn render_github_cli_notice(encoded: &str) -> Option<String> {
     let any_host = has("any-host");
     let runner = has("runner");
     let no_jq = has("no-jq");
-    let mut text = String::from("`gh` here is LingXi's built-in GitHub client, not the GitHub CLI (none was found on this machine when the session started). `gh api <REST endpoint>` works against github.com");
+    let mut text = format!("`gh` here is {}'s built-in GitHub client, not the GitHub CLI (none was found on this machine when the session started). `gh api <REST endpoint>` works against github.com", branding::PRODUCT_NAME);
     if enterprise {
         text.push_str(" and, with `--hostname <host>`, the GitHub Enterprise Server hosts this session's GitHub proxy serves");
     }
@@ -1008,7 +1011,10 @@ mod tests {
         let full_text = full[0].rendered.string_at("/0/content").unwrap();
         assert!(full_text.contains("  - /workspace/shared"));
         assert!(full_text.contains("Scratchpad directory: /scratch/session"));
-        assert!(full_text.contains("LingXi's built-in GitHub client"));
+        assert!(full_text.contains(&format!(
+            "{}'s built-in GitHub client",
+            branding::PRODUCT_NAME
+        )));
         assert!(full_text.contains("`--jq` is unavailable"));
 
         let current = environment("/workspace/one", "darwin", &[]);

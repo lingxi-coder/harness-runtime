@@ -4191,6 +4191,7 @@ mod tests {
             None,
             None,
             lingxi_core::host::ResumeRuntimeSnapshot {
+                api_error_message_ids: Vec::new(),
                 current_usage: Some(lingxi_core::host::CurrentUsageSnapshot {
                     input_tokens: 100,
                     output_tokens: 40,

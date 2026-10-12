@@ -79,6 +79,12 @@ KEEP_CLAUDE_ENV = {
     "CLAUDE_CODE_EXTRA_BODY",
     "CLAUDE_CODE_EXTRA_METADATA",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    # Exact 2.1.295 attachment and suggestion controls still read by Harness.
+    "CLAUDE_CODE_AUTO_MODE_PRIOR_ASSISTANT_CONTEXT",  # native_policy_attachments.rs
+    "CLAUDE_CODE_COZY_TEAPOT",  # native_policy_attachments.rs
+    "CLAUDE_CODE_DISABLE_PROACTIVITY",  # native_policy_attachments.rs
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",  # prompt_suggestion.rs
+    "CLAUDE_CODE_PROXY_AUTH_HELPER_TTL_MS",  # platforms/common/proxy_auth_helper.rs
     # Fixed 2.1.295 environment contracts, not product-brand aliases.
     "CLAUDE_CODE_MODEL_CAPABILITIES",  # src_186669406.js Pvo, local byte 23944.
     "CLAUDE_CODE_SESSION_START_ANNOUNCEMENTS_BEFORE_PROMPT",  # src_221001555.js Iv.

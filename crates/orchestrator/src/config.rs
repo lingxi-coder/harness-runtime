@@ -688,11 +688,9 @@ mod tests {
 
     #[test]
     fn default_system_prompt_override_is_none() {
-        assert!(
-            OrchestratorConfig::default()
-                .system_prompt_override
-                .is_none()
-        );
+        assert!(OrchestratorConfig::default()
+            .system_prompt_override
+            .is_none());
     }
 
     #[test]
@@ -725,6 +723,8 @@ mod tests {
             max_structured_output_retries: default_max_structured_output_retries(),
             structured_output_enabled: false,
             model: "x".into(),
+            classifier_model_explicit: None,
+            classifier_model_default_env: false,
             fallback_model: Some("claude-sonnet-4-6".into()),
             system_prompt_override: Some("custom".into()),
             context_rendering: lingxi_core::host::instructions::InstructionRendering::Announced,
@@ -851,11 +851,9 @@ mod tests {
 
     #[test]
     fn default_plan_mode_instructions_is_none() {
-        assert!(
-            OrchestratorConfig::default()
-                .plan_mode_instructions
-                .is_none()
-        );
+        assert!(OrchestratorConfig::default()
+            .plan_mode_instructions
+            .is_none());
     }
 
     #[test]
@@ -867,11 +865,9 @@ mod tests {
     fn default_refusal_fallback_model_is_none() {
         // Finding #80: the parity default is a strict no-op — a `refusal`
         // response keeps today's terminal/Continue behavior.
-        assert!(
-            OrchestratorConfig::default()
-                .refusal_fallback_model
-                .is_none()
-        );
+        assert!(OrchestratorConfig::default()
+            .refusal_fallback_model
+            .is_none());
     }
 
     #[test]

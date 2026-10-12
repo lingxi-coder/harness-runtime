@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+use lingxi_core::host::SourceToolWireDefinition;
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId,
+};
 use serde_json::json;
 use sidequery::{
     CacheSafeParams, ForkedAgentRequest, ForkedAgentRunner, QuerySource, SideQueryClient,
@@ -25,10 +28,13 @@ impl SideQueryClient for Client {
 }
 fn response(text: Option<&str>, tool: bool) -> SideQueryResponse {
     SideQueryResponse {
-        text: text.map(str::to_owned),
+        text: text.map(Utf16JsonProjection::from),
         structured: None,
         tool_calls: if tool {
-            vec![json!({"id":"toolu_requested","name":"Read","input":{"file_path":"/tmp/file"}})]
+            vec![Utf16JsonProjection::parse(
+                r#"{"id":"toolu_requested","name":"Read","input":{"file_path":"/tmp/file"}}"#,
+            )
+            .unwrap()]
         } else {
             vec![]
         },
@@ -51,7 +57,8 @@ fn request() -> ForkedAgentRequest {
             "predict my next prompt".into(),
         )],
         cache_safe_params: CacheSafeParams {
-            system_prompt: Arc::from("parent system"),
+            system_prompt: Arc::new(Utf16JsonProjection::from("parent system")),
+            system_prompt_input: None,
             user_context: HashMap::new(),
             system_context: HashMap::new(),
             user_context_message: None,
@@ -66,12 +73,20 @@ fn request() -> ForkedAgentRequest {
                 custom_system_prompt: None,
                 append_system_prompt: None,
             },
-            tools: vec![json!({"name":"Read","input_schema":{"type":"object"}}).into()],
+            tools: vec![SourceToolWireDefinition {
+                name: "Read".into(),
+                description: "".into(),
+                input_schema: Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
+                strict: false,
+                defer_loading: false,
+            }],
             effort: Some(json!("high")),
             fork_context_messages: vec![ConversationMessage::user(
                 MessageId::new(),
                 "parent history".into(),
             )],
+            typed_attachment_ids: Default::default(),
+            task_deliveries: Default::default(),
             transcript_path: None,
             generation: 1,
         },
@@ -115,7 +130,10 @@ async fn denied_tools_continue_in_isolation_and_keep_candidates_in_order() {
         "fixtures/prompt_suggestion_query_2_1_296.json"
     ))
     .unwrap();
-    assert_eq!(content, native["denial"]["message"].as_str().unwrap());
+    assert_eq!(
+        content.to_json_string().unwrap(),
+        serde_json::to_string(&native["denial"]["message"]).unwrap()
+    );
     assert_eq!(tool_use_id.as_str(), "toolu_requested");
     assert_eq!(*is_error, Some(true));
     assert_eq!(seen[1].model, "parent-model");

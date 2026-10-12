@@ -18,7 +18,6 @@ const BASH_FIRST_ENV: &str = "CLAUDE_CODE_THRIFTY_SONIC";
 const BASH_FIRST_STEER_ENV: &str = "CLAUDE_CODE_COZY_TEAPOT";
 const MODEL_CAPABILITIES_ENV: &str = "CLAUDE_CODE_MODEL_CAPABILITIES";
 const AUTO_MODE_PRIOR_ASSISTANT_CONTEXT_ENV: &str = "CLAUDE_CODE_AUTO_MODE_PRIOR_ASSISTANT_CONTEXT";
-const CHILD_SESSION_ENV: &str = "LINGXI_CHILD_SESSION";
 const BASH_FIRST_FEATURE: &str = "tengu_thrifty_sonic";
 const PROACTIVITY_SELECTOR_FEATURE: &str = "tengu_proactivity_selector";
 const DISABLE_PROACTIVITY_ENV: &str = "CLAUDE_CODE_DISABLE_PROACTIVITY";
@@ -580,7 +579,7 @@ fn native_bash_first_model_capability_gate_disabled_for(
 fn native_bash_first_model_capability_gate_disabled() -> bool {
     native_bash_first_model_capability_gate_disabled_for(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref(),
-        env_is_js_truthy(CHILD_SESSION_ENV),
+        env_is_js_truthy(branding::CHILD_SESSION_ENV),
     )
 }
 
@@ -669,7 +668,7 @@ fn auto_mode_consent_flow_value(bypass: bool, facts: &NativePolicyHostFacts) -> 
     if bypass
         || facts.agent_id.is_some()
         || facts.is_team_agent_context.unwrap_or(false)
-        || env_is_js_truthy(CHILD_SESSION_ENV)
+        || env_is_js_truthy(branding::CHILD_SESSION_ENV)
     {
         return source_bool(false);
     }

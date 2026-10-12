@@ -1,6 +1,7 @@
 //! Claude Code 2.1.296 post-turn suggestions and their session-owned lifecycle.
 use super::*;
 use lingxi_core::host::{PromptSuggestionContext, PromptSuggestionResult};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{json, Value};
 
 #[path = "prompt_suggestion_state.rs"]
@@ -332,11 +333,10 @@ impl ConversationOrchestrator {
         if let Some(enabled) = self.suggestion_state().enabled {
             return enabled;
         }
-        let setting = self
-            .suggestion_settings()
-            .await
-            .get("promptSuggestionEnabled")
-            .and_then(Value::as_bool);
+        let settings = self.suggestion_settings().await;
+        let setting = settings
+            .at_pointer("/promptSuggestionEnabled")
+            .and_then(|value| value.as_bool());
         let env = Self::suggestion_env();
         let (enabled, initialization) = {
             let mut state = self.suggestion_state();
@@ -367,10 +367,15 @@ impl ConversationOrchestrator {
         enabled
     }
 
-    async fn suggestion_settings(&self) -> Value {
+    async fn suggestion_settings(&self) -> Utf16JsonProjection {
         match &self.mod_settings_reader {
-            Some(reader) => reader.read(json!({})).await.unwrap_or_else(|_| json!({})),
-            None => json!({}),
+            Some(reader) => reader
+                .read(Utf16JsonProjection::parse("{}").expect("empty settings request is JSON"))
+                .await
+                .unwrap_or_else(|_| {
+                    Utf16JsonProjection::parse("{}").expect("empty settings fallback is JSON")
+                }),
+            None => Utf16JsonProjection::parse("{}").expect("empty settings are JSON"),
         }
     }
 
@@ -811,21 +816,37 @@ impl ConversationOrchestrator {
         cancel: &CancellationToken,
         background: Option<super::prompt_suggestion_background::BackgroundSuggestionContext>,
     ) {
-        let input = json!({"text":result.suggestion, "origin":{"kind":"suggestion"}});
+        let generation_request_id = result.generation_request_id.clone();
+        let input = Utf16JsonProjection::from_serde_value(&json!({
+            "text": result.suggestion,
+            "origin": {"kind": "suggestion"}
+        }))
+        .expect("generated prompt suggestion input is JSON");
         let placed = std::sync::atomic::AtomicBool::new(false);
-        let place = |input: Value| {
+        let place = |input: Option<Utf16JsonProjection>| {
             placed.store(true, std::sync::atomic::Ordering::Relaxed);
-            let generation_request_id = result.generation_request_id.clone();
+            let generation_request_id = generation_request_id.clone();
             let background = background.clone();
             async move {
-                let text = input
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let input = input.ok_or_else(|| {
+                    hooks::mods::ModError::Hook("prompt.suggest requires an event payload".into())
+                })?;
+                let text_units = input.string_units("/text").ok_or_else(|| {
+                    hooks::mods::ModError::Hook("prompt.suggest text must be a string".into())
+                })?;
+                let text = String::from_utf16(&text_units).map_err(|_| {
+                    hooks::mods::ModError::Hook(
+                        "prompt.suggest text must contain valid Unicode scalar values".into(),
+                    )
+                })?;
                 // Delivery and turn admission share one owner: a delayed output
                 // send cannot overtake TurnStarted or a committed session swap.
                 let _turn = tokio::select! { biased;
-                    () = cancel.cancelled() => return Ok::<_, hooks::mods::ModError>(json!({"isShown":false})),
+                    () = cancel.cancelled() => {
+                        return Utf16JsonProjection::from_serde_value(&json!({"isShown":false}))
+                            .map(Some)
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()));
+                    },
                     guard = self.turn_gate.lock() => guard,
                 };
                 let session = self.session.lock().await;
@@ -844,7 +865,7 @@ impl ConversationOrchestrator {
                         state.uuid = Some(uuid.clone());
                         state.first_keystroke_at = None;
                         state.presentation = controls::Presentation::Generated {
-                            text: text.to_owned(),
+                            text: text.clone(),
                             generation_request_id,
                         };
                         true
@@ -852,13 +873,15 @@ impl ConversationOrchestrator {
                 };
                 if shown {
                     if let Some(context) = &background {
-                        self.record_background_suggested_reply(text, context).await;
+                        self.record_background_suggested_reply(&text, context).await;
                     }
                     self.output
-                        .emit_prompt_suggestion(&session_id.as_uuid().to_string(), &uuid, text)
+                        .emit_prompt_suggestion(&session_id.as_uuid().to_string(), &uuid, &text)
                         .await;
                 }
-                Ok::<_, hooks::mods::ModError>(json!({"isShown":shown}))
+                Utf16JsonProjection::from_serde_value(&json!({"isShown":shown}))
+                    .map(Some)
+                    .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
             }
         };
         let host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
@@ -878,7 +901,13 @@ impl ConversationOrchestrator {
                 }) => result,
             }
         } else {
-            place(input).await
+            place(Some(input)).await.and_then(|result| {
+                result.ok_or_else(|| {
+                    hooks::mods::ModError::Hook(
+                        "prompt.suggest did not produce a placement result".into(),
+                    )
+                })
+            })
         };
         if cancel.is_cancelled() {
             self.suppress_suggestion("cli", "aborted", None).await;
@@ -886,8 +915,8 @@ impl ConversationOrchestrator {
         }
         if let Ok(outcome) = outcome {
             if !outcome
-                .get("isShown")
-                .and_then(Value::as_bool)
+                .at_pointer("/isShown")
+                .and_then(|value| value.as_bool())
                 .unwrap_or(false)
                 && !cancel.is_cancelled()
                 && placed.load(std::sync::atomic::Ordering::Relaxed)

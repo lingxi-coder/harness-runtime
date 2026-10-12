@@ -32,9 +32,9 @@ pub(crate) fn synthesize(response: SideQueryResponse) -> ForkedSideQueryResponse
         Some(ContentBlock::ToolUse {
             id: ToolUseId::from(call.string_at("/id")?.to_owned()),
             name: call.string_at("/name")?.to_owned(),
-            input: call
-                .subprojection("/input")
-                .unwrap_or_else(|_| Utf16JsonProjection::from(serde_json::Value::Null)),
+            input: call.subprojection("/input").unwrap_or_else(|_| {
+                Utf16JsonProjection::parse("null").expect("null is valid JSON source")
+            }),
             provider_id: None,
         })
     }));

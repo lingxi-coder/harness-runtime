@@ -176,7 +176,7 @@ fn paths_config(facts: &NativeSandboxHostFacts) -> Vec<String> {
                 }
             ));
         }
-        details.push("Leave LingXi Code's own settings, hooks, skills and plugin files, and the repository's git hooks and git config, unchanged unless the user asks; credential files and keys elsewhere on this machine are the user's, not the task's.".to_owned());
+        details.push(format!("Leave {} Code's own settings, hooks, skills and plugin files, and the repository's git hooks and git config, unchanged unless the user asks; credential files and keys elsewhere on this machine are the user's, not the task's.", branding::PRODUCT_NAME));
         details.join(" ")
     } else {
         let mut read_fields = vec![("denyOnly", array(deny_read))];
@@ -376,10 +376,13 @@ fn render_active_sandbox_instructions(facts: &NativeSandboxHostFacts) -> String 
         instructions.push(PromptItem::Text("If a clipboard utility such as `pbcopy`, `xclip`, or `wl-copy` fails inside the sandbox and the user wants the text on their clipboard, put the text in a fenced code block in your response and tell them to run `/copy` (it copies from outside the sandbox; when the picker appears they can select just that block), rather than writing a file for them to copy manually."));
     }
 
-    let mut sections = vec![format!("## LingXi Code command sandbox")];
+    let mut sections = vec![format!(
+        "## {} Code command sandbox",
+        branding::PRODUCT_NAME
+    )];
     if boundary_branch {
         sections.extend([
-            format!("By default, LingXi Code commands run inside an OS-level sandbox{platform_suffix} applied to each command separately, not to the session as a whole; how it is configured in this session is described below."),
+            format!("By default, {} Code commands run inside an OS-level sandbox{platform_suffix} applied to each command separately, not to the session as a whole; how it is configured in this session is described below.", branding::PRODUCT_NAME),
             String::new(),
             SANDBOX_BOUNDARY_NOTE.to_owned(),
             String::new(),
@@ -387,13 +390,13 @@ fn render_active_sandbox_instructions(facts: &NativeSandboxHostFacts) -> String 
         ]);
     } else if facts.filesystem_policy_relaxed {
         sections.extend([
-            "By default, LingXi Code tool commands run in a sandbox. This sandbox controls which network hosts commands may access without an explicit override.".to_owned(),
+            format!("By default, {} Code tool commands run in a sandbox. This sandbox controls which network hosts commands may access without an explicit override.", branding::PRODUCT_NAME),
             String::new(),
             "The sandbox is configured as follows:".to_owned(),
         ]);
     } else {
         sections.extend([
-            "By default, LingXi Code tool commands run in a sandbox. This sandbox controls which directories and network hosts commands may access or modify without an explicit override.".to_owned(),
+            format!("By default, {} Code tool commands run in a sandbox. This sandbox controls which directories and network hosts commands may access or modify without an explicit override.", branding::PRODUCT_NAME),
             String::new(),
             "The sandbox has the following restrictions:".to_owned(),
         ]);

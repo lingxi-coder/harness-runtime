@@ -547,12 +547,25 @@ impl ReplayedSession {
 }
 
 fn prompt_suggestion_api_error_ids(messages: &[JsonlMessage]) -> Vec<MessageId> {
-    messages.iter().filter(|row| row.message_type == "assistant"
-        && row.extra.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true))
-        .filter_map(|row| row.message.get("id").and_then(Value::as_str)
-            .and_then(|id| Uuid::parse_str(id).ok())
-            .or_else(|| Uuid::parse_str(&row.uuid).ok()))
-        .map(MessageId::from_uuid).collect()
+    messages
+        .iter()
+        .filter(|row| {
+            row.message_type == "assistant"
+                && row
+                    .extra
+                    .at_pointer("/isApiErrorMessage")
+                    .and_then(JsonValueView::as_bool)
+                    == Some(true)
+        })
+        .filter_map(|row| {
+            row.message
+                .string_units("/id")
+                .and_then(|units| String::from_utf16(&units).ok())
+                .and_then(|id| Uuid::parse_str(&id).ok())
+                .or_else(|| Uuid::parse_str(&row.uuid).ok())
+        })
+        .map(MessageId::from_uuid)
+        .collect()
 }
 
 /// Runtime state recoverable from a persisted JSONL transcript.
@@ -3158,7 +3171,9 @@ impl ConversationOrchestrator {
             memory,
             cwd,
         );
-        orch.restore_prompt_suggestion_api_errors(prompt_suggestion_api_error_ids(&replayed.messages));
+        orch.restore_prompt_suggestion_api_errors(prompt_suggestion_api_error_ids(
+            &replayed.messages,
+        ));
         // A transcript-inherited effort must remain inheritable if this
         // runtime later hot-resumes another session. Only the caller's
         // pre-resume launch choice pins the value.

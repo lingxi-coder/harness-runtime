@@ -414,6 +414,7 @@ impl ForkedAgentRunner {
                 id: MessageId::new(),
                 content: fork.assistant_content,
                 stop_reason: fork.response.stop_reason,
+                resumable: None,
                 per_turn_effort: None,
             });
             request.messages.push(ConversationMessage::User {
