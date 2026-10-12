@@ -2,17 +2,18 @@
 //!
 //! Locks the literal `clientInfo` and `capabilities` shape emitted by
 //! `mcp::InitializeParams::default()` against claude-code's
-//! reference (`src/services/mcp/client.ts:985-1002`):
+//! reference (pinned Native 2.1.295 source chunk `src_194447854.js` and
+//! captured MCP initialize requests):
 //!
 //! - `clientInfo.name = "lingxi"` (literal),
 //! - `clientInfo.title = "LingXi"` (literal),
 //! - `clientInfo.websiteUrl = "https://claude.com/claude-code"` (literal),
 //! - `clientInfo.version = env!("CARGO_PKG_VERSION")` of `lingxi-mcp`,
-//! - `capabilities.roots` is `{listChanged:true}` (parity 2.1.207 `J7n()`:
-//!   the client advertises it will send `notifications/roots/list_changed`
-//!   when its working-dir set changes) and `capabilities.elicitation` is the
-//!   LITERAL empty object `{}` (NOT null, NOT missing). The Java MCP SDK rejects
-//!   `{form:{},url:{}}` for elicitation, so we must emit a bare `{}`.
+//! - `capabilities.roots` is `{listChanged:true}` (the pinned 2.1.295
+//!   capability builder's base shape) and `capabilities.elicitation` is
+//!   `{form:{},url:{}}` under the pinned 2.1.295 URL-elicitation capability.
+//!   The fixed 2.1.295 `mcp-mime` and `mcp-pagination` initialize captures
+//!   both carry this shape.
 
 use mcp::initialize_params::InitializeParams;
 use serde::Deserialize;
@@ -64,17 +65,16 @@ fn mcp_initialize_request_matches_claude_code_identity() {
         "version must come from CARGO_PKG_VERSION via CLIENT_VERSION",
     );
 
-    // Capabilities: roots is {listChanged:true}, elicitation is a literal {}.
+    // Capabilities match the fixed 2.1.295 initialize captures.
     let caps = &got["capabilities"];
     assert!(caps.is_object(), "capabilities must be an object");
     assert_eq!(
         caps["roots"], fx.expected_capabilities_shape["roots"],
-        "capabilities.roots must be {{\"listChanged\":true}} (parity 2.1.207 J7n())",
+        "capabilities.roots must match the pinned 2.1.295 Native request",
     );
     assert_eq!(
-        caps["elicitation"],
-        fx.expected_capabilities_shape["elicitation"],
-        "capabilities.elicitation must be the literal empty object (Java SDK rejects {{form:{{}},url:{{}}}})",
+        caps["elicitation"], fx.expected_capabilities_shape["elicitation"],
+        "capabilities.elicitation must match the pinned 2.1.295 Native request",
     );
 
     // Sanity: no extra unexpected capability keys.

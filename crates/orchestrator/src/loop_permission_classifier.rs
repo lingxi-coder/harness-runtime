@@ -729,6 +729,8 @@ impl Transport for ProviderTransport {
                 None,
                 Some(query.temperature),
                 Some("auto_mode"),
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )
             .map_err(classifier_query_error)?;
         let len = query.blocks.len();

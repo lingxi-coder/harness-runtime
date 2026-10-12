@@ -5,6 +5,7 @@
 //! name byte-for-byte. Renaming any field is a managed-policy-breaking change
 //! and must be coordinated with claude-code's settings schema.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
@@ -262,6 +263,12 @@ pub struct SandboxRuntimeConfig {
     /// silently ignored (mostly noisy filesystem reads from build tools).
     #[serde(default)]
     pub ignore_violations: HashMap<String, Vec<String>>,
+    /// Exact JavaScript UTF-16 `sandbox.ignoreViolations` map retained beside
+    /// the Rust-string execution projection. Native accepts isolated UTF-16
+    /// units in JSON strings; do not treat a Rust serde projection as the raw
+    /// source or as proof that those entries are invalid.
+    #[serde(skip)]
+    pub ignore_violations_source: Option<Utf16JsonProjection>,
     /// When `true`, allow a sandbox-inside-sandbox configuration with weaker
     /// guarantees on the inner layer (claude-code feature flag).
     #[serde(default)]
@@ -316,6 +323,7 @@ impl Default for SandboxRuntimeConfig {
             credential_deny_env: Vec::new(),
             filesystem: FilesystemRestrictionConfig::default(),
             ignore_violations: HashMap::new(),
+            ignore_violations_source: None,
             enable_weaker_nested_sandbox: false,
             enable_weaker_network_isolation: false,
             allow_pty: false,
@@ -409,6 +417,10 @@ pub struct SandboxSettingsJson {
     pub filesystem: Option<FilesystemRestrictionConfig>,
     /// Override `SandboxRuntimeConfig::ignore_violations`.
     pub ignore_violations: Option<HashMap<String, Vec<String>>>,
+    /// Exact source projection for `ignoreViolations`, retained when its
+    /// strings contain isolated UTF-16 units that cannot fit in `String`.
+    #[serde(skip)]
+    pub ignore_violations_source: Option<Utf16JsonProjection>,
     /// `sandbox.credentials` — credential files and environment variables to
     /// withhold from the sandboxed process.
     ///

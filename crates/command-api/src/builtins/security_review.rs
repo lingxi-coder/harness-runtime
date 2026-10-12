@@ -258,8 +258,8 @@ impl BuiltinCommandHandler for SecurityReviewHandler {
         core_description("security-review")
     }
 
-    fn is_prompt_command(&self) -> bool {
-        true
+    fn native_type(&self) -> Option<crate::model::NativeCommandType> {
+        Some(crate::model::NativeCommandType::Prompt)
     }
 
     fn allowed_tools(&self) -> &'static [&'static str] {

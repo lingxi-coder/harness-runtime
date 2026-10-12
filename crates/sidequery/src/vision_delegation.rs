@@ -756,6 +756,8 @@ fn spawn_query(
                 profile: packet.profile.clone(),
                 system_prompt: Some(system_prompt().to_string().into()),
                 system_prompt_input: None,
+                typed_attachment_ids: HashSet::new(),
+                task_deliveries: std::collections::HashMap::new(),
                 messages: build_messages(&packet, &batch),
                 tools: Vec::new(),
                 tool_choice: None,

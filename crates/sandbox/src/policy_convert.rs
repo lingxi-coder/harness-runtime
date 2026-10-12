@@ -310,6 +310,9 @@ pub fn convert_settings_to_runtime_config(
         if let Some(v) = &s.ignore_violations {
             cfg.ignore_violations.clone_from(v);
         }
+        if let Some(source) = &s.ignore_violations_source {
+            cfg.ignore_violations_source = Some(source.clone());
+        }
         // `sandbox.credentials` (HP-6). Both `deny` and `mask` withhold the
         // credential here; see `sandbox::credentials` for why `mask` degrades
         // rather than falling through to no protection. Paths are resolved the

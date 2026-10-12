@@ -1094,6 +1094,8 @@ mod tests {
             tools: Vec::new(),
             effort: None,
             fork_context_messages: vec![],
+            typed_attachment_ids: std::collections::HashSet::new(),
+            task_deliveries: std::collections::HashMap::new(),
             transcript_path: None,
             generation: 1,
         };
@@ -1219,6 +1221,8 @@ mod tests {
             tools: Vec::new(),
             effort: None,
             fork_context_messages: vec![],
+            typed_attachment_ids: std::collections::HashSet::new(),
+            task_deliveries: std::collections::HashMap::new(),
             transcript_path: None,
             generation: 1,
         };

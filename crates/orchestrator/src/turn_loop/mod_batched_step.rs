@@ -45,6 +45,7 @@ pub(super) struct Request {
 struct PhysicalObservation {
     system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
+    inline_context: Option<ConversationMessage>,
     cost_scope: Option<cost::CostSessionScope>,
     api_success_message_count: u32,
     api_success_message_tokens: u64,
@@ -55,6 +56,7 @@ impl From<&Request> for PhysicalObservation {
         Self {
             system: request.system.clone(),
             tools: request.tools.clone(),
+            inline_context: request.context_announcements.inline_context.clone(),
             cost_scope: request.cost_scope.clone(),
             api_success_message_count: request.api_success_message_count,
             api_success_message_tokens: request.api_success_message_tokens,
@@ -165,8 +167,14 @@ impl PhysicalStepResponse {
         orch.record_response_input_tokens(&response.usage);
         orch.record_inline_prompt_tools_after_success(&params.tools)
             .await;
-        orch.save_cache_safe_params(params.system.as_ref(), &model, &params.tools)
-            .await;
+        orch.save_cache_safe_params_for_request(
+            params.system.as_ref(),
+            &model,
+            &params.tools,
+            &request_history,
+            params.inline_context.as_ref(),
+        )
+        .await;
         orch.emit_rate_limit_if_changed().await;
         orch.emit_raw_utilization_if_changed().await;
         if let Some((receipt, model_ref)) = cost_receipt {
@@ -281,25 +289,60 @@ pub(super) async fn dispatch(
         let physical_responses = source_physical.clone();
         async move {
             let requested = forwarded.string_at("/model").unwrap_or_default().to_owned();
+            let default_model = orch.config.model.as_str();
+            let default_sentinel = lingxi_core::host::effort::trim_js_whitespace(&requested)
+                .eq_ignore_ascii_case("default");
+            let route_model = if default_sentinel {
+                default_model
+            } else {
+                requested.as_str()
+            };
+            let route_profile = if default_sentinel {
+                None
+            } else {
+                params.profile.as_deref()
+            };
             let resolved = orch
                 .api
-                .resolve_media_route(&requested, params.profile.as_deref())
-                .or_else(|_| orch.api.resolve_media_route(&requested, None))
+                .resolve_media_route(route_model, route_profile)
+                .or_else(|_| orch.api.resolve_media_route(route_model, None))
                 .ok();
-            let resolved_model = resolved.as_ref().map_or(requested.as_str(), |route| {
-                route.main.request_model.as_str()
-            });
-            let denied = if let Some(reader) = orch.mod_settings_reader.as_ref() {
-                reader.model_allowed(resolved_model).await? == Some(false)
-            } else {
-                false
-            };
+            let resolved_model = resolved
+                .as_ref()
+                .map_or(route_model, |route| route.main.request_model.as_str());
+            let is_explicit_model_override = requested.as_str() != params.model.as_str();
+            let native_catalog_route = resolved
+                .as_ref()
+                .is_some_and(crate::ConversationOrchestrator::route_uses_native_model_catalog);
+            let same_active_model = is_explicit_model_override
+                && crate::ConversationOrchestrator::same_native_model_identity(
+                    orch.api.as_ref(),
+                    route_model,
+                    route_profile,
+                    &params.model,
+                    params.profile.as_deref(),
+                );
+            let same_default_model = is_explicit_model_override
+                && crate::ConversationOrchestrator::matches_native_default_model_identity(
+                    orch.api.as_ref(),
+                    route_model,
+                    route_profile,
+                    default_model,
+                    None,
+                );
+            let denied = is_explicit_model_override
+                && native_catalog_route
+                && !same_active_model
+                && !same_default_model
+                && !orch.model_catalog_allows(resolved_model).await?;
             let model = if denied {
                 tracing::warn!(
                     requested,
                     "turn.step batched model rewrite denied by policy"
                 );
                 params.model.clone()
+            } else if default_sentinel {
+                resolved_model.to_owned()
             } else {
                 requested
             };
@@ -308,7 +351,11 @@ pub(super) async fn dispatch(
             } else {
                 resolved
                     .map(|route| route.main.profile_name)
-                    .or(params.profile.clone())
+                    .or(if default_sentinel {
+                        None
+                    } else {
+                        params.profile.clone()
+                    })
             };
             *effective.lock().unwrap() = Some((model.clone(), profile.clone()));
             requested_model.store(true, std::sync::atomic::Ordering::Release);

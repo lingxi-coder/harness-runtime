@@ -245,21 +245,19 @@ impl OutputStyleRegistry {
         self.styles.get(name)
     }
 
-    /// Resolve a non-default registered style into the prompt-facing shape.
-    /// This is the live plugin-registry counterpart to the disk resolver.
+    /// Resolve the effective registered style into the prompt-facing shape.
+    /// A forced plugin style has the same priority as Native's `yj()` lookup:
+    /// it wins before the explicit `outputStyle` selection is consulted.
     #[must_use]
     pub fn resolve(&self, setting: Option<&str>) -> Option<ResolvedOutputStyle> {
-        let active;
-        let name = match setting {
-            Some(name) if !name.is_empty() && name != DEFAULT_OUTPUT_STYLE_NAME => name,
-            _ => {
-                active = self
-                    .forced_plugin_styles
-                    .last()
-                    .map(|(_, name)| name.as_str())?;
-                active
-            }
-        };
+        let name = self
+            .forced_plugin_styles
+            .last()
+            .map(|(_, name)| name.as_str())
+            .or_else(|| match setting {
+                Some(name) if !name.is_empty() && name != DEFAULT_OUTPUT_STYLE_NAME => Some(name),
+                _ => None,
+            })?;
         let style = self.styles.get(name)?;
         Some(ResolvedOutputStyle {
             name: style.name.clone(),
@@ -324,6 +322,17 @@ mod tests {
     #[test]
     fn force_for_plugin_activates_and_unload_restores_default() {
         let mut registry = OutputStyleRegistry::new();
+        registry.register(OutputStyle {
+            name: "selected-style".into(),
+            description: String::new(),
+            source: OutputStyleSource::Builtin,
+            frontmatter: OutputStyleFrontmatter {
+                name: "selected-style".into(),
+                ..OutputStyleFrontmatter::default()
+            },
+            system_prompt_addendum: "Use the selected style.".into(),
+            source_path: None,
+        });
         let plugin_id = PluginId::new();
         registry.register_plugin_styles(
             plugin_id,
@@ -342,10 +351,18 @@ mod tests {
         );
 
         assert_eq!(
-            registry.resolve(None).map(|style| style.name),
+            registry
+                .resolve(Some("selected-style"))
+                .map(|style| style.name),
             Some("demo:terse".into())
         );
         registry.unregister_plugin(&plugin_id);
+        assert_eq!(
+            registry
+                .resolve(Some("selected-style"))
+                .map(|style| style.name),
+            Some("selected-style".into())
+        );
         assert!(registry.resolve(None).is_none());
     }
 

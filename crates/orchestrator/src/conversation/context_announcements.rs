@@ -10,7 +10,6 @@ use lingxi_core::host::instructions::InstructionRendering;
 #[derive(Clone)]
 pub(crate) struct PreparedContextAnnouncements {
     pub(crate) messages: Vec<ConversationMessage>,
-    pub(crate) before_task_notification: Option<MessageId>,
     pub(crate) refresh_reason: &'static str,
     /// Or/pi's outgoing-only scalar envelope captured before compaction.
     pub(crate) inline_context: Option<ConversationMessage>,
@@ -20,7 +19,6 @@ impl Default for PreparedContextAnnouncements {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
-            before_task_notification: None,
             refresh_reason: "session_start",
             inline_context: None,
         }
@@ -34,17 +32,8 @@ impl PreparedContextAnnouncements {
             .iter()
             .map(ConversationMessage::id)
             .collect::<HashSet<_>>();
-        let original_position = history
-            .iter()
-            .position(|message| ids.contains(&message.id()));
         history.retain(|message| !ids.contains(&message.id()));
-        let position = self
-            .before_task_notification
-            .and_then(|id| history.iter().position(|message| message.id() == id))
-            .or(original_position)
-            .unwrap_or(history.len())
-            .min(history.len());
-        history.splice(position..position, self.messages.iter().cloned());
+        history.extend(self.messages.iter().cloned());
     }
 }
 
@@ -108,6 +97,7 @@ impl ConversationOrchestrator {
 
     /// PTL returns to the native outer query loop: Br runs again on the new
     /// history, while Or's eager file snapshot remains frozen for that query.
+    #[cfg(test)]
     pub(crate) async fn context_announcements_from_frozen_snapshot(
         &self,
     ) -> Vec<ConversationMessage> {

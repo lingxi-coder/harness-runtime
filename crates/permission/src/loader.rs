@@ -65,6 +65,7 @@ pub fn permission_rule_file_warning(value: &PermissionRuleValue) -> Option<Strin
     let suggested = PermissionRuleValue {
         tool_name: covering.to_string(),
         rule_content: Some(content.into()),
+        original_rule: None,
     };
     Some(format!(
         "{} is not matched by file permission checks — only {covering}(path) rules are. \

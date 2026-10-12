@@ -69,6 +69,7 @@ pub fn allow_suggestion(tool_name: &str, input: &Utf16JsonProjection) -> Option<
             value: PermissionRuleValue {
                 tool_name: tool_name.to_string(),
                 rule_content: Some(content.into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Session,
@@ -250,6 +251,7 @@ fn rule_value_from_wire(rule: JsonValueView<'_>) -> Option<PermissionRuleValue> 
     Some(PermissionRuleValue {
         tool_name,
         rule_content,
+        original_rule: None,
     })
 }
 
@@ -655,6 +657,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Bash".into(),
                 rule_content: Some(Utf16JsonProjection::parse(r#""\ud800""#).unwrap()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Session,

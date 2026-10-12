@@ -56,6 +56,8 @@ async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
                     text: "queued".into(),
                     is_meta: false,
                     mod_origin: None,
+                    message_origin: None,
+                    prompt_source: None,
                     message_id: None,
                     transcript_row_token: None,
                     queue_priority: None,

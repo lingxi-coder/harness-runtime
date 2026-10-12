@@ -61,9 +61,10 @@
 //! inputs consumed before the runner is ever called; they are intentionally not
 //! forwarded into the runtime wrap config.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use sandbox::runtime_config::SandboxRuntimeConfig as EngineConfig;
 use sandbox_runtime::config::{FilesystemConfig, NetworkConfig, RipgrepConfig};
-use sandbox_runtime::SandboxRuntimeConfig as RuntimeConfig;
+use sandbox_runtime::{SandboxRuntimeConfig as RuntimeConfig, Utf16IgnoreViolationsConfig};
 
 /// `Some(v)` when the vector is non-empty, else `None`.
 fn some_if_nonempty(v: Vec<String>) -> Option<Vec<String>> {
@@ -72,6 +73,20 @@ fn some_if_nonempty(v: Vec<String>) -> Option<Vec<String>> {
     } else {
         Some(v)
     }
+}
+
+fn utf16_ignore_violations(source: &Utf16JsonProjection) -> Option<Utf16IgnoreViolationsConfig> {
+    let entries = source.at_pointer("")?.object_entries()?;
+    let mut result = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let pattern_count = entry.value.array_len()?;
+        let mut patterns = Vec::with_capacity(pattern_count);
+        for index in 0..pattern_count {
+            patterns.push(entry.value.get_index(index)?.code_units()?.to_vec());
+        }
+        result.push((entry.code_units.to_vec(), patterns));
+    }
+    Some(Utf16IgnoreViolationsConfig { entries: result })
 }
 
 /// Convert the engine's sandbox config into the `sandbox-runtime` config the
@@ -135,6 +150,10 @@ pub fn to_runtime_config(engine: &EngineConfig) -> RuntimeConfig {
         } else {
             Some(engine.ignore_violations.clone())
         },
+        ignore_violations_utf16: engine
+            .ignore_violations_source
+            .as_ref()
+            .and_then(utf16_ignore_violations),
         enable_weaker_nested_sandbox: Some(engine.enable_weaker_nested_sandbox),
         enable_weaker_network_isolation: Some(engine.enable_weaker_network_isolation),
         // Forward the engine's resolved allowAppleEvents so the manager emits the
@@ -321,6 +340,59 @@ mod tests {
     fn ignore_violations_none_when_empty() {
         let rt = to_runtime_config(&EngineConfig::default());
         assert!(rt.ignore_violations.is_none());
+    }
+
+    #[test]
+    fn ignore_violations_keeps_exact_utf16_source_beside_typed_siblings() {
+        let source = Utf16JsonProjection::parse(
+            r#"{"filesystem":["valid-pattern","prefix-\ud800-suffix"],"\udfff":["other-pattern"]}"#,
+        )
+        .expect("raw ignoreViolations source");
+        let mut engine = EngineConfig::default();
+        engine
+            .ignore_violations
+            .insert("filesystem".to_owned(), vec!["valid-pattern".to_owned()]);
+        engine.ignore_violations_source = Some(source.clone());
+
+        let runtime = to_runtime_config(&engine);
+        assert_eq!(
+            runtime
+                .ignore_violations
+                .as_ref()
+                .and_then(|map| map.get("filesystem")),
+            Some(&vec!["valid-pattern".to_owned()])
+        );
+        let exact = runtime
+            .ignore_violations_utf16
+            .expect("source carrier retained");
+        assert_eq!(
+            exact.entries,
+            vec![
+                (
+                    "filesystem".encode_utf16().collect::<Vec<_>>(),
+                    vec![
+                        "valid-pattern".encode_utf16().collect::<Vec<_>>(),
+                        "prefix-"
+                            .encode_utf16()
+                            .chain([0xd800])
+                            .chain("-suffix".encode_utf16())
+                            .collect::<Vec<_>>(),
+                    ],
+                ),
+                (vec![0xdfff], vec!["other-pattern".encode_utf16().collect()]),
+            ]
+        );
+        assert_eq!(
+            source.string_units("/filesystem/1"),
+            Some(
+                "prefix-"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain("-suffix".encode_utf16())
+                    .collect()
+            ),
+            "source remains independently reusable"
+        );
     }
 
     #[test]

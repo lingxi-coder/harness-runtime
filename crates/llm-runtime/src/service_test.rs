@@ -23,6 +23,37 @@ mod tests {
     use super::*;
     use lingxi_llm_client::providers::anthropic::system_prompt::PromptText;
 
+    #[test]
+    fn native_model_option_overrides_follow_gd_provider_gate() {
+        assert!(!ApiService::native_model_option_overrides_allowed(
+            &crate::ProviderId::AnthropicFirstParty
+        ));
+        assert!(!ApiService::native_model_option_overrides_allowed(
+            &crate::ProviderId::Custom {
+                name: "gateway".into(),
+            }
+        ));
+        assert!(!ApiService::native_model_option_overrides_allowed(
+            &crate::ProviderId::Custom {
+                name: "anthropicAws".into(),
+            }
+        ));
+        assert!(!ApiService::native_model_option_overrides_allowed(
+            &crate::ProviderId::OpenAICompatible {
+                name: "anthropicGoogleCloud".into(),
+            }
+        ));
+        for provider_id in [
+            crate::ProviderId::FoundryClaude,
+            crate::ProviderId::VertexClaude,
+            crate::ProviderId::BedrockClaude,
+        ] {
+            assert!(ApiService::native_model_option_overrides_allowed(
+                &provider_id
+            ));
+        }
+    }
+
     // Ordinary structural assertions may use serde_json as a test projection;
     // source and exact-byte assertions below stay on JsonPayload/sealed bytes.
     fn request_body_value(body: &lingxi_llm_client::protocol::JsonPayload) -> serde_json::Value {
@@ -1896,6 +1927,208 @@ mod tests {
         }
     }
 
+    fn native_capability_profile(
+        provider_id: ProviderId,
+        profile_name: &str,
+        protocol: ProtocolFamily,
+        base_url: &str,
+        model: &str,
+        aliases: Vec<String>,
+    ) -> ProviderProfile {
+        ProviderProfile {
+            wire_profile: None,
+            regions: lingxi_llm_client::protocol::Region::all(),
+            provider_id,
+            profile_name: profile_name.to_owned(),
+            base_url: base_url.to_owned(),
+            protocol,
+            auth: AuthStrategy::ApiKey,
+            credential: CredentialConfig::Env {
+                var: "ADAPTER_TEST_KEY".to_owned(),
+            },
+            models: vec![ModelProfile {
+                display_model: model.to_owned(),
+                request_model: model.to_owned(),
+                billing_model: model.to_owned(),
+                aliases,
+                description: None,
+                metadata: Default::default(),
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    reasoning: true,
+                    ..Default::default()
+                },
+            }],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+            vision_delegate: None,
+            connection: Default::default(),
+        }
+    }
+
+    fn native_capability_adapter(profiles: Vec<ProviderProfile>) -> ApiService {
+        let client = Arc::new(
+            ModelRuntime::from_config(ClientConfig {
+                providers: profiles,
+            })
+            .expect("client"),
+        );
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        ApiService::new(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_owned()),
+                entrypoint: Some("cli".to_owned()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn native_mid_conversation_system_memoizes_per_service_and_raw_model() {
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            "CLAUDE_CODE_MODEL_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+        ]);
+        let model = "claude-sonnet-4-6";
+        let profile = native_capability_profile(
+            ProviderId::FoundryClaude,
+            "foundry",
+            ProtocolFamily::FoundryClaude,
+            "https://resource.services.ai.azure.com/anthropic",
+            model,
+            vec!["sonnet-route-alias".to_owned()],
+        );
+        let first_host = native_capability_adapter(vec![profile.clone()]);
+
+        // QTe's explicit false wins before the model-age floor and is memoized
+        // by the raw requested model string in this host/profile.
+        std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", model);
+        std::env::set_var("ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES", "");
+        assert!(!first_host.supports_native_mid_conversation_system(model, Some("foundry")));
+
+        // The Native hQ/ Ta result stays stable for the same host and raw key
+        // after process configuration changes.
+        std::env::set_var(
+            "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+            "mid_conversation_system",
+        );
+        assert!(!first_host.supports_native_mid_conversation_system(model, Some("foundry")));
+
+        // A new raw key that resolves to the same route gets its own QTe
+        // lookup, and a new ApiService gets an independent host cache.
+        std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", "sonnet-route-alias");
+        assert!(first_host
+            .supports_native_mid_conversation_system("sonnet-route-alias", Some("foundry")));
+        std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", model);
+        let second_host = native_capability_adapter(vec![profile]);
+        assert!(second_host.supports_native_mid_conversation_system(model, Some("foundry")));
+    }
+
+    #[test]
+    fn native_mid_conversation_system_cache_keeps_provider_profiles_separate() {
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            "CLAUDE_CODE_MODEL_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+        ]);
+        let model = "claude-sonnet-4-6";
+        std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", model);
+        std::env::set_var(
+            "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+            "mid_conversation_system",
+        );
+        let adapter = native_capability_adapter(vec![
+            native_capability_profile(
+                ProviderId::OpenAI,
+                "openai",
+                ProtocolFamily::OpenAiChat,
+                "https://api.openai.com/v1",
+                model,
+                Vec::new(),
+            ),
+            native_capability_profile(
+                ProviderId::AnthropicFirstParty,
+                "anthropic",
+                ProtocolFamily::AnthropicMessages,
+                "https://api.anthropic.com",
+                model,
+                Vec::new(),
+            ),
+            native_capability_profile(
+                ProviderId::FoundryClaude,
+                "foundry",
+                ProtocolFamily::FoundryClaude,
+                "https://resource.services.ai.azure.com/anthropic",
+                model,
+                Vec::new(),
+            ),
+        ]);
+
+        // A non-Anthropic route returns before entering the cache. First-party
+        // routes disallow QTe model-option overrides; Foundry allows them. The
+        // shared raw model string must retain each route's actual result.
+        assert!(!adapter.supports_native_mid_conversation_system(model, Some("openai")));
+        assert!(!adapter.supports_native_mid_conversation_system(model, Some("anthropic")));
+        assert!(adapter.supports_native_mid_conversation_system(model, Some("foundry")));
+
+        let reverse_order = native_capability_adapter(vec![
+            native_capability_profile(
+                ProviderId::AnthropicFirstParty,
+                "anthropic",
+                ProtocolFamily::AnthropicMessages,
+                "https://api.anthropic.com",
+                model,
+                Vec::new(),
+            ),
+            native_capability_profile(
+                ProviderId::FoundryClaude,
+                "foundry",
+                ProtocolFamily::FoundryClaude,
+                "https://resource.services.ai.azure.com/anthropic",
+                model,
+                Vec::new(),
+            ),
+        ]);
+        assert!(reverse_order.supports_native_mid_conversation_system(model, Some("foundry")));
+        assert!(!reverse_order.supports_native_mid_conversation_system(model, Some("anthropic")));
+    }
+
     fn text_user_msg(s: &str) -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
@@ -3021,6 +3254,8 @@ mod tests {
                 None,
                 None,
                 Some("mod_side_query"),
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )
         })
         .await
@@ -3069,6 +3304,8 @@ mod tests {
                 Some(serde_json::json!("high")),
                 Some(0.2),
                 Some("fusion_analyst"),
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )
             .expect("side-query request builder");
         assert_eq!(req.input.model, "claude-sonnet-4-20250514");
@@ -3125,6 +3362,8 @@ mod tests {
                 None,
                 None,
                 Some("permission_classifier"),
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )
             .unwrap();
         assert_eq!(
@@ -3166,6 +3405,8 @@ mod tests {
                 None,
                 None,
                 Some("permission_classifier"),
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )
             .unwrap();
 
@@ -3201,6 +3442,8 @@ mod tests {
                 None,
                 None,
                 Some("permission_classifier"),
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )
             .unwrap_err();
         assert!(matches!(
@@ -7845,6 +8088,8 @@ mod tests {
                     rejected.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 })),
                 None,
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             ))
             .await;
 
@@ -7889,6 +8134,8 @@ mod tests {
                     observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 })),
                 None,
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )
             .await
             .expect("positive control reaches transport");
@@ -7939,6 +8186,8 @@ mod tests {
                     observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 })),
                 None,
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )
             .await;
 
@@ -9348,6 +9597,45 @@ mod tests {
     }
     llm_runtime::impl_fixture_transport!(ScriptedStreamTransport);
 
+    /// Returns a scripted sequence of HTTP stream responses and records the
+    /// exact beta headers of each physical request.
+    struct NativeAfkStreamRetryTransport {
+        responses: Mutex<std::collections::VecDeque<(u16, BTreeMap<String, String>, Vec<Vec<u8>>)>>,
+        seen: Mutex<Vec<ProviderRequest>>,
+    }
+
+    impl llm_runtime::test_support::FixtureTransport for NativeAfkStreamRetryTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async {
+                Err(LlmError::Transport {
+                    message: "execute is not used in Native AFK stream retry test".into(),
+                })
+            })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            self.seen.lock().unwrap().push(request.clone());
+            let next = self.responses.lock().unwrap().pop_front();
+            Box::pin(async move {
+                let (status, headers, frames) = next.ok_or_else(|| LlmError::Transport {
+                    message: "Native AFK stream retry sequence exhausted".into(),
+                })?;
+                Ok(StreamingResponse {
+                    status,
+                    headers,
+                    frames: Box::new(ScriptedFrames::new(frames)),
+                })
+            })
+        }
+    }
+    llm_runtime::impl_fixture_transport!(NativeAfkStreamRetryTransport);
+
     /// Build a streaming adapter with an attached analytics bus.
     async fn make_stream_adapter_with_bus(
         transport: Arc<dyn Transport>,
@@ -9934,7 +10222,10 @@ mod tests {
             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
             "DISABLE_INTERLEAVED_THINKING",
             "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_EXTRA_BODY",
             branding::EFFORT_LEVEL_ENV,
+            branding::THINKING_DISPLAY_UPDATES_ENV,
             "DISABLE_PROMPT_CACHING",
         ]);
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -10043,6 +10334,16 @@ mod tests {
                 .get("anthropic-beta")
                 .map(|value| format!("anthropic-beta: {value}\r\n"));
             let captured = &case["captured"];
+            let expected_thinking: serde_json::Value = serde_json::from_str(
+                captured["raw_body_fragments"]["thinking_utf8"]
+                    .as_str()
+                    .expect("captured thinking source"),
+            )
+            .expect("captured thinking JSON");
+            assert_eq!(
+                body["thinking"], expected_thinking,
+                "row {matrix_row}: thinking display projection"
+            );
             assert_eq!(
                 actual_top_effort
                     .as_ref()
@@ -10066,18 +10367,303 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_295_tty_main_request_projections_match_prepared_host_calls() {
+    async fn native_295_mctc_model_unsupported_retries_and_latches_only_canonical_model() {
         let _guard = CACHE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _env = CacheEnvRestore::clear(&[
             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
             "DISABLE_INTERLEAVED_THINKING",
-            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
-            "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
-            branding::EFFORT_LEVEL_ENV,
-            "DISABLE_PROMPT_CACHING",
         ]);
+        use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
+        use lingxi_llm_client::NativeAnthropicRequestContext;
+
+        let first_model = "claude-opus-4-8-r30-model-unsupported-20261011";
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                400,
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "The tool_addition block is not supported on this model"
+                    }
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+            "native",
+            first_model,
+            transport.clone(),
+        )
+        .with_native_anthropic_endpoint("https://api.anthropic.com");
+        let mut request = crate::MessagesCreateRequest::new(
+            first_model,
+            None,
+            None,
+            vec![text_user_msg("Return marker.")],
+            vec![],
+        );
+        request.opts.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
+            mid_conversation_tool_changes: true,
+            ..Default::default()
+        });
+        request.opts.fallback = crate::FallbackPolicy::Disabled;
+        service
+            .messages_create(request)
+            .await
+            .expect("model-unsupported MCTC response retries without the beta");
+
+        let mctc = Beta::MidConversationToolChanges.header();
+        assert_eq!(transport.seen_count(), 2);
+        assert!(transport.seen_headers(0)["anthropic-beta"].contains(mctc));
+        assert!(!transport.seen_headers(1)["anthropic-beta"].contains(mctc));
+
+        // The Native request latch uses We(model), which canonicalizes model
+        // family aliases/suffixes before its host-level model-only lookup.
+        let same_model_transport =
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let same_model_alias = "claude-opus-4-8-r30-model-unsupported-alias";
+        let same_model_service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+            "native",
+            same_model_alias,
+            same_model_transport.clone(),
+        )
+        .with_native_anthropic_endpoint("https://api.anthropic.com");
+        let mut same_model_request = crate::MessagesCreateRequest::new(
+            same_model_alias,
+            None,
+            None,
+            vec![text_user_msg("Return marker.")],
+            vec![],
+        );
+        same_model_request.opts.native_anthropic_request_context =
+            Some(NativeAnthropicRequestContext {
+                mid_conversation_tool_changes: true,
+                ..Default::default()
+            });
+        same_model_service
+            .messages_create(same_model_request)
+            .await
+            .expect("same canonical model request succeeds");
+        assert!(!same_model_transport.seen_headers(0)["anthropic-beta"].contains(mctc));
+
+        let other_model_transport =
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let other_model = "claude-sonnet-5-5-r30-distinct-model";
+        let other_model_service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+            "native",
+            other_model,
+            other_model_transport.clone(),
+        )
+        .with_native_anthropic_endpoint("https://api.anthropic.com");
+        let mut other_model_request = crate::MessagesCreateRequest::new(
+            other_model,
+            None,
+            None,
+            vec![text_user_msg("Return marker.")],
+            vec![],
+        );
+        other_model_request.opts.native_anthropic_request_context =
+            Some(NativeAnthropicRequestContext {
+                mid_conversation_tool_changes: true,
+                ..Default::default()
+            });
+        other_model_service
+            .messages_create(other_model_request)
+            .await
+            .expect("different model remains eligible");
+        assert!(other_model_transport.seen_headers(0)["anthropic-beta"].contains(mctc));
+
+        // Model support is provider-route scoped as well as canonical-model
+        // scoped in this multi-provider runtime. A direct Anthropic refusal
+        // must not suppress the same model on Foundry.
+        let foundry_transport =
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let foundry_service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::FoundryClaude,
+            ProviderId::OpenAICompatible {
+                name: "foundry-claude".to_owned(),
+            },
+            "https://example.services.ai.azure.com/anthropic",
+            "foundry-claude",
+            same_model_alias,
+            foundry_transport.clone(),
+        );
+        let mut foundry_request = crate::MessagesCreateRequest::new(
+            same_model_alias,
+            None,
+            None,
+            vec![text_user_msg("Return marker.")],
+            vec![],
+        );
+        foundry_request.opts.native_anthropic_request_context =
+            Some(NativeAnthropicRequestContext {
+                mid_conversation_tool_changes: true,
+                ..Default::default()
+            });
+        foundry_service
+            .messages_create(foundry_request)
+            .await
+            .expect("same canonical model remains eligible on another provider route");
+        assert!(foundry_transport.seen_headers(0)["anthropic-beta"].contains(mctc));
+    }
+
+    #[tokio::test]
+    async fn native_295_nonstream_bedrock_afk_error_does_not_use_stream_kie_retry() {
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"]);
+        use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
+        use lingxi_llm_client::NativeAnthropicRequestContext;
+
+        let transport = FakeTransport::always(ProviderResponse::json(
+            400,
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "afk-mode-2026-01-31 is unavailable for this endpoint"
+                }
+            }),
+        ));
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "bedrock",
+            "claude-opus-4-8-r30-afk",
+            transport.clone(),
+        );
+        let mut request = crate::MessagesCreateRequest::new(
+            "claude-opus-4-8-r30-afk",
+            None,
+            None,
+            vec![text_user_msg("Return marker.")],
+            vec![],
+        );
+        request.opts.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
+            afk_mode: true,
+            ..Default::default()
+        });
+        request.opts.fallback = crate::FallbackPolicy::Disabled;
+        assert!(
+            service.messages_create(request).await.is_err(),
+            "Native nested non-stream fallback has no Kie/AFK retry callback"
+        );
+
+        let afk = Beta::AfkMode.header();
+        assert_eq!(transport.seen_count(), 1);
+        let first = request_body_value(&transport.seen.lock().unwrap()[0].body_json);
+        assert!(first["anthropic_beta"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|beta| { beta.as_str() == Some(afk) }));
+        assert!(!transport
+            .seen_headers(0)
+            .get("anthropic-beta")
+            .is_some_and(|value| value.contains(afk)));
+    }
+
+    #[tokio::test]
+    async fn native_295_stream_afk_kie_retries_only_afk_before_mctc_model_latch() {
+        use futures::StreamExt;
+        use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
+        use lingxi_llm_client::NativeAnthropicRequestContext;
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "DISABLE_INTERLEAVED_THINKING",
+        ]);
+
+        let model = "claude-sonnet-5-5-r30-afk-mctc-stream";
+        let body = |message: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": message}
+            }))
+            .unwrap()
+        };
+        let error_headers = BTreeMap::from([("content-type".into(), "application/json".into())]);
+        let success_frames = ScriptedStreamTransport::anthropic_success().frames.clone();
+        let transport = Arc::new(NativeAfkStreamRetryTransport {
+            responses: Mutex::new(std::collections::VecDeque::from(vec![
+                (
+                    400,
+                    error_headers.clone(),
+                    vec![body(
+                        "afk-mode-2026-01-31 was rejected; tool_addition is not supported on this model",
+                    )],
+                ),
+                (
+                    400,
+                    error_headers,
+                    vec![body("The tool_addition block is not supported on this model")],
+                ),
+                (
+                    200,
+                    BTreeMap::from([("content-type".into(), "text/event-stream".into())]),
+                    success_frames,
+                ),
+            ])),
+            seen: Mutex::new(Vec::new()),
+        });
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+            // The process model-support latch is route-scoped. Keep this
+            // synthetic refusal on its own profile so it cannot pre-retire
+            // MCTC for the public TTY fixture's `native` route in this test
+            // binary.
+            "native-afk-mctc-latch-test",
+            model,
+            transport.clone(),
+        )
+        .with_native_anthropic_endpoint("https://api.anthropic.com");
+        let mut request = LlmRequest::new(model).with_user_text("Return marker.");
+        request.execution.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
+            afk_mode: true,
+            mid_conversation_tool_changes: true,
+            ..Default::default()
+        });
+        let mut stream = service
+            .stream_request(request)
+            .await
+            .expect("AFK and MCTC refusals are repaired in Native order");
+        while let Some(event) = stream.next().await {
+            event.expect("successful third stream decodes");
+        }
+
+        let afk = Beta::AfkMode.header();
+        let mctc = Beta::MidConversationToolChanges.header();
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        let first = seen[0].headers["anthropic-beta"].as_str();
+        let second = seen[1].headers["anthropic-beta"].as_str();
+        let third = seen[2].headers["anthropic-beta"].as_str();
+        assert!(first.contains(afk) && first.contains(mctc));
+        assert!(!second.contains(afk) && second.contains(mctc));
+        assert!(!third.contains(afk) && !third.contains(mctc));
+    }
+
+    #[tokio::test]
+    async fn native_295_tty_main_request_projections_match_prepared_host_calls() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../tests/fixtures/native_per_turn_control_2_1_295_tty_mainrequest_44.json"
         ))
@@ -10095,13 +10681,79 @@ mod tests {
             serde_json::json!([265, 267])
         );
 
+        const CHILD_ENV: &str = "LINGXI_NATIVE_295_TTY_ROW_CHILD";
+        const ROW_ENV: &str = "LINGXI_NATIVE_295_TTY_MATRIX_ROW";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Each Native capture came from a fresh CLI process. Reusing one
+            // process here shares model beta latches and the display-probe
+            // budget across rows, which changes later provider requests.
+            // Re-run this same test once per captured row in a clean process;
+            // each child selects exactly one immutable fixture input below.
+            let executable = std::env::current_exe().expect("current test binary path");
+            let mut failures = Vec::new();
+            for case in cases {
+                let matrix_row = case["matrix_row"].as_u64().expect("matrix row");
+                let output = std::process::Command::new(&executable)
+                    .arg("native_295_tty_main_request_projections_match_prepared_host_calls")
+                    .arg("--nocapture")
+                    .env_clear()
+                    .env(CHILD_ENV, "1")
+                    .env(ROW_ENV, matrix_row.to_string())
+                    .env("RUST_TEST_THREADS", "1")
+                    .output()
+                    .unwrap_or_else(|error| {
+                        panic!("row {matrix_row}: launch isolated test process: {error}")
+                    });
+                if !output.status.success() {
+                    failures.push(format!(
+                        "row {matrix_row} failed\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "independent Native row processes failed:\n{}",
+                failures.join("\n\n")
+            );
+            return;
+        }
+        let selected_row = std::env::var(ROW_ENV)
+            .expect("isolated child has a selected matrix row")
+            .parse::<u64>()
+            .expect("selected matrix row is numeric");
+        assert_eq!(
+            cases
+                .iter()
+                .filter(|case| case["matrix_row"].as_u64() == Some(selected_row))
+                .count(),
+            1,
+            "the isolated child selects exactly one recorded row"
+        );
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "DISABLE_INTERLEAVED_THINKING",
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
+            branding::EFFORT_LEVEL_ENV,
+            "DISABLE_PROMPT_CACHING",
+        ]);
+
         let environment_keys = [
             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
             "DISABLE_INTERLEAVED_THINKING",
             "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
             "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
         ];
-        for case in cases {
+        for case in cases
+            .iter()
+            .filter(|case| case["matrix_row"].as_u64() == Some(selected_row))
+        {
             let matrix_row = case["matrix_row"].as_u64().expect("matrix row");
             let input = &case["input"];
             assert_eq!(input["interactive"], true, "row {matrix_row}");
@@ -10171,6 +10823,76 @@ mod tests {
                 )
                 .expect("build current Host main request");
             request.execution.resolve_native_effort = true;
+            let host_inputs = &case["host_inputs"];
+            let permission_mode = host_inputs["permission_mode"]["value"]
+                .as_str()
+                .expect("captured host permission mode");
+            assert_eq!(permission_mode, "auto", "row {matrix_row}");
+            let permission_source = host_inputs["permission_mode"]["source_path"]
+                .as_str()
+                .expect("captured session JSONL path");
+            let permission_source_hash = host_inputs["permission_mode"]["source_sha256"]
+                .as_str()
+                .expect("captured session JSONL hash");
+            assert!(permission_source.ends_with(".jsonl"), "row {matrix_row}");
+            assert_eq!(permission_source_hash.len(), 64, "row {matrix_row}");
+            assert_eq!(
+                host_inputs["server_classifier_context"]["source_body_path"],
+                case["main_request"]["source_body_path"],
+                "row {matrix_row}: classifier source is the captured main request"
+            );
+            assert_eq!(
+                host_inputs["server_classifier_context"]["source_body_sha256"],
+                case["main_request"]["body_sha256"],
+                "row {matrix_row}: classifier source hash matches the captured body"
+            );
+            let experimental_betas_disabled = input["env"]
+                .get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(crate::structured_output::bool_value);
+            let mctc_route = matches!(input["provider"].as_str(), Some("firstParty" | "foundry"));
+            let mctc_model = matches!(model, "claude-sonnet-5-5" | "claude-fable-5-1");
+            let afk_route = match input["provider"].as_str() {
+                // Native Gyo requires vh() for direct Anthropic, including its
+                // experimental-beta gate.
+                Some("firstParty") => !experimental_betas_disabled,
+                // Native's broader MUn() branch admits Foundry independently
+                // of vh()'s experimental-beta gate.
+                Some("foundry") => true,
+                other => panic!("unexpected AFK provider {other:?}"),
+            };
+            let classifier_source =
+                host_inputs["server_classifier_context"]["payload_json"].as_str();
+            let server_classifier = classifier_source.map(|source| {
+                use sha2::Digest as _;
+
+                let payload_hash = format!("{:x}", sha2::Sha256::digest(source.as_bytes()));
+                assert_eq!(
+                    Some(payload_hash.as_str()),
+                    host_inputs["server_classifier_context"]["payload_sha256"].as_str(),
+                    "row {matrix_row}: classifier input retains its exact captured JSON source"
+                );
+                assert_eq!(
+                    host_inputs["server_classifier_context"]["json_pointer"],
+                    "/safeguards/0/classifier_context",
+                    "row {matrix_row}: classifier input comes from the captured safeguards"
+                );
+                let payload = lingxi_llm_client::protocol::JsonPayload::parse(source)
+                    .expect("captured classifier JSON source parses");
+                lingxi_llm_client::NativeAnthropicServerClassifierContext::new(payload)
+                    .expect("captured classifier context is a JSON object")
+            });
+            request.execution.native_anthropic_request_context =
+                Some(lingxi_llm_client::NativeAnthropicRequestContext {
+                    server_classifier,
+                    afk_mode: permission_mode == "auto" && afk_route,
+                    // In 2.1.295 V$n() defaults true. These recorded models
+                    // pass the Native model capability gate; vh() still
+                    // excludes disabled experimental betas and HIPAA routes.
+                    mid_conversation_tool_changes: mctc_route
+                        && mctc_model
+                        && !experimental_betas_disabled,
+                });
             let mut prepared = adapter
                 .client
                 .prepare(&request)

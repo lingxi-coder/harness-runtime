@@ -105,6 +105,8 @@ fn auxiliary(
             None,
             None,
             Some("compaction"),
+            std::collections::HashSet::new(),
+            std::collections::HashMap::new(),
         )
         .unwrap()
 }

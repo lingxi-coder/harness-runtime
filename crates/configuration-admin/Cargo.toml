@@ -25,7 +25,7 @@ plugin = { path = "../plugin" }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 secret = { path = "../secret" }
-skill-api = { path = "../skill-api" }
+skill = { path = "../skill" }
 serde.workspace = true
 serde_json.workspace = true
 telemetry = { path = "../telemetry" }

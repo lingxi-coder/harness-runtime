@@ -555,6 +555,20 @@ pub fn next_step_with_backoff(
 ) -> DriveStep {
     use crate::LlmError;
 
+    if error.is_proxy_auth_helper_retry() {
+        state.consecutive_overloaded = 0;
+        if state.attempt >= ctl.max_retries {
+            return DriveStep::Terminal;
+        }
+        let base = scaled_base_delay_ms(state.attempt, backoff_ms);
+        state.attempt = state.attempt.saturating_add(1);
+        return DriveStep::RetryAfter(jittered_delay(base));
+    }
+    if error.is_proxy_tunnel_auth_rejection() {
+        state.consecutive_overloaded = 0;
+        return DriveStep::Terminal;
+    }
+
     match error.classification_source() {
         LlmError::Overloaded { .. } => {
             // Increment consecutive counter (always, regardless of allow_fallback,
@@ -649,7 +663,8 @@ pub fn next_step_with_backoff(
         LlmError::ProviderInternal
         | LlmError::ProviderTimeout { .. }
         | LlmError::Transport { .. }
-        | LlmError::TransportTimeout { .. } => {
+        | LlmError::TransportTimeout { .. }
+        | LlmError::ProxyTunnelResponse { .. } => {
             // Reset the consecutive-overloaded counter.
             state.consecutive_overloaded = 0;
 
@@ -718,8 +733,8 @@ pub fn next_step_with_backoff(
             state.consecutive_overloaded = 0;
             DriveStep::Terminal
         }
-        LlmError::ProviderErrorText { .. } => {
-            unreachable!("classification_source removes provider text wrappers")
+        LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+            unreachable!("classification_source removes carrier wrappers")
         }
     }
 }

@@ -891,6 +891,14 @@ impl PoolSubagentSpawner {
             instruction_context: Default::default(),
             instruction_context_is_override: false,
             instruction_provider: None,
+            native_settings_prompt_provider: None,
+            native_settings_prompt_context: lingxi_core::host::NativeSettingsPromptContext {
+                agent_context: lingxi_core::host::NativeSettingsAgentContext::Subagent {
+                    is_main_session: false,
+                },
+                bare_fork: None,
+                isolated_context: None,
+            },
             mobile_runtime_workspace_reminder: None,
             content_replacement_state: None,
             agent_memory: None,
@@ -1295,6 +1303,20 @@ impl PoolSubagentSpawner {
         ctx.instruction_context_is_override =
             ctx.agent_definition.is_fork() && request.instruction_context.is_some();
         ctx.instruction_provider = self.instruction_provider.clone();
+        ctx.native_settings_prompt_provider = self.native_settings_prompt_provider.get();
+        ctx.native_settings_prompt_context = lingxi_core::host::NativeSettingsPromptContext {
+            agent_context: lingxi_core::host::NativeSettingsAgentContext::Subagent {
+                is_main_session: false,
+            },
+            // AgentTool's fork-context carrier does not prove that the
+            // query option `bareFork` was set. Keep the source fact absent;
+            // `Subagent { is_main_session: false }` already suppresses the
+            // Native settings producer for ordinary child queries.
+            bare_fork: None,
+            // Isolated hook side queries do not use this runner/provider
+            // path, so this query option is absent here.
+            isolated_context: None,
+        };
         ctx.session_interactive = self.session_interactive;
         ctx.origin_session_id = origin_session_id;
         // Hand the child the refusal-fallback chain. Upstream's subagents share
@@ -1642,7 +1664,7 @@ impl PoolSubagentSpawner {
 
 #[cfg(test)]
 mod native_query_depth_tests {
-    use super::PoolSubagentSpawner;
+    use super::{PoolSubagentSpawner, Utf16JsonProjection};
 
     #[test]
     fn child_depth_is_separate_from_agent_spawn_depth() {
@@ -1653,5 +1675,42 @@ mod native_query_depth_tests {
             PoolSubagentSpawner::initial_native_query_depth(Some(u32::MAX)),
             u32::MAX
         );
+    }
+
+    #[test]
+    fn regular_and_forked_agent_contexts_are_not_main_session_queries() {
+        use lingxi_core::host::NativeSettingsAgentContext;
+        use lingxi_core::types::{ConversationMessage, MessageId};
+
+        let definition = PoolSubagentSpawner::fallback_definition("general-purpose");
+        let regular = PoolSubagentSpawner::make_subagent_context(
+            definition.clone(),
+            "regular child",
+            None,
+            None,
+        );
+        let forked = PoolSubagentSpawner::make_subagent_context(
+            definition,
+            "forked child",
+            Some(vec![ConversationMessage::user(
+                MessageId::new(),
+                "parent history".into(),
+            )]),
+            Some(Utf16JsonProjection::from("parent system prompt")),
+        );
+
+        for context in [
+            regular.native_settings_prompt_context,
+            forked.native_settings_prompt_context,
+        ] {
+            assert_eq!(
+                context.agent_context,
+                NativeSettingsAgentContext::Subagent {
+                    is_main_session: false
+                }
+            );
+            assert!(!context.is_admitted());
+        }
+        assert_eq!(forked.native_settings_prompt_context.bare_fork, None);
     }
 }

@@ -172,6 +172,35 @@ fn set_permission_mode_round_trips() {
 }
 
 #[test]
+fn native_proactivity_commands_keep_initialize_opt_in_separate_from_level_changes() {
+    let initialize = ClientCommand::InitializeProactivity {
+        proactivity: Some(true),
+        reinitialize: None,
+    };
+    let initialize_json = serde_json::to_value(&initialize).expect("serialize initialize opt-in");
+    assert_eq!(initialize_json["type"], "initialize_proactivity");
+    assert_eq!(initialize_json["proactivity"], true);
+    assert!(initialize_json.get("reinitialize").is_none());
+    assert_eq!(
+        serde_json::from_value::<ClientCommand>(initialize_json).unwrap(),
+        initialize
+    );
+
+    let level = ClientCommand::SetProactivityLevel {
+        level: "proactive".into(),
+        offer_bypass: Some(false),
+    };
+    let level_json = serde_json::to_value(&level).expect("serialize proactivity level");
+    assert_eq!(level_json["type"], "set_proactivity_level");
+    assert_eq!(level_json["level"], "proactive");
+    assert_eq!(level_json["offer_bypass"], false);
+    assert_eq!(
+        serde_json::from_value::<ClientCommand>(level_json).unwrap(),
+        level
+    );
+}
+
+#[test]
 fn provider_credential_command_round_trips_without_debug_leak() {
     let secret = "sk-provider-super-secret";
     let command = ClientCommand::SetProviderCredential {

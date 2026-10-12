@@ -55,7 +55,9 @@ pub use builtin_context::{
 pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};
 pub use defer::{
-    mode_from_env, mode_from_values, DeferralState, ToolSearchMode, ENTER_WORKTREE_TOOL_NAME,
+    mode_from_env, mode_from_values, DeferralState, DeferredMcpFailedServer,
+    DeferredMcpServerStatus, DeferredToolNativeContext, DeferredToolRevocation, ToolSearchMode,
+    ENTER_WORKTREE_TOOL_NAME,
 };
 pub use hosted_search::{
     HostedSearchError, HostedSearchOutput, HostedSearchRequest, HostedWebSearchClient,

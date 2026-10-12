@@ -173,7 +173,11 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
                     SlashDispatchResult::Handled { .. }
                 ));
             }
-            let listing = runtime.wired_skill_listing_provider.skill_entries().await;
+            let listing = runtime
+                .wired_skill_listing_provider
+                .skill_listing_snapshot()
+                .await
+                .entries;
             for (name, section, absent_section) in [
                 ("mobile-device", "device_status", "clipboard"),
                 ("mobile-personal-context", "location", "calendar"),
@@ -238,7 +242,11 @@ async fn missing_device_backends_do_not_advertise_tools_or_skills() {
                 .await,
             SlashDispatchResult::Handled { .. }
         ));
-        let listing = runtime.wired_skill_listing_provider.skill_entries().await;
+        let listing = runtime
+            .wired_skill_listing_provider
+            .skill_listing_snapshot()
+            .await
+            .entries;
         for name in DEVICE_SKILLS {
             assert!(!listing
                 .iter()

@@ -211,6 +211,7 @@ mod tests {
             value: crate::rule::PermissionRuleValue {
                 tool_name: "Read".into(),
                 rule_content: Some("./secret/**".into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Ask,
             source: crate::rule::PermissionRuleSource::Settings(

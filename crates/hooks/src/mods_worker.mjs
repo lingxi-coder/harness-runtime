@@ -39,7 +39,45 @@ let parentUiPressCounter = 0;
 const context = createContext({ AbortController, AbortSignal });
 const invocationSlot = `__lingxi_mod_call_${randomUUID().replaceAll('-', '')}`;
 const invokeScript = new Script(`globalThis[${JSON.stringify(invocationSlot)}].fn(...globalThis[${JSON.stringify(invocationSlot)}].args)`);
-const supportedEvents = new Set(['plugin.register', 'tool.call', 'tool.check', 'tool.describe', 'tool.list', 'tool.register', 'command.list', 'command.register', 'command.run', 'command.describe', 'prompt.submit', 'prompt.context', 'prompt.attachment', 'prompt.section', 'prompt.compose', 'session.start', 'session.receive', 'session.end', 'session.compact', 'session.measure', 'session.append', 'session.attach', 'session.detach', 'turn.start', 'turn.step', 'turn.complete', 'agent.offer', 'agent.spawn', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.render', 'ui.resolve', 'ui.press', 'ui.input', 'ui.select', 'ui.message', 'ui.fault', 'ui.selection', 'ui.log', 'ui.toast', 'ui.notify', 'ui.status', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
+const supportedEvents = new Set([
+  'classic.PreToolUse', 'classic.PostToolUse', 'classic.PostToolUseFailure',
+  'classic.PostToolBatch', 'classic.Notification', 'classic.UserPromptSubmit',
+  'classic.UserPromptExpansion', 'classic.SessionStart', 'classic.SessionEnd',
+  'classic.Stop', 'classic.StopFailure', 'classic.SubagentStart', 'classic.SubagentStop',
+  'classic.PreCompact', 'classic.PostCompact', 'classic.PreModelSwitch',
+  'classic.PostModelSwitch', 'classic.PermissionRequest', 'classic.PermissionDenied',
+  'classic.Setup', 'classic.TeammateIdle', 'classic.TaskCreated', 'classic.TaskCompleted',
+  'classic.Elicitation', 'classic.ElicitationResult', 'classic.ConfigChange',
+  'classic.WorktreeCreate', 'classic.WorktreeRemove', 'classic.InstructionsLoaded',
+  'classic.CwdChanged', 'classic.FileChanged', 'classic.DirectoryAdded',
+  'classic.MessageDisplay',
+  'tool.call', 'tool.check', 'ui.render', 'ui.resolve', 'ui.press', 'ui.input',
+  'ui.select', 'ui.message', 'ui.fault', 'ui.scroll', 'ui.focus', 'agent.offer',
+  'agent.spawn', 'prompt.submit', 'prompt.fill', 'prompt.suggest', 'prompt.edit',
+  'prompt.autocomplete', 'prompt.section', 'prompt.context', 'prompt.attachment',
+  'prompt.mention', 'prompt.compose', 'tool.describe', 'command.run',
+  'command.describe', 'config.set', 'config.describe', 'telemetry.log',
+  'telemetry.mark', 'skill.prompt', 'attribution.text', 'session.start',
+  'session.receive', 'session.append', 'session.send', 'session.compact',
+  'session.attach', 'session.detach', 'session.measure', 'session.end',
+  'plugin.register', 'turn.start', 'turn.step', 'turn.complete', 'engine.create',
+  'model.complete', 'model.classify', 'model.fork', 'audio.play', 'audio.speak',
+  'mcp.call', 'mcp.connect', 'session.cwd', 'session.root', 'session.model',
+  'session.turns', 'session.id', 'session.messages', 'session.repo',
+  'session.surface', 'session.surfaces', 'session.authorize', 'session.usage',
+  'session.version', 'turn.abort', 'prompt.read', 'flag.value', 'tool.list',
+  'tool.register', 'command.list', 'command.register', 'config.list', 'agent.list',
+  'agent.register', 'ui.toast', 'ui.status', 'ui.log', 'ui.notice', 'ui.invalidate',
+  'ui.open', 'ui.close', 'ui.panes', 'ui.selection', 'ui.copy', 'ui.notify',
+  'ui.blit', 'fs.read', 'fs.write', 'fs.list', 'fs.exists', 'fs.stat',
+  'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys',
+  'state.get', 'state.set', 'clock.now', 'clock.sleep', 'clock.after',
+  'clock.every', 'http.fetch', 'process.run', 'process.spawn', 'settings.read',
+  'env.get', 'env.set',
+]);
+const supportedEventNamespaces = new Set(
+  [...supportedEvents].map(event => event.slice(0, event.indexOf('.'))),
+);
 const operationEvents = new Set(['tool.check', 'tool.list', 'tool.register', 'command.list', 'command.register', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.log', 'ui.toast', 'ui.notify', 'ui.status', 'ui.selection', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.receive', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
 const commandRunHeldEvents = new Set(['tool.call', 'prompt.context', 'prompt.section', 'prompt.compose', 'command.run']);
 const promptSubmitHeldEvents = new Set([
@@ -1384,18 +1422,6 @@ function matches(pattern, value, depth = 0) {
   return Object.is(pattern, value);
 }
 
-function matcherKey(value) {
-  if (Object.prototype.toString.call(value) === '[object RegExp]') {
-    return `regexp:${value.source}/${value.flags}`;
-  }
-  if (Array.isArray(value)) return `array:[${value.map(matcherKey).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `object:{${Object.keys(value).sort().map(key =>
-      JSON.stringify(key) + ':' + matcherKey(value[key])).join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
 function selectsEvent(pattern, event) {
   if (typeof pattern !== 'string') return false;
   // The native wildcard does not subscribe to either telemetry stream.
@@ -1410,14 +1436,38 @@ function selectsEvent(pattern, event) {
   return pattern === event;
 }
 
-function isSupportedPattern(pattern) {
-  if (supportedEvents.has(pattern) || pattern === '*') return true;
-  if (pattern.startsWith('!')) {
-    const positive = pattern.slice(1);
-    return positive !== '*' && !positive.startsWith('!') && isSupportedPattern(positive);
+const eventIdentifierPattern = new RegExp(
+  String.raw`^(?!\p{Default_Ignorable_Code_Point})[\p{ID_Start}$_](?:(?!\p{Default_Ignorable_Code_Point})[\p{ID_Continue}$])*$`,
+  'u',
+);
+const defaultIgnorablePattern = new RegExp(String.raw`\p{Default_Ignorable_Code_Point}`, 'u');
+
+function isNativeEventIdentifier(part) {
+  return eventIdentifierPattern.test(part) && !defaultIgnorablePattern.test(part);
+}
+
+function nativeEventPatternError(pattern) {
+  if (typeof pattern !== 'string') {
+    return `${typeof pattern} is not an event name or a pattern (a string)`;
   }
-  return pattern.endsWith('.*') && [...supportedEvents]
-    .some(event => event.startsWith(pattern.slice(0, -1)));
+  const negated = pattern.startsWith('!');
+  const positive = negated ? pattern.slice(1) : pattern;
+  if (negated && positive === '*') return `"${pattern}" is not a pattern: it selects no event`;
+  if (negated && positive.startsWith('!')) return `"${pattern}" is not a pattern: "!" negates once`;
+  const wildcard = positive === '*' || positive.endsWith('.*');
+  const body = positive === '*' ? '' : wildcard ? positive.slice(0, -2) : positive;
+  if (positive !== '*' && (body === '' || !body.split('.').every(isNativeEventIdentifier))) {
+    return `"${pattern}" is not an event name or a pattern ("*", "<prefix>.*", or "!" before either)`;
+  }
+  if (wildcard) return undefined;
+  if (supportedEvents.has(positive)) return undefined;
+  const parts = positive.split('.');
+  const customEvent = parts.length === 2 && !supportedEventNamespaces.has(parts[0]);
+  return customEvent ? undefined : `"${positive}" is not an event`;
+}
+
+function isSupportedPattern(pattern) {
+  return nativeEventPatternError(pattern) === undefined;
 }
 
 function markCancelledApiCall(callId) {
@@ -3124,15 +3174,15 @@ async function load(message) {
   const tierOrder = Number.isSafeInteger(message.tierOrder) && message.tierOrder >= 0
     ? message.tierOrder : Number.MAX_SAFE_INTEGER;
   const pending = [];
+  const unmatchedEvents = new Set();
   let registering = true;
   const on = (event, matcherOrHandler, maybeHandler) => {
     if (!registering) throw new Error('on after register() returned');
     const matcher = typeof matcherOrHandler === 'function' ? undefined : matcherOrHandler;
     const handler = typeof matcherOrHandler === 'function' ? matcherOrHandler : maybeHandler;
     if (typeof event !== 'string' || typeof handler !== 'function') throw new TypeError('on requires an event and handler');
-    if (!isSupportedPattern(event)) {
-      throw new Error('Unsupported Mod event: ' + event);
-    }
+    const patternError = nativeEventPatternError(event);
+    if (patternError) throw new Error(patternError);
     if (matcher !== undefined && (!matcher || typeof matcher !== 'object' || Array.isArray(matcher))) {
       throw new TypeError('on matcher must be an object');
     }
@@ -3148,11 +3198,13 @@ async function load(message) {
         && destinations.some(destination => destination !== 'collector')) {
       throw new Error('its hooks stand on the telemetry stream "anthropic" (a matcher names it, or a telemetry hook names no "to" and so stands on every stream), which is for the plugins built into the CLI; name the collector on each telemetry hook: on("telemetry.log", { to: "collector" }, hook)');
     }
-    const key = matcherKey(matcher);
-    if (pending.some(item => item.event === event && item.matcherKey === key)) {
-      throw new Error(`on(${JSON.stringify(event)}) is registered twice${matcher === undefined ? ' without a matcher' : ' with the same matcher'}`);
+    const hasMatcher = matcher !== undefined;
+    const isPattern = event === '*' || event.endsWith('.*') || event.startsWith('!');
+    if (unmatchedEvents.has(event) && (!hasMatcher || isPattern)) {
+      throw new Error(`on(${JSON.stringify(event)}) is registered twice${hasMatcher ? '' : ' without a matcher'}`);
     }
-    const entry = { event, matcher, matcherKey: key, handler, root: message.root,
+    if (!hasMatcher || isPattern) unmatchedEvents.add(event);
+    const entry = { event, matcher, handler, root: message.root,
       plugin, storageId, tier, tierOrder, hookId: nextHookId++, catchHandler: undefined };
     pending.push(entry);
     return { catch: callback => {
@@ -3819,7 +3871,7 @@ async function dispatch(message) {
         const timedOut = error === budgetExpired || budget.isExpired();
         if (timedOut) hookController.abort(new Error(`${entry.plugin}: hook budget expired`));
         budget.finish();
-        if (entry.catchHandler) {
+        if (entry.catchHandler && !controller.signal.aborted) {
           next.error = freeze({ kind: timedOut ? 'timeout' : 'throw',
             ...timedOut ? {} : { message: String(error?.message || error) },
             budget: catchBudgetMs });
@@ -4165,7 +4217,7 @@ async function dispatchStream(message) {
           hookController.abort(new Error(`${entry.plugin}: hook budget expired`));
         }
         budget.finish();
-        if (entry.catchHandler) {
+        if (entry.catchHandler && !controller.signal.aborted) {
           const catchBudget = makeBudget(catchBudgetMs);
           catchController = new AbortController();
           if (controller.signal.aborted) catchController.abort(controller.signal.reason);

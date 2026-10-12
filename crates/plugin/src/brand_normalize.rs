@@ -39,12 +39,15 @@
 //!
 //! ## Frozen identities are a *second*, orthogonal concept
 //!
-//! `scripts/checks/brand_frozen_identities.txt` (the L3 list) currently licenses two
-//! identifiers to remain their Claude spelling **at a specific file path**,
-//! because renaming them would discard already-shipped state: an upstream
-//! `CLAUDECODE` marker, and the literal `CLAUDE_PLUGIN_ROOT` HTTP-header key
-//! `mcp/src/headers_helper.rs` writes for already-installed plugins. Neither
-//! is something to normalize away, but for different reasons:
+//! `scripts/checks/brand_frozen_identities.txt` (the L3 list) contains frozen
+//! identities for distinct reasons. The original two protect already-shipped
+//! state: an upstream `CLAUDECODE` marker and the literal
+//! `CLAUDE_PLUGIN_ROOT` HTTP-header key `mcp/src/headers_helper.rs` writes for
+//! already-installed plugins. Newer entries also pin exact source-parity test
+//! identities or intentionally branded product text. The normalizer only
+//! recognizes the two token families documented below, so those latter
+//! entries remain unchanged by construction rather than by an exemption.
+//! The recognized identities behave differently:
 //!
 //! * `CLAUDE_PLUGIN_ROOT` *is* one of [`known_pairs`]'s ordinary mapped
 //!   tokens (the env-var substitution spelling) — everywhere except that one
@@ -56,7 +59,7 @@
 //!   so it is inert to this module by construction, not by an exemption.
 //!
 //! This module reads `scripts/checks/brand_frozen_identities.txt` at call time via
-//! [`load_frozen_identities`] rather than hand-copying its two entries, for
+//! [`load_frozen_identities`] rather than hand-copying its entries, for
 //! the same reason `claude_counterpart` derives rather than hard-codes: the
 //! file is this repo's single source of truth for frozen identities, and it
 //! is itself excluded from the brand gate's own scan (`SELF_ARTIFACTS`), so
@@ -427,13 +430,15 @@ mod tests {
 
     /// Required test. For every entry in `scripts/checks/brand_frozen_identities.txt`
     /// (the L3 list), [`normalize`] at that entry's exact frozen path is the
-    /// identity map on that literal: it survives byte-for-byte and is
-    /// recorded as `preserved`, never `mapped` or `unmapped`.
+    /// identity map on that literal: it survives byte-for-byte and is never
+    /// mapped or reported unmapped. Entries in one of the scanner's token
+    /// families are recorded as `preserved`; unrelated fixture markers and
+    /// intentionally branded text are inert to this normalizer.
     ///
-    /// Two documented entries exist today with two different reasons a token
-    /// is inert to this module (see the module doc's "Frozen identities are a
-    /// second, orthogonal concept" section), so this test exercises BOTH
-    /// shapes rather than assuming they behave identically:
+    /// The list contains both recognized oracle tokens and identities outside
+    /// the normalizer's token families, so this test exercises both a real
+    /// path-scoped exemption and entries that must remain brand-preserving by
+    /// construction:
     ///
     /// * `CLAUDE_PLUGIN_ROOT` — recognized by [`scan_tokens`] AND one of
     ///   [`known_pairs`]'s ordinary mapped tokens. Preserving it at its
@@ -451,14 +456,6 @@ mod tests {
     #[test]
     fn normalizer_maps_every_frozen_identity() {
         let entries = load_frozen_identities();
-        assert_eq!(
-            entries.len(),
-            2,
-            "expected exactly the two documented frozen entries in \
-             scripts/checks/brand_frozen_identities.txt; update this test (and the \
-             module doc) if that list grew or shrank"
-        );
-
         let mut exercised_a_real_exemption = false;
 
         for entry in &entries {

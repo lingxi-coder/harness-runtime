@@ -126,6 +126,7 @@ pub fn history_to_jsonl_lines(
     let mut parent_uuid: Option<String> = None;
     for msg in &conversation.history {
         let mut extra = Source::parse("{}").expect("empty metadata");
+        let mut tool_use_result_projection = None;
         let mut logical_parent_uuid = None;
         let mut resets_chain = false;
         let (mut kind, mut inner) = match msg {
@@ -156,6 +157,7 @@ pub fn history_to_jsonl_lines(
                 )
             }
             ConversationMessage::Assistant {
+                id,
                 content,
                 stop_reason,
                 resumable,
@@ -165,9 +167,18 @@ pub fn history_to_jsonl_lines(
                     ("role", "assistant".into()),
                     ("content", source_content_blocks(content)),
                 ]);
-                if !model.is_empty() {
+                let assistant_model = if conversation
+                    .native_request_history
+                    .synthetic_closing_ids
+                    .contains(id)
+                {
+                    "<synthetic>"
+                } else {
+                    model
+                };
+                if !assistant_model.is_empty() {
                     inner
-                        .set_field("model", model.into())
+                        .set_field("model", assistant_model.into())
                         .expect("assistant object");
                 }
                 if let Some(reason) = stop_reason {
@@ -259,6 +270,53 @@ pub fn history_to_jsonl_lines(
             inner = source(&());
             extra = Source::parse("{}").expect("empty attachment metadata");
         }
+        if kind == "attachment"
+            && conversation
+                .native_request_history
+                .before_closing_line_ids
+                .contains(&msg.id())
+            && attachment_projection
+                .as_ref()
+                .and_then(|payload| payload.string_at("/type"))
+                .is_some_and(crate::conversation::closing_placement::is_tee_attachment_type)
+        {
+            extra
+                .set_field("placement", Source::from("before_closing_line"))
+                .expect("attachment metadata is an object");
+        }
+        if kind == "user" {
+            if let Some(envelope) = conversation
+                .native_request_history
+                .task_delivery_envelopes
+                .get(&msg.id())
+            {
+                for (key, projection) in [
+                    (
+                        "verifiedSlackHumanTurn",
+                        &envelope.verified_slack_human_turn,
+                    ),
+                    ("promptSource", &envelope.prompt_source),
+                ] {
+                    if let Some(projection) = projection {
+                        extra
+                            .set_field(key, projection.clone())
+                            .expect("user envelope metadata is an object");
+                    }
+                }
+                if let Some(tool_use_result) = &envelope.tool_use_result {
+                    tool_use_result_projection = Some(tool_use_result.clone());
+                }
+            }
+            if let Some(task_delivery) = conversation
+                .native_request_history
+                .task_deliveries
+                .get(&msg.id())
+            {
+                extra
+                    .set_field("taskDelivery", task_delivery.clone())
+                    .expect("user metadata is an object");
+            }
+        }
         // Bare 8-4-4-4-12 lowercase uuid (NOT the `msg:`-prefixed display form)
         // — the JSONL schema + `validate_uuid` regex require the raw uuid.
         let uuid = msg.id().as_uuid().to_string();
@@ -293,7 +351,7 @@ pub fn history_to_jsonl_lines(
             extra,
 
             attachment_projection,
-            tool_use_result_projection: None,
+            tool_use_result_projection,
             mcp_meta_projection: None,
             turn_companion: None,
             usage_limit_note: None,
@@ -328,6 +386,7 @@ mod tests {
         BgSessionSnapshot {
             history: history.to_vec(),
             model_reminder_attachments: Vec::new(),
+            native_request_history: lingxi_core::host::NativeRequestHistoryMetadata::default(),
         }
     }
 
@@ -409,6 +468,119 @@ mod tests {
         assert_eq!(row.string_at("/type"), Some("attachment"));
         assert_eq!(row.string_units("/attachment/body"), Some(vec![0xd800]));
         assert_eq!(lines[0].attachment_projection.as_ref(), Some(&attachment));
+    }
+
+    #[test]
+    fn fork_snapshot_carries_native_placement_task_delivery_and_synthetic_identity() {
+        let mut task_user = user("task output");
+        if let ConversationMessage::User { origin, .. } = &mut task_user {
+            *origin = Some(Source::parse(r#"{"kind":"human"}"#).unwrap());
+        }
+        let task_user_id = task_user.id();
+        let closing = assistant("No response requested.");
+        let closing_id = closing.id();
+        let environment = ConversationMessage::user_meta(
+            lingxi_core::types::MessageId::new(),
+            "environment announcement".into(),
+        );
+        let environment_id = environment.id();
+        let environment_payload = Source::parse(r#"{"type":"environment","value":"x"}"#).unwrap();
+        let task_delivery =
+            Source::parse(r#"{"taskId":"r12345678","status":"completed"}"#).unwrap();
+        let mut conversation = snapshot(&[task_user, closing, environment]);
+        conversation
+            .model_reminder_attachments
+            .push((environment_id, environment_payload.clone()));
+        conversation
+            .native_request_history
+            .before_closing_line_ids
+            .insert(environment_id);
+        conversation
+            .native_request_history
+            .synthetic_closing_ids
+            .insert(closing_id);
+        conversation
+            .native_request_history
+            .task_deliveries
+            .insert(task_user_id, task_delivery.clone());
+        conversation
+            .native_request_history
+            .task_delivery_envelopes
+            .insert(
+                task_user_id,
+                lingxi_core::host::TaskDeliveryHistoryEnvelope {
+                    verified_slack_human_turn: Some(Source::parse("null").unwrap()),
+                    prompt_source: Some(Source::parse("null").unwrap()),
+                    tool_use_result: Some(Source::parse("null").unwrap()),
+                },
+            );
+
+        let lines = history_to_jsonl_lines(
+            &conversation,
+            "00000000-0000-4000-8000-000000000001",
+            "/tmp",
+            "test",
+            "claude-opus-4-8",
+        );
+        let task_row = lines
+            .iter()
+            .find(|row| row.message_type == "user")
+            .expect("task user row");
+        assert!(task_row
+            .extra
+            .subprojection("/taskDelivery")
+            .unwrap()
+            .semantically_eq(&task_delivery));
+        assert_eq!(
+            task_row
+                .origin_projection
+                .as_ref()
+                .and_then(|origin| origin.string_at("/kind")),
+            Some("human")
+        );
+        assert!(task_row
+            .extra
+            .subprojection("/verifiedSlackHumanTurn")
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+        assert!(task_row
+            .extra
+            .subprojection("/promptSource")
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+        assert!(task_row
+            .tool_use_result_projection
+            .as_ref()
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+        let closing_row = lines
+            .iter()
+            .find(|row| row.message_type == "assistant")
+            .expect("closing assistant row");
+        assert_eq!(closing_row.message.string_at("/model"), Some("<synthetic>"));
+        let environment_row = lines
+            .iter()
+            .find(|row| row.attachment_projection.is_some())
+            .expect("environment attachment row");
+        assert_eq!(
+            environment_row.extra.string_at("/placement"),
+            Some("before_closing_line")
+        );
+        assert_eq!(
+            environment_row
+                .attachment_projection
+                .as_ref()
+                .unwrap()
+                .string_at("/placement"),
+            None,
+            "Native placement belongs to the outer JSONL row"
+        );
     }
 
     #[test]

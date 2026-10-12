@@ -1,0 +1,36 @@
+{
+  "case": "unicode-skill-name",
+  "argv": [
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "--print",
+    "--output-format",
+    "json",
+    "--max-budget-usd",
+    "1",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002953",
+    "/skill-🧪-probe"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/native-command-skills-295-capture/attempt-01/unicode-skill-name/runtime/cwd",
+  "environment_keys": [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CONFIG_DIR",
+    "DISABLE_AUTOUPDATER",
+    "DISABLE_TELEMETRY",
+    "DO_NOT_TRACK",
+    "HOME",
+    "LANG",
+    "PATH",
+    "TERM",
+    "TMPDIR",
+    "TZ"
+  ],
+  "dummy_credential_used": true,
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "sandbox_sha256": "e087addc018d2a896134748dabd35e413e36e454aa79ed3b393bc1d56f57a6d2"
+}

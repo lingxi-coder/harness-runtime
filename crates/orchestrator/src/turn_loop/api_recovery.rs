@@ -127,7 +127,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
     orch.sync_thinking_signature_strip_flag_to_api().await;
     // A first request after resume may overflow before any successful call
     // has populated the summary fork's cache-safe slot.
-    orch.save_cache_safe_params(system, model, &tools).await;
+    orch.save_cache_safe_params_for_request(
+        system,
+        model,
+        &tools,
+        &history_snapshot,
+        context_announcements.inline_context.as_ref(),
+    )
+    .await;
     let tools =
         llm_runtime::convert::to_tool_declarations(tools).map_err(OrchestratorError::ApiCall)?;
     // SC-04: the compaction-failure detail is per-CALL state (the oracle reads
@@ -287,6 +294,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
         &mut turn_reminders,
         guarded_async_hook_reminders,
     );
+    request.opts.typed_attachment_ids = orch.typed_attachment_ids_for_snapshot(&request.messages);
+    request.opts.task_deliveries = orch.task_deliveries_for_snapshot(&request.messages).await;
     request.opts.request_dispatch_admission =
         crate::prompt::async_hook_response::request_dispatch_admission(
             &request.messages,
@@ -298,6 +307,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         .prompt_cache_capture
         .scope(crate::native_computer::call_model(orch, request))
         .await;
+    orch.record_native_afk_beta_rejection_if_any();
 
     // Map `LlmError::ContextOverflow` to the PTL recovery path.
     // The `token_gap` field carries the actual-minus-limit count parsed from the
@@ -420,18 +430,23 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         &mut turn_reminders,
                         guarded_async_hook_reminders,
                     );
+                    request.opts.typed_attachment_ids =
+                        orch.typed_attachment_ids_for_snapshot(&request.messages);
+                    request.opts.task_deliveries =
+                        orch.task_deliveries_for_snapshot(&request.messages).await;
                     request.opts.request_dispatch_admission =
                         crate::prompt::async_hook_response::request_dispatch_admission(
                             &request.messages,
                             guarded_async_hook_reminders,
                         );
                     let request_history = request.messages.clone();
-                    return match orch
+                    let retry_result = orch
                         .model_runtime
                         .prompt_cache_capture
                         .scope(crate::native_computer::call_model(orch, request))
-                        .await
-                    {
+                        .await;
+                    orch.record_native_afk_beta_rejection_if_any();
+                    return match retry_result {
                         Ok(resp) => {
                             if let Some(observation) = &mut output_observation {
                                 observation.observe(&resp.usage);
@@ -519,6 +534,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     &mut turn_reminders,
                     guarded_async_hook_reminders,
                 );
+                request.opts.typed_attachment_ids =
+                    orch.typed_attachment_ids_for_snapshot(&request.messages);
+                request.opts.task_deliveries =
+                    orch.task_deliveries_for_snapshot(&request.messages).await;
                 request.opts.request_dispatch_admission =
                     crate::prompt::async_hook_response::request_dispatch_admission(
                         &request.messages,
@@ -530,6 +549,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     .prompt_cache_capture
                     .scope(crate::native_computer::call_model(orch, request))
                     .await;
+                orch.record_native_afk_beta_rejection_if_any();
                 match retry_result {
                     Ok(resp) => {
                         if let Some(observation) = &mut output_observation {
@@ -797,18 +817,23 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     &mut turn_reminders,
                     guarded_async_hook_reminders,
                 );
+                request.opts.typed_attachment_ids =
+                    orch.typed_attachment_ids_for_snapshot(&request.messages);
+                request.opts.task_deliveries =
+                    orch.task_deliveries_for_snapshot(&request.messages).await;
                 request.opts.request_dispatch_admission =
                     crate::prompt::async_hook_response::request_dispatch_admission(
                         &request.messages,
                         guarded_async_hook_reminders,
                     );
                 let request_history = request.messages.clone();
-                match orch
+                let retry_result = orch
                     .model_runtime
                     .prompt_cache_capture
                     .scope(crate::native_computer::call_model(orch, request))
-                    .await
-                {
+                    .await;
+                orch.record_native_afk_beta_rejection_if_any();
+                match retry_result {
                     Ok(resp) => {
                         if let Some(observation) = &mut output_observation {
                             observation.observe(&resp.usage);

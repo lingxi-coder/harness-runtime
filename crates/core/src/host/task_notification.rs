@@ -14,12 +14,13 @@
 //!
 //! Unlike the skill-/agent-listing and async-hook reminders, this message is
 //! DURABLE: claude-code enqueues it onto the command queue and it becomes an
-//! ordinary user message, so both drivers append it to `session.history` and the
-//! JSONL rather than rendering it into the outgoing snapshot alone. A completion
-//! the model was told about therefore survives the turn, which matters because
-//! the drain marks each task notified exactly once — a transient render meant a
-//! turn that ended badly lost the completion for good. When no task finished
-//! since the last turn the message is `None`, exactly as before.
+//! model-facing user message backed by a typed `queued_command` attachment, so
+//! both drivers append its stable history projection and attachment row to the
+//! session rather than rendering it into the outgoing snapshot alone. A
+//! completion the model was told about therefore survives the turn, which
+//! matters because the drain marks each task notified exactly once — a transient
+//! render meant a turn that ended badly lost the completion for good. When no
+//! task finished since the last turn the message is `None`, exactly as before.
 //!
 //! It is deliberately NOT one of the `turn_reminders`: a retry or model fallback
 //! rebuilds the request from raw history and re-appends the reminders on top, so
@@ -265,7 +266,9 @@ fn monitor_push_hint(housekeeping: bool, push_enabled: bool) -> String {
     if housekeeping || !push_enabled {
         return String::new();
     }
-    format!("\nIf this event is something the user would act on now, send a {PUSH_NOTIFICATION_TOOL_NAME}. Routine or benign output doesn't need one.")
+    format!(
+        "\nIf this event is something the user would act on now, send a {PUSH_NOTIFICATION_TOOL_NAME}. Routine or benign output doesn't need one."
+    )
 }
 
 /// claude-code `Vr` — the `SendMessage` tool name interpolated into the
@@ -749,7 +752,9 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> Utf16Jso
                     Some(limit) => summary_with_description(
                         "Agent \"",
                         &n.description,
-                        &format!("\" stopped at its {limit}-turn limit (partial result; {SEND_MESSAGE_TOOL_NAME} to task-id to continue)"),
+                        &format!(
+                            "\" stopped at its {limit}-turn limit (partial result; {SEND_MESSAGE_TOOL_NAME} to task-id to continue)"
+                        ),
                     ),
                     None => summary_with_description("Agent \"", &n.description, "\" finished"),
                 },
@@ -1269,12 +1274,27 @@ pub fn render_reminders_with_options(
     in_human_turn: bool,
     push_enabled: bool,
 ) -> Vec<Utf16JsonProjection> {
+    render_reminder_sources_with_options(notifications, in_human_turn, push_enabled)
+        .into_iter()
+        .map(|(_, rendered)| rendered)
+        .collect()
+}
+
+/// Render each raw task-notification body and its final model-facing wrapper
+/// from one source snapshot. The first projection is suitable for the
+/// `queued_command.prompt` field; the second is the cached system-role view.
+#[must_use]
+pub fn render_reminder_sources_with_options(
+    notifications: &[TaskNotification],
+    in_human_turn: bool,
+    push_enabled: bool,
+) -> Vec<(Utf16JsonProjection, Utf16JsonProjection)> {
     notifications
         .iter()
         .map(|notification| {
             let body =
                 truncate_task_notification(&render_one_with_options(notification, push_enabled));
-            if in_human_turn {
+            let rendered = if in_human_turn {
                 let sanitized = escape_closing_system_reminder_source(&body);
                 let mut output = SourceStringBuilder::default();
                 output.text(ENVELOPE_OPEN_TAG);
@@ -1284,7 +1304,8 @@ pub fn render_reminders_with_options(
                 output.finish()
             } else {
                 wrap_task_notification(&body)
-            }
+            };
+            (body, rendered)
         })
         .collect()
 }
@@ -1826,7 +1847,9 @@ mod tests {
         assert!(block.contains(
             "For a custom editable script only, call: Workflow({scriptPath: '/tmp/a&amp;b.js', resumeFromRunId: 'wf_abcdef', args: [1,2]})\nAgent transcripts: /tmp/transcripts/wf_abcdef</recovery>"
         ));
-        assert!(block.contains("For a workflow launched by plugin name, use the original name and original caller args"));
+        assert!(block.contains(
+            "For a workflow launched by plugin name, use the original name and original caller args"
+        ));
         assert!(block.contains("Do not edit its Host-owned script"));
         assert!(!block.contains("To resume after editing the script"));
         assert!(!block.contains("<diagnostics>"));

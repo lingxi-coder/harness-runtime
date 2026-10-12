@@ -219,6 +219,18 @@ pub(crate) struct TranscriptStore {
     pub(crate) model_reminder_attachments: std::sync::Mutex<
         std::collections::HashMap<MessageId, lingxi_core::types::utf16_json::Utf16JsonProjection>,
     >,
+    /// Typed origins present in the currently projected request, independent
+    /// of the rendered row's `is_meta` flag.
+    /// This execution-only set lets provider conversion preserve message seams
+    /// for known attachment projections without persisting another field into
+    /// transcript history. It is replaced per projection and snapshot-filtered
+    /// before reuse, so expired transient ids do not accumulate across turns.
+    pub(crate) request_attachment_ids: std::sync::Mutex<std::collections::HashSet<MessageId>>,
+    /// Original normalized message order immediately before Native's zjr
+    /// attachment projection. TaskDelivery placement is computed against this
+    /// execution-only snapshot; it is never persisted or carried across reset.
+    pub(crate) request_history_before_attachment_projection:
+        std::sync::Mutex<Vec<lingxi_core::types::ConversationMessage>>,
 }
 
 impl TranscriptStore {
@@ -238,6 +250,8 @@ impl TranscriptStore {
             git_branch_cache: Mutex::new(None),
             post_compact_skill_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
             model_reminder_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
+            request_attachment_ids: std::sync::Mutex::new(std::collections::HashSet::new()),
+            request_history_before_attachment_projection: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -259,6 +273,14 @@ impl TranscriptStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.request_attachment_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.request_history_before_attachment_projection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -672,6 +694,8 @@ pub(crate) struct PromptRuntime {
     /// visible to prompt assembly without rebuilding the orchestrator.
     pub(crate) output_style_registry:
         Option<Arc<tokio::sync::RwLock<outputstyles::OutputStyleRegistry>>>,
+    /// Explicit Native query identity for per-session settings attachment gates.
+    pub(crate) native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext,
     /// Output style chosen DURING the session (`/output-style <name>`), which
     /// overrides `OrchestratorConfig::output_style` for every later turn.
     ///
@@ -681,7 +705,16 @@ pub(crate) struct PromptRuntime {
     /// must override an inherited custom style rather than read as "unset";
     /// `None` means nothing has been chosen this session and the config value
     /// stands.
-    pub(crate) live_output_style: Mutex<Option<String>>,
+    /// Outer `None` means no live setting refresh has superseded the boot config;
+    /// `Some(None)` is an explicit live clear to the default style.
+    pub(crate) live_output_style:
+        Mutex<Option<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
+    /// Effective `settings.language` snapshot, initialized from
+    /// `OrchestratorConfig` and replaced after watched settings changes.
+    /// The projection keeps JavaScript UTF-16 units across response-language
+    /// refreshes without conflating an unset value with a host locale.
+    pub(crate) live_response_language:
+        Mutex<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     /// Session-level cache for the expensive prompt/schema serialization of
     /// the post-filter tool pool. Dynamic per-turn marks (`strict`,
     /// `defer_loading`) are applied to a clone after cache lookup.
@@ -886,13 +919,13 @@ pub(crate) struct PromptRuntime {
     /// purely `skill_discovery_prefetch.is_some()` at the composition root,
     /// mirroring claude-code's `feature('EXPERIMENTAL_SKILL_SEARCH')` (default
     /// false). Wired (flag ON) via [`Self::with_skill_discovery_prefetch`].
-    pub(crate) skill_discovery_prefetch: Option<Arc<skill_api::SkillDiscoveryPrefetch>>,
+    pub(crate) skill_discovery_prefetch: Option<Arc<skill::SkillDiscoveryPrefetch>>,
     /// EXPERIMENTAL_SKILL_SEARCH per-turn slot holding the in-flight prefetch
     /// handle armed by [`Self::start_skill_discovery_prefetch`] at turn start and
     /// consumed by [`Self::skill_discovery_reminder_message`] before snapshot
     /// assembly. `None` between turns / when no prefetch is wired. Mirrors
     /// [`Self::pending_memory_prefetch`].
-    pub(crate) pending_skill_prefetch: Mutex<Option<skill_api::PendingSkillDiscoveryPrefetch>>,
+    pub(crate) pending_skill_prefetch: Mutex<Option<skill::PendingSkillDiscoveryPrefetch>>,
     /// EXPERIMENTAL_SKILL_SEARCH surfacing dedup: skill NAMES already surfaced via
     /// the `skill_discovery` channel this session, so a skill surfaced once is
     /// never re-injected on a later turn. Analog of [`Self::sent_skill_names`] /
@@ -934,7 +967,9 @@ impl PromptRuntime {
             pending_prompt_id: Mutex::new(None),
             remote_ui_host: std::sync::RwLock::new(None),
             output_style_registry: None,
+            native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,
             live_output_style: Mutex::new(None),
+            live_response_language: Mutex::new(None),
             wire_tool_schema_cache: Mutex::new(None),
             deferred_tool_token_cache: Mutex::new(std::collections::HashMap::new()),
             silent_turn_reminder_marks: std::sync::Mutex::new(Vec::new()),
@@ -979,6 +1014,14 @@ impl PromptRuntime {
             context_rendering_hint: Mutex::new(None),
             prompt_snapshot_resume: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn new_with_response_language(
+        language: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    ) -> Self {
+        let mut runtime = Self::new();
+        runtime.live_response_language = Mutex::new(language);
+        runtime
     }
 
     pub(crate) async fn remember_guarded_prompt_message(
@@ -1843,6 +1886,13 @@ pub(crate) struct ModelRuntime {
     pub(crate) refusal_cascade: Mutex<lingxi_core::host::refusal_driver::RefusalCascadeState>,
     pub(crate) refusal_selection:
         std::sync::Mutex<lingxi_core::host::refusal_state::ModelSelection>,
+    /// The Native Mge usage snapshot belongs to one concrete assistant row.
+    /// Selection checks the row id against current history before using it.
+    pub(crate) main_loop_latest_assistant_usage:
+        std::sync::Mutex<Option<lingxi_core::host::MainLoopAssistantUsageSnapshot>>,
+    /// Managed model restriction and the catalog used for Native Plan upgrades.
+    pub(crate) main_model_restriction:
+        std::sync::RwLock<Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>>,
 
     /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
     /// when not configured — `snapshot_cost` then falls back to the M5-10
@@ -1946,6 +1996,8 @@ impl ModelRuntime {
                 lingxi_core::host::refusal_driver::RefusalCascadeState::default(),
             ),
             refusal_selection: Default::default(),
+            main_loop_latest_assistant_usage: std::sync::Mutex::new(None),
+            main_model_restriction: std::sync::RwLock::new(None),
             cost_tracker: None,
             loop_usage: None,
             observer_pairings: None,

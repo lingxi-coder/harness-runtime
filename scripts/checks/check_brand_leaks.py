@@ -79,6 +79,14 @@ KEEP_CLAUDE_ENV = {
     "CLAUDE_CODE_EXTRA_BODY",
     "CLAUDE_CODE_EXTRA_METADATA",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    # Fixed 2.1.295 environment contracts, not product-brand aliases.
+    "CLAUDE_CODE_MODEL_CAPABILITIES",  # src_186669406.js Pvo, local byte 23944.
+    "CLAUDE_CODE_SESSION_START_ANNOUNCEMENTS_BEFORE_PROMPT",  # src_221001555.js Iv.
+    "CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER",  # src_186760168.js yUe.
+    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",  # src_188508971.js / src_202521450.js.
+    "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS",  # Native R6, binary byte 189592086.
+    # Native 2.1.295 Fso/IOt, binary byte 195484572: typed inbound consent override.
+    "CLAUDE_CODE_AUTO_MODE_ARTIFACT_CONSENT_RULE",
     "CLAUDE_CODE_OAUTH_SCOPES",  # 2.1.287 xk reads actual environment grant scopes.
     # Exact Native/provider integration inputs which are still read by this
     # port. Keep only names with a concrete read site; a binary/string mention

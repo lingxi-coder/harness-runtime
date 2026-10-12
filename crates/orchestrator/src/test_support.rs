@@ -99,6 +99,7 @@ pub struct MockApiClient {
     /// seed it with the rows they need.
     model_listings: std::sync::Mutex<Vec<lingxi_core::host::ModelListing>>,
     effort_snapshot: std::sync::Mutex<Option<lingxi_core::host::effort::EffortCommandSnapshot>>,
+    native_mid_system_supported: std::sync::Mutex<bool>,
 }
 
 /// Captured startup Responses WebSocket prewarm call.
@@ -147,7 +148,13 @@ impl MockApiClient {
             rate_limit_error_message: std::sync::Mutex::new(None),
             model_listings: std::sync::Mutex::new(Vec::new()),
             effort_snapshot: std::sync::Mutex::new(None),
+            native_mid_system_supported: std::sync::Mutex::new(false),
         }
+    }
+
+    /// Set the test route's Native mid-conversation system capability.
+    pub fn set_native_mid_system_supported(&self, supported: bool) {
+        *self.native_mid_system_supported.lock().unwrap() = supported;
     }
 
     /// Seed the catalog `list_model_listings()` returns, so a test can exercise
@@ -240,6 +247,14 @@ impl MockApiClient {
 
 #[async_trait]
 impl OrchestratorApiClient for MockApiClient {
+    fn supports_native_mid_conversation_system(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> bool {
+        *self.native_mid_system_supported.lock().unwrap()
+    }
+
     fn effort_command_snapshot(
         &self,
         _model: &str,

@@ -2,7 +2,7 @@
 //!
 //! The platform-agnostic command machinery: the [`CommandRegistry`],
 //! [`RegistrySlashDispatcher`], parser, argument substitution, data model, and
-//! the shared builtin scaffolding ([`builtin_support`] — the locked 99-name
+//! the shared builtin scaffolding ([`builtin_support`] — the locked 82-name
 //! table, the `/help` + list renderers, and the per-name unimplemented stub
 //! handler).
 //!
@@ -24,6 +24,7 @@ pub mod describe;
 pub mod dispatcher;
 pub mod expand;
 pub mod markdown_loader;
+mod native_locale_collation;
 pub mod mcp_prompts;
 pub mod mod_catalog;
 pub mod model;
@@ -46,7 +47,8 @@ pub use markdown_loader::{
     build_markdown_command, build_skill_command, command_name_from_path,
     extract_description_from_markdown, load_command_markdown_files, load_skill_markdown_files,
     load_skill_markdown_files_with_roots, parse_command_markdown, parse_skill_command_markdown,
-    project_dirs_up_to_home, MarkdownCommandFile, SkillMarkdownCommandFile,
+    plugin_prompt_name_metadata, project_dirs_up_to_home, MarkdownCommandFile,
+    SkillMarkdownCommandFile,
 };
 pub use mod_catalog::{
     record_mod_command_settlement, with_mod_command_capture, with_mod_command_context,
@@ -54,7 +56,7 @@ pub use mod_catalog::{
 };
 pub use model::*;
 pub use parser::{parse_slash_command, ParsedSlashCommand};
-pub use registry::CommandRegistry;
+pub use registry::{CommandRegistry, NativeHeadlessCatalogContext};
 pub use shell_expansion::{
     execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionError,
     ShellExpansionProvider, ShellOut, ShellPermissionDecision, ShellPermissionGate, ShellRunError,

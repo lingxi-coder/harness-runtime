@@ -167,6 +167,7 @@ async fn side_question_rebuilds_resumed_context_without_writing_slot_or_history(
     assert_eq!(orch.session().lock().await.history, history);
     let requests = client.0.lock().unwrap();
     let req = &requests[0];
+    assert!(req.typed_attachment_ids.is_empty());
     assert_eq!(req.model, "resumed-model");
     assert_eq!(req.profile.as_deref(), Some("resumed-provider"));
     assert_eq!(
@@ -226,6 +227,8 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
         }],
         effort: Some(serde_json::json!("high")),
         fork_context_messages: prefix.clone(),
+        typed_attachment_ids: std::collections::HashSet::new(),
+        task_deliveries: std::collections::HashMap::new(),
         transcript_path: None,
         generation: 0,
     })
@@ -268,6 +271,7 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
             .and_then(|value| value.string_at("")),
         Some("frozen system")
     );
+    assert!(requests[0].typed_attachment_ids.is_empty());
     assert_eq!(requests[0].model, current_model);
     assert_eq!(requests[0].effort, Some(serde_json::json!("medium")));
     let expected_tools = llm_runtime::convert::to_tool_declarations(vec![

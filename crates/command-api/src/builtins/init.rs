@@ -46,8 +46,8 @@ impl BuiltinCommandHandler for InitHandler {
         core_description("init")
     }
 
-    fn is_prompt_command(&self) -> bool {
-        true
+    fn native_type(&self) -> Option<crate::model::NativeCommandType> {
+        Some(crate::model::NativeCommandType::Prompt)
     }
 }
 

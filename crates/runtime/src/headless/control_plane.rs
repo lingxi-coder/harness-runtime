@@ -1182,6 +1182,7 @@ fn parse_persistent_permission_update(
                         value: PermissionRuleValue {
                             tool_name: permission::rule::normalize_legacy_tool_name(&tool_name),
                             rule_content,
+                            original_rule: None,
                         },
                         behavior,
                         source,

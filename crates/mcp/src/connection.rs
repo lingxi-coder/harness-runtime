@@ -8,6 +8,7 @@ use lingxi_core::host::{
     McpConfiguredToolPolicyDto, McpPermissionCeiling, McpPromptDto, McpResourceDto,
     McpResourceTemplateDto, McpToolDto, McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -53,6 +54,74 @@ pub struct McpServerMetadata {
     /// list. See `enterprise_policy::org_delivered_needs_no_allowlist_entry`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub expanded_from_env: bool,
+}
+
+/// Source values carried by one failed MCP connection attempt.
+///
+/// `error`, `display_detail`, and `error_code` remain separate because Claude
+/// Code projects `error` and `displayDetail` together for a deferred-tools
+/// snapshot, while `errorCode` has independent filtering and change-detection
+/// semantics. Projections retain JSON type and UTF-16 source units; an absent
+/// property is different from a present `null` or empty string.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpConnectionFailure {
+    /// Native client's source `error` value, when one was supplied.
+    pub error: Option<Utf16JsonProjection>,
+    /// Native client's optional secondary display detail.
+    pub display_detail: Option<Utf16JsonProjection>,
+    /// Native client's source `errorCode`, without guessing from display text.
+    pub error_code: Option<Utf16JsonProjection>,
+}
+
+/// One tool removed from a server's advertised catalog by schema policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpDroppedToolRecord {
+    /// The raw tool name returned by the MCP server.
+    pub tool_name: String,
+    /// The schema decision's source reason for dropping the tool.
+    pub reason: String,
+}
+
+/// A failed-server row projected for Native-compatible deferred tool deltas.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpFailedServerSnapshot {
+    /// Sanitized logical MCP server name.
+    pub name: String,
+    /// Sanitized source error code, when the source supplied one.
+    pub error_code: Option<Utf16JsonProjection>,
+    /// Sanitized merge of source `error` and `displayDetail`, if either key
+    /// existed on the failed client. A present empty string remains present.
+    pub error: Option<Utf16JsonProjection>,
+    /// Raw source `error` value before the deferred-tools display merge and
+    /// sanitization. This is an internal cause-classification input; it is not
+    /// part of the model-visible attachment payload.
+    pub native_raw_error: Option<Utf16JsonProjection>,
+    /// Native only emits `willRetry: true` when its next-turn-redial predicate
+    /// says so; false and unknown are both represented as an omitted field.
+    pub will_retry: Option<bool>,
+}
+
+/// Current source config paired with one server whose action state is
+/// `NeedsAuth`. Deferred producers need the transport config as well as the
+/// name when applying Native's connector-specific SPr predicate.
+#[derive(Debug, Clone)]
+pub struct McpNeedsAuthServerSnapshot {
+    /// Logical MCP server name.
+    pub name: String,
+    /// Config for the same current connection-state row.
+    pub config: McpServerConfig,
+}
+
+/// Dropped-tool records for one active MCP connection generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpDroppedToolServerSnapshot {
+    /// Logical server name from the current connection config.
+    pub server_name: String,
+    /// Connection identity that owns these filtered tool decisions.
+    pub connection_id: McpConnectionId,
+    /// Raw tool names and schema-decision reasons in server-list order.
+    pub tools: Vec<McpDroppedToolRecord>,
 }
 
 /// MCP server routing role.  `Comms` affects coordinator worker tool routing;

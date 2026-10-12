@@ -87,6 +87,27 @@ fn load() -> Fixture {
     serde_json::from_str(FIXTURE).expect("fixture parse")
 }
 
+/// Compare an ordinary fixture prompt without erasing the UTF-16 carrier when
+/// the orchestrator preserves the Native source representation.
+fn is_exact_plain_prompt_block(
+    content: &[lingxi_core::types::ContentBlock],
+    expected: &str,
+) -> bool {
+    let expected_units = expected.encode_utf16().collect::<Vec<_>>();
+    match content {
+        [lingxi_core::types::ContentBlock::Text {
+            text,
+            citations: None,
+        }] => text == expected,
+        [lingxi_core::types::ContentBlock::TextJsUtf16 {
+            utf16_code_units,
+            citations: None,
+            ..
+        }] => utf16_code_units == &expected_units,
+        _ => false,
+    }
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -163,9 +184,10 @@ async fn single_turn_no_tools_completes_with_end_turn() {
         1,
         "exactly one API call for single-turn scenario"
     );
-    // .286 normal Or routing announces the known-empty context anchor and
-    // date after the human prompt. There are no context_sections for this
-    // empty host context, and the durable total-token attachment trails them.
+    // Native turn reminders precede the Br context/date announcements in the
+    // prepared request. The 2.1.295 environment/model ingress rows are followed
+    // by the token reminder, then the empty context anchor and date; full-history
+    // attachment projection places those rows before the human prompt.
     let oracle: serde_json::Value = serde_json::from_str(include_str!(
         "../../core/tests/fixtures/instruction_announcements_2_1_286.json"
     ))
@@ -200,35 +222,54 @@ async fn single_turn_no_tools_completes_with_end_turn() {
     let sent = &captured[0];
     assert_eq!(
         sent.len(),
-        4,
-        "human prompt, empty session_context projection, native date, total-token attachment"
+        6,
+        "environment, model, total-token, session_context, date, human prompt"
     );
     assert!(
-        matches!(&sent[0], ConversationMessage::User { content, is_meta: false, .. }
-        if content == &[ContentBlock::Text { text: s.user_prompt.clone().unwrap(), citations: None }])
+        matches!(&sent[0], ConversationMessage::User { content, is_meta: true, .. }
+        if content.iter().filter_map(ContentBlock::visible_text).collect::<String>().starts_with("<system-reminder>\n# Environment\n"))
     );
     assert!(
-        matches!(&sent[1], ConversationMessage::System { content, subtype, compact_metadata: None, refusal_fallback: None, .. }
+        matches!(&sent[1], ConversationMessage::User { content, is_meta: true, .. }
+        if content.iter().filter_map(ContentBlock::visible_text).collect::<String>().starts_with("<system-reminder>\nYou are powered by the model "))
+    );
+    assert!(
+        matches!(&sent[2], ConversationMessage::User { content, is_meta: true, .. }
+        if content == &[ContentBlock::Text { text: "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>".into(), citations: None }])
+    );
+    assert!(
+        matches!(&sent[3], ConversationMessage::System { content, subtype, compact_metadata: None, refusal_fallback: None, .. }
         if content.string_at("").is_some_and(str::is_empty)
             && subtype.as_deref() == Some("model_reminder_attachment"))
     );
     assert!(
-        matches!(&sent[2], ConversationMessage::User { content, is_meta: true, .. }
+        matches!(&sent[4], ConversationMessage::User { content, is_meta: true, .. }
         if content == &[ContentBlock::Text { text: date_body, citations: None }])
     );
     assert!(
-        matches!(&sent[3], ConversationMessage::User { content, is_meta: true, .. }
-        if content == &[ContentBlock::Text { text: "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>".into(), citations: None }])
+        matches!(&sent[5], ConversationMessage::User { content, is_meta: false, .. }
+        if is_exact_plain_prompt_block(content, s.user_prompt.as_deref().unwrap()))
     );
     let history = orch.session().lock().await.history.clone();
     assert_eq!(
         history.len(),
-        5,
-        "all three durable attachments survive completion"
+        7,
+        "environment, model, token, context, and date rows survive completion"
     );
-    assert_eq!(&history[..4], sent.as_slice());
+    let request_ids = sent
+        .iter()
+        .map(|message| message.id().as_uuid())
+        .collect::<std::collections::HashSet<_>>();
+    let durable_request_ids = history[..history.len() - 1]
+        .iter()
+        .map(|message| message.id().as_uuid())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        request_ids, durable_request_ids,
+        "the projected request retains exactly the durable pre-assistant rows"
+    );
     assert!(
-        matches!(&history[4], ConversationMessage::Assistant { content, stop_reason, .. }
+        matches!(history.last().unwrap(), ConversationMessage::Assistant { content, stop_reason, .. }
         if content == &[ContentBlock::Text { text: "Hello!".into(), citations: None }]
             && stop_reason.as_deref() == Some("end_turn"))
     );

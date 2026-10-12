@@ -16,6 +16,43 @@ where
 {
     Box::pin(create())
 }
+
+/// Keep preparation cancelable until the initial typed attachment batch starts
+/// writing. Once a durable append has begun, wait for the batch finalizer to
+/// update the transcript tip before returning cancellation; dropping the rest
+/// of preparation is safe after that checkpoint.
+pub(crate) async fn await_prepare_with_ingress_commit_boundary<F, T>(
+    future: F,
+    cancel: Option<&lingxi_core::host::CancellationToken>,
+) -> Result<T, OrchestratorError>
+where
+    F: std::future::Future<Output = Result<T, OrchestratorError>>,
+{
+    let Some(cancel) = cancel else {
+        return future.await;
+    };
+    tokio::pin!(future);
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {}
+        result = &mut future => return result,
+    }
+    if crate::request_context::prompt_ingress_batch_append_started()
+        && !crate::request_context::prompt_ingress_batch_finalized()
+    {
+        let finalized = crate::request_context::wait_for_prompt_ingress_batch_finalized();
+        tokio::pin!(finalized);
+        tokio::select! {
+            biased;
+            () = &mut finalized => {}
+            _ = &mut future => {}
+        }
+    }
+    Err(OrchestratorError::Internal(
+        "model request cancelled".into(),
+    ))
+}
+
 pub(crate) mod api_recovery;
 mod batch_hooks;
 mod error_reporting;
@@ -477,16 +514,28 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     ))
     .await?;
     let is_regular_user_prompt = orch.regular_user_prompt_for_model_step().await;
-    let prepared = crate::native_computer::cancel_before_effects(boxed_turn_future(|| {
-        orch.prepare_turn_step(
-            ModelCallPath::Batched,
-            system,
-            true,
-            is_regular_user_prompt,
-            cancel.as_ref(),
-        )
-    }))
+    // Keep preparation responsive to cancellation before the first append,
+    // then wait only for the staged durable batch to finish if it has begun.
+    // The model request remains gated by `cancel_before_effects` below.
+    let mut prepared = await_prepare_with_ingress_commit_boundary(
+        boxed_turn_future(|| {
+            orch.prepare_turn_step(
+                ModelCallPath::Batched,
+                system,
+                true,
+                is_regular_user_prompt,
+                cancel.as_ref(),
+            )
+        }),
+        cancel.as_ref(),
+    )
     .await?;
+    if !cancel
+        .as_ref()
+        .is_some_and(lingxi_core::host::CancellationToken::is_cancelled)
+    {
+        orch.persist_prepared_turn_attachments(&mut prepared).await;
+    }
     let skip_global_cache_for_system_prompt = prepared.skip_global_cache_for_system_prompt;
     let mut history_snapshot = prepared.snapshot;
     let mut model = prepared.model;
@@ -957,7 +1006,14 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     // compaction inside `call_api_with_ptl_recovery`), BEFORE the assistant reply
     // is appended below. Strict no-op when no cache-safe slot is wired.
     if requested_model && physical_responses.is_empty() {
-        orch.save_cache_safe_params(system, &model, &tools).await;
+        orch.save_cache_safe_params_for_request(
+            system,
+            &model,
+            &tools,
+            &final_request_history,
+            context_announcements.inline_context.as_ref(),
+        )
+        .await;
     }
     // FORK (codex #5 follow-up): record the rendered system prompt this turn
     // handed the model, so a fork-subagent spawn dispatched below in this same

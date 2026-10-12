@@ -44,6 +44,10 @@ pub(crate) async fn resolve(ctx: &SubagentContext) -> Result<InstructionContext,
                 telemetry::feature_flags::flag_bool("tengu_foamy_spring", true),
             ),
             announcement_history: ctx.instruction_context.announcement_history.clone(),
+            native_settings_attachments: ctx
+                .instruction_context
+                .native_settings_attachments
+                .clone(),
             ..Default::default()
         }
     } else {
@@ -63,9 +67,11 @@ pub(crate) async fn resolve(ctx: &SubagentContext) -> Result<InstructionContext,
         // ordering from a prior account/project snapshot; only an explicit
         // fresh override above bypasses this authoritative selection.
         let announcement_history = original.announcement_history;
+        let native_settings_attachments = original.native_settings_attachments;
         let rendering = original.rendering;
         original = loaded;
         original.announcement_history = announcement_history;
+        original.native_settings_attachments = native_settings_attachments;
         if cold_resume {
             original.rendering = rendering;
         }

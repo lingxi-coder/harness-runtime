@@ -63,6 +63,17 @@ impl WindowsMcpTransport {
         Self::default()
     }
 
+    /// Share the Desktop session's process-local Native proxy-auth cache with
+    /// remote HTTP and SSE MCP clients.
+    #[must_use]
+    pub fn with_proxy_auth_helper(
+        mut self,
+        helper: Arc<dyn platform_common::ProxyAuthHelper>,
+    ) -> Self {
+        self.remote = Arc::new(RemoteMcpTransport::new().with_proxy_auth_helper(helper));
+        self
+    }
+
     fn insert(&self, id: McpConnectionId, conn: WindowsMcpConnection) {
         // Recover from a poisoned std `Mutex` by silently dropping the
         // insert — the engine will surface the failure on the next call

@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use super::{
     fusion_attempts, load_effective_settings_for_config, managed_model_policy_source,
-    managed_settings_raw_tiers_sync, DesktopConfig,
+    settings_watch, DesktopConfig,
 };
 
 /// `billing_mode` is the OWNING profile's source-resolved
@@ -169,6 +169,7 @@ pub(super) struct FusionCatalogModelSource {
     /// that inject a fixed restriction keep this false for deterministic,
     /// filesystem-independent fixtures.
     pub(super) reload_managed_model_restriction: bool,
+    pub(super) managed_policy_snapshot_cache: settings_watch::ManagedPolicySnapshotCache,
 }
 
 impl fusion::ModelSource for FusionCatalogModelSource {
@@ -180,7 +181,7 @@ impl fusion::ModelSource for FusionCatalogModelSource {
             .unwrap_or_default();
         let live_restriction = self
             .reload_managed_model_restriction
-            .then(live_managed_model_restriction_sync)
+            .then(|| live_managed_model_restriction_sync(&self.managed_policy_snapshot_cache))
             .flatten();
         let restriction = if self.reload_managed_model_restriction {
             live_restriction.as_ref()
@@ -204,10 +205,15 @@ impl fusion::ModelSource for FusionCatalogModelSource {
 }
 
 pub(super) fn live_managed_model_restriction_sync(
+    cache: &settings_watch::ManagedPolicySnapshotCache,
 ) -> Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)> {
     use llm_runtime::model::allowlist::{self, ModelEnforcement};
 
-    let source = managed_model_policy_source(&managed_settings_raw_tiers_sync());
+    let source = cache
+        .snapshot()
+        .as_ref()
+        .map(managed_model_policy_source)
+        .unwrap_or(llm_runtime::model::allowlist::PolicySource::Failed);
     let enforcement = allowlist::resolve_enforcement(&source, &mut |_| {});
     match enforcement {
         ModelEnforcement::Inactive => None,
@@ -1461,14 +1467,15 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
 pub(super) fn desktop_fusion_runtime_config(
     cfg: &DesktopConfig,
 ) -> Result<fusion::FusionRuntimeConfig, lingxi_core::host::FusionError> {
-    // Managed policy is intentionally read at the call boundary.  Keeping a
-    // boot-time `Vec<String>` here makes `FusionConfigSource::load()` and the
-    // executor's preflight disagree with the next on-disk policy edit.
-    let managed_raw_tiers = managed_settings_raw_tiers_sync();
-    let effective =
-        load_effective_settings_for_config(cfg, &managed_raw_tiers).ok_or_else(|| {
-            lingxi_core::host::FusionError::InvalidConfiguration("settings failed to load".into())
-        })?;
+    // The session cache is updated by the actual policy watcher; sync config
+    // reads never run an independent filesystem fold or nested event loop.
+    let managed_layers = settings_watch::managed_policy_layers_sync(cfg).map_err(|error| {
+        tracing::warn!(?error, "managed policy unavailable for Fusion settings");
+        lingxi_core::host::FusionError::InvalidConfiguration("managed settings unavailable".into())
+    })?;
+    let effective = load_effective_settings_for_config(cfg, &managed_layers).ok_or_else(|| {
+        lingxi_core::host::FusionError::InvalidConfiguration("settings failed to load".into())
+    })?;
     match effective.settings.fusion {
         Some(settings) => fusion::FusionRuntimeConfig::from_settings(&settings),
         None => Ok(fusion::FusionRuntimeConfig::defaults()),

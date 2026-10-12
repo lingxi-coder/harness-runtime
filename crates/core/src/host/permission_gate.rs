@@ -801,8 +801,15 @@ pub struct PermissionToolCheckRule {
 pub struct PermissionPolicyRuleFact {
     /// Exact `Tool` / `Tool(content)` rule string.
     pub rule: Utf16JsonProjection,
+    /// Canonical spelling, present only when it differs from the stored rule.
+    pub canonical: Option<Utf16JsonProjection>,
     /// Exact permission source token associated with this rule.
     pub source: String,
+    /// Resolved matcher root. The outer option controls field presence and
+    /// the inner option preserves an explicit null root.
+    pub root: Option<Option<PathBuf>>,
+    /// Exact matcher pattern, when this rule has a path matcher.
+    pub pattern: Option<Utf16JsonProjection>,
 }
 
 /// One source-specific root used to resolve permission rule paths.
@@ -863,6 +870,12 @@ pub struct PermissionClassifierAutoModeSettings {
 pub struct PermissionPolicySnapshot {
     /// Effective live permission mode (`default`, `plan`, `auto`, etc.).
     pub permission_mode: String,
+    /// Whether Auto mode is active for this session. Entering Plan from Auto
+    /// retains this state; starting directly in Plan does not activate it.
+    pub active_auto_mode: bool,
+    /// Native Auto-mode circuit tripped by an AFK beta refusal for this
+    /// session, independent of tool-denial counters.
+    pub native_auto_mode_circuit_broken: bool,
     /// Current allow rules, ordered by source precedence and then insertion
     /// order within each source.
     pub allow_rules: Vec<PermissionPolicyRuleFact>,
@@ -1641,6 +1654,31 @@ pub trait PermissionGate: Send + Sync {
         Ok(())
     }
 
+    /// Apply Native's proactivity-level permission-mode selection against this
+    /// gate's live auto/bypass availability. `baseline_mode` is the ordinary
+    /// mode retained before a level-driven transition; `selector_gate_ever_on`
+    /// distinguishes Native's first opt-in from a previously active selector.
+    /// The default gate has no mode state and simply reports its current mode.
+    async fn set_permission_mode_for_proactivity(
+        &self,
+        level: &str,
+        offer_bypass: Option<bool>,
+        baseline_mode: &str,
+        selector_gate_ever_on: bool,
+    ) -> Result<Option<String>, String> {
+        let _ = (level, offer_bypass, baseline_mode, selector_gate_ever_on);
+        Ok(self.permission_mode())
+    }
+
+    /// Consume whether a real live permission-mode transition left Native Auto
+    /// mode and therefore requires the next main-model `auto_mode_exit` row.
+    /// Rule-free gates have no session mode transition state, so they return
+    /// false. This is intentionally a take operation: a staged request batch
+    /// consumes the transition once and then persists/replays its cached row.
+    fn take_native_auto_mode_exit_attachment_pending(&self) -> bool {
+        false
+    }
+
     /// Apply a live administrator-managed `disableAutoMode` setting.
     ///
     /// The settings watcher calls this after firing the `ConfigChange` hook
@@ -1724,6 +1762,10 @@ pub trait PermissionGate: Send + Sync {
     fn permission_policy_snapshot(&self) -> Option<PermissionPolicySnapshot> {
         None
     }
+
+    /// Record the current session's rejected Native AFK beta. Policy-owning
+    /// gates disable its Auto-mode circuit; transport-only gates have no state.
+    fn record_native_afk_beta_rejection(&self) {}
 }
 
 #[cfg(test)]

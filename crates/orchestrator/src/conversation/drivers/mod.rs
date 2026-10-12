@@ -21,10 +21,11 @@ mod disposition;
 mod loop_state;
 mod prepare;
 mod projected_content;
-mod streaming;
 mod realtime;
+mod streaming;
 pub use realtime::{
-    realtime_history, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits,
+    realtime_history, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
+    RealtimeAgentLimits,
 };
 
 use super::hooks_impl::ModPromptScreen;
@@ -45,6 +46,11 @@ pub struct QueuedPromptInput {
     pub is_meta: bool,
     /// Host-stamped `prompt.submit` origin for this queue entry.
     pub mod_origin: Option<serde_json::Value>,
+    /// Native message origin for this entry. This is independent of
+    /// `mod_origin`, which is exclusively hook ingress metadata.
+    pub message_origin: Option<Utf16JsonProjection>,
+    /// Native outer `promptSource` value when the source is known.
+    pub prompt_source: Option<Utf16JsonProjection>,
     /// Queue-supplied identity; generated when absent.
     pub message_id: Option<MessageId>,
     /// TUI-owned row correlation token, resolved to the actual persisted JSONL
@@ -65,6 +71,8 @@ impl Default for QueuedPromptInput {
             text: String::new().into(),
             is_meta: false,
             mod_origin: None,
+            message_origin: None,
+            prompt_source: None,
             message_id: None,
             transcript_row_token: None,
             queue_priority: None,
@@ -747,15 +755,17 @@ impl ConversationOrchestrator {
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.string_at("").unwrap_or_default().len()
         );
-        let result = crate::server_fallback::scope_query_and_flush(
-            self,
-            telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
-                self.scope_api_session(
-                    !self.prompt_is_interactive(),
-                    crate::turn_loop::boxed_turn_future(|| self.try_run_turn(&prompt)),
-                )
-                .await
-            }),
+        let result = crate::request_context::scope_if_missing(
+            crate::server_fallback::scope_query_and_flush(
+                self,
+                telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
+                    self.scope_api_session(
+                        !self.prompt_is_interactive(),
+                        crate::turn_loop::boxed_turn_future(|| self.try_run_turn(&prompt)),
+                    )
+                    .await
+                }),
+            ),
         )
         .await;
         let cleanup = crate::native_computer::cleanup(self).await;
@@ -822,13 +832,17 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear_idle_checkins();
-        let user_msg =
+        let mut user_msg =
             user_message_from_projection(MessageId::new(), &screened_text, false, Vec::new());
+        let native_source = crate::native_user_message_source::current().unwrap_or_default();
+        self.apply_native_user_message_source(&mut user_msg, &native_source)
+            .await;
         {
             let mut s = self.session.lock().await;
             s.history.push(user_msg.clone());
         }
         self.persist_message_to_jsonl(&user_msg).await;
+        crate::request_context::persist_prompt_ingress_after_user(self, user_msg.id(), true).await;
         self.append_mod_prompt_context(&mod_context).await;
 
         // hooks B4: fire UserPromptSubmit. A Block decision aborts the turn
@@ -943,6 +957,7 @@ impl ConversationOrchestrator {
         prompt: impl Into<Utf16JsonProjection>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         let prompt = prompt.into();
+        let native_user_source = crate::native_user_message_source::current().unwrap_or_default();
         let ambient_origin = crate::mod_prompt_origin::current();
         let mod_origin = streaming::external_receive_kind(&ambient_origin)
             .is_some()
@@ -968,6 +983,8 @@ impl ConversationOrchestrator {
                     Some(vec![QueuedPromptInput {
                         text: prompt.clone(),
                         mod_origin,
+                        message_origin: native_user_source.message_origin,
+                        prompt_source: native_user_source.prompt_source,
                         ..Default::default()
                     }]),
                     None,
@@ -2387,22 +2404,24 @@ impl ConversationOrchestrator {
             self.begin_turn_metrics();
         }
         let completion_cancel = user_cancel.clone();
-        let result = crate::server_fallback::scope_query_and_flush(
-            self,
-            Box::pin(
-                StreamingTurnDriver {
-                    orch: self,
-                    prompt,
-                    images,
-                    user_cancel,
-                    message_id,
-                    transient_rewake,
-                    in_human_turn,
-                    queued_inputs,
-                    row_token,
-                    projected_content,
-                }
-                .run(),
+        let result = crate::request_context::scope_if_missing(
+            crate::server_fallback::scope_query_and_flush(
+                self,
+                Box::pin(
+                    StreamingTurnDriver {
+                        orch: self,
+                        prompt,
+                        images,
+                        user_cancel,
+                        message_id,
+                        transient_rewake,
+                        in_human_turn,
+                        queued_inputs,
+                        row_token,
+                        projected_content,
+                    }
+                    .run(),
+                ),
             ),
         )
         .await;
@@ -2483,22 +2502,24 @@ impl ConversationOrchestrator {
                 event = orch_events::CONVERSATION_STARTED,
                 prompt_len = prompt.string_at("").unwrap_or_default().len()
             );
-            let result = crate::server_fallback::scope_query_and_flush(
-                self,
-                telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
-                    self.scope_api_session(
-                        !self.prompt_is_interactive(),
-                        crate::turn_loop::boxed_turn_future(|| {
-                            self.try_run_turn_cancelable(
-                                &prompt,
-                                images,
-                                message_id,
-                                cancel.clone(),
-                            )
-                        }),
-                    )
-                    .await
-                }),
+            let result = crate::request_context::scope_if_missing(
+                crate::server_fallback::scope_query_and_flush(
+                    self,
+                    telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
+                        self.scope_api_session(
+                            !self.prompt_is_interactive(),
+                            crate::turn_loop::boxed_turn_future(|| {
+                                self.try_run_turn_cancelable(
+                                    &prompt,
+                                    images,
+                                    message_id,
+                                    cancel.clone(),
+                                )
+                            }),
+                        )
+                        .await
+                    }),
+                ),
             )
             .await;
             let cleanup = crate::native_computer::cleanup(self).await;
@@ -2565,6 +2586,7 @@ impl ConversationOrchestrator {
             s.history.push(user_msg.clone());
         }
         self.persist_message_to_jsonl(&user_msg).await;
+        crate::request_context::persist_prompt_ingress_after_user(self, user_msg.id(), true).await;
         self.append_mod_prompt_context(&mod_context).await;
 
         // hooks B4: UserPromptSubmit (cancelable REPL twin). A Block aborts the
@@ -2988,6 +3010,7 @@ impl ConversationOrchestrator {
         row_token: Option<String>,
     ) -> Result<TurnOutcome, OrchestratorError> {
         let display = prompt.string_at("").unwrap_or_default().to_owned();
+        let native_user_source = crate::native_user_message_source::current().unwrap_or_default();
         self.run_turn_streaming_inputs_locked(
             turn_guard,
             &display,
@@ -2998,6 +3021,8 @@ impl ConversationOrchestrator {
             Some(vec![QueuedPromptInput {
                 text: prompt,
                 is_meta: !in_human_turn,
+                message_origin: native_user_source.message_origin,
+                prompt_source: native_user_source.prompt_source,
                 message_id,
                 transcript_row_token: row_token.clone(),
                 ..Default::default()

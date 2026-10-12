@@ -54,6 +54,63 @@ fn usage() -> serde_json::Value {
     })
 }
 
+fn remove_cache_controls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                remove_cache_controls(value);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            fields.remove("cache_control");
+            for value in fields.values_mut() {
+                remove_cache_controls(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalized_messages(body: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut messages = body["messages"]
+        .as_array()
+        .expect("Anthropic request messages")
+        .clone();
+    for message in &mut messages {
+        remove_cache_controls(message);
+    }
+    messages
+}
+
+fn messages_containing_prompt<'a>(
+    body: &'a serde_json::Value,
+    prompt: &str,
+) -> Vec<&'a serde_json::Value> {
+    body["messages"]
+        .as_array()
+        .expect("Anthropic request messages")
+        .iter()
+        .filter(|message| {
+            message["role"] == "user"
+                && message["content"].as_array().is_some_and(|blocks| {
+                    blocks.iter().any(|block| {
+                        block["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains(prompt))
+                    })
+                })
+        })
+        .collect()
+}
+
+fn last_message_cache_control(message: &serde_json::Value) -> Option<&serde_json::Value> {
+    message["content"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find_map(|block| block.get("cache_control"))
+}
+
 impl llm_runtime::test_support::FixtureTransport for CacheTransport {
     fn execute<'a>(
         &'a self,
@@ -191,38 +248,55 @@ async fn assert_diagnostics(streaming: bool) {
         let attribution = summary.last_miss_attribution.unwrap();
         assert!(attribution.causes.contains(&MissCause::SystemPromptChanged));
         // Non-ephemeral token reminders retain their original place in history.
-        // Changing only the system prompt must not report a message rewrite.
-        assert!(!attribution.causes.contains(&MissCause::MessagesRewritten));
+        // The physical request must preserve every prior message byte-for-byte
+        // after cache markers are ignored; changing only the system prompt must
+        // not report a message rewrite.
         let requests = seen.lock().unwrap();
         let previous_body: serde_json::Value =
             serde_json::from_str(requests[1].body_json.as_json_source()).unwrap();
         let current_body: serde_json::Value =
             serde_json::from_str(requests[2].body_json.as_json_source()).unwrap();
-        let previous_user = &previous_body["messages"][2]["content"];
-        let current_user = &current_body["messages"][2]["content"];
-
-        assert_eq!(previous_user[0]["text"], "continue");
-        assert!(previous_user[1]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("<system-reminder>\n<total_tokens>"));
-        // The SDK moves the request-local checkpoint to the new user tail.
-        // All prior model content stays byte-identical; only that checkpoint
-        // is removed from the previous tail, as the diagnostics already model.
-        let old_checkpoint = previous_user[1]["cache_control"].clone();
-        assert_eq!(old_checkpoint, json!({"type":"ephemeral"}));
-        assert!(current_user[1].get("cache_control").is_none());
-        let mut prior_without_checkpoint = previous_user.clone();
-        prior_without_checkpoint[1]
-            .as_object_mut()
-            .unwrap()
-            .remove("cache_control");
-        assert_eq!(current_user, &prior_without_checkpoint);
-        let new_tail = current_body["messages"].as_array().unwrap().last().unwrap();
-
+        let previous_messages = normalized_messages(&previous_body);
+        let current_messages = normalized_messages(&current_body);
+        assert!(current_messages.len() >= previous_messages.len());
         assert_eq!(
-            new_tail["content"].as_array().unwrap().last().unwrap()["cache_control"],
-            old_checkpoint,
+            &current_messages[..previous_messages.len()],
+            previous_messages.as_slice(),
+            "later request reordered or rewrote a previously sent message"
+        );
+        assert!(!attribution.causes.contains(&MissCause::MessagesRewritten));
+
+        let previous_users = messages_containing_prompt(&previous_body, "continue");
+        let current_users = messages_containing_prompt(&current_body, "continue");
+        assert!(
+            current_users.len() >= 2,
+            "prior user prompts remain in history"
+        );
+        let previous_user = previous_users.last().expect("previous user prompt");
+        let current_user = current_users.last().expect("current user prompt");
+        assert!(previous_user["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("<system-reminder>\n<total_tokens>"))));
+        // The SDK moves the request-local checkpoint to the new user tail.
+        // Its former block stays in the prior message prefix without a marker.
+        let old_checkpoint = last_message_cache_control(previous_user)
+            .expect("previous user tail has a cache checkpoint")
+            .clone();
+        assert_eq!(old_checkpoint, json!({"type":"ephemeral"}));
+        let prior_user_after_append = current_users[current_users.len() - 2];
+        assert!(last_message_cache_control(prior_user_after_append).is_none());
+        let current_user_tail = current_user["content"]
+            .as_array()
+            .unwrap()
+            .last()
+            .expect("new user tail has content");
+        assert_eq!(
+            current_user_tail.get("cache_control"),
+            Some(&old_checkpoint)
         );
         assert_eq!(attribution.system_char_delta, Some(4));
     }

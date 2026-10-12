@@ -247,6 +247,23 @@ pub fn memory_chars_per_token(model: &str) -> u64 {
     }
 }
 
+/// Claude Code 2.1.295 Eh(model), used by the Skill-listing budget and
+/// /context skill-frontmatter rows. Unlike the memory-file estimator above,
+/// Native is Anthropic-only and returns three for every non-empty model that
+/// does not resolve to its legacy four-character family set.
+#[must_use]
+pub fn native_skill_listing_chars_per_token(model: Option<&str>) -> u64 {
+    let Some(model) = model.filter(|model| !model.is_empty()) else {
+        return 4;
+    };
+    let canonical = canonical_model_family(model).replace(['.', '_'], "-");
+    if ISG_FOUR_CHARS_PER_TOKEN.contains(&canonical.as_str()) {
+        4
+    } else {
+        3
+    }
+}
+
 /// claude-code `pJr()` (2.1.220 binary offset 230802563):
 /// `let t=JE(e,Mv()),r=Number.isFinite(t)&&t>0?t:_er; return
 /// Math.max(gn_, Math.round(r*hn_*kC(e)))`.
@@ -458,6 +475,24 @@ mod large_memory_file_tests {
         assert_eq!(memory_chars_per_token("claude-opus-4-7"), 3);
         assert_eq!(memory_chars_per_token("claude-opus-4-8"), 3);
         assert_eq!(memory_chars_per_token("claude-opus-5"), 3);
+    }
+
+    #[test]
+    fn native_skill_listing_rate_matches_295_eh_source() {
+        assert_eq!(native_skill_listing_chars_per_token(None), 4);
+        assert_eq!(native_skill_listing_chars_per_token(Some("")), 4);
+        assert_eq!(
+            native_skill_listing_chars_per_token(Some("claude-opus-4-5")),
+            4
+        );
+        assert_eq!(
+            native_skill_listing_chars_per_token(Some("claude-opus-5")),
+            3
+        );
+        // Native Eh is a two-way split and returns three for every non-empty
+        // name outside its legacy Claude family set; memory's separate
+        // multi-provider estimate deliberately chooses four instead.
+        assert_eq!(native_skill_listing_chars_per_token(Some("gpt-5.5")), 3);
     }
 
     /// A NON-ANTHROPIC model takes the unset-model default of 4, not the

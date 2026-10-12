@@ -630,6 +630,12 @@ async fn replay_case(case: &str, duration_expression: &str) {
         "Native parser failure must be marked on the same provider ToolResult; candidate raw capture: {error_flag_artifact:?}"
     );
     assert_eq!(tool_result.tool_use_id, TOOL_USE_ID);
+    assert!(
+        tool_result
+            .content_units
+            .starts_with(&"<tool_use_error>".encode_utf16().collect::<Vec<_>>()),
+        "typed Glob output validation uses Native's model-facing error wrapper"
+    );
     assert_eq!(
         tool_result.content_units,
         expected
@@ -670,6 +676,11 @@ async fn replay_case(case: &str, duration_expression: &str) {
         .string_units("/error")
         .expect("structured OutputEvent error text");
     assert_eq!(actual_error_units, expected.error_units, "{case}");
+    assert_eq!(
+        result.object_entries().map(|entries| entries.len()),
+        Some(1),
+        "the replaced Glob result publishes only its bare host error payload; the model-only wrapper and original filenames do not leak into OutputEvent: {case}"
+    );
 
     let serialized_event = serde_json::to_string(event).expect("serialize OutputStream event");
     let serialized_projection =

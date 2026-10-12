@@ -297,6 +297,7 @@ pub struct MobileDiskSkillLoader {
     session_id: Option<String>,
     session_mode: SessionMode,
     prompt_cwd: Option<Arc<tool_api::SessionCwd>>,
+    skill_usage_session: Option<command_api::skill_usage::SkillUsageSession>,
 }
 
 impl MobileDiskSkillLoader {
@@ -312,6 +313,7 @@ impl MobileDiskSkillLoader {
             session_id: None,
             session_mode,
             prompt_cwd: None,
+            skill_usage_session: None,
         }
     }
 
@@ -339,6 +341,16 @@ impl MobileDiskSkillLoader {
         self
     }
 
+    /// Share the session-scoped lifetime usage recorder with slash dispatch.
+    #[must_use]
+    pub fn with_skill_usage_session(
+        mut self,
+        session: command_api::skill_usage::SkillUsageSession,
+    ) -> Self {
+        self.skill_usage_session = Some(session);
+        self
+    }
+
     /// Construct a disk-populated live registry for the selected session mode.
     pub async fn load_from_disk(
         cwd: &Path,
@@ -357,6 +369,7 @@ impl MobileDiskSkillLoader {
             session_id,
             session_mode,
             prompt_cwd: Some(tool_api::SessionCwd::new(cwd.to_path_buf(), Vec::new())),
+            skill_usage_session: None,
         }
     }
 }
@@ -393,6 +406,18 @@ pub async fn load_mobile_disk_commands_into_registry(
 
 #[async_trait::async_trait]
 impl ToolSkillLoader for MobileDiskSkillLoader {
+    async fn skill_invoked(
+        &self,
+        canonical_name: &Utf16JsonProjection,
+        _input_name: &Utf16JsonProjection,
+    ) {
+        if let Some(session) = self.skill_usage_session.as_ref() {
+            if let Err(error) = session.record(canonical_name) {
+                tracing::warn!(%error, "failed to record mobile Skill-tool usage");
+            }
+        }
+    }
+
     // Supply canonical names for the Skill tool's unknown-name suggestions.
     // Read the live registry and apply the same visibility rules as load().
     async fn list_names(&self) -> Vec<Utf16JsonProjection> {
@@ -547,13 +572,13 @@ mod tests {
             .map(|(name, body)| {
                 let file = std::path::PathBuf::from(format!("plugin/skills/{name}/SKILL.md"));
                 SlashCommand {
-                    name: format!("{FIXTURE_PLUGIN}:{name}"),
+                    name: format!("{FIXTURE_PLUGIN}:{name}").into(),
                     source: CommandSource::Plugin,
                     kind: SlashCommandKind::Plugin {
                         plugin_id,
                         file_path: file,
                         frontmatter: CommandFrontmatter::default(),
-                        prompt_template: (*body).to_owned(),
+                        prompt_template: (*body).to_owned().into(),
                     },
                     loaded_from: Some("plugin".to_owned()),
                     ..SlashCommand::default()
@@ -575,8 +600,15 @@ mod tests {
 
         let loader = Arc::new(loaded_fixture_plugin_loader(&[("canvas-skill", "Draw.")]).await);
         let canonical = "acme-plugin:canvas-skill";
-        assert!(loader.list_names().await.contains(&canonical.to_owned()));
-        assert!(loader.load("canvas-skill").await.unwrap().is_none());
+        assert!(loader
+            .list_names()
+            .await
+            .contains(&Utf16JsonProjection::from(canonical)));
+        assert!(loader
+            .load(&Utf16JsonProjection::from("canvas-skill"))
+            .await
+            .unwrap()
+            .is_none());
         let tool = tool_skill::skill::SkillTool::with_loader(
             shell_test_ctx(mobile_linux_api::ProcessOutput {
                 stdout: String::new(),
@@ -620,6 +652,29 @@ mod tests {
             ..SlashCommand::default()
         });
         assert_eq!(loader.list_names().await, vec!["later-skill".into()]);
+    }
+
+    #[tokio::test]
+    async fn skill_tool_usage_uses_canonical_name_not_the_input_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = command_api::skill_usage::SkillUsageSession::new(tmp.path().to_path_buf());
+        let loader = MobileDiskSkillLoader::new(Arc::new(RwLock::new(CommandRegistry::new())))
+            .with_skill_usage_session(session);
+        loader
+            .skill_invoked(
+                &Utf16JsonProjection::from("acme-plugin:review"),
+                &Utf16JsonProjection::from("review"),
+            )
+            .await;
+
+        let usage = command_api::skill_usage::read_skill_usage(tmp.path()).unwrap();
+        assert_eq!(
+            usage
+                .get(&"acme-plugin:review".encode_utf16().collect::<Vec<_>>())
+                .map(|record| record.count),
+            Some(1)
+        );
+        assert!(!usage.contains_key(&"review".encode_utf16().collect::<Vec<_>>()));
     }
 
     /// The deferred #14 test: a disk-authored `.lingxi/commands/*.md` under the

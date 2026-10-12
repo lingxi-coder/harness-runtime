@@ -36,13 +36,14 @@
 //! per-turn reminder collector in `conversation/drivers/prepare.rs` that BOTH
 //! turn drivers share.
 //!
-//! The oracle's fan-out (@296520120) puts `changed_files` after
-//! `agent_listing_delta` and before `nested_memory`. This port emits
-//! `nested_memory` earlier (it has to run right after the conditional-rules
-//! producer, whose claims into `sent_conditional_rules` it then skips), so
-//! here `changed_files` sits directly after
-//! `agent_listing_delta` — a deliberate position divergence recorded at the
-//! call site.
+//! The 2.1.295 fan-out (@296520120) invokes the `changed_files` producer once,
+//! after agent/MCP attachment producers and before `nested_memory`; producer
+//! results retain their declared order even though Native computes those
+//! attachments concurrently. Harness collects this reminder once before
+//! `nested_memory`, persists its typed `edited_text_file` payload and original
+//! `rendered` cache under the same message ID, then screens only the request
+//! copy through `prompt.attachment` Mods. Resume reconstructs that original
+//! rendered row and its engine-origin descriptor from JSONL.
 //!
 //! The producer performs the current Read-tool call after route and policy
 //! checks, then consumes only the Native reminder result kinds. The Read call

@@ -1,0 +1,259 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "scope": "public print-mode Commands/Skills slash dispatch, outbound request source, and JSONL persistence",
+  "sandbox": "outbound denied except ephemeral loopback fixture listener; inbound denied",
+  "dummy_credential_only": true,
+  "no_upstream_relay": true,
+  "max_seconds_per_native_process": 60,
+  "normal_wait_seconds": 55,
+  "sigterm_grace_seconds": 2,
+  "sigkill_grace_seconds": 2,
+  "output_format": "json",
+  "one_launch_per_case": true,
+  "stop_on_first_incomplete_case": true,
+  "interrupt_signal": null,
+  "runner_exception": null,
+  "cases": [
+    {
+      "id": "slash-only",
+      "session_id": "00000000-0000-4000-8000-000000002951",
+      "prompt": "/",
+      "native_launched": true,
+      "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+      "argv": [
+        "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+        "--print",
+        "--output-format",
+        "json",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000002951",
+        "/"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "interrupted": false,
+      "interrupt_signal": null,
+      "forced_exit": null,
+      "stdout_file": "slash-only/stdout.raw",
+      "stdout_bytes": 1628,
+      "stdout_sha256": "6aeaad66bdc3b0ecbb9f6fa74df7c3c033aee68d777fbc86f10ac9f8bf96a744",
+      "stderr_file": "slash-only/stderr.raw",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "slash-only",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "remote_address": "127.0.0.1",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "request_bytes": 93597,
+          "request_sha256": "31ba833cfe2a882d05482e6bf8713a3f84bde6d8b14b8e57bb869264d3c54752",
+          "request_file": "slash-only/request-00.raw.json",
+          "request_body_anchors_present": {
+            "\"text\":\"/\"": true
+          },
+          "response_file": "slash-only/response-00.raw",
+          "response_bytes": 863,
+          "response_sha256": "522f9a30e8842f3f4c339bb73a798d09935e6cb8b449c56ceec6714f2ef36665",
+          "response_content_type": "text/event-stream",
+          "json_parseable": true
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_case_config": "projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-acceptance-native-command-skills-295-capture-attempt-01-slash-only-runtime-cwd/00000000-0000-4000-8000-000000002951.jsonl",
+        "bytes": 172300,
+        "sha256": "5da3a68ff37f296d60b980342a4997e9552ddbc76b60430d639f0b3098d548f8",
+        "capture_file": "slash-only/session.jsonl.raw"
+      },
+      "status": "complete"
+    },
+    {
+      "id": "unknown-slash-command",
+      "session_id": "00000000-0000-4000-8000-000000002952",
+      "prompt": "/__native_unknown_295__ fixed-argument",
+      "native_launched": true,
+      "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+      "argv": [
+        "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+        "--print",
+        "--output-format",
+        "json",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000002952",
+        "/__native_unknown_295__ fixed-argument"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "interrupted": false,
+      "interrupt_signal": null,
+      "forced_exit": null,
+      "stdout_file": "unknown-slash-command/stdout.raw",
+      "stdout_bytes": 1628,
+      "stdout_sha256": "f1d01bd80ac6ee0425c3efd7442ffb91af11a68314a043ddc574285935e50aef",
+      "stderr_file": "unknown-slash-command/stderr.raw",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unknown-slash-command",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "remote_address": "127.0.0.1",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "request_bytes": 103906,
+          "request_sha256": "9a4ec3bbb1db85404cb0f481c3136da6602b056788fe259d80746a3822d88a7c",
+          "request_file": "unknown-slash-command/request-00.raw.json",
+          "request_body_anchors_present": {
+            "\"text\":\"/__native_unknown_295__ fixed-argument\"": true
+          },
+          "response_file": "unknown-slash-command/response-00.raw",
+          "response_bytes": 863,
+          "response_sha256": "522f9a30e8842f3f4c339bb73a798d09935e6cb8b449c56ceec6714f2ef36665",
+          "response_content_type": "text/event-stream",
+          "json_parseable": true
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_case_config": "projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-acceptance-native-command-skills-295-capture-attempt-01-unknown-slash-command-runtime-cwd/00000000-0000-4000-8000-000000002952.jsonl",
+        "bytes": 195842,
+        "sha256": "42bb4d54e8ee1b718b2f9b06f6552be9f3dada7c14316fc68271273007e9f276",
+        "capture_file": "unknown-slash-command/session.jsonl.raw"
+      },
+      "status": "complete"
+    },
+    {
+      "id": "unicode-skill-name",
+      "session_id": "00000000-0000-4000-8000-000000002953",
+      "prompt": "/skill-🧪-probe",
+      "native_launched": true,
+      "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+      "argv": [
+        "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+        "--print",
+        "--output-format",
+        "json",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000002953",
+        "/skill-🧪-probe"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "interrupted": false,
+      "interrupt_signal": null,
+      "forced_exit": null,
+      "stdout_file": "unicode-skill-name/stdout.raw",
+      "stdout_bytes": 1628,
+      "stdout_sha256": "4e695c3d01837437cc31b6752196e02a623a6a4d1c1fe61469d9fdb4fbe3d9a8",
+      "stderr_file": "unicode-skill-name/stderr.raw",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unicode-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "remote_address": "127.0.0.1",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "request_bytes": 103439,
+          "request_sha256": "626534f7959a9f43a711f302b5c97bd0b95bca536e8729be51f8aa7a2972a7c0",
+          "request_file": "unicode-skill-name/request-00.raw.json",
+          "request_body_anchors_present": {
+            "\"text\":\"<command-message>skill-🧪-probe</command-message>\\n<command-name>/skill-🧪-probe</command-name>\\n\"": true,
+            "Return the fixed Skill body for skill-🧪-probe.": true
+          },
+          "response_file": "unicode-skill-name/response-00.raw",
+          "response_bytes": 863,
+          "response_sha256": "522f9a30e8842f3f4c339bb73a798d09935e6cb8b449c56ceec6714f2ef36665",
+          "response_content_type": "text/event-stream",
+          "json_parseable": true
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_case_config": "projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-acceptance-native-command-skills-295-capture-attempt-01-unicode-skill-name-runtime-cwd/00000000-0000-4000-8000-000000002953.jsonl",
+        "bytes": 195012,
+        "sha256": "ea797f2a54b944833e60bbb1bcf8c894d0097442ef2a24d82288f0ef89bd3fbb",
+        "capture_file": "unicode-skill-name/session.jsonl.raw"
+      },
+      "status": "complete"
+    },
+    {
+      "id": "punctuation-skill-name",
+      "session_id": "00000000-0000-4000-8000-000000002954",
+      "prompt": "/skill.alpha+beta",
+      "native_launched": true,
+      "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+      "argv": [
+        "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+        "--print",
+        "--output-format",
+        "json",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000002954",
+        "/skill.alpha+beta"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "interrupted": false,
+      "interrupt_signal": null,
+      "forced_exit": null,
+      "stdout_file": "punctuation-skill-name/stdout.raw",
+      "stdout_bytes": 1628,
+      "stdout_sha256": "b3f37ded16ff41eecc6ddec1cb00edab2707cc9d77403e2c917ed737708401ea",
+      "stderr_file": "punctuation-skill-name/stderr.raw",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "punctuation-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "remote_address": "127.0.0.1",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "request_bytes": 103444,
+          "request_sha256": "fc92636072174a971ab06178a8dd528875cc44507166bb2e687001fa0a00fb86",
+          "request_file": "punctuation-skill-name/request-00.raw.json",
+          "request_body_anchors_present": {
+            "\"text\":\"<command-message>skill.alpha+beta</command-message>\\n<command-name>/skill.alpha+beta</command-name>\\n\"": true,
+            "Return the fixed Skill body for skill.alpha+beta.": true
+          },
+          "response_file": "punctuation-skill-name/response-00.raw",
+          "response_bytes": 863,
+          "response_sha256": "522f9a30e8842f3f4c339bb73a798d09935e6cb8b449c56ceec6714f2ef36665",
+          "response_content_type": "text/event-stream",
+          "json_parseable": true
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_case_config": "projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-acceptance-native-command-skills-295-capture-attempt-01-punctuation-skill-name-runtime-cwd/00000000-0000-4000-8000-000000002954.jsonl",
+        "bytes": 195078,
+        "sha256": "3b166395684a0e5b1267daabde211d14a9ab43e8e172ac5835a7433e45da17ae",
+        "capture_file": "punctuation-skill-name/session.jsonl.raw"
+      },
+      "status": "complete"
+    }
+  ],
+  "server_errors": [],
+  "all_completed": true
+}

@@ -10,6 +10,7 @@ pub mod batch_skill;
 pub mod builtin_skill;
 pub mod checkup_skill;
 pub mod code_review_skill;
+pub mod commit_skill;
 pub mod cron_skill;
 pub mod dataviz_skill;
 pub mod debug_skill;
@@ -52,6 +53,7 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     // prompt names above; manual-only bundles are counted but not named.
     register_cron_skill(reg, cron_enabled);
     register_verify_skill(reg);
+    register_commit_skill(reg);
     register_checkup_skill(reg);
     register_debug_skill(reg);
     register_run_skill_generator_skill(reg);
@@ -61,15 +63,40 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_explain_usage_skill(reg);
 }
 
+/// Register `fo()` — the Native `/commit` bundled prompt. The GrowthBook gate
+/// defaults off and is evaluated by Native `bvr()` on the command factory.
+fn register_commit_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "commit".into(),
+        description: commit_skill::COMMIT_DESCRIPTION.into(),
+        menu_description: Some("Create a git commit".into()),
+        source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
+        kind: SlashCommandKind::Bundled {
+            frontmatter: commit_skill::frontmatter(),
+            prompt_fn: Some(Arc::new(commit_skill::CommitPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        is_enabled: telemetry::flag_bool("tengu_cinder_relay", false),
+        has_user_specified_description: true,
+        argument_hint: Some("[guidance]".into()),
+        ..SlashCommand::default()
+    });
+}
+
 /// Register a desktop Skill API builtin as a slash command using the shared
 /// name, description, and prompt body.
 fn register_claude_api_skill(reg: &mut CommandRegistry) {
-    let skill = skill_api::desktop_builtin_skill("claude-api")
+    let skill = skill::desktop_builtin_skill("claude-api")
         .expect("claude-api is registered as a desktop builtin Skill");
     reg.register_command(SlashCommand {
         name: skill.name.into(),
         description: skill.description,
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(builtin_skill::DesktopBuiltinSkillPromptFn::new(
@@ -77,7 +104,6 @@ fn register_claude_api_skill(reg: &mut CommandRegistry) {
             ))),
         },
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -86,12 +112,14 @@ fn register_claude_api_skill(reg: &mut CommandRegistry) {
 
 /// Register the desktop plugin-authoring reference as a prompt skill.
 fn register_plugin_authoring_skill(reg: &mut CommandRegistry) {
-    let skill = skill_api::desktop_builtin_skill("plugin-authoring")
+    let skill = skill::desktop_builtin_skill("plugin-authoring")
         .expect("plugin-authoring is registered as a desktop builtin Skill");
     reg.register_command(SlashCommand {
         name: skill.name.into(),
         description: skill.description,
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(builtin_skill::DesktopBuiltinSkillPromptFn::new(
@@ -99,7 +127,6 @@ fn register_plugin_authoring_skill(reg: &mut CommandRegistry) {
             ))),
         },
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -123,6 +150,8 @@ fn register_cron_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
                 .into(),
         menu_description: Some("Create, list, or cancel scheduled prompts".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter {
                 allowed_tools: Some(
@@ -158,6 +187,8 @@ fn register_dataviz_skill(reg: &mut CommandRegistry) {
         description: dataviz_skill::DATAVIZ_DESCRIPTION.into(),
         menu_description: Some("Chart and dashboard design guidance".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter {
                 session_modes: Some(vec!["chat".into(), "code".into()]),
@@ -166,7 +197,6 @@ fn register_dataviz_skill(reg: &mut CommandRegistry) {
             prompt_fn: Some(Arc::new(dataviz_skill::DatavizPromptFn)),
         },
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -182,6 +212,8 @@ fn register_deep_research_skill(reg: &mut CommandRegistry) {
         description: deep_research_skill::DESCRIPTION.into(),
         menu_description: Some("Research a question across verified sources".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter {
                 allowed_tools: Some(vec!["Workflow".into()]),
@@ -209,6 +241,8 @@ fn register_batch_skill(reg: &mut CommandRegistry) {
         description: batch_skill::BATCH_DESCRIPTION.into(),
         menu_description: Some("Plan a large change; background agents each open a PR".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(batch_skill::BatchPromptFn)),
@@ -240,12 +274,13 @@ fn register_code_review_skill(reg: &mut CommandRegistry) {
         description: code_review_skill::CODE_REVIEW_DESCRIPTION.into(),
         menu_description: Some("Review the current diff for bugs and cleanups".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter,
             prompt_fn: Some(Arc::new(code_review_skill::CodeReviewPromptFn)),
         },
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         argument_hint: Some(code_review_skill::CODE_REVIEW_ARGUMENT_HINT.into()),
@@ -263,6 +298,8 @@ fn register_fewer_permission_prompts_skill(reg: &mut CommandRegistry) {
         description: fewer_permission_prompts_skill::FEWER_PERMISSION_PROMPTS_DESCRIPTION.into(),
         menu_description: Some("Pre-approve safe read-only commands based on your usage".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(
@@ -270,7 +307,6 @@ fn register_fewer_permission_prompts_skill(reg: &mut CommandRegistry) {
             )),
         },
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -286,6 +322,8 @@ fn register_run_skill_generator_skill(reg: &mut CommandRegistry) {
         description: run_skill_generator_skill::RUN_SKILL_GENERATOR_DESCRIPTION.into(),
         menu_description: Some("Create a skill that knows how to run this project’s app".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(
@@ -313,6 +351,8 @@ fn register_debug_skill(reg: &mut CommandRegistry) {
         description: debug_skill::DEBUG_DESCRIPTION.into(),
         menu_description: Some(debug_skill::DEBUG_MENU_DESCRIPTION.into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter {
                 allowed_tools: Some(["Read", "Grep", "Glob"].map(str::to_string).to_vec()),
@@ -329,23 +369,26 @@ fn register_debug_skill(reg: &mut CommandRegistry) {
     });
 }
 
-/// `No()` — upstream's `doctor` skill, registered here under its own upstream
-/// alias `checkup` because this port's `/doctor` is a different, deterministic
-/// command with a client-rendered DTO. See `checkup_skill`'s module doc.
+/// `Mo()` — the Native `/doctor` bundled prompt, retaining `/checkup` as its
+/// declared alias. The structured GUI DoctorReport remains a separate host
+/// event and is not a slash command.
 fn register_checkup_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
-        name: "checkup".into(),
+        name: "doctor".into(),
         description: checkup_skill::CHECKUP_DESCRIPTION.into(),
         menu_description: Some(checkup_skill::CHECKUP_MENU_DESCRIPTION.into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
+        aliases: vec!["checkup".into()],
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(checkup_skill::CheckupPromptFn)),
         },
         loaded_from: Some("bundled".into()),
         user_invocable: Some(true),
-        // Upstream `disableModelInvocation:!0` — the user asks for a checkup;
-        // the model does not start one on its own.
+        // Native `disableModelInvocation:!0` — users may invoke the setup
+        // prompt, but Headless model-fallback names omit it.
         disable_model_invocation: true,
         has_user_specified_description: true,
         // ⚠️ Upstream also sets `progressMessage:"running checkup"`.
@@ -368,6 +411,8 @@ fn register_workflow_authoring_skill(reg: &mut CommandRegistry) {
             workflow_authoring_skill::WORKFLOW_AUTHORING_MENU_DESCRIPTION.into(),
         ),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(
@@ -375,7 +420,6 @@ fn register_workflow_authoring_skill(reg: &mut CommandRegistry) {
             )),
         },
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -392,12 +436,13 @@ fn register_simplify_skill(reg: &mut CommandRegistry) {
         description: simplify_skill::SIMPLIFY_DESCRIPTION.into(),
         menu_description: Some("Clean up the changed code without changing behavior".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(simplify_skill::SimplifyPromptFn)),
         },
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         // Reference `argumentHint:"[<target>]"`.
@@ -414,12 +459,13 @@ fn register_run_skill(reg: &mut CommandRegistry) {
         description: run_skill::RUN_DESCRIPTION.into(),
         menu_description: Some("Launch this project’s app to see your change working".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(run_skill::RunPromptFn)),
         },
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -435,6 +481,8 @@ fn register_verify_skill(reg: &mut CommandRegistry) {
         name: "verify".into(),
         description: verify_skill::VERIFY_DESCRIPTION.into(),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(verify_skill::VerifyPromptFn)),
@@ -467,6 +515,8 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
             "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace."
                 .into(),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(loop_skill::LoopPromptFn)),
@@ -474,7 +524,6 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
         // Sets `is_bundled` in the skill listing + satisfies the listing's
         // loadedFrom ∈ {bundled,…} filter.
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         // PARITY: binary `_Zm` `aliases:["proactive"]` (cc_all.txt:521920).
         aliases: vec!["proactive".into()],
         // PARITY: binary `_Zm` `whenToUse` (cc_all.txt:521920).
@@ -511,6 +560,8 @@ fn register_update_config_skill(reg: &mut CommandRegistry) {
         description: update_config_skill::UPDATE_CONFIG_DESCRIPTION.into(),
         menu_description: Some("Change settings: hooks, permissions, environment variables".into()),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter {
                 allowed_tools: Some(vec!["Read".to_string()]),
@@ -519,7 +570,6 @@ fn register_update_config_skill(reg: &mut CommandRegistry) {
             prompt_fn: Some(Arc::new(update_config_skill::UpdateConfigPromptFn)),
         },
         loaded_from: Some("bundled".into()),
-        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -536,6 +586,8 @@ fn register_keybindings_help_skill(reg: &mut CommandRegistry) {
         name: "keybindings-help".into(),
         description: keybindings_help_skill::KEYBINDINGS_HELP_DESCRIPTION.into(),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter {
                 allowed_tools: Some(vec!["Read".to_string()]),
@@ -559,6 +611,8 @@ fn register_explain_usage_skill(reg: &mut CommandRegistry) {
             "See where this session\u{2019}s tokens went, in plain words".into(),
         ),
         source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
             prompt_fn: Some(Arc::new(explain_usage_skill::ExplainUsagePromptFn)),
@@ -602,17 +656,15 @@ mod tests {
 
         let want = vec![
             "batch".to_string(),
-            // Ported 2026-09-10 as `checkup`, upstream's own alias for it:
-            // upstream registers `doctor` (aliases ["checkup"]), but this
-            // port's `/doctor` is a deterministic client-rendered report.
-            "checkup".to_string(),
             "claude-api".to_string(),
             "code-review".to_string(),
+            "commit".to_string(),
             "cron".to_string(),
             "dataviz".to_string(),
             // Ported 2026-09-10, once the session debug log it reads existed.
             "debug".to_string(),
             "deep-research".to_string(),
+            "doctor".to_string(),
             // Ported 2026-09-10.
             "explain-usage".to_string(),
             "fewer-permission-prompts".to_string(),
@@ -640,6 +692,20 @@ mod tests {
              failure this test exists to catch"
         );
 
+        let doctor = reg.resolve(&"doctor".into()).expect("Native doctor prompt");
+        assert_eq!(doctor.source, CommandSource::Bundled);
+        assert_eq!(
+            doctor.native_type,
+            Some(crate::model::NativeCommandType::Prompt)
+        );
+        assert!(doctor.disable_model_invocation);
+        assert_eq!(
+            reg.resolve(&"checkup".into())
+                .and_then(|command| command.name.string_at("")),
+            Some("doctor"),
+            "/checkup must resolve through Native doctor's declared alias"
+        );
+
         // The other half of a name set: names that must NOT be here. These are
         // upstream bundled skills whose surfaces this port does not ship, so a
         // sudden appearance means someone wired a skill without its substrate.
@@ -656,6 +722,31 @@ mod tests {
                  it would advertise a skill that cannot run"
             );
         }
+    }
+
+    #[test]
+    fn commit_bundle_uses_native_default_off_growthbook_gate() {
+        let _guard = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
+        const FLAG: &str = "tengu_cinder_relay";
+        telemetry::test_clear_flag(FLAG);
+
+        let mut disabled = CommandRegistry::new();
+        register_bundled_skills(&mut disabled, false);
+        let commit = disabled
+            .resolve(&"commit".into())
+            .expect("commit factory row");
+        assert_eq!(commit.source, CommandSource::Bundled);
+        assert_eq!(
+            commit.native_type,
+            Some(crate::model::NativeCommandType::Prompt)
+        );
+        assert!(!commit.is_enabled, "Native bvr() defaults the feature off");
+
+        telemetry::test_set_flag(FLAG, true);
+        let mut enabled = CommandRegistry::new();
+        register_bundled_skills(&mut enabled, false);
+        assert!(enabled.resolve(&"commit".into()).unwrap().is_enabled);
+        telemetry::test_clear_flag(FLAG);
     }
 
     #[test]

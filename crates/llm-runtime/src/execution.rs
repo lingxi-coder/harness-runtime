@@ -5,6 +5,15 @@ use std::sync::Arc;
 
 pub(crate) fn wire_error(error: LlmError) -> wire::LlmError {
     match error {
+        LlmError::ProviderErrorText {
+            source,
+            text,
+            native_anthropic_facts,
+        } => wire::LlmError::ProviderErrorText {
+            source: Box::new(wire_error(*source)),
+            text,
+            native_anthropic_facts: native_anthropic_facts.map(Box::new),
+        },
         LlmError::TransportTimeout { message } => wire::LlmError::TransportTimeout { message },
         LlmError::StreamInterrupted { message } => wire::LlmError::StreamInterrupted { message },
         LlmError::InvalidRequest { message } => wire::LlmError::InvalidRequest { message },
@@ -18,6 +27,19 @@ pub(crate) fn wire_error(error: LlmError) -> wire::LlmError {
             message: capability,
         },
         LlmError::Transport { message } => wire::LlmError::Transport { message },
+        LlmError::ProxyTunnelResponse {
+            status,
+            proxy_authenticate,
+        } => wire::LlmError::ProxyTunnelResponse {
+            status,
+            proxy_authenticate,
+        },
+        LlmError::ProxyAuthHelperRetry { source, challenge } => {
+            wire::LlmError::ProxyAuthHelperRetry {
+                source: Box::new(wire_error(*source)),
+                challenge,
+            }
+        }
         LlmError::TlsCert { message, .. } => wire::LlmError::TlsCert { message },
         other => wire::LlmError::Transport {
             message: other.to_string(),
@@ -561,6 +583,38 @@ mod tests {
         assert_eq!(
             response_json_payload(&error).as_json_source(),
             r#""upstream unavailable""#
+        );
+    }
+
+    #[test]
+    fn proxy_helper_error_roundtrip_keeps_utf16_source_and_live_challenge() {
+        let mut units = "407 ".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        let text =
+            wire::ProviderErrorText::new(String::from_utf16_lossy(&units), units.clone()).unwrap();
+        let error = LlmError::ProxyAuthHelperRetry {
+            source: Box::new(LlmError::ProviderErrorText {
+                source: Box::new(LlmError::Authentication {
+                    message: text.display().into(),
+                }),
+                text,
+                native_anthropic_facts: None,
+            }),
+            challenge: Some(wire::ProxyAuthHelperChallenge {
+                status: 407,
+                proxy_authenticate: Some(b"Basic realm=private-proxy".to_vec()),
+            }),
+        };
+
+        let roundtripped = crate::upstream::error(wire_error(error));
+        assert!(roundtripped.is_proxy_auth_helper_retry());
+        assert_eq!(roundtripped.http_status(), Some(407));
+        assert_eq!(
+            roundtripped
+                .provider_error_text()
+                .unwrap()
+                .utf16_code_units(),
+            units
         );
     }
 

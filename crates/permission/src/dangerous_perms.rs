@@ -769,6 +769,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: tool.to_string(),
                 rule_content: content.map(Utf16JsonProjection::from),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Allow,
             source,
@@ -799,6 +800,7 @@ mod tests {
                 value: PermissionRuleValue {
                     tool_name: "Bash".into(),
                     rule_content: None,
+                    original_rule: None,
                 },
                 behavior: PermissionBehavior::Deny,
                 source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),

@@ -347,7 +347,9 @@ pub fn collect_mcp_config_warnings(
             {
                 warn(
                     name,
-                    format!("Skipped \u{2014} MCP server \"{name}\" has a \"url\" but no \"type\"; add \"type\": \"http\" (or \"sse\" / \"ws\") to this entry"),
+                    format!(
+                        "Skipped \u{2014} MCP server \"{name}\" has a \"url\" but no \"type\"; add \"type\": \"http\" (or \"sse\" / \"ws\") to this entry"
+                    ),
                     None,
                 );
                 continue;
@@ -911,7 +913,10 @@ mod tests {
                 &json!({"mcpServers":{"srv":{"type":ty,"command":"mcp-test","url":"https://mcp.test","bareElicitationCapability":"true"}}}),
             );
             assert_eq!(warnings.len(), 1, "{ty}: {warnings:?}");
-            assert_eq!(warnings[0].message, "Skipped \u{2014} invalid MCP server config for \"srv\": bareElicitationCapability: expected boolean, received string");
+            assert_eq!(
+                warnings[0].message,
+                "Skipped \u{2014} invalid MCP server config for \"srv\": bareElicitationCapability: expected boolean, received string"
+            );
         }
         for ty in ["sdk", "claudeai-proxy"] {
             assert!(only(&json!({"mcpServers":{"srv":{"type":ty,"name":"sdk-client","id":"connector","url":"https://mcp.test","bareElicitationCapability":"true"}}})).is_empty(), "{ty}");
@@ -1061,7 +1066,9 @@ mod tests {
         );
         assert_eq!(
             w[0].suggestion.as_deref(),
-            Some("Rename this server in your MCP config \u{2014} \"workspace\" is reserved for internal use")
+            Some(
+                "Rename this server in your MCP config \u{2014} \"workspace\" is reserved for internal use"
+            )
         );
         // An SDK server with a reserved name is NOT flagged (claude `m.type!=="sdk"`).
         // `name` is `MAn`'s one required field; the stray `url` is stripped.

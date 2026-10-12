@@ -191,7 +191,7 @@ pub(crate) fn received_model_allowed(orch: &ConversationOrchestrator, received: 
         &received_identity,
         orch.config
             .server_fallback_regular_available_models
-            .as_deref(),
+            .as_ref(),
         Some(&orch.config.server_fallback_regular_model_overrides),
     );
     let is_resolved_default = orch

@@ -1707,12 +1707,13 @@ impl TaskRegistryHandle for TaskRegistry {
 
     async fn take_pending_task_notifications(
         &self,
+        task_delivery_policy: lingxi_core::host::task_delivery::TaskDeliveryPolicy,
     ) -> Result<Vec<lingxi_core::host::task_registry::TaskNotification>, TaskRegistryError> {
         // Dispatch to the inherent drain, which snapshots + marks-notified +
         // retains the terminal-not-notified tasks. Infallible at the registry
         // level (the lock is always acquirable), so the seam result is always
         // `Ok`.
-        Ok(TaskRegistry::take_pending_task_notifications(self).await)
+        Ok(TaskRegistry::take_pending_task_notifications(self, task_delivery_policy).await)
     }
 
     async fn park_foreground_agent(
@@ -1772,8 +1773,16 @@ impl TaskRegistryHandle for TaskRegistry {
     async fn take_pending_task_notifications_for(
         &self,
         recipient: Option<lingxi_core::types::AgentId>,
+        task_delivery_policy: lingxi_core::host::task_delivery::TaskDeliveryPolicy,
     ) -> Result<Vec<lingxi_core::host::task_registry::TaskNotification>, TaskRegistryError> {
-        Ok(TaskRegistry::take_pending_task_notifications_for(self, recipient).await)
+        Ok(
+            TaskRegistry::take_pending_task_notifications_for(
+                self,
+                recipient,
+                task_delivery_policy,
+            )
+            .await,
+        )
     }
 
     fn web_search_calls(&self) -> u32 {
@@ -2016,7 +2025,12 @@ mod tests {
         handle
             .notify_monitor_event(&task_id, source_event, false)
             .await;
-        let events = handle.take_pending_task_notifications().await.unwrap();
+        let events = handle
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+            )
+            .await
+            .unwrap();
         assert_eq!(events.len(), 1);
         let event = &events[0];
         assert_eq!(event.task_id, task_id);
@@ -2033,7 +2047,9 @@ mod tests {
         assert_eq!(event.output_path.as_deref(), spool.to_str());
         assert!(
             handle
-                .take_pending_task_notifications()
+                .take_pending_task_notifications(
+                    lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+                )
                 .await
                 .unwrap()
                 .is_empty(),

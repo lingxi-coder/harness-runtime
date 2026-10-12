@@ -376,6 +376,16 @@ impl WindowsConfig {
 /// matches all commands.
 pub type IgnoreViolationsConfig = HashMap<String, Vec<String>>;
 
+/// Exact JavaScript UTF-16 `ignoreViolations` keys and patterns retained by
+/// source-aware hosts when an entry contains an isolated surrogate that a Rust
+/// `String` cannot represent. This is an execution-side carrier, not part of
+/// the JSON wire schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Utf16IgnoreViolationsConfig {
+    /// Category/command pattern, followed by the exact path-pattern units.
+    pub entries: Vec<(Vec<u16>, Vec<Vec<u16>>)>,
+}
+
 /// `SandboxRuntimeConfigSchema` (`sandbox-config.js:272-319`): the umbrella
 /// config a consumer passes to the manager.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -388,6 +398,10 @@ pub struct SandboxRuntimeConfig {
     /// Optional configuration for ignoring specific violations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ignore_violations: Option<IgnoreViolationsConfig>,
+    /// Raw source companion for valid Native strings that cannot fit in
+    /// `IgnoreViolationsConfig`'s Rust `String` fields.
+    #[serde(skip)]
+    pub ignore_violations_utf16: Option<Utf16IgnoreViolationsConfig>,
     /// Enable weaker nested sandbox mode (for Docker environments).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_weaker_nested_sandbox: Option<bool>,

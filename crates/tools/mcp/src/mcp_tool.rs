@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use lingxi_core::host::{McpPermissionCeiling, McpTransportSpec};
-use lingxi_core::types::utf16_json::Utf16JsonProjection as UJP;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection as UJP};
 use mcp::registry::{McpRegistry, McpToolOutputSchemaParserHandle};
 use mcp::McpClientError;
 use once_cell::sync::Lazy;
@@ -314,21 +314,164 @@ fn mcp_progress_event_data(
         .expect("fixed MCP progress keys are unique")
 }
 
-/// Lift the first content block's `text` out of an MCP result, mirroring the TS
-/// `result.content[0].text` lookup on an `isError: true` result
-/// (`services/mcp/client.ts:3124-3142`). Returns `None` unless `content` is a
-/// non-empty array whose first element is an object carrying a string `text`
-/// (the caller falls back to `"Unknown error"`).
-fn first_content_block_text(
-    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
-) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
-    if content.array_len("")? == 0 {
-        return None;
+/// Convert a JSON value using the JavaScript String(value) behavior used by
+/// Native's MCP error fallback. Arrays use comma-join semantics, and ordinary
+/// objects become [object Object]. A JSON-owned non-callable toString shadows
+/// the inherited method and makes coercion fail; Native's outer tool error
+/// formatter then surfaces No default value.
+fn javascript_string_units(value: JsonValueView<'_>) -> Result<Vec<u16>, ()> {
+    if let Some(units) = value.code_units() {
+        return Ok(units.to_vec());
     }
-    content
-        .subprojection("/0/text")
-        .ok()
-        .filter(|text| text.string_units("").is_some())
+    if let Some(number) = value.as_number() {
+        let display = if number.is_nan() {
+            "NaN".to_owned()
+        } else if number == f64::INFINITY {
+            "Infinity".to_owned()
+        } else if number == f64::NEG_INFINITY {
+            "-Infinity".to_owned()
+        } else if number == 0.0 {
+            "0".to_owned()
+        } else {
+            ryu_js::Buffer::new().format_finite(number).to_owned()
+        };
+        return Ok(display.encode_utf16().collect());
+    }
+    if let Some(boolean) = value.as_bool() {
+        return Ok(if boolean { "true" } else { "false" }
+            .encode_utf16()
+            .collect());
+    }
+    if value.is_null() {
+        return Ok("null".encode_utf16().collect());
+    }
+    if let Some(length) = value.array_len() {
+        let mut units = Vec::new();
+        for index in 0..length {
+            if index > 0 {
+                units.push(b',' as u16);
+            }
+            let Some(item) = value.get_index(index) else {
+                continue;
+            };
+            if !item.is_null() {
+                units.extend(javascript_string_units(item)?);
+            }
+        }
+        return Ok(units);
+    }
+    if value.object_entries().is_some() {
+        if value.get_property("toString").is_some() {
+            return Err(());
+        }
+        return Ok("[object Object]".encode_utf16().collect());
+    }
+    Ok("undefined".encode_utf16().collect())
+}
+
+fn javascript_string_projection(value: &UJP) -> Result<UJP, ()> {
+    let units = value
+        .at_pointer("")
+        .map(javascript_string_units)
+        .transpose()?
+        .unwrap_or_else(|| "undefined".encode_utf16().collect());
+    Ok(source_text_units(units))
+}
+
+fn javascript_truthy(value: JsonValueView<'_>) -> bool {
+    if let Some(units) = value.code_units() {
+        return !units.is_empty();
+    }
+    if let Some(number) = value.as_number() {
+        return number != 0.0 && !number.is_nan();
+    }
+    if let Some(boolean) = value.as_bool() {
+        return boolean;
+    }
+    !value.is_null()
+}
+
+fn javascript_template_property(value: JsonValueView<'_>, property: &str) -> Result<Vec<u16>, ()> {
+    match value.get_property(property) {
+        Some(value) => javascript_string_units(value),
+        None => Ok("undefined".encode_utf16().collect()),
+    }
+}
+
+fn resource_link_error_line(block: JsonValueView<'_>) -> Result<Vec<u16>, ()> {
+    let mut units = "[Resource link: ".encode_utf16().collect::<Vec<_>>();
+    units.extend(javascript_template_property(block, "name")?);
+    units.extend("] ".encode_utf16());
+    units.extend(javascript_template_property(block, "uri")?);
+    if let Some(description) = block.get_property("description") {
+        if javascript_truthy(description) {
+            units.extend(" (".encode_utf16());
+            units.extend(javascript_string_units(description)?);
+            units.push(b')' as u16);
+        }
+    }
+    Ok(units)
+}
+
+/// Mirror Native's MCP error-result projection: nonempty content arrays flatten
+/// text values and resource links in source order, joining them with LF. The
+/// protocol schema removes unknown resource_link members before this logic, so
+/// that shape wins even when raw input carried an extra text property. Only
+/// empty or non-array content consults top-level error through JavaScript
+/// String; a nonempty array with no recognized blocks stays Unknown error.
+fn native_mcp_error_detail(content: &UJP, error: Option<&UJP>) -> UJP {
+    if let Some(length) = content.array_len("").filter(|length| *length > 0) {
+        let mut lines = Vec::<Vec<u16>>::new();
+        for index in 0..length {
+            let pointer = format!("/{index}");
+            let Some(block) = content.at_pointer(&pointer) else {
+                continue;
+            };
+            if block.object_entries().is_none() {
+                continue;
+            }
+            // Native's decoded content-block schema strips unknown properties
+            // before error flattening tests for text. In particular, a
+            // resource_link or image with an extra raw text key keeps its type.
+            match block.get_property("type").and_then(|value| value.as_str()) {
+                Some("resource_link") => match resource_link_error_line(block) {
+                    Ok(line) => lines.push(line),
+                    Err(()) => {
+                        return source_text_units("No default value".encode_utf16().collect())
+                    }
+                },
+                Some("text") => {
+                    if let Some(text) = block.get_property("text") {
+                        match javascript_string_units(text) {
+                            Ok(line) => lines.push(line),
+                            Err(()) => {
+                                return source_text_units(
+                                    "No default value".encode_utf16().collect(),
+                                )
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if lines.is_empty() {
+            return source_text_units("Unknown error".encode_utf16().collect());
+        }
+        let mut units = Vec::new();
+        for (index, line) in lines.into_iter().enumerate() {
+            if index > 0 {
+                units.push(b'\n' as u16);
+            }
+            units.extend(line);
+        }
+        return source_text_units(units);
+    }
+    match error {
+        Some(error) => javascript_string_projection(error)
+            .unwrap_or_else(|()| source_text_units("No default value".encode_utf16().collect())),
+        None => source_text_units("Unknown error".encode_utf16().collect()),
+    }
 }
 
 /// Render an MCP result `content` value to a model-facing string IFF it is a
@@ -1056,17 +1199,16 @@ async fn process_mcp_call_result(
 ) -> Result<ToolCallResult, ToolError> {
     match res {
         Ok(dto) => {
-            // MCP.1: a server-flagged error result (`isError: true`) is mapped
-            // to a tool ERROR before the success path, mirroring the TS throw
-            // (`client.ts:3124-3148`) which fires BEFORE COMPLETED telemetry /
-            // result transform. We lift the first content block's `text` (else
-            // `"Unknown error"`) into the error message and emit MCP_FAILED.
+            // MCP.1: a server-flagged error result (isError: true) is mapped
+            // to a tool ERROR before the success path, mirroring the Native
+            // throw before COMPLETED telemetry / result transform. Flatten
+            // text and resource links first, then use the top-level error
+            // field only when content is empty or non-array.
             // The orchestrator keeps the thrown MCP failure typed so its main
             // model frame can carry the server's bare `error.message`, while
             // the separate `toolUseResult` retains Native's `Error: ` prefix.
             if dto.is_error {
-                let error_details = first_content_block_text(&dto.content)
-                    .unwrap_or_else(|| "Unknown error".into());
+                let error_details = native_mcp_error_detail(&dto.content, dto.error.as_ref());
                 emit(
                     &bus,
                     MCP_FAILED,
@@ -3994,28 +4136,84 @@ mod tests {
     }
 
     #[test]
-    fn first_content_block_text_lifts_exact_source_string() {
+    fn native_mcp_error_detail_flattens_text_and_resource_links_in_source_order() {
         let content = fixture_json(
-            r#"[{"type":"text","text":"\ud800boom"},{"type":"text","text":"second"}]"#,
+            r#"[{"type":"text","text":"DETAIL_FIRST_\ud800"},{"type":"image","text":"IMAGE_EXTRA_TEXT"},{"type":"text","text":"DETAIL_SECOND"},{"type":"resource_link","name":"guide","uri":"mcp://guide","description":"available"},{"type":"resource_link","name":"empty","uri":"mcp://empty","description":""},{"type":"resource_link","name":"shadowed","uri":"mcp://shadowed","description":"truthy","text":"TEXT_PROPERTY_PRECEDES_RESOURCE_LINK"}]"#,
+        );
+        let detail = native_mcp_error_detail(&content, None);
+        let mut expected = "DETAIL_FIRST_".encode_utf16().collect::<Vec<_>>();
+        expected.push(0xd800);
+        expected.extend(
+            "\nDETAIL_SECOND\n[Resource link: guide] mcp://guide (available)\n[Resource link: empty] mcp://empty\n[Resource link: shadowed] mcp://shadowed (truthy)"
+                .encode_utf16(),
         );
         assert_eq!(
-            first_content_block_text(&content).unwrap().string_units(""),
-            Some(vec![
-                0xd800,
-                b'b' as u16,
-                b'o' as u16,
-                b'o' as u16,
-                b'm' as u16
-            ])
+            detail.string_units(""),
+            Some(expected),
+            "Native's content-block schema strips extra text properties from resource_link and image blocks"
         );
     }
 
     #[test]
-    fn first_content_block_text_none_for_non_text_shapes() {
-        assert!(first_content_block_text(&fixture_json(r#""a bare string""#)).is_none());
-        assert!(first_content_block_text(&fixture_json("[]")).is_none());
-        assert!(first_content_block_text(&fixture_json(r#"[{"type":"image"}]"#)).is_none());
-        assert!(first_content_block_text(&fixture_json(r#"[{"text":7}]"#)).is_none());
+    fn native_mcp_error_detail_uses_top_level_error_only_for_empty_or_non_array_content() {
+        let empty = fixture_json("[]");
+        assert_eq!(
+            native_mcp_error_detail(&empty, Some(&fixture_json("null"))).string_at(""),
+            Some("null"),
+            "explicit null is distinct from an absent error member"
+        );
+        assert_eq!(
+            native_mcp_error_detail(&empty, Some(&fixture_json("17.25"))).string_at(""),
+            Some("17.25")
+        );
+        assert_eq!(
+            native_mcp_error_detail(&empty, Some(&fixture_json(r#"[1,null,"x",{}]"#)))
+                .string_at(""),
+            Some("1,,x,[object Object]")
+        );
+        assert_eq!(
+            native_mcp_error_detail(&empty, Some(&fixture_json(r#"{"toString":null}"#)))
+                .string_at(""),
+            Some("No default value")
+        );
+        assert_eq!(
+            native_mcp_error_detail(&empty, None).string_at(""),
+            Some("Unknown error")
+        );
+
+        let unsupported = fixture_json(r#"[null,1,{"type":"image"}]"#);
+        assert_eq!(
+            native_mcp_error_detail(&unsupported, Some(&fixture_json(r#""fallback""#)))
+                .string_at(""),
+            Some("Unknown error"),
+            "a nonempty content array with no recognized entries keeps the factory default"
+        );
+        assert_eq!(
+            native_mcp_error_detail(
+                &fixture_json(r#""bare content""#),
+                Some(&fixture_json("true"))
+            )
+            .string_at(""),
+            Some("true"),
+            "a non-array content value uses the top-level error fallback"
+        );
+    }
+
+    #[test]
+    fn native_mcp_error_fallback_uses_javascript_number_and_array_stringification() {
+        let empty = fixture_json("[]");
+        assert_eq!(
+            native_mcp_error_detail(&empty, Some(&fixture_json("1e21"))).string_at(""),
+            Some("1e+21")
+        );
+        assert_eq!(
+            native_mcp_error_detail(&empty, Some(&fixture_json("1e20"))).string_at(""),
+            Some("100000000000000000000")
+        );
+        assert_eq!(
+            native_mcp_error_detail(&empty, Some(&fixture_json(r#"[[1,null],"x"]"#))).string_at(""),
+            Some("1,,x")
+        );
     }
 
     #[test]

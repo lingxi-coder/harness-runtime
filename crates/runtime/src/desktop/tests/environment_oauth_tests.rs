@@ -131,9 +131,12 @@ async fn environment_oauth_worker() {
         "\u{FEFF} enterprise \u{FEFF}",
     );
     std::env::set_var(branding::RATE_LIMIT_TIER_ENV, " default_claude_ai ");
+    // Byte-exact copy of llm-client/tests/fixtures/oauth_source_2_1_288.json
+    // (SHA-256 e5bb0906f9f4f9ddb19d981c63a979d2554fe1bc39b58bd15c1efb8cc8b615ca)
+    // keeps the Harness crate independently buildable at its pinned checkout.
     let fixture: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../llm-client/tests/fixtures/oauth_source_2_1_288.json"
+        "/tests/fixtures/oauth_source_2_1_288.json"
     )))
     .unwrap();
     let mut count = 0;
@@ -226,7 +229,7 @@ async fn environment_oauth_worker() {
                     shared.clock.clone(),
                     shared.http.clone(),
                 ));
-                let mut stack = resolve_llm_stack_with_credentials(&cfg, shared)
+                let mut stack = resolve_llm_stack_with_credentials(&cfg, shared, None)
                     .await
                     .unwrap();
                 assert!(stack.has_oauth_token);

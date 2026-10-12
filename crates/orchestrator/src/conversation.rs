@@ -90,6 +90,27 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
+    /// Native hQ capability for the selected current route, including its
+    /// settings and account exclusions. Unavailable host facts admit no support.
+    fn supports_native_mid_conversation_system(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> bool {
+        false
+    }
+
+    /// Native `mSe(model)` capability after route/model gates. `None` means
+    /// the selected route cannot provide an authoritative answer; a known
+    /// unsupported route/model returns `Some(false)`.
+    fn native_mid_conversation_tool_change_supported(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Option<bool> {
+        None
+    }
+
     /// Inspect the selected credential's redacted origin without executing auth.
     async fn credential_source(
         &self,
@@ -462,11 +483,18 @@ pub trait StreamingApiClient: Send + Sync {
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
         request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
         native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+        typed_attachment_ids: std::collections::HashSet<MessageId>,
+        task_deliveries: std::collections::HashMap<
+            lingxi_core::types::MessageId,
+            lingxi_core::host::task_delivery::TaskDeliveryRequest,
+        >,
     ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = effort;
         let _ = tool_result_reminder_suffixes;
         let _ = request_dispatch_observer;
         let _ = native_anthropic_request_context;
+        let _ = typed_attachment_ids;
+        let _ = task_deliveries;
         self.stream(
             model,
             profile,
@@ -718,8 +746,8 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
     let (error, api_error_status) = match e {
         OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => {
             match inner.classification_source() {
-                LlmError::ProviderErrorText { .. } => {
-                    unreachable!("classification_source removes the provider-text wrapper")
+                LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+                    unreachable!("classification_source removes carrier wrappers")
                 }
                 // 429 family → "rate_limit" (status 429). Carved out before reaching
                 // `surface_model_error` for the non-streaming path; kept for totality
@@ -766,6 +794,9 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
                 | LlmError::TransportTimeout { .. }
                 | LlmError::TlsCert { .. }
                 | LlmError::StreamInterrupted { .. } => (Some("server_error"), None),
+                LlmError::ProxyTunnelResponse { status, .. } => {
+                    (Some("server_error"), Some(*status))
+                }
                 // Generic `Error` fallthrough in `Flp` → "unknown".
                 LlmError::MediaDelegationUnavailable { .. }
                 | LlmError::MediaDelegationPartial { .. } => (Some("invalid_request"), None),
@@ -857,29 +888,110 @@ fn node_platform_name(rust_os: &str) -> &str {
     }
 }
 
-/// Conservative provider gate for Anthropic's dynamic-tool-loading beta.
-/// Claude models routed through an Anthropic-family profile are eligible;
-/// Haiku is the upstream unsupported-model denylist. Project-specific
-/// non-Anthropic providers retain the complete inline tool list.
-fn tool_search_supported_for_request(model: &str, profile: Option<&str>) -> bool {
-    let model = model.to_ascii_lowercase();
-    if model.contains("haiku") {
+/// Native's Rre/Tre gate for tool search. The unsupported-model list applies
+/// to every selected route; the stricter version floor is specific to the
+/// actual Vertex Claude wire protocol, never inferred from the profile label.
+fn tool_search_supported_for_request(
+    api: &dyn OrchestratorApiClient,
+    model: &str,
+    profile: Option<&str>,
+) -> bool {
+    let unsupported_models = telemetry::flag_string_list(
+        "tengu_tool_search_unsupported_models",
+        &[
+            "claude-3-opus",
+            "claude-3-sonnet",
+            "claude-3-haiku",
+            "claude-3-5-sonnet",
+            "claude-3-5-haiku",
+            "claude-3-7-sonnet",
+        ],
+    );
+    tool_search_supported_for_model_and_protocol(
+        model,
+        &unsupported_models,
+        api.protocol_for_model(model, profile),
+    )
+}
+
+fn tool_search_supported_for_model_and_protocol(
+    model: &str,
+    unsupported_models: &[String],
+    protocol: Option<llm_runtime::ProtocolFamily>,
+) -> bool {
+    let model_lower = model.to_ascii_lowercase();
+    if unsupported_models
+        .iter()
+        .any(|unsupported| model_lower.contains(&unsupported.to_ascii_lowercase()))
+    {
         return false;
     }
-    profile.map_or_else(
-        // Claude uses a negative capability test: every current/future model is
-        // assumed to support tool_reference unless it matches the unsupported
-        // Haiku pattern. A missing profile is the built-in first-party route,
-        // not evidence that the model name must contain the word "claude".
-        || true,
-        |profile| {
-            let profile = profile.to_ascii_lowercase();
-            profile.contains("anthropic")
-                || profile.contains("bedrock")
-                || profile.contains("vertex-claude")
-                || profile.contains("foundry")
-        },
-    )
+    protocol != Some(llm_runtime::ProtocolFamily::VertexClaude)
+        || !vertex_tool_search_model_unsupported(model)
+}
+
+fn vertex_tool_search_model_unsupported(model: &str) -> bool {
+    let normalized = strip_native_model_formatting(model);
+    let model = strip_vertex_model_date(&normalized);
+    if model == "claude-3" || model.starts_with("claude-3-") {
+        return true;
+    }
+    let Some((_family, version)) = model.strip_prefix("claude-").and_then(|model| {
+        let (family, version) = model.split_once('-')?;
+        matches!(family, "opus" | "sonnet" | "haiku").then_some((family, version))
+    }) else {
+        return false;
+    };
+    // All three Native families currently share the [4, 5] floor.
+    if !version
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_digit())
+    {
+        return false;
+    }
+    let Some(version) = version
+        .split('-')
+        .map(|component| component.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()
+    else {
+        // Native's Dhr returns false for names that match the family/version
+        // prefix but do not parse as a complete numeric model id.
+        return true;
+    };
+    let floor = [4_u64, 5_u64];
+    for index in 0..version.len().max(floor.len()) {
+        let actual = version.get(index).copied().unwrap_or(0);
+        let minimum = floor.get(index).copied().unwrap_or(0);
+        if actual != minimum {
+            return actual < minimum;
+        }
+    }
+    false
+}
+
+fn strip_native_model_formatting(model: &str) -> String {
+    // Native `Fn` removes the literal formatting markers case-insensitively;
+    // it does not remove the ESC byte that may precede one of these markers.
+    model
+        .replace("[1m]", "")
+        .replace("[2m]", "")
+        .replace("[1M]", "")
+        .replace("[2M]", "")
+}
+
+fn strip_vertex_model_date(model: &str) -> &str {
+    let bytes = model.as_bytes();
+    if bytes.len() < 9 {
+        return model;
+    }
+    let suffix = &bytes[bytes.len() - 8..];
+    let separator = bytes[bytes.len() - 9];
+    if matches!(separator, b'-' | b'@') && suffix.iter().all(u8::is_ascii_digit) {
+        &model[..model.len() - 9]
+    } else {
+        model
+    }
 }
 
 /// `getBranch()` (`sessionStorage.ts:1012-1019`) — resolve the cwd's current git
@@ -1316,8 +1428,71 @@ pub(crate) struct ModSessionMeasureSnapshot {
     pub(crate) limit_status: Option<String>,
 }
 
+/// Live sandbox facts used to build the main-loop model-facing attachment.
+/// Hosts supply the effective runtime config and backend availability from
+/// the same context their Bash tool uses.
+#[derive(Clone, Debug)]
+pub struct NativeSandboxHostFacts {
+    /// Whether this host can currently execute commands inside the sandbox.
+    pub sandbox_available: bool,
+    /// Effective filesystem read values from the live sandbox context, with
+    /// Native's `denyOnly` / `allowWithinDeny` property names and source order.
+    pub filesystem_read: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    /// Effective filesystem write values from the live sandbox context, with
+    /// Native's `allowOnly` / `denyWithinAllow` property names and source order.
+    pub filesystem_write: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    /// Network restriction config returned by the live sandbox host, if present.
+    pub network_restriction_config: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Unix sockets returned by the live sandbox host, if present.
+    pub allow_unix_sockets: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Ignore-violation map returned by the live sandbox host, if present.
+    pub ignore_violations: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Effective raw `sandbox` settings projection, retained for exact source
+    /// strings that the typed runtime config cannot represent.
+    pub sandbox_settings: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Whether the current live config permits the unsandboxed-command parameter.
+    pub allow_unsandboxed_commands: bool,
+    /// Whether the current live config allows Apple Events.
+    pub allow_apple_events: bool,
+    /// Whether the current live config allows local port binding.
+    pub allow_local_binding: bool,
+    /// Detected Native platform label (`macos`, `linux`, or `wsl`), when known.
+    pub platform: Option<String>,
+    /// Whether the current main loop uses Native's auto permission mode.
+    pub auto_mode: bool,
+    /// Whether Native's current filesystem policy resolves to `relaxed`.
+    pub filesystem_policy_relaxed: bool,
+    /// The two Native Claude temp paths used by `getSimpleSandboxSection`.
+    pub temp_paths: Vec<String>,
+    /// Whether the `tengu_elegant_ocean` boundary-note branch is enabled.
+    pub boundary_note_enabled: bool,
+    /// Whether the host supports `registerCommandNetworkLists` for `wge()`.
+    pub command_network_lists_offered: bool,
+    /// Native's `qb()` result for whether `/sandbox` changes settings.
+    pub sandbox_command_changes_settings: bool,
+    /// Whether the current session is interactive (`!ve()`).
+    pub interactive_session: bool,
+    /// Whether `CLAUDE_CODE_SESSION_KIND` is defined, including an empty value.
+    pub session_kind_present: bool,
+    /// All source-preserving settings tiers in their Native merge order.
+    pub settings_layers: Vec<lingxi_core::settings::SettingsRawLayer>,
+}
+
+pub use native_policy_attachments::{
+    NativeBashFirstSessionAssignment, NativePolicyHostFacts, NativeProactivityLevel,
+    NativeProactivityResponse, NativeProactivitySnapshot, NativeProactivityState,
+};
+
 pub struct ConversationOrchestrator {
     pub(crate) config: OrchestratorConfig,
+    pub(crate) native_sandbox_host_facts_provider:
+        Option<Arc<dyn Fn() -> NativeSandboxHostFacts + Send + Sync>>,
+    pub(crate) native_policy_host_facts_provider:
+        Option<Arc<dyn Fn() -> NativePolicyHostFacts + Send + Sync>>,
+    pub(crate) native_proactivity_state: NativeProactivityState,
+    /// Whether this host request path has Native's `options.refreshTools`
+    /// callback. `None` means the composition root has no source-backed fact.
+    pub(crate) native_tool_pool_refresh_callback_available: Option<bool>,
     pub(crate) api: Arc<dyn OrchestratorApiClient>,
     /// Streaming-path API client. Wired by `new_with_streaming`; the
     /// legacy `new` constructor wires a [`NoStreamingApiClient`] stub
@@ -1645,22 +1820,45 @@ impl ConversationOrchestrator {
     ) -> std::sync::Arc<crate::mod_surface_roster::ModSurfaceRoster> {
         self.mod_surface_roster.clone()
     }
+
+    /// Return this conversation's current request-recovery scope for Native
+    /// tool-search reminder state. The clone shares the session-owned latches;
+    /// request preparation reads it without borrowing or mutating the store.
+    pub(crate) fn native_tool_search_scope_snapshot(
+        &self,
+    ) -> llm_runtime::thinking_scope::ThinkingRecoveryScope {
+        self.transcript
+            .thinking_recovery
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Native `pfr` treats `options.refreshTools !== undefined` as an input
+    /// fact. Keep it distinct from the existence of the shared ToolRegistry.
+    pub(crate) fn native_tool_pool_refresh_callback_available(&self) -> Option<bool> {
+        self.native_tool_pool_refresh_callback_available
+    }
 }
 
 // Responsibility-focused implementation modules. `conversation.rs` owns the
 // public façade and shared state shape; behavior lives in these child modules.
+#[path = "conversation/attachment_order.rs"]
+mod attachment_order;
+pub(crate) mod closing_placement;
 #[path = "conversation/command_describe.rs"]
 mod command_describe_impl;
 #[path = "conversation/compaction.rs"]
 mod compaction_impl;
+mod task_delivery;
 pub(crate) use compaction_impl::{
     SessionCompactCore, SessionCompactCoreOutput, SessionCompactDecision,
 };
 #[path = "conversation/drivers/mod.rs"]
 mod drivers_impl;
 pub use drivers_impl::{
-    realtime_history, QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits,
+    realtime_history, QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd,
+    RealtimeAgentInput, RealtimeAgentLimits,
 };
 #[path = "conversation/context_announcements.rs"]
 pub(crate) mod context_announcements_impl;
@@ -1680,11 +1878,19 @@ mod model_impl;
 mod model_reminders_impl;
 #[path = "conversation/native_classifier_context.rs"]
 pub(crate) mod native_classifier_context;
+#[path = "conversation/native_policy_attachments.rs"]
+mod native_policy_attachments;
+#[path = "conversation/native_sandbox_attachments.rs"]
+mod native_sandbox_attachments;
+#[path = "conversation/native_settings_attachments.rs"]
+mod native_settings_attachments;
 pub(crate) use context_announcements_impl::PreparedContextAnnouncements;
 #[path = "conversation/prompt_cache.rs"]
 mod prompt_cache_impl;
 #[path = "conversation/prompt.rs"]
 mod prompt_impl;
+#[path = "conversation/prompt_ingress_environment.rs"]
+mod prompt_ingress_environment;
 #[path = "conversation/reminders.rs"]
 mod reminders_impl;
 #[path = "conversation/tooling.rs"]

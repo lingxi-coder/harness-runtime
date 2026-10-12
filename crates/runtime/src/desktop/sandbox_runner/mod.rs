@@ -186,9 +186,13 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
         if state.manager.is_none() {
             // ── Lazy first init ──
             let mut m = SandboxManager::new();
-            m.initialize(rt.clone(), self.ask_callback.clone(), false)
-                .await
-                .map_err(map_err)?;
+            m.initialize(
+                rt.clone(),
+                self.ask_callback.clone(),
+                self.ask_callback.is_some(),
+            )
+            .await
+            .map_err(map_err)?;
             state.manager = Some(m);
             state.last_full_key = Some(key);
             state.active_net = Some(net.clone());
@@ -196,9 +200,13 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
             // ── Structural change → reset + re-init ──
             let m = state.manager.as_mut().expect("manager checked Some");
             m.reset();
-            m.initialize(rt.clone(), self.ask_callback.clone(), false)
-                .await
-                .map_err(map_err)?;
+            m.initialize(
+                rt.clone(),
+                self.ask_callback.clone(),
+                self.ask_callback.is_some(),
+            )
+            .await
+            .map_err(map_err)?;
             state.last_full_key = Some(key);
             state.active_net = Some(net.clone());
         } else if state.active_net.as_ref() != Some(&net) {
@@ -523,6 +531,31 @@ mod tests {
             "a rejected host prompt must remain denied"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // A structural config change resets the manager and starts a fresh
+        // monitor with the runner's same host callback; the final reset must
+        // stop and reap that second child too.
+        let mut changed = EngineConfig::default();
+        changed.enable_weaker_nested_sandbox = true;
+        runner
+            .wrap(
+                "echo ask after reset",
+                &changed,
+                Platform::Mac,
+                Some("bash"),
+                Some(&cwd),
+            )
+            .await
+            .expect("structural change reinitializes the ask-enabled manager");
+        assert!(runner.ask_callback.is_some());
+        assert!(runner
+            .state
+            .lock()
+            .await
+            .manager
+            .as_ref()
+            .and_then(SandboxManager::http_proxy_port)
+            .is_some());
         runner.reset().await;
     }
 

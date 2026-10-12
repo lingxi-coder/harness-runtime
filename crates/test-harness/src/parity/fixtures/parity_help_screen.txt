@@ -1,6 +1,6 @@
 Commands:
   /add-dir              Add a new working directory
-  /agents               (removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/
+  /agents               (removed) Ask Claude to create/manage subagents, or edit .claude/agents/
   /autocompact          Configure the auto-compact window size
   /background           Send this session to the background and free the terminal
   /branch               Create a branch of the current conversation at this point
@@ -11,21 +11,18 @@ Commands:
   /chrome               Open Claude in Chrome settings
   /clear                Start a new session with empty context; previous session stays on disk (resumable with /resume)
   /color                Set the prompt bar color for this session
-  /commit               Create a git commit
-  /commit-push-pr       Commit, push, and open a PR
   /compact              Free up context by summarizing the conversation so far
   /config               Open settings
   /context              Visualize current context usage as a colored grid
   /copy                 Copy Claude's last response to clipboard (or /copy N for the Nth-latest)
   /desktop              Continue the current session in Claude Desktop
   /diff                 View uncommitted changes and per-turn diffs
-  /doctor               Diagnose and verify your LingXi installation and settings
+  /doctor               Health-check your setup and fix issues: unused extensions, duplicated or bloated memory files, slow hooks, permissions
   /effort               Set effort level for model usage
   /exit                 Exit the CLI
   /export               Export the current conversation to a file or clipboard
   /fast                 Toggle fast mode
   /feedback             Submit feedback about LingXi
-  /files                List all files currently in context
   /focus                Toggle focus view: just your prompt, summary, and response
   /fork                 Copy this conversation into a new background session and keep working here
   /goal                 Set a goal — keep working until the condition is met
@@ -33,7 +30,6 @@ Commands:
   /hooks                View hook configurations for tool events
   /ide                  Manage IDE integrations and show status
   /init                 Initialize a new LINGXI.md file with codebase documentation
-  /init-verifiers       Create verifier skill(s) for automated verification of code changes
   /insights             Generate a report analyzing your LingXi sessions
   /install              Install LingXi native build
   /install-github-app   Set up Claude GitHub Actions for a repository

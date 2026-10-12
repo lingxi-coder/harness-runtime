@@ -33,7 +33,7 @@ use command_api::builtins::{
     register_core_batch_4, register_core_batch_5,
 };
 use lingxi_core::host::{AuthHandle, OrchestratorHandle};
-use skill_api::SkillRegistry;
+use skill::SkillRegistry;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_ui::ask_user_question::AskUserQuestionResolver;
@@ -449,7 +449,7 @@ mod android_ui_registration_tests {
 #[must_use]
 pub fn mobile_skill_registry() -> SkillRegistry {
     let mut reg = SkillRegistry::new();
-    skill_api::register_mobile(&mut reg);
+    skill::register_mobile(&mut reg);
     reg
 }
 
@@ -462,7 +462,6 @@ pub fn mobile_command_registry(
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
-    register_mobile_bundled_prompt_commands(&mut reg);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
@@ -482,7 +481,9 @@ pub fn mobile_command_registry(
 }
 
 /// Register the mobile authoritative bundled prompt catalog (for example
-/// `/loop`). Plugin skills are file-backed Plugin commands and are added by
+/// `/loop`) after settings-backed commands have loaded. That order lets the
+/// catalog reseed preserve custom `verify` and `simplify` implementations.
+/// Plugin skills are file-backed Plugin commands and are added by
 /// `PluginManager` after this base catalog is installed.
 pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry) {
     // Canonical custom precommit skills must keep their origin/body across the
@@ -672,8 +673,8 @@ mod tests {
             .call(
                 lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
                     &serde_json::json!({
-                        "subject": "Generate local app",
-                        "description": "Exercise the iOS app-private task store"
+                        "subject": "Create a task",
+                        "description": "Exercise the mobile task store"
                     }),
                 )
                 .unwrap(),

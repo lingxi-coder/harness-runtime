@@ -1,7 +1,7 @@
-//! Locked constant tables of the 86 builtin command names + the 19 core names.
+//! Locked constant tables of the 82 builtin command names + the 18 core names.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
-//! Task 0 step 2 (name list) + Task 0 step 3 (19 core list).
+//! Task 0 step 2 (name list) + Task 0 step 3 (18 core list).
 //!
 //! NOTE: The 2026-05-28 addendum locked the total at **99** (originally `102`
 //! in the plan prose). The 2026-06-20 slash-parity pass (findings #66/#67 vs
@@ -87,17 +87,17 @@
 //!   whenClosed:[]}` @296430738 and `function nXe(){return!1}` @284247792, so
 //!   it never reaches the command table at all.
 
-/// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **87** for the current 2.1.270 parity
-/// surface. The latest oracle removed the stale internal command objects
-/// listed in the slash audit, including the policy-gated `heapdump` object
-/// which has no provider-neutral runtime analog.
+/// Every native built-in slash command's runtime name (without leading `/`),
+/// ASCII-sorted. Locked at length **82** for the 2.1.295 source surface. The
+/// reachable bundled prompts `/commit` and `/doctor` live in the bundled skill
+/// catalog; `/commit-push-pr`, `/files`, and `/init-verifiers` have no reachable
+/// default command producer in the pinned source and are not registered here.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the current membership lock).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 87] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 82] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -117,22 +117,18 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 87] = &[
     "chrome",
     "clear",
     "color",
-    "commit",
-    "commit-push-pr",
     "compact",
     "config",
     "context",
     "copy",
     "desktop",
     "diff",
-    "doctor",
     "effort",
     "exit",
     "export",
     "extra-usage",
     "fast",
     "feedback",
-    "files",
     "focus",
     "fork",
     "goal",
@@ -140,7 +136,6 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 87] = &[
     "hooks",
     "ide",
     "init",
-    "init-verifiers",
     "insights",
     "install",
     "install-github-app",
@@ -203,7 +198,7 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 87] = &[
     "workflows",
 ];
 
-/// The 19 core commands that ship with real implementations in M5-10 / M5-11.
+/// The 18 core builtin commands that ship with real implementations in M5-10 / M5-11.
 /// Subset of [`BUILTIN_COMMAND_NAMES`], ASCII-sorted.
 ///
 /// In M5-09 each of these gets a per-name placeholder struct in
@@ -211,13 +206,12 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 87] = &[
 /// literal as the shared `UnimplementedCommandHandler` until the real bodies
 /// land in M5-10 (batch 1: clear/compact/help/exit/memory/init) and M5-11
 /// (batch 2: the remaining 12).
-pub const BUILTIN_CORE_NAMES: &[&str; 19] = &[
+pub const BUILTIN_CORE_NAMES: &[&str; 18] = &[
     "agents",
     "auto-mode-setup",
     "clear",
     "compact",
     "config",
-    "doctor",
     "exit",
     "help",
     "hooks",
@@ -441,13 +435,9 @@ pub const STATICALLY_DISABLED_COMMANDS: &[&str] = &["version"];
 /// `apps/bridge-server`, whose announcer still does no filtering; that is the
 /// one remaining unconsumed use of this table.
 ///
-/// NOTE 2 (open, for the skills owner): upstream also flags the BUNDLED SKILL
-/// `doctor` — `wd({name:"doctor",aliases:["checkup"],…,terminalOriented:!0,…})`
-/// @304067710 — and the emitter's `e.commands` includes bundled skills (they
-/// pass through the normalizers above). The port models `doctor` as a builtin
-/// COMMAND, not a bundled skill, so it is left out of this table: adding it
-/// would encode a skill's flag in the command registry. Whoever wires the
-/// emitter must decide which of the two models the payload should follow.
+/// NOTE 2: `/doctor` is a bundled prompt with `terminalOriented:!0` and alias
+/// `/checkup` in the 2.1.295 source. It is not a builtin row; the bundled
+/// command itself carries that source metadata.
 pub const TERMINAL_ORIENTED_COMMANDS: &[&str] = &["color", "exit", "reload-plugins", "statusline"];
 
 /// Returns `true` when `name` carries claude-code 2.1.238's
@@ -512,8 +502,10 @@ pub fn command_aliases(name: &str) -> &'static [&'static str] {
 /// - [`STATICALLY_DISABLED_COMMANDS`] — the 1 command (`version`) whose every
 ///   upstream twin is `isEnabled:()=>!1` (SLASH-14).
 ///
-/// Total = 3 + 3 + 1 + 1 = **8** filtered names, leaving 86 − 8 = 78
-/// visible in `/help`. The host-bound `btw` command and the implemented
+/// Total = 3 + 3 + 1 + 1 = **8** filtered builtin names, leaving 82 − 8 = 74
+/// visible builtins in `/help`. Native's separately registered bundled
+/// `/doctor` prompt adds one default-visible row; `/commit` adds a row only
+/// when its default-off GrowthBook gate is enabled. The host-bound `btw` command and the implemented
 /// `/reload-plugins` command remain visible. Likewise `install-slack-app`,
 /// `mobile`, and `desktop` carry no
 /// default-off hidden gate (`desktop`'s `Dsl()` returns `true`) and stay
@@ -646,7 +638,7 @@ pub fn core_description(name: &str) -> &'static str {
         }
         "compact" => "Free up context by summarizing the conversation so far",
         "config" => "Open settings",
-        "doctor" => "Diagnose and verify your LingXi installation and settings",
+        "doctor" => "Health-check your setup and fix issues: unused extensions, duplicated or bloated memory files, slow hooks, permissions",
         "exit" => "Exit the CLI",
         "help" => "Show help and available commands",
         "hooks" => "View hook configurations for tool events",
@@ -774,7 +766,8 @@ pub fn core_description(name: &str) -> &'static str {
 /// in-process and in parallel, so without ONE shared lock a mutation here can
 /// race a concurrent render in another module and intermittently drop a command
 /// (e.g. `/login`) — the latent flake behind `every_visible_command_appears_once`
-/// / `output_has_exactly_69_lines`. `pub(crate)` so help_render can lock it too.
+/// / `output_has_exactly_76_lines_at_default_native_factory_gates`. `pub(crate)` so
+/// help_render can lock it too.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -783,8 +776,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_87() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
+    fn total_count_locked_at_82() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
     }
 
     #[test]
@@ -1036,10 +1029,42 @@ mod tests {
                 ("upgrade", "DISABLE_UPGRADE_COMMAND"),
             ]
         );
-        // Every gated name is a real builtin.
-        let full: std::collections::HashSet<&str> = BUILTIN_COMMAND_NAMES.iter().copied().collect();
+
+        // `doctor` is not a row in BUILTIN_COMMAND_NAMES in 2.1.295: its
+        // command object comes from the bundled prompt factory (`Mo()`), with
+        // canonical name `doctor` and alias `checkup`. The other four rows
+        // remain builtin command objects. Validate the live registered pool
+        // instead of treating every Native command object as a core builtin.
+        let mut registry = crate::registry::CommandRegistry::new();
+        crate::builtins::register_all_builtin_commands(&mut registry);
+        crate::builtins::register_bundled_skills(&mut registry, true);
         for (cmd, _) in ENV_DISABLE_GATED_COMMANDS {
-            assert!(full.contains(cmd), "gated name '{cmd}' is not a builtin");
+            let command = registry
+                .resolve(&(*cmd).into())
+                .unwrap_or_else(|| panic!("gated name '{cmd}' has no Native command object"));
+            if *cmd == "doctor" {
+                assert!(
+                    matches!(
+                        &command.kind,
+                        crate::model::SlashCommandKind::Bundled { .. }
+                    ),
+                    "Native /doctor is a bundled prompt, not a core builtin"
+                );
+                assert_eq!(command.name.string_at(""), Some("doctor"));
+                assert_eq!(command.aliases[0].string_at(""), Some("checkup"));
+            } else {
+                assert!(
+                    BUILTIN_COMMAND_NAMES.contains(cmd),
+                    "gated name '{cmd}' should remain in the core builtin inventory"
+                );
+                assert!(
+                    matches!(
+                        &command.kind,
+                        crate::model::SlashCommandKind::Builtin { .. }
+                    ),
+                    "gated name '{cmd}' should resolve to a core builtin"
+                );
+            }
         }
     }
 
@@ -1093,8 +1118,8 @@ mod tests {
     }
 
     #[test]
-    fn core_count_locked_at_19() {
-        assert_eq!(BUILTIN_CORE_NAMES.len(), 19);
+    fn core_count_locked_at_18() {
+        assert_eq!(BUILTIN_CORE_NAMES.len(), 18);
     }
 
     #[test]
@@ -1226,7 +1251,7 @@ mod tests {
 
     #[test]
     fn intentionally_disabled_is_disjoint_from_core() {
-        // Bucket (d) commands are NOT implemented; the 19 core names ARE wired
+        // Bucket (d) commands are NOT implemented; the 18 core names ARE wired
         // to real handlers. The two sets must never overlap, otherwise a name is
         // both "implemented" and "intentionally stubbed" — a contradiction.
         let core: std::collections::HashSet<&str> = BUILTIN_CORE_NAMES.iter().copied().collect();
@@ -1255,7 +1280,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
     }
 
     // ========================================================================
@@ -1360,7 +1385,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "all disabled commands are correct-by-design"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
     }
 
     #[test]

@@ -198,7 +198,7 @@ async fn initial_memory(
 ) -> (Vec<ConversationMessage>, ConversationMessage) {
     persist_user(root, "inspect the handler").await;
     read_trigger(root, fixture).await;
-    let messages = root.nested_memory_reminder_messages().await;
+    let messages = root.nested_memory_reminder_messages(&[]).await;
     assert!(!messages.is_empty());
     let tail = persist_user(root, "continue after reading the handler").await;
     (messages, tail)
@@ -385,7 +385,7 @@ async fn filesystem_imports_persist_per_file_bytes_and_dedup_after_cold_and_hot_
             .is_none()
     );
     read_trigger(&cold, &fixture).await;
-    assert!(cold.nested_memory_reminder_messages().await.is_empty());
+    assert!(cold.nested_memory_reminder_messages(&[]).await.is_empty());
     assert_seeded(&cold, &fixture.memory, parent_body);
     assert_seeded(&cold, &imported, child_seed);
     let prior = cold.nested_memory_history().await;
@@ -397,7 +397,7 @@ async fn filesystem_imports_persist_per_file_bytes_and_dedup_after_cold_and_hot_
             .is_none()
     );
     read_trigger(&root, &fixture).await;
-    assert!(root.nested_memory_reminder_messages().await.is_empty());
+    assert!(root.nested_memory_reminder_messages(&[]).await.is_empty());
     assert_seeded(&root, &fixture.memory, parent_body);
     assert_seeded(&root, &imported, child_seed);
     let sidecars = root.transcript.model_reminder_attachments.lock().unwrap();
@@ -432,7 +432,7 @@ async fn changed_body_after_cold_or_hot_resume_emits_new_raw_body_once() {
             root.clone()
         };
         read_trigger(&resumed, &fixture).await;
-        let emitted = resumed.nested_memory_reminder_messages().await;
+        let emitted = resumed.nested_memory_reminder_messages(&[]).await;
         assert_eq!(emitted.len(), 1, "cold={cold_resume}");
         assert_ne!(emitted[0].id(), original[0].id());
         assert_eq!(
@@ -442,7 +442,10 @@ async fn changed_body_after_cold_or_hot_resume_emits_new_raw_body_once() {
                 fixture.memory.display()
             )
         );
-        assert!(resumed.nested_memory_reminder_messages().await.is_empty());
+        assert!(resumed
+            .nested_memory_reminder_messages(&[])
+            .await
+            .is_empty());
         assert_seeded(&resumed, &fixture.memory, changed);
         persist_user(&resumed, "continue with the changed instructions").await;
         let replayed = fixture.replay().await;
@@ -521,7 +524,7 @@ async fn retained_raw_nested_memory_survives_real_compaction_and_cold_or_hot_res
         );
         read_trigger(&root, &fixture).await;
         assert!(
-            root.nested_memory_reminder_messages().await.is_empty(),
+            root.nested_memory_reminder_messages(&[]).await.is_empty(),
             "the retained raw body suppresses reattachment immediately after compaction"
         );
         assert_restored_read_state(&root, &fixture.memory, body);
@@ -575,7 +578,10 @@ async fn retained_raw_nested_memory_survives_real_compaction_and_cold_or_hot_res
         .is_none());
         read_trigger(&resumed, &fixture).await;
         assert!(
-            resumed.nested_memory_reminder_messages().await.is_empty(),
+            resumed
+                .nested_memory_reminder_messages(&[])
+                .await
+                .is_empty(),
             "cold={cold_resume}: retained body must dedup without a restored path cursor"
         );
         assert_seeded(&resumed, &fixture.memory, body);
@@ -637,7 +643,7 @@ async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold
             .await;
         assert!(resumed.nested_memory_history().await.nested.is_empty());
         read_trigger(&resumed, &fixture).await;
-        let emitted = resumed.nested_memory_reminder_messages().await;
+        let emitted = resumed.nested_memory_reminder_messages(&[]).await;
         assert_eq!(
             emitted.len(),
             1,
@@ -676,12 +682,12 @@ async fn discarded_body_restores_as_file_after_real_compaction_without_resume() 
     assert!(root.nested_memory_history().await.nested.is_empty());
     read_trigger(&root, &fixture).await;
     assert!(
-        root.nested_memory_reminder_messages().await.is_empty(),
+        root.nested_memory_reminder_messages(&[]).await.is_empty(),
         "the full compact ReadState snapshot restores a file instead of attaching nested memory twice"
     );
 
     assert_restored_read_state(&root, &fixture.memory, body);
-    assert!(root.nested_memory_reminder_messages().await.is_empty());
+    assert!(root.nested_memory_reminder_messages(&[]).await.is_empty());
     persist_user(&root, "continue with restored file instructions").await;
     let replayed = fixture.replay().await;
     let raw = nested_rows(&replayed.messages);
@@ -698,7 +704,7 @@ async fn later_memory_creation_requires_a_new_read_trigger() {
     std::fs::remove_file(&fixture.memory).unwrap();
     let root = fixture.root();
     read_trigger(&root, &fixture).await;
-    assert!(root.nested_memory_reminder_messages().await.is_empty());
+    assert!(root.nested_memory_reminder_messages(&[]).await.is_empty());
     assert!(root
         .prompt_runtime
         .nested_memory_triggers
@@ -706,13 +712,13 @@ async fn later_memory_creation_requires_a_new_read_trigger() {
         .is_empty());
     write(&fixture.memory, "new guidance");
     assert!(
-        root.nested_memory_reminder_messages().await.is_empty(),
+        root.nested_memory_reminder_messages(&[]).await.is_empty(),
         "cached touched paths must not re-scan later files"
     );
     fixture.trigger = fixture.cwd.join("pkg/api/second.rs");
     write(&fixture.trigger, "fn second() {}\n");
     read_trigger(&root, &fixture).await;
-    let messages = root.nested_memory_reminder_messages().await;
+    let messages = root.nested_memory_reminder_messages(&[]).await;
     assert_eq!(messages.len(), 1);
     assert!(messages[0].text_content().contains("new guidance"));
 }
@@ -744,7 +750,7 @@ async fn trigger_survives_cache_eviction_before_attachment_acquisition() {
         root.prompt_runtime.nested_memory_triggers.queued(),
         vec![fixture.trigger.clone()]
     );
-    let messages = root.nested_memory_reminder_messages().await;
+    let messages = root.nested_memory_reminder_messages(&[]).await;
     assert_eq!(messages.len(), 1);
     assert!(messages[0]
         .text_content()
@@ -768,7 +774,7 @@ async fn a_cached_model_visible_entry_is_not_a_read_trigger() {
             is_partial_view: false,
         },
     );
-    assert!(root.nested_memory_reminder_messages().await.is_empty());
+    assert!(root.nested_memory_reminder_messages(&[]).await.is_empty());
     assert_eq!(
         root.prompt_runtime
             .read_state_map
@@ -784,7 +790,7 @@ async fn failed_and_unchanged_reads_do_not_enqueue_nested_memory() {
     let fixture = Fixture::new("initial guidance");
     let root = fixture.root();
     read_trigger(&root, &fixture).await;
-    assert_eq!(root.nested_memory_reminder_messages().await.len(), 1);
+    assert_eq!(root.nested_memory_reminder_messages(&[]).await.len(), 1);
     read_trigger(&root, &fixture).await;
     assert!(
         root.prompt_runtime
@@ -839,7 +845,7 @@ async fn child_read_context_does_not_enqueue_the_main_context() {
         .await
         .unwrap();
     assert_eq!(queue.queued(), vec![fixture.trigger.clone()]);
-    assert!(root.nested_memory_reminder_messages().await.is_empty());
+    assert!(root.nested_memory_reminder_messages(&[]).await.is_empty());
     assert!(
         tool_api::read_file_state::get(&root.prompt_runtime.read_state_map, &fixture.trigger)
             .is_some()

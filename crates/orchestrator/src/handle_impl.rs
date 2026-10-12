@@ -135,6 +135,7 @@ impl ConversationOrchestrator {
             lingxi_core::host::bg_session_forker::BgSessionSnapshot {
                 history: session.history.clone(),
                 model_reminder_attachments,
+                native_request_history: session.native_request_history.clone(),
             },
             session.model.clone(),
         )
@@ -145,6 +146,7 @@ impl ConversationOrchestrator {
     /// these caches would make the new session depend on the previously mounted
     /// transcript.
     async fn reset_session_scoped_runtime(&self) {
+        self.reset_native_proactivity_session();
         // Retire session-owned async hook completions before clearing or
         // restoring the transcript. The token is cancelled before waiting for
         // already-admitted durable attachment commits, so stale producers are
@@ -175,6 +177,11 @@ impl ConversationOrchestrator {
         self.model_runtime.reset_cost_and_api_accounting().await;
         self.compaction_runtime.reset_token_accounting();
         self.model_runtime.reset_refusal_fallback();
+        *self
+            .model_runtime
+            .main_loop_latest_assistant_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 
         self.tools
             .deferral()
@@ -206,13 +213,56 @@ impl ConversationOrchestrator {
         // the next request snapshots the selection under the session lock.
         let _switch_guard = self.model_switch_gate.lock().await;
         let listings = self.api.list_model_listings();
-        let (target_model, target_profile) = normalize_session_model_ref(model, profile, &listings);
+        let default_sentinel =
+            lingxi_core::host::effort::trim_js_whitespace(model).eq_ignore_ascii_case("default");
+        let model_for_route = if default_sentinel {
+            self.default_model()
+        } else {
+            model.to_owned()
+        };
+        let profile_for_route = if default_sentinel { None } else { profile };
+        let (target_model, target_profile) =
+            normalize_session_model_ref(&model_for_route, profile_for_route, &listings);
+        let user_selection = matches!(source, "command" | "picker" | "sdk");
+        if user_selection && !default_sentinel {
+            if let Ok(route) = self
+                .api
+                .resolve_media_route(&target_model, target_profile.as_deref())
+            {
+                if Self::route_uses_native_model_catalog(&route)
+                    && !self
+                        .model_catalog_allows(&route.main.request_model)
+                        .await
+                        .map_err(|error| HandleError::ActionFailed(error.to_string()))?
+                {
+                    return Err(HandleError::ActionFailed(format!(
+                        "model \"{model}\" is not in this organization's allowlist"
+                    )));
+                }
+            }
+        }
         let (from_model, from_profile) = {
             let session = self.session.lock().await;
             (session.model.clone(), session.model_profile.clone())
         };
         if from_model == target_model && from_profile == target_profile {
-            if matches!(source, "command" | "picker" | "sdk") {
+            if user_selection {
+                let mut session = self.session.lock().await;
+                if default_sentinel {
+                    session.user_model_setting = None;
+                    session.user_model_setting_provenance =
+                        lingxi_core::host::ModelProvenance::default();
+                    session.user_model_setting_source =
+                        lingxi_core::session::SessionModelSettingSource::Configured;
+                } else {
+                    session.user_model_setting = Some(model.to_owned());
+                    session.user_model_setting_provenance =
+                        lingxi_core::host::ModelProvenance::UserOrEnv;
+                    session.user_model_setting_source =
+                        lingxi_core::session::SessionModelSettingSource::UserSelection;
+                }
+            }
+            if user_selection {
                 self.model_runtime
                     .refusal_selection
                     .lock()
@@ -237,7 +287,7 @@ impl ConversationOrchestrator {
                 .run_pre_model_switch_hooks(
                     &from_model,
                     &target_model,
-                    Some(model),
+                    (!default_sentinel).then_some(model),
                     target_profile.as_deref(),
                     source,
                 )
@@ -279,6 +329,21 @@ impl ConversationOrchestrator {
             let mut session = self.session.lock().await;
             session.model = target_model.clone();
             session.model_profile = target_profile.clone();
+            if user_selection {
+                if default_sentinel {
+                    session.user_model_setting = None;
+                    session.user_model_setting_provenance =
+                        lingxi_core::host::ModelProvenance::default();
+                    session.user_model_setting_source =
+                        lingxi_core::session::SessionModelSettingSource::Configured;
+                } else {
+                    session.user_model_setting = Some(model.to_owned());
+                    session.user_model_setting_provenance =
+                        lingxi_core::host::ModelProvenance::UserOrEnv;
+                    session.user_model_setting_source =
+                        lingxi_core::session::SessionModelSettingSource::UserSelection;
+                }
+            }
         }
         self.model_runtime
             .refusal_selection
@@ -288,7 +353,7 @@ impl ConversationOrchestrator {
         self.run_post_model_switch_hooks(
             &from_model,
             &target_model,
-            Some(model),
+            (!default_sentinel).then_some(model),
             target_profile.as_deref(),
             source,
         )
@@ -527,6 +592,7 @@ impl ConversationOrchestrator {
         s.model_context_excluded_messages.clear();
         s.active_goal = None;
         s.message_timing = lingxi_core::session::MessageTimingState::default();
+        s.native_request_history = lingxi_core::host::NativeRequestHistoryMetadata::default();
         self.prompt_runtime
             .commit_instruction_session_reset(&mut instruction_context);
         s.session_id = new_session_id_value;
@@ -679,6 +745,15 @@ impl ConversationOrchestrator {
         self.model_runtime.activate_cost_session(prepared_cost);
         self.install_output_session(prepared_output);
         s.history = history;
+        s.native_request_history = runtime.native_request_history.clone();
+        if let Some(raw_model_setting) = runtime.user_model_setting.as_ref() {
+            s.user_model_setting = Some(raw_model_setting.clone());
+            s.user_model_setting_provenance =
+                runtime.user_model_setting_provenance.unwrap_or_default();
+            s.user_model_setting_source = runtime
+                .user_model_setting_source
+                .unwrap_or(lingxi_core::session::SessionModelSettingSource::Configured);
+        }
         if let Some(restore) = self
             .model_runtime
             .refusal_selection
@@ -787,6 +862,9 @@ impl ConversationOrchestrator {
         drop(instruction_context);
         drop(s);
         drop(reports);
+        self.restore_main_loop_latest_assistant_usage(
+            runtime.main_loop_latest_assistant_usage.clone(),
+        );
         if let Some(on_activated) = on_activated {
             on_activated();
         }
@@ -1676,8 +1754,12 @@ impl OrchestratorHandle for ConversationOrchestrator {
                     response
                 }
                 Some("ui_client_module") => {
-                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
-                        .expect("null is JSON")
+                    let plugin = request
+                        .string_at("/plugin")
+                        .expect("normalized ui_client_module requests have a plugin");
+                    return Err(HandleError::ActionFailed(format!(
+                        "ui_client_module: plugin {plugin} is not loaded or its hooks module names no surface module"
+                    )));
                 }
                 Some(
                     "ui_message" | "ui_client_fault" | "ui_client_press" | "ui_press" | "ui_input"
@@ -1983,6 +2065,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let current = self
             .active_output_style_setting()
             .await
+            .and_then(|setting| {
+                let units = setting.string_units("")?;
+                String::from_utf16(&units).ok()
+            })
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| outputstyles::DEFAULT_OUTPUT_STYLE_NAME.to_string());
         Some(lingxi_core::host::OutputStyleListing { current, styles })
@@ -2003,7 +2089,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
             .map(|(candidate, _)| candidate.clone())
             .ok_or_else(|| HandleError::ActionFailed(format!("unknown output style {name:?}")))?;
-        *self.prompt_runtime.live_output_style.lock().await = Some(canonical);
+        let units = canonical.encode_utf16().collect();
+        *self.prompt_runtime.live_output_style.lock().await = Some(Some(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(canonical, units)
+                .expect("a registered output-style name is a valid UTF-16 string"),
+        ));
         Ok(())
     }
 
@@ -2032,6 +2122,43 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn set_permission_mode(&self, mode: &str) -> Result<(), HandleError> {
         ConversationOrchestrator::set_permission_mode(self, mode)
             .await
+            .map_err(HandleError::ActionFailed)
+    }
+
+    fn native_proactivity_snapshot(&self) -> lingxi_core::host::NativeProactivityStatusSnapshot {
+        let snapshot = self.current_native_proactivity_snapshot();
+        lingxi_core::host::NativeProactivityStatusSnapshot {
+            opted_in: snapshot.opted_in,
+            opt_in_available: self.native_proactivity_opt_in_available(),
+            selector_gate: snapshot.selector_gate,
+            selector_gate_ever_on: snapshot.selector_gate_ever_on,
+            attachments_enabled: snapshot.attachments_enabled,
+            level: snapshot.level.as_wire().to_owned(),
+        }
+    }
+
+    async fn apply_native_proactivity_initialize(
+        &self,
+        value: Option<bool>,
+        reinitialize: bool,
+    ) -> Result<(), HandleError> {
+        self.apply_native_proactivity_initialize(value, reinitialize);
+        Ok(())
+    }
+
+    async fn set_native_proactivity_level(
+        &self,
+        level: &str,
+        offer_bypass: Option<bool>,
+    ) -> Result<lingxi_core::host::NativeProactivityControlResponse, HandleError> {
+        ConversationOrchestrator::set_native_proactivity_level(self, level, offer_bypass)
+            .await
+            .map(
+                |response| lingxi_core::host::NativeProactivityControlResponse {
+                    level: response.level.as_wire().to_owned(),
+                    permission_mode: response.permission_mode,
+                },
+            )
             .map_err(HandleError::ActionFailed)
     }
 
@@ -2122,7 +2249,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn list_skills(&self) -> Vec<SkillInfo> {
         // Desktop Skills settings view (Task 7): re-scan the project, user,
-        // and managed tiers via `skill_api::load_file_skill_sections_with_roots`,
+        // and managed tiers via `skill::load_file_skill_sections_with_roots`,
         // rather than a Rust-side `SkillRegistry` — the composition root's
         // registry is a residual empty instance with no turn-loop consumer,
         // so it would report zero skills unconditionally.
@@ -2164,20 +2291,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
             return Vec::new();
         };
         let managed_dir = lingxi_core::host::live_sessions::managed_settings_dir();
-        skill_api::load_file_skill_sections_with_roots(
-            &self.cwd,
-            config_home,
-            Some(&managed_dir),
-            &[],
-        )
-        .into_iter()
-        .flat_map(|section| {
-            section.rows.into_iter().map(|row| SkillInfo {
-                name: row.name,
-                source_dir: row.source_dir,
+        skill::load_file_skill_sections_with_roots(&self.cwd, config_home, Some(&managed_dir), &[])
+            .into_iter()
+            .flat_map(|section| {
+                section.rows.into_iter().map(|row| SkillInfo {
+                    name: row.name,
+                    source_dir: row.source_dir,
+                })
             })
-        })
-        .collect()
+            .collect()
     }
 
     async fn reconnect_mcp_servers(
@@ -2573,14 +2695,44 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// `switch_model` still accepts any string; actual availability depends on the
     /// profile's credential (see `docs/LLM_PROVIDERS.md`).
     async fn list_available_models(&self) -> Vec<String> {
-        self.api.available_models()
+        let available = self.api.available_models();
+        let listings = self.api.list_model_listings();
+        let mut visible = Vec::with_capacity(available.len());
+        for reference in available {
+            let (model, profile) = lingxi_core::host::parse_model_ref(&reference, &listings);
+            match self
+                .model_catalog_route_allows(&model, profile.as_deref())
+                .await
+            {
+                Ok(Some(false)) => {}
+                Err(error) => {
+                    tracing::warn!(%error, %reference, "hiding model from an unavailable Native model policy")
+                }
+                _ => visible.push(reference),
+            }
+        }
+        visible
     }
 
     /// Richer catalog listing for the grouped `/model` picker. Delegates to the
     /// api client's [`OrchestratorApiClient::list_model_listings`], which the
     /// production `ProviderApiAdapter` sources from the llm-runtime catalog.
     async fn list_model_listings(&self) -> Vec<lingxi_core::host::orchestrator::ModelListing> {
-        self.api.list_model_listings()
+        let listings = self.api.list_model_listings();
+        let mut visible = Vec::with_capacity(listings.len());
+        for listing in listings {
+            match self
+                .model_catalog_route_allows(&listing.request_model, Some(&listing.provider_id))
+                .await
+            {
+                Ok(Some(false)) => {}
+                Err(error) => {
+                    tracing::warn!(%error, model = %listing.request_model, profile = %listing.provider_id, "hiding model from an unavailable Native model policy")
+                }
+                _ => visible.push(listing),
+            }
+        }
+        visible
     }
 
     /// Return the most recently observed provider rate-limit header snapshot.
@@ -2778,9 +2930,13 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Snapshot the live model and history together. The history component
         // uses the exact estimator auto-compaction uses, so replacing history
         // with a compact summary immediately lowers the Messages row.
-        let (model, history) = {
+        let (model, model_profile, history) = {
             let session = self.session.lock().await;
-            (session.model.clone(), session.history.clone())
+            (
+                session.model.clone(),
+                session.model_profile.clone(),
+                session.history.clone(),
+            )
         };
         let active_betas = self.api.active_betas();
         let max_context_tokens =
@@ -2805,13 +2961,61 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 .string_units("")
                 .map_or(0, |units| units.len()),
         );
-        let system_tool_tokens = estimate_json_tokens(&system_tools);
+        let mut system_tool_tokens = estimate_json_tokens(&system_tools);
         let mcp_tool_tokens = estimate_json_tokens(&mcp_tools);
         let message_tokens = compaction::grouping::estimate_tokens_for_range(&history);
 
-        // Invoked skill bodies are already represented by their persisted
-        // messages. Keep the explicit Skills row stable without double-counting.
-        let skills_tokens = 0;
+        // Native m$o reports the model-invocable skill listing as its own row
+        // while excluding those tokens from System tools. Read one atomic
+        // command/settings snapshot, then use the same budgeted lines as the
+        // model-facing listing producer.
+        let skill_listing = if let Some(provider) = self.skill_listing_provider() {
+            let listing = provider.skill_listing_snapshot().await;
+            let (line_model, _) = self
+                .effective_main_loop_selection_for(&model, model_profile.as_deref(), &history, true)
+                .await;
+            let budget_chars_per_token =
+                usize::try_from(memory::native_skill_listing_chars_per_token(Some(&model)))
+                    .unwrap_or(usize::MAX);
+            let line_token_divisor = usize::try_from(memory::native_skill_listing_chars_per_token(
+                Some(&line_model),
+            ))
+            .unwrap_or(usize::MAX);
+            let diagnostics = crate::prompt::skill_listing::native_skill_listing_diagnostics(
+                &listing.entries,
+                usize::try_from(max_context_tokens).ok(),
+                budget_chars_per_token,
+                listing.budget_settings,
+                line_token_divisor,
+            );
+            let rows = diagnostics
+                .rows
+                .into_iter()
+                .map(|row| lingxi_core::host::ContextSkillListingRow {
+                    canonical_name: row.canonical_name,
+                    name: row.frontmatter_name,
+                    display_name: row.display_name,
+                    source: row.source,
+                    plugin_name: row.plugin_name,
+                    rendered_line: row.rendered_line,
+                    tokens: row.tokens,
+                })
+                .collect::<Vec<_>>();
+            let total_tokens = rows
+                .iter()
+                .fold(0u64, |total, row| total.saturating_add(row.tokens));
+            Some(lingxi_core::host::ContextSkillListingSnapshot {
+                rows,
+                total_tokens,
+                budget_truncated: !diagnostics.budget_truncated_skills.is_empty(),
+            })
+        } else {
+            None
+        };
+        let skills_tokens = skill_listing
+            .as_ref()
+            .map_or(0, |listing| listing.total_tokens);
+        system_tool_tokens = system_tool_tokens.saturating_sub(skills_tokens);
         let live_context_tokens = system_prompt_tokens
             .saturating_add(system_tool_tokens)
             .saturating_add(mcp_tool_tokens)
@@ -2837,6 +3041,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 ContextUsageCategory::new(Kind::AutocompactBuffer, autocompact_buffer),
                 ContextUsageCategory::new(Kind::FreeSpace, free_tokens),
             ],
+            skill_listing,
             cumulative_cost: self.snapshot_cost().await,
         }
     }
@@ -3611,6 +3816,118 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn accepted_same_route_selection_updates_raw_main_setting() {
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        api.set_model_listings(vec![lingxi_core::host::ModelListing {
+            request_model: "wire-model".into(),
+            provider_id: "provider-a".into(),
+            ..Default::default()
+        }]);
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api,
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        orch.switch_model_with_hook_source("provider-a/wire-model", None, "command")
+            .await
+            .expect("qualified user selection");
+        orch.switch_model_with_hook_source("wire-model", Some("provider-a"), "picker")
+            .await
+            .expect("same route selection");
+
+        let session = orch.session.lock().await;
+        assert_eq!(session.model, "wire-model");
+        assert_eq!(session.model_profile.as_deref(), Some("provider-a"));
+        assert_eq!(session.user_model_setting.as_deref(), Some("wire-model"));
+        assert_eq!(
+            session.user_model_setting_provenance,
+            lingxi_core::host::ModelProvenance::UserOrEnv
+        );
+        assert_eq!(
+            session.user_model_setting_source,
+            lingxi_core::session::SessionModelSettingSource::UserSelection
+        );
+        drop(session);
+
+        orch.switch_model_with_hook_source("fallback-model", Some("provider-a"), "auto")
+            .await
+            .expect("automatic route fallback");
+        let session = orch.session.lock().await;
+        assert_eq!(session.model, "fallback-model");
+        assert_eq!(session.user_model_setting.as_deref(), Some("wire-model"));
+        assert_eq!(
+            session.user_model_setting_source,
+            lingxi_core::session::SessionModelSettingSource::UserSelection
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_resume_restores_raw_selection_and_pair_bound_usage() {
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let id = lingxi_core::types::MessageId::new();
+        let assistant = lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id,
+            content: Vec::new(),
+            stop_reason: None,
+            resumable: None,
+        };
+        let usage = lingxi_core::host::MainLoopAssistantUsageSnapshot {
+            message_id: id,
+            context_tokens: 200_001.0,
+        };
+        lingxi_core::host::OrchestratorHandle::resume_session(
+            &orch,
+            lingxi_core::types::SessionId::new(),
+            vec![assistant],
+            None,
+            None,
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                main_loop_latest_assistant_usage: Some(usage.clone()),
+                user_model_setting: Some("opusplan".into()),
+                user_model_setting_provenance: Some(lingxi_core::host::ModelProvenance::UserOrEnv),
+                user_model_setting_source: Some(
+                    lingxi_core::session::SessionModelSettingSource::UserSelection,
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("hot resume");
+
+        let session = orch.session.lock().await;
+        assert_eq!(session.user_model_setting.as_deref(), Some("opusplan"));
+        assert_eq!(
+            session.user_model_setting_source,
+            lingxi_core::session::SessionModelSettingSource::UserSelection
+        );
+        drop(session);
+        assert_eq!(
+            orch.model_runtime
+                .main_loop_latest_assistant_usage
+                .lock()
+                .unwrap()
+                .as_ref(),
+            Some(&usage)
+        );
+    }
+
     /// A transcript can carry a PROVIDER-QUALIFIED model reference with no
     /// `modelProfile` alongside it — written by an older engine, by another
     /// client, or by any session whose profile was never persisted. Adopting it
@@ -3848,8 +4165,12 @@ mod tests {
                     cache_read_input_tokens: 200,
                     cache_creation_input_tokens: 300,
                 }),
+                main_loop_latest_assistant_usage: None,
                 model: "claude-opus-4-8".to_string(),
                 model_profile: Some("anthropic".to_string()),
+                user_model_setting: None,
+                user_model_setting_provenance: None,
+                user_model_setting_source: None,
                 effort: Some("high".to_string()),
                 reasoning_selection: None,
                 main_thread_agent_type: None,
@@ -3874,6 +4195,7 @@ mod tests {
                 deferred_tools: Vec::new(),
                 prompt_snapshot: None,
                 context_rendering_hint: None,
+                native_request_history: lingxi_core::host::NativeRequestHistoryMetadata::default(),
             },
         )
         .await
@@ -4843,6 +5165,78 @@ mod tests {
             max,
             "used + reserved buffer + free space must cover the window"
         );
+    }
+
+    #[tokio::test]
+    async fn context_usage_snapshot_uses_the_same_skill_listing_diagnostics() {
+        use crate::prompt::skill_listing::{
+            LazySkillListingProvider, SkillListingBudgetSettings, SkillListingEntry,
+            SkillListingSnapshot,
+        };
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+
+        let listing = SkillListingSnapshot {
+            entries: vec![SkillListingEntry {
+                name: "deploy".into(),
+                display_name: "deploy".into(),
+                user_facing_name: Some("Deployment".into()),
+                unqualified_name: None,
+                is_synced_skill: false,
+                bare_name_reserved: false,
+                aliases: Vec::new(),
+                source: Some("projectSettings".into()),
+                plugin_name: None,
+                description: "Deploy the current package".into(),
+                when_to_use: None,
+                is_bundled_prompt: false,
+                is_name_only: false,
+                priority: 0.0,
+            }],
+            budget_settings: SkillListingBudgetSettings::default(),
+        };
+        let provider = Arc::new(LazySkillListingProvider::new(move || {
+            let listing = listing.clone();
+            async move { listing }
+        }));
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_skill_listing(provider);
+
+        let snapshot = orch.context_usage_snapshot().await;
+        let listing = snapshot
+            .skill_listing
+            .expect("the wired listing provider supplies /context diagnostics");
+        assert_eq!(listing.rows.len(), 1);
+        assert_eq!(listing.rows[0].canonical_name.string_at(""), Some("deploy"));
+        assert_eq!(listing.rows[0].name.string_at(""), Some("Deployment"));
+        assert_eq!(
+            listing.rows[0]
+                .source
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("projectSettings")
+        );
+        assert_eq!(
+            snapshot
+                .breakdown
+                .iter()
+                .find(|row| row.kind == lingxi_core::host::ContextUsageCategoryKind::Skills)
+                .map(|row| row.tokens),
+            Some(listing.total_tokens)
+        );
+        assert!(listing.total_tokens > 0);
     }
 
     #[tokio::test]

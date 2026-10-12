@@ -5343,6 +5343,7 @@ mod classify_all_shell_policy_test {
             value: PermissionRuleValue {
                 tool_name: "Bash".into(),
                 rule_content: Some(content.into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),

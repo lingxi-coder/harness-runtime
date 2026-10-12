@@ -651,6 +651,7 @@ async fn desktop_registry_exposes_connect() {
         super::CustomizationGates::default(),
         false,
         &[],
+        Default::default(),
         Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
     )
     .await;
@@ -759,6 +760,7 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
             gates,
             false,
             &[],
+            Default::default(),
             Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
         )
         .await;
@@ -785,8 +787,9 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
 /// skills dir rather than joining, so wiring it naively would still have
 /// found nothing.
 ///
-/// Two arms on purpose: the first proves the skill is not reachable by some
-/// ambient path, so the second is really testing the root.
+/// The permission-only arm proves `permissions.additionalDirectories` does not
+/// enter Native's extension-root callback. The CLI arm proves the supported
+/// `--add-dir` root still contributes its `<root>/<DOT_DIR>/skills` directory.
 #[tokio::test]
 async fn an_add_dir_root_contributes_its_skills() {
     use async_trait::async_trait;
@@ -845,8 +848,20 @@ async fn an_add_dir_root_contributes_its_skills() {
 
     let cwd_tmp = tempfile::tempdir().expect("tempdir");
     let cwd = cwd_tmp.path().to_path_buf();
+    let project_settings = cwd.join(branding::DOT_DIR).join("settings.json");
+    std::fs::create_dir_all(project_settings.parent().unwrap()).expect("mk project settings");
     let root_tmp = tempfile::tempdir().expect("tempdir");
     let root = root_tmp.path().to_path_buf();
+    std::fs::write(
+        &project_settings,
+        serde_json::json!({
+            "permissions": {
+                "additionalDirectories": [root.to_string_lossy()]
+            }
+        })
+        .to_string(),
+    )
+    .expect("write permission-only additional directory");
     let skill_dir = root.join(branding::DOT_DIR).join("skills").join("addskill");
     std::fs::create_dir_all(&skill_dir).expect("mk skill dir");
     std::fs::write(
@@ -870,6 +885,7 @@ async fn an_add_dir_root_contributes_its_skills() {
             super::CustomizationGates::default(),
             false,
             &roots,
+            Default::default(),
             Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
         )
         .await;
@@ -2711,6 +2727,10 @@ fn desktop_session_composition_distinguishes_interactive_cli_from_headless_and_t
         ("repl_main_thread:outputStyle:Proactive".to_string(), false)
     );
     assert_eq!(
+        DesktopSessionComposition::InteractiveCli.query_source_and_print(Some(""), false),
+        ("repl_main_thread:outputStyle:custom".to_string(), false)
+    );
+    assert_eq!(
         DesktopSessionComposition::InteractiveCli
             .query_source_and_print(Some("custom-style"), false),
         ("repl_main_thread:outputStyle:custom".to_string(), false)
@@ -3773,7 +3793,7 @@ impl crate::desktop::DesktopDiagnosticSink for RecordingDesktopDiagnostics {
 
 #[tokio::test]
 async fn startup_mcp_warning_uses_only_the_injected_diagnostic_sink() {
-    let (_tmp, mut cfg) = test_config(true);
+    let (_tmp, cfg) = test_config(true);
     cfg.isolated_credential_storage = true;
     cfg.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::PlainTextFixture;
     cfg.defer_session_start = true;
@@ -4164,7 +4184,7 @@ async fn init_git_repo_for_worktree_launch_test(dir: &std::path::Path) {
 #[tokio::test]
 async fn build_constructs_runtime_deterministically() {
     use lingxi_core::host::OrchestratorHandle as _;
-    let (_tmp, cfg) = test_config(true);
+    let (_tmp, mut cfg) = test_config(true);
     let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
@@ -5266,6 +5286,7 @@ async fn build_reroutes_disconnected_default_to_connected_provider() {
     clear_provider_env();
     let (_tmp, mut cfg) = test_config(true);
     cfg.default_model_explicit = false;
+    cfg.default_model = "opusplan".to_string();
     cfg.provider_profiles = Some({
         let mut m = std::collections::BTreeMap::new();
         m.insert(
@@ -5292,13 +5313,21 @@ async fn build_reroutes_disconnected_default_to_connected_provider() {
         .default_model_fallback
         .clone()
         .expect("disconnected anthropic default must reroute");
-    assert_eq!(notice.from, "claude-sonnet-4-20250514");
+    assert_eq!(notice.from, "opusplan");
     // The booted model is the notice's target (bare id after the profile split)…
     let bare = notice
         .to
         .split_once('/')
         .map_or(notice.to.as_str(), |(_, m)| m);
     assert_eq!(rt.orchestrator.default_model(), bare);
+    let session = rt.orchestrator.session();
+    let state = session.lock().await;
+    assert_eq!(
+        state.user_model_setting.as_deref(),
+        Some("opusplan"),
+        "connected-provider wire fallback must not replace the raw main model setting"
+    );
+    drop(state);
     // …and its provider is genuinely connected per the same availability map.
     if let Some((profile, _)) = notice.to.split_once('/') {
         assert_eq!(
@@ -5682,7 +5711,10 @@ fn filter_fusion_catalog_drops_managed_allowlist_barred_models() {
     let mut availability = std::collections::BTreeMap::new();
     availability.insert("anthropic".to_string(), true);
     let enforcement = ModelEnforcement::Active {
-        allowlist: vec!["claude-sonnet-4-6".to_string()],
+        allowlist: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"["claude-sonnet-4-6"]"#,
+        )
+        .unwrap(),
         overrides: std::collections::BTreeMap::new(),
     };
     let restriction = (enforcement, vec!["claude-sonnet-4-6".to_string()]);
@@ -5734,6 +5766,7 @@ fn fusion_catalog_model_source_sees_a_provider_connected_after_construction() {
         mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         session_model_restriction: None,
         reload_managed_model_restriction: false,
+        managed_policy_snapshot_cache: Default::default(),
     };
 
     // Boot-time snapshot: github-copilot was uncredentialed, so its row
@@ -5774,14 +5807,17 @@ reconstruction — got: {after:?}"
     );
 }
 
-#[test]
-fn fusion_catalog_model_source_reloads_managed_model_policy() {
+#[tokio::test]
+async fn fusion_catalog_model_source_reloads_managed_model_policy() {
     use fusion::ModelSource as _;
 
     let _guard = MANAGED_ENV_LOCK.lock().unwrap();
     let previous = std::env::var_os(super::settings_watch::MANAGED_DIR_ENV);
     let managed = tempfile::tempdir().expect("managed tempdir");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed.path());
+    let policy_cache = super::settings_watch::ManagedPolicySnapshotCache::default();
+    policy_cache
+        .replace(super::settings_watch::read_managed_settings_snapshot(managed.path()).await);
     let catalog = vec![
         fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
         fusion_catalog_row("anthropic", "claude-opus-5"),
@@ -5796,6 +5832,7 @@ fn fusion_catalog_model_source_reloads_managed_model_policy() {
         mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         session_model_restriction: None,
         reload_managed_model_restriction: true,
+        managed_policy_snapshot_cache: policy_cache.clone(),
     };
 
     assert_eq!(source.list().len(), 2);
@@ -5805,16 +5842,22 @@ fn fusion_catalog_model_source_reloads_managed_model_policy() {
         r#"{"availableModels":["claude-sonnet-4-6"],"enforceAvailableModels":true}"#,
     )
     .unwrap();
+    policy_cache
+        .replace(super::settings_watch::read_managed_settings_snapshot(managed.path()).await);
     let restricted = source.list();
     assert_eq!(restricted.len(), 1);
     assert_eq!(restricted[0].model, "claude-sonnet-4-6");
 
     std::fs::write(&policy_path, "{").unwrap();
+    policy_cache
+        .replace(super::settings_watch::read_managed_settings_snapshot(managed.path()).await);
     assert!(
         source.list().is_empty(),
         "a malformed live managed policy must fail closed"
     );
     std::fs::remove_file(policy_path).unwrap();
+    policy_cache
+        .replace(super::settings_watch::read_managed_settings_snapshot(managed.path()).await);
     assert_eq!(
         source.list().len(),
         2,
@@ -5958,6 +6001,7 @@ async fn a_completed_reprobe_re_arms_availability_filtering_after_a_boot_probe_t
         mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         session_model_restriction: None,
         reload_managed_model_restriction: false,
+        managed_policy_snapshot_cache: Default::default(),
     };
 
     // Fail-open while the probe is unknown: both rows survive. This half
@@ -6187,6 +6231,7 @@ async fn a_degraded_reprobe_must_not_re_arm_availability_filtering() {
         mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         session_model_restriction: None,
         reload_managed_model_restriction: false,
+        managed_policy_snapshot_cache: Default::default(),
     };
 
     let refresher = FusionCatalogRefresher {
@@ -6315,6 +6360,7 @@ async fn a_frozen_anthropic_boot_boolean_must_not_re_arm_availability_filtering(
         mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         session_model_restriction: None,
         reload_managed_model_restriction: false,
+        managed_policy_snapshot_cache: Default::default(),
     };
     assert_eq!(
         source.list().len(),
@@ -6444,6 +6490,7 @@ async fn an_env_var_only_row_must_not_re_arm_availability_filtering() {
         mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         session_model_restriction: None,
         reload_managed_model_restriction: false,
+        managed_policy_snapshot_cache: Default::default(),
     };
 
     let refresher = FusionCatalogRefresher {
@@ -6566,6 +6613,7 @@ async fn an_anthropic_only_install_can_still_re_arm_availability_filtering() {
         mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         session_model_restriction: None,
         reload_managed_model_restriction: false,
+        managed_policy_snapshot_cache: Default::default(),
     };
     assert_eq!(
         source.list().len(),
@@ -6688,6 +6736,7 @@ async fn an_all_env_var_install_can_still_re_arm_availability_filtering() {
         mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         session_model_restriction: None,
         reload_managed_model_restriction: false,
+        managed_policy_snapshot_cache: Default::default(),
     };
     assert_eq!(
         source.list().len(),
@@ -6743,6 +6792,8 @@ async fn desktop_fusion_runtime_config_honors_a_managed_only_tier() {
     )
     .expect("write managed settings");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed_tmp.path());
+    cfg.managed_policy_snapshot_cache
+        .replace(super::settings_watch::read_managed_settings_snapshot(managed_tmp.path()).await);
     let config = desktop_fusion_runtime_config(&cfg).expect("valid fusion config");
 
     std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
@@ -6787,6 +6838,8 @@ async fn desktop_fusion_runtime_config_managed_tier_beats_project_tier() {
     )
     .expect("write managed settings");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed_tmp.path());
+    cfg.managed_policy_snapshot_cache
+        .replace(super::settings_watch::read_managed_settings_snapshot(managed_tmp.path()).await);
     let config = desktop_fusion_runtime_config(&cfg).expect("valid fusion config");
 
     std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
@@ -8688,7 +8741,7 @@ fn sandbox_runtime_config_ignores_project_merged_ripgrep_without_override() {
 // `policySettings` (managed) at the HIGHEST priority (SETTING_SOURCES:
 // …→localSettings→flagSettings→policySettings, "later sources override
 // earlier"). The desktop composition root appends
-// `managed_settings_raw_tiers()` AFTER the user/project/local file tiers so a
+// the selected managed-policy projection AFTER the user/project/local tiers so a
 // managed `sandbox.*` wins. These tests point `LINGXI_MANAGED_DIR` at a
 // tempdir (the real managed path is an absolute, unwritable OS path) and
 // assert the loader + fold honor managed precedence.
@@ -8712,7 +8765,8 @@ async fn managed_sandbox_enabled_overrides_absent_user_setting() {
     .expect("write managed");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
-    let managed = super::settings_watch::managed_settings_raw_tiers().await;
+    let managed = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    let managed = managed.effective_json().into_iter().collect::<Vec<_>>();
     // No user/project/local tiers (none present); managed is the only tier.
     let refs: Vec<&str> = managed.iter().map(String::as_str).collect();
     let ctx = sandbox::policy_convert::SandboxConvertContext::default();
@@ -8743,8 +8797,9 @@ async fn managed_sandbox_enabled_overrides_user_disabled() {
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
     // user tier (disabled) first, then managed appended LAST (highest).
+    let managed = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
     let mut tiers = vec![r#"{"sandbox":{"enabled":false}}"#.to_string()];
-    tiers.extend(super::settings_watch::managed_settings_raw_tiers().await);
+    tiers.extend(managed.effective_json());
     let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
     let ctx = sandbox::policy_convert::SandboxConvertContext::default();
     let cfg = super::sandbox_runtime_config_from_settings_tiers(
@@ -8778,7 +8833,8 @@ async fn managed_fail_if_unavailable_triggers_hard_reject() {
     .expect("write managed");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
-    let tiers = super::settings_watch::managed_settings_raw_tiers().await;
+    let managed = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    let tiers = managed.effective_json().into_iter().collect::<Vec<_>>();
     let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
     let ctx = sandbox::policy_convert::SandboxConvertContext::default();
     let cfg = super::sandbox_runtime_config_from_settings_tiers(
@@ -8815,7 +8871,8 @@ async fn managed_excluded_commands_flow_into_auto_allow() {
     .expect("write managed");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
-    let tiers = super::settings_watch::managed_settings_raw_tiers().await;
+    let managed = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    let tiers = managed.effective_json().into_iter().collect::<Vec<_>>();
     let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
     let auto_allow =
         super::sandbox_auto_allow_from_settings_tiers(&refs, std::path::Path::new("/tmp"));
@@ -8835,7 +8892,7 @@ async fn managed_excluded_commands_flow_into_auto_allow() {
 /// (5) `managed-settings.json` `{"sandbox":{"enabled":false}}` +
 /// `managed-settings.d/10-org.json` `{"sandbox":{"enabled":true}}` → the
 /// drop-in (sorted-alphabetical-last) wins, exercising
-/// `managed_settings_raw_tiers` ordering.
+/// selected policy file ordering.
 #[tokio::test]
 async fn managed_drop_in_overrides_base_managed_file() {
     let _g = MANAGED_ENV_LOCK.lock().unwrap();
@@ -8854,9 +8911,14 @@ async fn managed_drop_in_overrides_base_managed_file() {
     .expect("write drop-in");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
-    let tiers = super::settings_watch::managed_settings_raw_tiers().await;
-    // base then drop-in (the loader's ascending order).
-    assert_eq!(tiers.len(), 2, "base + one drop-in");
+    let managed = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    assert_eq!(
+        managed.file_reads.len(),
+        2,
+        "base + one drop-in source record"
+    );
+    let tiers = managed.effective_json().into_iter().collect::<Vec<_>>();
+    assert_eq!(tiers.len(), 1, "one selected policy projection");
     let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
     let ctx = sandbox::policy_convert::SandboxConvertContext::default();
     let cfg = super::sandbox_runtime_config_from_settings_tiers(
@@ -8876,7 +8938,7 @@ async fn managed_drop_in_overrides_base_managed_file() {
 /// are ignored; only `*.json` non-dotfiles are read (mirrors the watcher's
 /// `classify` behavior).
 #[tokio::test]
-async fn managed_settings_raw_tiers_skips_dotfiles_and_nonjson() {
+async fn managed_policy_reader_skips_dotfiles_and_nonjson() {
     let _g = MANAGED_ENV_LOCK.lock().unwrap();
     let tmp = tempfile::tempdir().expect("tempdir");
     // No base managed-settings.json (absent → skipped).
@@ -8895,17 +8957,18 @@ async fn managed_settings_raw_tiers_skips_dotfiles_and_nonjson() {
     .expect("write real");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
-    let tiers = super::settings_watch::managed_settings_raw_tiers().await;
+    let managed = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
     assert_eq!(
-        tiers.len(),
-        1,
-        "only the single `*.json` non-dotfile drop-in is read (.hidden.json + README.md skipped)"
+        managed.file_reads.len(),
+        2,
+        "the base source and the single `*.json` non-dotfile drop-in are represented; .hidden.json + README.md are ignored"
     );
+    assert!(managed.effective_projection().is_some());
 
     std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
 }
 
-/// (7) Override points at a non-existent dir → `managed_settings_raw_tiers()`
+/// (7) Override points at a non-existent dir → the selected policy is absent
 /// is empty, so both helpers behave exactly as the pre-fix 3-tier path
 /// (regression guard for the common case = byte-identical boot).
 #[tokio::test]
@@ -8915,8 +8978,12 @@ async fn absent_managed_dir_is_noop() {
     let missing = tmp.path().join("does-not-exist");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, &missing);
 
-    let tiers = super::settings_watch::managed_settings_raw_tiers().await;
-    assert!(tiers.is_empty(), "absent managed dir → no tiers");
+    let managed = super::settings_watch::read_managed_settings_snapshot(&missing).await;
+    assert!(
+        !managed.read_failed(),
+        "absent managed dir is a successfully loaded absence"
+    );
+    assert!(managed.effective_projection().is_none());
 
     // With no managed tier and no other tiers, the sandbox stays disabled
     // (byte-identical to the pre-fix opt-in posture).
@@ -8931,23 +8998,37 @@ async fn absent_managed_dir_is_noop() {
 // ── H-BIN-08 (parity 2.1.207): managed availableModels / ────────────────
 // enforceAvailableModels policy source ──────────────────────────────────
 
-#[test]
-fn managed_model_policy_source_folds_managed_tiers_and_enforces() {
+#[tokio::test]
+async fn managed_model_policy_source_uses_selected_managed_snapshot_and_enforces() {
     use llm_runtime::model::allowlist::{self, ModelEnforcement, PolicySource};
-    // Base tier sets the allowlist; a drop-in flips enforce on and adds an
-    // override — last tier wins for scalars, overrides union per key.
-    let tiers = vec![
-            r#"{"availableModels":["claude-opus-4-5"]}"#.to_string(),
-            r#"{"enforceAvailableModels":true,"modelOverrides":{"claude-opus-4-5":"arn:aws:bedrock:us-east-1::inference-profile/opus"}}"#.to_string(),
-        ];
-    let source = super::managed_model_policy_source(&tiers);
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("managed-settings.json"),
+        r#"{"availableModels":["claude-opus-4-5"]}"#,
+    )
+    .unwrap();
+    let drop_ins = root.path().join("managed-settings.d");
+    std::fs::create_dir_all(&drop_ins).unwrap();
+    std::fs::write(
+        drop_ins.join("10-models.json"),
+        r#"{"enforceAvailableModels":true,"modelOverrides":{"claude-opus-4-5":"arn:aws:bedrock:us-east-1::inference-profile/opus"}}"#,
+    )
+    .unwrap();
+    let snapshot = super::settings_watch::read_managed_settings_snapshot(root.path()).await;
+    let source = super::managed_model_policy_source(&snapshot);
     let enforcement = allowlist::resolve_enforcement(&source, &mut |_| {});
     match &enforcement {
         ModelEnforcement::Active {
             allowlist: al,
             overrides,
         } => {
-            assert_eq!(al, &["claude-opus-4-5".to_string()]);
+            assert_eq!(
+                al,
+                &lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"["claude-opus-4-5"]"#
+                )
+                .unwrap()
+            );
             assert_eq!(
                 overrides.get("claude-opus-4-5").map(String::as_str),
                 Some("arn:aws:bedrock:us-east-1::inference-profile/opus")
@@ -8969,19 +9050,30 @@ fn managed_model_policy_source_folds_managed_tiers_and_enforces() {
         Some(false)
     );
     // A malformed managed tier fails the whole source closed.
-    let bad = vec![r#"{"availableModels": "not-an-array"}"#.to_string()];
+    std::fs::write(
+        root.path().join("managed-settings.json"),
+        r#"{"availableModels": "not-an-array"}"#,
+    )
+    .unwrap();
+    let bad = super::settings_watch::read_managed_settings_snapshot(root.path()).await;
     assert!(matches!(
         super::managed_model_policy_source(&bad),
         PolicySource::Failed
     ));
 }
 
-#[test]
-fn managed_enforce_without_allowlist_is_inert() {
+#[tokio::test]
+async fn managed_enforce_without_allowlist_is_inert() {
     use llm_runtime::model::allowlist::{self, ModelEnforcement};
     // enforce flag with NO policy-owned availableModels ⇒ inactive + warn.
-    let tiers = vec![r#"{"enforceAvailableModels":true}"#.to_string()];
-    let source = super::managed_model_policy_source(&tiers);
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("managed-settings.json"),
+        r#"{"enforceAvailableModels":true}"#,
+    )
+    .unwrap();
+    let snapshot = super::settings_watch::read_managed_settings_snapshot(root.path()).await;
+    let source = super::managed_model_policy_source(&snapshot);
     let mut warned = Vec::new();
     let enforcement = allowlist::resolve_enforcement(&source, &mut |m| warned.push(m.to_string()));
     assert_eq!(enforcement, ModelEnforcement::Inactive);
@@ -10036,7 +10128,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
     };
     use plugin::{PluginManager, StrictPluginOnlyPolicy};
     use secret::CredentialManager;
-    use skill_api::SkillRegistry;
+    use skill::SkillRegistry;
     use tokio::sync::RwLock;
     use tool_api::ToolRegistry;
 
@@ -10088,6 +10180,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
         restricted: false,
         flag_settings: None,
         load_order: RwLock::new(Vec::new()),
+        managed_policy_snapshot_cache: Default::default(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -10170,6 +10263,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
         restricted: false,
         flag_settings: None,
         load_order: RwLock::new(Vec::new()),
+        managed_policy_snapshot_cache: Default::default(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -10278,6 +10372,7 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
         restricted: false,
         flag_settings: None,
         load_order: RwLock::new(Vec::new()),
+        managed_policy_snapshot_cache: Default::default(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     });
 
@@ -10394,7 +10489,7 @@ async fn make_reload_test_manager_with_mcp_registry(
     };
     use plugin::{PluginManager, StrictPluginOnlyPolicy};
     use secret::CredentialManager;
-    use skill_api::SkillRegistry;
+    use skill::SkillRegistry;
     use tokio::sync::RwLock;
     use tool_api::ToolRegistry;
 
@@ -10808,6 +10903,7 @@ async fn plugin_runtime_refresh_strips_agent_escalation_from_live_catalog() {
         restricted: false,
         flag_settings: None,
         load_order: RwLock::new(Vec::new()),
+        managed_policy_snapshot_cache: Default::default(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -10935,6 +11031,7 @@ async fn plugin_runtime_refresh_benign_agent_does_enter_catalog() {
         restricted: false,
         flag_settings: None,
         load_order: RwLock::new(Vec::new()),
+        managed_policy_snapshot_cache: Default::default(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -10990,7 +11087,7 @@ fn write_full_component_third_party_plugin(
     .unwrap();
 
     // Skills — `skills/<dir>/SKILL.md` layout. The registered name comes
-    // from the FRONTMATTER `name` (`skill_api::parse_skill_markdown` reads
+    // from the FRONTMATTER `name` (`skill::parse_skill_markdown` reads
     // `fm.name`), NOT from the containing directory, so the two are
     // deliberately DIFFERENT here (`greeter/` vs `politegreeter`): a
     // fixture that spelled them identically would pass just as happily if
@@ -11194,7 +11291,7 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
     };
     use plugin::{PluginManager, StrictPluginOnlyPolicy};
     use secret::CredentialManager;
-    use skill_api::SkillRegistry;
+    use skill::SkillRegistry;
     use tokio::sync::RwLock;
     use tool_api::ToolRegistry;
 
@@ -11261,6 +11358,7 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
         restricted: false,
         flag_settings: None,
         load_order: RwLock::new(Vec::new()),
+        managed_policy_snapshot_cache: Default::default(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -11439,6 +11537,9 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
         .expect("registered workflow")
         .contains("name: 'assemble'"));
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
+    let managed_policy_root = tempfile::tempdir().unwrap();
+    let managed_snapshot =
+        super::settings_watch::read_managed_settings_snapshot(managed_policy_root.path()).await;
     let discovered_at_boot = super::discover_plugin_set(
         true,
         false,
@@ -11449,6 +11550,7 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
         &[],
         false,
         None,
+        &managed_snapshot,
         &analytics_bus,
     )
     .await;

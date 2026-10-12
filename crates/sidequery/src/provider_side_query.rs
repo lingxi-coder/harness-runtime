@@ -428,6 +428,8 @@ impl SideQueryClient for ProviderSideQueryClient {
                     request.effort,
                     request.temperature,
                     Some(query_source),
+                    request.typed_attachment_ids,
+                    request.task_deliveries,
                 )?;
                 estimate_canonical_request(canonical)
             }
@@ -507,6 +509,8 @@ impl SideQueryClient for ProviderSideQueryClient {
                 request.effort,
                 request.temperature,
                 Some(query_source),
+                request.typed_attachment_ids,
+                request.task_deliveries,
             )?;
             canonical.execution.model_attempt = request.model_attempt;
             let resp = service.execute_side_query_request(canonical).await?;
@@ -1127,6 +1131,8 @@ mod tests {
             profile: None,
             system_prompt: Some("system".into()),
             system_prompt_input: None,
+            typed_attachment_ids: std::collections::HashSet::new(),
+            task_deliveries: std::collections::HashMap::new(),
             messages: vec![ConversationMessage::user(MessageId::new(), "hi".into())],
             tools: vec![],
             tool_choice: None,

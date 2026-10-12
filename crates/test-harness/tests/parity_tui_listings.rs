@@ -25,6 +25,21 @@ fn load_fixture() -> Value {
     serde_json::from_str(FIXTURE).expect("fixture parses")
 }
 
+fn product_agents_guidance(native: &str) -> String {
+    // Native BSo/HSo: acceptance/rea-evaluation-20261011/native-chunks/src_194447854.js.
+    // The product uses LingXi/.lingxi and does not direct users to Claude's docs URL.
+    const NATIVE_DOCS_LINE: &str = "\n\nDocs: https://code.claude.com/docs/en/sub-agents";
+    assert!(native.starts_with("The /agents wizard has been removed.\n\nAsk Claude"));
+    assert_eq!(native.matches("Ask Claude").count(), 1);
+    assert_eq!(native.matches(".claude/agents/").count(), 2);
+    let without_claude_docs = native
+        .strip_suffix(NATIVE_DOCS_LINE)
+        .expect("the 2.1.295 source baseline ends with the Claude docs link");
+    let with_product_name =
+        without_claude_docs.replace("Ask Claude", &format!("Ask {}", branding::PRODUCT_NAME));
+    with_product_name.replace(".claude/agents/", &format!("{}/agents/", branding::DOT_DIR))
+}
+
 #[tokio::test]
 async fn empty_states_match_fixture() {
     let fixture = load_fixture();
@@ -48,9 +63,10 @@ async fn empty_states_match_fixture() {
     }
 
     let r = AgentsHandler::new(mock).handle(&args("agents")).await;
+    let expected_agents = product_agents_guidance(empty["agents"].as_str().unwrap());
     match r {
         CommandResult::Done { display: Some(s) } => {
-            assert_eq!(s.string_at(""), empty["agents"].as_str());
+            assert_eq!(s.string_at(""), Some(expected_agents.as_str()))
         }
         other => panic!("got {other:?}"),
     }
@@ -118,8 +134,11 @@ async fn non_empty_agents_matches_fixture() {
     let expected = fixture["non_empty_sample"]["agents"]["output"]
         .as_str()
         .unwrap();
+    let expected = product_agents_guidance(expected);
     match r {
-        CommandResult::Done { display: Some(s) } => assert_eq!(s.string_at(""), Some(expected)),
+        CommandResult::Done { display: Some(s) } => {
+            assert_eq!(s.string_at(""), Some(expected.as_str()))
+        }
         other => panic!("got {other:?}"),
     }
 }

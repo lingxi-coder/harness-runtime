@@ -10,9 +10,9 @@
 //! JSON **String** (`input_json`/`result_json`).
 
 use client::protocol::controls::{
-    ControlDisabledReasonDto, ConversationControlsDto, PermissionControlStateDto,
-    PermissionModeOptionDto, ReasoningControlSpecDto, ReasoningControlStateDto, ReasoningOptionDto,
-    ReasoningSelectionDto,
+    ControlDisabledReasonDto, ConversationControlsDto, NativeProactivityControlStateDto,
+    PermissionControlStateDto, PermissionModeOptionDto, ReasoningControlSpecDto,
+    ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
 };
 use client::protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client::protocol::listings::{SessionAgentMessageRowDto, SessionAgentSummaryDto};
@@ -156,6 +156,14 @@ fn conversation_controls_changed_round_trips() {
                     disabled_reason: None,
                 },
             },
+            proactivity: Some(NativeProactivityControlStateDto {
+                opted_in: false,
+                selector_gate: false,
+                selector_gate_ever_on: false,
+                attachments_enabled: true,
+                opt_in_available: true,
+                level: "default".into(),
+            }),
         },
     };
     let json = serde_json::to_value(&event).expect("serialize ConversationControlsChanged");
@@ -169,6 +177,26 @@ fn conversation_controls_changed_round_trips() {
     let back: ClientEvent =
         serde_json::from_value(json).expect("deserialize ConversationControlsChanged");
     assert_eq!(back, event);
+}
+
+#[test]
+fn native_proactivity_control_state_round_trips_without_conflating_opt_in_and_level() {
+    let state = NativeProactivityControlStateDto {
+        opted_in: true,
+        selector_gate: true,
+        selector_gate_ever_on: true,
+        attachments_enabled: true,
+        opt_in_available: true,
+        level: "proactive".into(),
+    };
+    let json = serde_json::to_value(&state).expect("serialize proactivity control state");
+    assert_eq!(json["opted_in"], true);
+    assert_eq!(json["selector_gate"], true);
+    assert_eq!(json["level"], "proactive");
+    assert_eq!(
+        serde_json::from_value::<NativeProactivityControlStateDto>(json).unwrap(),
+        state
+    );
 }
 
 #[test]

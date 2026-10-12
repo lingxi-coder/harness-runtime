@@ -59,8 +59,7 @@ pub fn enterprise_mcp_active() -> bool {
 }
 
 /// claude-code's byte-exact `mcp add` rejection when [`enterprise_mcp_active`].
-pub const ENTERPRISE_EXCLUSIVE_CONTROL_MESSAGE: &str =
-    "Cannot add MCP server: enterprise MCP configuration is active and has exclusive control over MCP servers";
+pub const ENTERPRISE_EXCLUSIVE_CONTROL_MESSAGE: &str = "Cannot add MCP server: enterprise MCP configuration is active and has exclusive control over MCP servers";
 
 /// The [`enterprise_mcp_active`] core, parameterized on the config path so it is
 /// testable without touching the process-global managed dir / env.

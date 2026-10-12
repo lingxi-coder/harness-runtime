@@ -29,7 +29,7 @@ use mcp::{McpConnectionState, McpRegistry, McpServerRole};
 use outputstyles::OutputStyleRegistry;
 use plugin::{PluginManager, StrictPluginOnlyPolicy};
 use secret::CredentialManager;
-use skill_api::SkillRegistry;
+use skill::SkillRegistry;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;

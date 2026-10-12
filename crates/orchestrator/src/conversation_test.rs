@@ -2,6 +2,108 @@
 
 use super::*;
 
+struct ToolSearchGateApi(Option<llm_runtime::ProtocolFamily>);
+
+#[async_trait::async_trait]
+impl OrchestratorApiClient for ToolSearchGateApi {
+    fn protocol_for_model(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Option<llm_runtime::ProtocolFamily> {
+        self.0.clone()
+    }
+
+    async fn messages_create(
+        &self,
+        _request: OrchestratorApiRequest,
+    ) -> Result<HistoryResponse, LlmError> {
+        Err(LlmError::ModelUnavailable)
+    }
+}
+
+struct ToolSearchFlagOverride;
+
+impl ToolSearchFlagOverride {
+    fn set(values: Vec<String>) -> Self {
+        telemetry::test_set_flag_list("tengu_tool_search_unsupported_models", values);
+        Self
+    }
+}
+
+impl Drop for ToolSearchFlagOverride {
+    fn drop(&mut self) {
+        telemetry::test_clear_flag_list("tengu_tool_search_unsupported_models");
+    }
+}
+
+#[test]
+fn tool_search_uses_overridable_native_unsupported_model_list_case_insensitively() {
+    let _flag_override = ToolSearchFlagOverride::set(vec!["blocked-family".to_owned()]);
+    let api = ToolSearchGateApi(None);
+    assert!(!tool_search_supported_for_request(
+        &api,
+        "Vendor/BLOCKED-FAMILY-v2",
+        None
+    ));
+    assert!(tool_search_supported_for_request(
+        &api,
+        "Vendor/allowed-family-v2",
+        None
+    ));
+}
+
+#[test]
+fn vertex_tool_search_gate_strips_complete_native_formatting_and_date_suffix_before_45_floor() {
+    let _flag_override = ToolSearchFlagOverride::set(Vec::new());
+    let vertex = ToolSearchGateApi(Some(llm_runtime::ProtocolFamily::VertexClaude));
+    assert!(!tool_search_supported_for_request(
+        &vertex,
+        "claude-sonnet-3-7-20250301",
+        None
+    ));
+    assert!(!tool_search_supported_for_request(
+        &vertex,
+        "claude-opus-4-4@20250301",
+        None
+    ));
+    assert!(tool_search_supported_for_request(
+        &vertex,
+        "claude-sonnet-[1m]4-5-20250301",
+        None
+    ));
+    assert!(tool_search_supported_for_request(
+        &vertex,
+        "claude-sonnet-[2M]4-5-20250301",
+        None
+    ));
+    assert!(!tool_search_supported_for_request(
+        &vertex,
+        "claude-sonnet-[2m]4-4-20250301",
+        None
+    ));
+    assert!(
+        tool_search_supported_for_request(&vertex, "claude-sonnet-[1m4-4-20250301", None),
+        "Native Fn does not strip an unterminated formatting marker"
+    );
+    assert!(tool_search_supported_for_request(
+        &vertex,
+        "claude-haiku-4-5-1-20250301",
+        None
+    ));
+
+    // The same model name follows the generic route rule outside Vertex.
+    let generic = ToolSearchGateApi(None);
+    assert!(tool_search_supported_for_request(
+        &generic,
+        "claude-opus-4-4",
+        None
+    ));
+}
+
+#[path = "conversation/tests/cache_safe_params_tests.rs"]
+mod cache_safe_params_tests;
+
 #[path = "conversation/tests/session_memory_context_tests.rs"]
 mod session_memory_context_tests;
 

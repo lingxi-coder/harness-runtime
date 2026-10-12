@@ -88,7 +88,7 @@ async fn matching_touched_file_injects_rule() {
     push_touched(&orch, &cwd.join("src/x.rs"));
 
     let msg = orch
-        .nested_memory_reminder_messages()
+        .nested_memory_reminder_messages(&[])
         .await
         .into_iter()
         .next()
@@ -111,7 +111,7 @@ async fn non_matching_touched_file_does_not_inject() {
     // `docs/y.md` does NOT match `paths: src/**`.
     push_touched(&orch, &cwd.join("docs/y.md"));
     assert!(
-        orch.nested_memory_reminder_messages().await.is_empty(),
+        orch.nested_memory_reminder_messages(&[]).await.is_empty(),
         "a non-matching touched file must not activate the rule"
     );
 }
@@ -122,7 +122,7 @@ async fn host_seeded_file_does_not_activate_conditional_rule() {
     let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
     push_host_seed(&orch, &cwd.join("src/x.rs"));
     assert!(
-        orch.nested_memory_reminder_messages().await.is_empty(),
+        orch.nested_memory_reminder_messages(&[]).await.is_empty(),
         "host-seeded paths are not model context and must not trigger rules"
     );
 }
@@ -135,7 +135,7 @@ async fn rule_injected_once_then_not_reinjected() {
 
     // Turn 0: injected.
     assert!(
-        orch.nested_memory_reminder_messages()
+        orch.nested_memory_reminder_messages(&[])
             .await
             .into_iter()
             .next()
@@ -145,7 +145,7 @@ async fn rule_injected_once_then_not_reinjected() {
     // Turn 1: the same file is still touched, but the rule was already sent →
     // not re-injected (sent-tracking dedup).
     assert!(
-        orch.nested_memory_reminder_messages().await.is_empty(),
+        orch.nested_memory_reminder_messages(&[]).await.is_empty(),
         "an already-sent rule must not be re-injected"
     );
 }
@@ -155,7 +155,7 @@ async fn no_touched_file_yields_none() {
     let cwd = PathBuf::from("/work/repo");
     let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
     // read_file_state empty → no rule can match.
-    assert!(orch.nested_memory_reminder_messages().await.is_empty());
+    assert!(orch.nested_memory_reminder_messages(&[]).await.is_empty());
 }
 
 #[tokio::test]
@@ -177,7 +177,7 @@ async fn no_conditional_rules_yields_none() {
     };
     let orch = orch_with_rules(cwd.clone(), vec![unconditional]);
     push_touched(&orch, &cwd.join("src/x.rs"));
-    assert!(orch.nested_memory_reminder_messages().await.is_empty());
+    assert!(orch.nested_memory_reminder_messages(&[]).await.is_empty());
 }
 
 #[tokio::test]
@@ -194,7 +194,7 @@ async fn newly_matching_rule_injected_on_later_turn() {
     );
     push_touched(&orch, &cwd.join("src/a.rs"));
     let t0 = orch
-        .nested_memory_reminder_messages()
+        .nested_memory_reminder_messages(&[])
         .await
         .into_iter()
         .next()
@@ -206,7 +206,7 @@ async fn newly_matching_rule_injected_on_later_turn() {
     // Now touch a docs file → docs-rule newly activates; src-rule already sent.
     push_touched(&orch, &cwd.join("docs/readme.md"));
     let t1 = orch
-        .nested_memory_reminder_messages()
+        .nested_memory_reminder_messages(&[])
         .await
         .into_iter()
         .next()
@@ -379,7 +379,9 @@ async fn freeze_unsent_rule(
     // Exercise the real producer order. A cached conditional producer used
     // to run first and claim a stale path before fresh nested discovery could
     // replace its body, deletion status, or globs on a later model step.
-    let first = orchestrator.collect_turn_reminders(true, false, None).await;
+    let first = orchestrator
+        .collect_turn_reminders(true, false, None, &[])
+        .await;
     assert!(rule_reminder_texts(&first.model_reminders, &fixture.rule).is_empty());
     assert!(
         !orchestrator
@@ -414,7 +416,9 @@ async fn unsent_rule_body_changes_are_fresh_across_all_rule_tiers() {
 
         fixture.write_rule("src/**", "new rule body");
         push_touched(&orchestrator, &fixture.trigger("src/next.rs"));
-        let next = orchestrator.collect_turn_reminders(true, false, None).await;
+        let next = orchestrator
+            .collect_turn_reminders(true, false, None, &[])
+            .await;
         assert_eq!(
             rule_reminder_texts(&next.model_reminders, &fixture.rule),
             vec![format!(
@@ -432,7 +436,9 @@ async fn unsent_rule_body_changes_are_fresh_across_all_rule_tiers() {
 
         fixture.write_rule("src/**", "edited after already sent");
         push_touched(&orchestrator, &fixture.trigger("src/another.rs"));
-        let repeated = orchestrator.collect_turn_reminders(true, false, None).await;
+        let repeated = orchestrator
+            .collect_turn_reminders(true, false, None, &[])
+            .await;
         assert!(
             rule_reminder_texts(&repeated.model_reminders, &fixture.rule).is_empty(),
             "editing an already-sent path must preserve session dedup for {tier:?}"
@@ -448,7 +454,9 @@ async fn deleted_unsent_rule_is_not_claimed_from_the_eager_snapshot() {
 
     std::fs::remove_file(&fixture.rule).expect("delete unsent rule");
     push_touched(&orchestrator, &fixture.trigger("src/next.rs"));
-    let next = orchestrator.collect_turn_reminders(true, false, None).await;
+    let next = orchestrator
+        .collect_turn_reminders(true, false, None, &[])
+        .await;
     assert!(rule_reminder_texts(&next.model_reminders, &fixture.rule).is_empty());
     assert!(
         !orchestrator
@@ -470,7 +478,9 @@ async fn changed_unsent_rule_globs_stop_a_previous_match() {
 
     fixture.write_rule("docs/**", "now docs only");
     push_touched(&orchestrator, &fixture.trigger("src/next.rs"));
-    let next = orchestrator.collect_turn_reminders(true, false, None).await;
+    let next = orchestrator
+        .collect_turn_reminders(true, false, None, &[])
+        .await;
     assert!(rule_reminder_texts(&next.model_reminders, &fixture.rule).is_empty());
     assert!(
         !orchestrator
@@ -492,7 +502,9 @@ async fn changed_unsent_rule_globs_activate_a_new_match_with_fresh_body() {
 
     fixture.write_rule("src/**", "new src body");
     push_touched(&orchestrator, &fixture.trigger("src/next.rs"));
-    let next = orchestrator.collect_turn_reminders(true, false, None).await;
+    let next = orchestrator
+        .collect_turn_reminders(true, false, None, &[])
+        .await;
     let oracle: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/nested_memory_2_1_287.json"
     ))

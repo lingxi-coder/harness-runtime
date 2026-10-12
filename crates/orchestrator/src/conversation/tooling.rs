@@ -595,6 +595,22 @@ impl ConversationOrchestrator {
     pub(crate) async fn build_wire_tools(
         &self,
     ) -> (Vec<lingxi_core::host::SourceToolWireDefinition>, bool) {
+        let (wire, skip_global_cache_for_system_prompt, _) =
+            self.build_wire_tools_with_complete().await;
+        (wire, skip_global_cache_for_system_prompt)
+    }
+
+    /// Return the exact pre-deferral schema snapshot alongside the final
+    /// request tools. Native mid-conversation additions are built from the same
+    /// once-produced descriptions and schemas, without rerunning Tool prompts
+    /// or registry filters.
+    pub(crate) async fn build_wire_tools_with_complete(
+        &self,
+    ) -> (
+        Vec<lingxi_core::host::SourceToolWireDefinition>,
+        bool,
+        Vec<lingxi_core::host::SourceToolWireDefinition>,
+    ) {
         use tool_api::tool_trait::PromptOptions;
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
@@ -635,7 +651,10 @@ impl ConversationOrchestrator {
         lingxi_core::host::session_flags::set_skill_tool_advertised(skill_tool_advertised);
         let bash_precommit_skills =
             match (skill_tool_advertised, &self.prompt_runtime.skill_listing) {
-                (true, Some(provider)) => provider.bash_precommit_skills().await,
+                (true, Some(provider)) => {
+                    let snapshot = provider.skill_listing_snapshot().await;
+                    provider.bash_precommit_skills(&snapshot.entries).await
+                }
                 _ => tool_api::tool_trait::BashPrecommitSkills::default(),
             };
         let bash_precommit_session_generation = self.tools.bash_precommit_session_generation();
@@ -732,7 +751,11 @@ impl ConversationOrchestrator {
         };
         let request_supported = tool_search_present
             && (has_deferred_candidates || has_pending_mcp_servers)
-            && tool_search_supported_for_request(&model, model_profile.as_deref());
+            && tool_search_supported_for_request(
+                self.api.as_ref(),
+                &model,
+                model_profile.as_deref(),
+            );
         self.tools
             .deferral()
             .set_request_supported(request_supported);
@@ -744,9 +767,13 @@ impl ConversationOrchestrator {
         // normalization branch as the main loop.
         lingxi_core::host::session_flags::set_tool_search_enabled(
             self.tools.deferral().mode().is_enabled()
-                && tool_search_supported_for_request(&model, model_profile.as_deref()),
+                && tool_search_supported_for_request(
+                    self.api.as_ref(),
+                    &model,
+                    model_profile.as_deref(),
+                ),
         );
-        let complete_wire = wire.clone();
+        let mut complete_wire = wire.clone();
         // Tool Search (2.1.216): omit undiscovered deferred definitions and
         // stamp discovered definitions with `defer_loading: true`. The shared
         // `DeferralState` is owned by the registry and restored on resume, so a
@@ -833,6 +860,8 @@ impl ConversationOrchestrator {
         // request; the schema and defer markers stay live.
         self.apply_prompt_snapshot_tool_descriptions(&mut wire)
             .await;
+        self.apply_prompt_snapshot_tool_descriptions(&mut complete_wire)
+            .await;
         // Native jqt's `Rr` derives `skipGlobalCacheForSystemPrompt` from the
         // active registered tools and the same `hr(tool)` decision serialized
         // as `defer_loading`. Do this before `Tool` identity is flattened into
@@ -844,7 +873,7 @@ impl ConversationOrchestrator {
                     .find(|definition| definition.name == tool.name())
                     .is_some_and(|definition| !definition.defer_loading)
         });
-        (wire, skip_global_cache_for_system_prompt)
+        (wire, skip_global_cache_for_system_prompt, complete_wire)
     }
 
     async fn mod_tool_provider(&self, tool: &dyn tool_api::tool_trait::Tool) -> serde_json::Value {

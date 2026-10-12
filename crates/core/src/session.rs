@@ -108,6 +108,20 @@ pub enum GoalOrigin {
     Restored,
 }
 
+/// Origin of the raw model-setting value that drives Native main-loop model
+/// selection. A user model pick is session-authoritative and must survive
+/// settings refreshes; configured values may be refreshed from the current
+/// CLI/settings precedence.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionModelSettingSource {
+    /// Current configured CLI/environment/settings value.
+    #[default]
+    Configured,
+    /// A user selected a model in this live session.
+    UserSelection,
+}
+
 impl GoalOrigin {
     /// The analytics spelling.
     #[must_use]
@@ -192,6 +206,18 @@ pub struct SessionState {
     /// across providers). `None` = resolve unscoped. Set by `switch_model`.
     #[serde(default)]
     pub model_profile: Option<String>,
+    /// Raw user model setting used by Native Plan-mode selection (`opusplan`
+    /// and `haiku`), distinct from the resolved wire model above.
+    #[serde(default)]
+    pub user_model_setting: Option<String>,
+    /// Provenance for the configured raw model setting. A live session pick
+    /// uses `UserOrEnv` provenance and is distinguished by `user_model_setting_source`.
+    #[serde(default)]
+    pub user_model_setting_provenance: crate::host::ModelProvenance,
+    /// Whether the raw model setting is still configured state or a session
+    /// user selection that settings refresh must preserve.
+    #[serde(default)]
+    pub user_model_setting_source: SessionModelSettingSource,
     /// Active todo list (M4-04). Mutated by `TodoWriteTool`. Defaults to empty
     /// on deserialize so pre-M4-04 persisted sessions still load.
     #[serde(default)]
@@ -202,6 +228,13 @@ pub struct SessionState {
     /// Timing state adjacent to history; never inferred from message count.
     #[serde(default)]
     pub message_timing: MessageTimingState,
+    /// Source-typed row identity used to reconstruct native request projection
+    /// details that do not fit the frozen provider message shape.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::host::NativeRequestHistoryMetadata::is_empty"
+    )]
+    pub native_request_history: crate::host::NativeRequestHistoryMetadata,
     /// Persisted Ultracode reminder state. The transcript replay path
     /// reconstructs these fields from the meta reminder messages, so cold
     /// resume and in-process resume continue the same sparse cadence.
@@ -312,9 +345,13 @@ impl SessionState {
             usage: CumulativeUsage::default(),
             model,
             model_profile: None,
+            user_model_setting: None,
+            user_model_setting_provenance: crate::host::ModelProvenance::default(),
+            user_model_setting_source: SessionModelSettingSource::Configured,
             todos: Vec::new(),
             active_goal: None,
             message_timing: MessageTimingState::default(),
+            native_request_history: crate::host::NativeRequestHistoryMetadata::default(),
             ultracode_active: false,
             ultracode_non_meta_turns_since_reminder: 0,
             plan_mode: false,

@@ -75,12 +75,11 @@ impl RuntimeSpawner for UnusedRuntime {
 async fn seeded_memory_file_dedups_on_a_real_read_tool_call() {
     let tmp = TempDir::new().unwrap();
     // Deliberately NOT canonicalized. On macOS `TempDir` hands back a `/var/...`
-    // path whose real location is `/private/var/...`, which is exactly the
-    // production shape: the orchestrator's cwd is whatever the user launched in,
-    // symlinks and all, while `FileReadTool` looks the registry up by
-    // `canonicalize_and_validate(..)`. Canonicalizing here made the test pass by
-    // hiding that mismatch — the seed and the lookup only agreed because the
-    // fixture had pre-resolved the path for them.
+    // path whose real location is `/private/var/...`, matching a session cwd
+    // reached through a symlink. Native `Kv(file_path)` and FileReadTool's
+    // read-state key preserve that normalized lexical route; canonicalization is
+    // separate for permission checks and I/O. Keeping the alias here verifies
+    // that eager memory seeding and the later model Read use the same route.
     let cwd = tmp.path().to_path_buf();
     let managed = tmp.path().join("empty-managed");
     std::fs::create_dir_all(&managed).unwrap();
@@ -98,16 +97,36 @@ async fn seeded_memory_file_dedups_on_a_real_read_tool_call() {
     // then keep only the fixture's own files so the developer's real
     // `~/.lingxi/LINGXI.md` cannot leak in.
     std::env::set_var(memory::lingxi_md::hierarchy::MANAGED_DIR_ENV, &managed);
-    let files: Vec<MemoryFile> = RealMemoryHierarchyProvider
+    let provider = RealMemoryHierarchyProvider;
+    let files: Vec<MemoryFile> = provider
         .load(&cwd)
         .await
         .into_iter()
         .filter(|f| f.path.starts_with(&cwd))
         .collect();
+    let conditional = provider
+        .load_conditional_rules(
+            &cwd,
+            &cwd.join("src").join("main.rs"),
+            provider.instruction_files_mode(),
+        )
+        .await;
+    let conditional: Vec<MemoryFile> = conditional
+        .into_iter()
+        .filter(|file| file.path.starts_with(&cwd))
+        .collect();
     std::env::remove_var(memory::lingxi_md::hierarchy::MANAGED_DIR_ENV);
     assert!(
-        files.iter().any(|f| f.path == plain) && files.iter().any(|f| f.path == cond),
-        "fixture must load both files"
+        files.iter().any(|f| f.path == plain),
+        "the unconditional fixture must load through the eager context path"
+    );
+    assert!(
+        !files.iter().any(|f| f.path == cond),
+        "conditional rules must stay out of eager context and its seeded read state"
+    );
+    assert!(
+        conditional.iter().any(|f| f.path == cond),
+        "the paths-gated fixture must load through conditional acquisition"
     );
 
     // ── ONE shared registry, exactly as a composition root wires it ─────────
@@ -156,15 +175,14 @@ async fn seeded_memory_file_dedups_on_a_real_read_tool_call() {
     // Drop that Read's own entry so the seeding guard (`!has(path)`) does not
     // legitimately skip it — this test is about the SEED, not the Read entry.
     //
-    // By CANONICAL path: the Read tool keyed it under
-    // `canonicalize_and_validate(..)`'s output, so removing the raw path is a
-    // silent no-op. That in turn makes the seed skip (the entry is still there)
-    // and the next Read dedup via the plain branch, which reports no `source` —
-    // the exact failure this fixture used to hide by pre-canonicalizing `cwd`.
-    shared
-        .lock()
-        .unwrap()
-        .remove(&std::fs::canonicalize(&plain).unwrap());
+    // By the normalized lexical request path: Native `Kv(file_path)` resolves
+    // dot segments but does not follow symlinks, and the Read tool keeps that
+    // route as its state key. `plain` is already absolute and normalized, so
+    // remove the exact key written by the first Read. Removing its canonical
+    // target instead would leave the prior Read entry in place, make seeding
+    // skip it, and cause the next Read to dedup as an ordinary prior-read
+    // result (which has no `source: "seeded"`).
+    shared.lock().unwrap().remove(&plain);
 
     // ── THE PRODUCTION SEAM ────────────────────────────────────────────────
     orch.fire_instructions_loaded().await;

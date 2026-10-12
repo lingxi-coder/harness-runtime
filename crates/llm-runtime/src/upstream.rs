@@ -241,6 +241,17 @@ pub(crate) fn error(error: wire::LlmError) -> LlmError {
             text,
             native_anthropic_facts: native_anthropic_facts.map(|facts| *facts),
         },
+        E::ProxyAuthHelperRetry { source, challenge } => LlmError::ProxyAuthHelperRetry {
+            source: Box::new(self::error(*source)),
+            challenge,
+        },
+        E::ProxyTunnelResponse {
+            status,
+            proxy_authenticate,
+        } => LlmError::ProxyTunnelResponse {
+            status,
+            proxy_authenticate,
+        },
         E::ProviderResponse {
             status,
             request_id,
@@ -411,6 +422,66 @@ mod upgrade_tests {
             crate::error_display_source(&translated).string_units(""),
             Some(units)
         );
+    }
+
+    #[test]
+    fn proxy_helper_translation_preserves_error_source_utf16_and_live_407() {
+        let facts = wire::NativeAnthropicErrorFacts {
+            provider_id: wire::ProviderId::from("anthropic"),
+            protocol: wire::ProtocolFamily::AnthropicMessages,
+            request_authority: Some("api.anthropic.com".into()),
+            thinking_resumption_refused: false,
+            thinking_resumption_beta_requested: None,
+            thinking_resumption_beta_refused: false,
+        };
+        let mut units = "407 ".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        let text =
+            wire::ProviderErrorText::new(String::from_utf16_lossy(&units), units.clone()).unwrap();
+        let wire_error = wire::LlmError::ProviderErrorText {
+            source: Box::new(wire::LlmError::Authentication {
+                message: text.display().into(),
+            }),
+            text,
+            native_anthropic_facts: Some(Box::new(facts.clone())),
+        }
+        .with_proxy_auth_helper_challenge(wire::ProxyAuthHelperChallenge {
+            status: 407,
+            proxy_authenticate: Some(b"Basic realm=private-proxy".to_vec()),
+        });
+        let translated = error(wire_error);
+
+        assert!(translated.is_proxy_auth_helper_retry());
+        assert!(!translated.is_proxy_tunnel_auth_rejection());
+        assert_eq!(translated.http_status(), Some(407));
+        assert!(matches!(
+            translated.classification_source(),
+            LlmError::Authentication { .. }
+        ));
+        assert_eq!(translated.native_anthropic_error_facts(), Some(&facts));
+        assert_eq!(
+            translated.provider_error_text().unwrap().utf16_code_units(),
+            units
+        );
+        assert_eq!(
+            crate::error_display_source(&translated).string_units(""),
+            Some(units)
+        );
+        assert!(!format!("{translated:?}").contains("private-proxy"));
+    }
+
+    #[test]
+    fn raw_connect_407_stays_typed_terminal_transport() {
+        let translated = error(wire::LlmError::ProxyTunnelResponse {
+            status: 407,
+            proxy_authenticate: Some(wire::ProxyAuthHeader::new(
+                b"Basic realm=private-proxy".to_vec(),
+            )),
+        });
+        assert!(translated.is_proxy_tunnel_auth_rejection());
+        assert!(!translated.is_proxy_auth_helper_retry());
+        assert_eq!(translated.http_status(), Some(407));
+        assert!(!format!("{translated:?}").contains("private-proxy"));
     }
 
     fn projected_history(native: wire::ContentBlock) -> Vec<ContentBlock> {

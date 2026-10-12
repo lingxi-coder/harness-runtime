@@ -36,6 +36,9 @@ pub struct BgSessionSnapshot {
         crate::types::MessageId,
         crate::types::utf16_json::Utf16JsonProjection,
     )>,
+    /// Native request-history metadata carried into the copied cold-resume
+    /// transcript, including outer-row placement and task-delivery fields.
+    pub native_request_history: crate::host::NativeRequestHistoryMetadata,
 }
 
 /// Failure modes for [`BgSessionForker::fork_to_background`]. Projected to a

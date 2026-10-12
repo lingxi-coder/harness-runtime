@@ -6,7 +6,10 @@
 //! ([`McpRegistry::run_reconnect_loop`]) implement the "Plan 13" wiring.
 
 use crate::client::{McpClient, McpClientError};
-use crate::connection::{McpConnectionState, McpServerConfig};
+use crate::connection::{
+    McpConnectionFailure, McpConnectionState, McpDroppedToolRecord, McpDroppedToolServerSnapshot,
+    McpFailedServerSnapshot, McpNeedsAuthServerSnapshot, McpServerConfig,
+};
 use crate::hook_dispatch::HookDispatcher;
 use crate::normalization::normalize_name_for_mcp;
 use crate::oauth::{self, OnAuthorizationUrl};
@@ -25,11 +28,11 @@ use lingxi_core::types::{AgentId, McpConnectionId};
 // the old path stays.
 use mcp_wire::export::is_sha256;
 pub use mcp_wire::export::ConversationExport;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 mod authentication;
 mod catalog_refresh;
@@ -161,6 +164,34 @@ pub trait XaaConfigProvider: Send + Sync {
 const INITIAL_BACKOFF: Duration = Duration::from_millis(1000);
 /// Ceiling on reconnect backoff (claude-code `MAX_BACKOFF_MS = 30000`).
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+const NATIVE_NEXT_TURN_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+const NATIVE_NEXT_TURN_MAX_CONCURRENT_REDIALS: usize = 20;
+const NATIVE_NEXT_TURN_MAX_RETRIES: u32 = 10;
+const NATIVE_NEXT_TURN_FLAG: &str = "tengu_snug_reef";
+const NATIVE_CONNECT_TIMEOUT_RETRY_FLAG: &str = "tengu_mcp_connect_timeout_retry";
+const NATIVE_CONNECTION_TIMEOUT_MESSAGE: &str = "MCP connection deadline exceeded";
+const NATIVE_NEXT_TURN_RETRYABLE_CODES: &[&str] = &[
+    "500",
+    "502",
+    "503",
+    "504",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "ECONNABORTED",
+    "ENOTFOUND",
+    "ENETUNREACH",
+    "EAI_AGAIN",
+    "ConnectionRefused",
+    "ConnectionClosed",
+    "FailedToOpenSocket",
+    "ERR_SOCKET_CLOSED",
+    "ERR_PROXY_TUNNEL",
+    "23",
+    "CLI_OWNED_BEARER_REJECTED",
+    "HEADERS_HELPER_AUTH_REJECTED",
+    "CONNECT_TIMEOUT",
+];
 
 /// Host-owned, provider-neutral guard used by asynchronous reconciliation.
 ///
@@ -506,6 +537,7 @@ struct LiveDiscovery {
     negotiated: lingxi_core::host::McpNegotiatedProtocol,
     capabilities: ServerCapabilitiesDto,
     tools: Vec<lingxi_core::host::McpToolDto>,
+    dropped_tools: Vec<McpDroppedToolRecord>,
     resources: Vec<lingxi_core::host::McpResourceDto>,
     resource_templates: Vec<lingxi_core::host::McpResourceTemplateDto>,
     prompts: Vec<lingxi_core::host::McpPromptDto>,
@@ -569,6 +601,45 @@ struct CachedDiscoveryContext {
     connection_id: McpConnectionId,
     partition: Option<DiscoveryCachePartition>,
     negotiation_mode: crate::protocol_negotiation::NegotiationMode,
+}
+
+#[derive(Clone)]
+struct ConnectionFailureDiagnostic {
+    config: McpServerConfig,
+    failure: McpConnectionFailure,
+}
+
+#[derive(Clone)]
+struct NextTurnRedialState {
+    config: McpServerConfig,
+    failure: McpConnectionFailure,
+    turns: u32,
+    held_turns: u32,
+    in_flight: bool,
+    last_attempt: Option<Instant>,
+    held_by: Option<PendingTurnHold>,
+    held_since: Option<Instant>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PendingTurnHold {
+    server_name: String,
+    started_at: SystemTime,
+}
+
+#[derive(Clone, Copy)]
+enum FailedStateFingerprint {
+    Disconnected,
+    Failed { attempts: u32 },
+}
+
+struct NextTurnRedialCandidate {
+    name: String,
+    config: McpServerConfig,
+    failure: McpConnectionFailure,
+    state: FailedStateFingerprint,
+    turns: u32,
+    order: usize,
 }
 
 struct DiscoveryCacheConsult {
@@ -641,6 +712,16 @@ pub struct McpRegistry {
     /// (`AgentTool.tsx:394-405`). A plain `HashMap` would make the required-MCP
     /// gate error text non-deterministic.
     clients: Arc<RwLock<IndexMap<String, RegisteredClient>>>,
+    /// Source-native failure fields paired with the config snapshot that
+    /// produced them; they are projected only while that failure is current.
+    failure_diagnostics: Arc<RwLock<HashMap<String, ConnectionFailureDiagnostic>>>,
+    /// Per-server state for the source's next-user-turn redial scheduler.
+    next_turn_redials: Arc<RwLock<HashMap<String, NextTurnRedialState>>>,
+    /// Config publication order used to break equal-turn retry ties.
+    server_order: Arc<StdMutex<Vec<String>>>,
+    /// Actual schema drops keyed by transport/cache connection generation.
+    dropped_tool_snapshots:
+        Arc<RwLock<HashMap<McpConnectionId, (String, Vec<McpDroppedToolRecord>)>>>,
     /// Stable per-server slots captured by MCP tool parser handles. These are
     /// not registry lookups at result time; registration updates each slot.
     output_parser_slots: Arc<StdMutex<HashMap<String, Arc<RwLock<Option<Arc<McpClient>>>>>>>,
@@ -784,6 +865,165 @@ fn negotiated_era_label(era: lingxi_core::host::McpProtocolEra) -> &'static str 
     }
 }
 
+fn source_string_projection(value: &str) -> Utf16JsonProjection {
+    let units = value.encode_utf16().collect::<Vec<_>>();
+    Utf16JsonProjection::root_string(value.to_owned(), units)
+        .expect("Rust strings are valid UTF-16 source strings")
+}
+
+fn native_next_turn_retry_budget() -> u32 {
+    let value = telemetry::flag_number(NATIVE_NEXT_TURN_FLAG, 0.0);
+    if value.is_finite() {
+        value
+            .trunc()
+            .clamp(0.0, f64::from(NATIVE_NEXT_TURN_MAX_RETRIES)) as u32
+    } else {
+        0
+    }
+}
+
+fn native_retry_transport_type(config: &McpServerConfig) -> &str {
+    config
+        .metadata
+        .transport
+        .as_deref()
+        .unwrap_or_else(|| config.spec.kind())
+}
+
+fn native_next_turn_retryable(config: &McpServerConfig, failure: &McpConnectionFailure) -> bool {
+    if !matches!(
+        native_retry_transport_type(config),
+        "http" | "sse" | "claudeai-proxy"
+    ) {
+        return false;
+    }
+    let Some(error_code) = failure
+        .error_code
+        .as_ref()
+        .and_then(|code| code.string_at(""))
+    else {
+        // Native `Yge` retries an SSE failed row when its `errorCode` is
+        // absent; HTTP and claudeai-proxy require an explicit source code.
+        return native_retry_transport_type(config) == "sse";
+    };
+    NATIVE_NEXT_TURN_RETRYABLE_CODES.contains(&error_code)
+        && !matches!(
+            error_code,
+            "CLI_OWNED_BEARER_REJECTED" | "HEADERS_HELPER_AUTH_REJECTED"
+        )
+}
+
+fn native_next_turn_redial_allowed(config: &McpServerConfig) -> bool {
+    !config.metadata.cli_owned
+        && !config.disabled
+        && !config.is_unconfigured()
+        && config.config_error.is_none()
+        && config.connect_time_url_error().is_none()
+        && matches!(
+            native_retry_transport_type(config),
+            "http" | "sse" | "claudeai-proxy"
+        )
+}
+
+fn failed_state_fingerprint(state: &McpConnectionState) -> Option<FailedStateFingerprint> {
+    match state {
+        McpConnectionState::Disconnected {
+            last_error: Some(_),
+            ..
+        } => Some(FailedStateFingerprint::Disconnected),
+        McpConnectionState::Failed { attempts, .. } => Some(FailedStateFingerprint::Failed {
+            attempts: *attempts,
+        }),
+        _ => None,
+    }
+}
+
+fn failure_for_state(
+    state: &McpConnectionState,
+    diagnostics: &HashMap<String, ConnectionFailureDiagnostic>,
+) -> Option<McpConnectionFailure> {
+    let fallback = match state {
+        McpConnectionState::Disconnected {
+            last_error: Some(error),
+            ..
+        }
+        | McpConnectionState::Failed { error, .. } => error.as_str(),
+        _ => return None,
+    };
+    Some(
+        diagnostics
+            .get(state.name())
+            .filter(|entry| McpRegistry::same_config_snapshot(&entry.config, state.config()))
+            .map(|entry| entry.failure.clone())
+            .unwrap_or_else(|| McpConnectionFailure {
+                error: Some(source_string_projection(fallback)),
+                display_detail: None,
+                error_code: None,
+            }),
+    )
+}
+
+fn sanitize_failure_projection(value: &Utf16JsonProjection) -> Utf16JsonProjection {
+    diagnostics::sanitize_native_mcp_projection(value)
+}
+
+fn source_value_truthy(value: &Utf16JsonProjection) -> bool {
+    let Some(value) = value.at_pointer("") else {
+        return false;
+    };
+    if value.is_null() {
+        return false;
+    }
+    if let Some(value) = value.as_bool() {
+        return value;
+    }
+    if let Some(value) = value.as_number() {
+        return value != 0.0 && !value.is_nan();
+    }
+    if let Some(value) = value.code_units() {
+        return !value.is_empty();
+    }
+    true
+}
+
+fn merged_failure_display_error(failure: &McpConnectionFailure) -> Option<Utf16JsonProjection> {
+    let error_present = failure.error.is_some() || failure.display_detail.is_some();
+    if !error_present {
+        return None;
+    }
+    let mut units = Vec::new();
+    let mut has_part = false;
+    for source in [&failure.error, &failure.display_detail]
+        .into_iter()
+        .flatten()
+    {
+        if !source_value_truthy(source) {
+            continue;
+        }
+        if has_part {
+            units.push(u16::from(b' '));
+        }
+        // Native filters truthy values first, then `nl` returns an empty
+        // string for a non-string value. Keep that ordering and sanitize each
+        // source property independently before joining.
+        let sanitized = diagnostics::sanitize_native_mcp_projection(source);
+        let part = sanitized.string_units("").unwrap_or_default();
+        units.extend(part);
+        has_part = true;
+    }
+    Some(
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("display error UTF-16 units form a source string"),
+    )
+}
+
+/// Native 2.1.295 `nl` text projection used by failed-MCP rows and the
+/// dropped-tools attachment. It is distinct from the ToolSearch `xLt` note
+/// sanitizer, which intentionally has no credential redaction.
+pub fn sanitize_native_mcp_text(input: &str) -> String {
+    diagnostics::sanitize_native_mcp_text(input)
+}
+
 fn clone_mcp_error(error: &McpError) -> McpError {
     match error {
         McpError::UnsupportedTransport(kind) => McpError::UnsupportedTransport(*kind),
@@ -850,6 +1090,10 @@ impl McpRegistry {
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
             clients: Arc::clone(&self.clients),
+            failure_diagnostics: Arc::clone(&self.failure_diagnostics),
+            next_turn_redials: Arc::clone(&self.next_turn_redials),
+            server_order: Arc::clone(&self.server_order),
+            dropped_tool_snapshots: Arc::clone(&self.dropped_tool_snapshots),
             output_parser_slots: Arc::clone(&self.output_parser_slots),
             catalog_changes: self.catalog_changes.clone(),
             agent_scoped: Arc::clone(&self.agent_scoped),
@@ -895,6 +1139,10 @@ impl McpRegistry {
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
             clients: Arc::new(RwLock::new(IndexMap::new())),
+            failure_diagnostics: Arc::new(RwLock::new(HashMap::new())),
+            next_turn_redials: Arc::new(RwLock::new(HashMap::new())),
+            server_order: Arc::new(StdMutex::new(Vec::new())),
+            dropped_tool_snapshots: Arc::new(RwLock::new(HashMap::new())),
             output_parser_slots: Arc::new(StdMutex::new(HashMap::new())),
             catalog_changes,
             agent_scoped: Arc::new(RwLock::new(HashMap::new())),
@@ -987,6 +1235,16 @@ impl McpRegistry {
                 .entry(name.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
+    }
+
+    fn remember_server_order(&self, name: &str) {
+        let mut order = self
+            .server_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !order.iter().any(|entry| entry == name) {
+            order.push(name.to_string());
+        }
     }
 
     /// Per-server-key single-flight lock for the XAA resolve chain (§26b
@@ -1851,25 +2109,6 @@ impl McpRegistry {
     /// `Connected` state.
     pub async fn connect(&self, config: McpServerConfig) -> Result<McpConnectionId, McpError> {
         self.freeze_configuration();
-        // `zar()` — refuse an unconfigured remote server BEFORE opening a
-        // socket or spawning anything. Oracle @231408727:
-        //   if (zar(t)) return {type:"failed", errorCode:"UNCONFIGURED", ...}
-        //
-        // This guard is what makes it safe for `json_config` to keep
-        // blank-url entries: they now reach the listing, and `mcp list`
-        // health-probes approved servers, so without it a typo'd config would
-        // become a live connect attempt against an empty URL.
-        if is_unconfigured_remote(&config.spec) {
-            emit_server_connection_failed(&server_connection_failed_payload(
-                &config,
-                None,
-                None,
-                Some("UNCONFIGURED"),
-            ));
-            return Err(McpError::Connection(
-                UNCONFIGURED_MESSAGE.to_string().into(),
-            ));
-        }
         let lifecycle = self.lifecycle_lock(&config.name);
         let _guard = lifecycle.lock().await;
         self.connect_locked(config, None).await
@@ -1931,6 +2170,9 @@ impl McpRegistry {
                     last_error: None,
                 },
             );
+            if let Some(connection_id) = retired_connection_id {
+                self.clear_dropped_tool_snapshot(connection_id).await;
+            }
             self.clients.write().await.shift_remove(&key);
             self.set_output_parser_client(&key, None).await;
             self.clear_prompt_predecessors_for_key(&key).await;
@@ -1970,17 +2212,6 @@ impl McpRegistry {
         guard: Arc<McpOperationGuard>,
     ) -> Result<Option<McpConnectionId>, McpError> {
         self.freeze_configuration();
-        if is_unconfigured_remote(&config.spec) {
-            emit_server_connection_failed(&server_connection_failed_payload(
-                &config,
-                None,
-                None,
-                Some("UNCONFIGURED"),
-            ));
-            return Err(McpError::Connection(
-                UNCONFIGURED_MESSAGE.to_string().into(),
-            ));
-        }
         let key = config.name.clone();
         let lifecycle = self.lifecycle_lock(&key);
         let _guard = lifecycle.lock().await;
@@ -2063,6 +2294,8 @@ impl McpRegistry {
                     let _ = self.cleanup_owned_pending_state(&key, &config).await;
                     return Ok(None);
                 }
+                self.record_connection_failure_diagnostic(&config, &error)
+                    .await;
                 connections.insert(key.clone(), Self::connection_failure_state(config, &error));
                 drop(connections);
                 self.clear_prompt_predecessors_for_key(&key).await;
@@ -2117,17 +2350,6 @@ impl McpRegistry {
         agent_id: AgentId,
     ) -> Result<(McpConnectionId, String), McpError> {
         self.freeze_configuration();
-        if is_unconfigured_remote(&config.spec) {
-            emit_server_connection_failed(&server_connection_failed_payload(
-                &config,
-                None,
-                None,
-                Some("UNCONFIGURED"),
-            ));
-            return Err(McpError::Connection(
-                UNCONFIGURED_MESSAGE.to_string().into(),
-            ));
-        }
         let table_key = agent_scope_table_key(agent_id, &config.name);
         let lifecycle = self.lifecycle_lock(&table_key);
         let _guard = lifecycle.lock().await;
@@ -2180,6 +2402,10 @@ impl McpRegistry {
             // A failed public connect must never strand the registry in
             // `Connecting`. Reconnect scheduling only considers disconnected
             // states, and `/mcp` should expose the actual last failure.
+            if key == config.name {
+                self.record_connection_failure_diagnostic(&config, error)
+                    .await;
+            }
             self.connections
                 .write()
                 .await
@@ -2205,6 +2431,7 @@ impl McpRegistry {
         operation_guard: Option<&McpOperationGuard>,
     ) -> Result<McpConnectionId, McpError> {
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
+        self.remember_server_order(&key);
         Self::validate_connectable_config(&config)?;
         if operation_guard.is_some_and(|guard| !guard()) {
             return Err(operation_guard_rejected());
@@ -2324,6 +2551,105 @@ impl McpRegistry {
             .await?;
         self.install_live_discovery(key, config, discovery, None, operation_guard, None)
             .await
+    }
+
+    fn connection_failure_diagnostics(
+        config: &McpServerConfig,
+        error: &McpError,
+    ) -> McpConnectionFailure {
+        let (error, error_code) = if config.is_unconfigured() {
+            (
+                Some(source_string_projection(
+                    crate::connection::UNCONFIGURED_ERROR,
+                )),
+                Some(source_string_projection("UNCONFIGURED")),
+            )
+        } else if let Some(message) = config
+            .config_error
+            .as_deref()
+            .or_else(|| config.connect_time_url_error())
+        {
+            (
+                Some(source_string_projection(message)),
+                Some(source_string_projection("INVALID_CONFIG")),
+            )
+        } else {
+            let error_code = match error {
+                McpError::Connection(message) => {
+                    let message = message.string_at("").unwrap_or_default();
+                    if message == NATIVE_CONNECTION_TIMEOUT_MESSAGE
+                        && telemetry::flag_bool(NATIVE_CONNECT_TIMEOUT_RETRY_FLAG, true)
+                    {
+                        Some(source_string_projection("CONNECT_TIMEOUT"))
+                    } else if message.starts_with(
+                        "Server rejected the configured Authorization header (HTTP ",
+                    ) {
+                        Some(source_string_projection("AUTH_HEADER_REJECTED"))
+                    } else if message.starts_with(
+                        "Server rejected the Authorization header minted by the configured headersHelper (HTTP ",
+                    ) {
+                        Some(source_string_projection("HEADERS_HELPER_AUTH_REJECTED"))
+                    } else {
+                        None
+                    }
+                }
+                // Native's connection failure projector uses
+                // `status ?? error.code ?? cause.code` and then stringifies
+                // the selected source value. This transport DTO retains the
+                // first two typed cases; it does not infer a code from text.
+                McpError::HttpResponse { status, .. } => {
+                    Some(source_string_projection(&status.to_string()))
+                }
+                McpError::Result(result) => Some(source_string_projection(result.code)),
+                _ => None,
+            };
+            let error = match error {
+                McpError::Result(result) => Some(source_string_projection(&result.message)),
+                _ => error.source_diagnostic(),
+            };
+            (error, error_code)
+        };
+        McpConnectionFailure {
+            error,
+            display_detail: None,
+            error_code,
+        }
+    }
+
+    async fn record_connection_failure_diagnostic(
+        &self,
+        config: &McpServerConfig,
+        error: &McpError,
+    ) {
+        self.failure_diagnostics.write().await.insert(
+            config.name.clone(),
+            ConnectionFailureDiagnostic {
+                config: config.clone(),
+                failure: Self::connection_failure_diagnostics(config, error),
+            },
+        );
+    }
+
+    async fn clear_connection_failure_diagnostic(&self, name: &str) {
+        self.failure_diagnostics.write().await.remove(name);
+    }
+
+    async fn record_dropped_tool_snapshot(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+        tools: Vec<McpDroppedToolRecord>,
+    ) {
+        let mut snapshots = self.dropped_tool_snapshots.write().await;
+        snapshots.retain(|id, (name, _)| name != server_name || *id == connection_id);
+        snapshots.insert(connection_id, (server_name.to_string(), tools));
+    }
+
+    async fn clear_dropped_tool_snapshot(&self, connection_id: McpConnectionId) {
+        self.dropped_tool_snapshots
+            .write()
+            .await
+            .remove(&connection_id);
     }
 
     fn connection_failure_needs_auth(error: &McpError) -> bool {
@@ -2967,6 +3293,7 @@ impl McpRegistry {
                     1,
                 );
             }
+            let mut dropped_tools = Vec::new();
             tools.retain_mut(|dto| {
                 let decision = crate::tool_schema::decide_tool_schema_source(
                     gate_url.as_deref(),
@@ -2981,6 +3308,10 @@ impl McpRegistry {
                     *degraded_counts.entry(reason).or_insert(0) += 1;
                 }
                 if let Some(reason) = decision.drop_reason {
+                    dropped_tools.push(McpDroppedToolRecord {
+                        tool_name: dto.tool_name.clone(),
+                        reason: reason.clone(),
+                    });
                     tracing::warn!(
                         server = %server_display,
                         tool = %dto.tool_name,
@@ -3041,6 +3372,7 @@ impl McpRegistry {
                 grant_provenance,
                 capabilities: caps,
                 tools,
+                dropped_tools,
                 resources,
                 resource_templates,
                 prompts,
@@ -3163,12 +3495,23 @@ impl McpRegistry {
         let (tools, resources, resource_templates, prompts) = self
             .published_catalogs_for_connection(&key, connection_id, &discovery)
             .await;
+        let dropped_tools = discovery.dropped_tools.clone();
+        if shared_server {
+            self.clear_connection_failure_diagnostic(&server_name).await;
+            self.record_dropped_tool_snapshot(&server_name, connection_id, dropped_tools.clone())
+                .await;
+        }
+        if let Some(retired_connection_id) = retired_connection_id {
+            self.clear_dropped_tool_snapshot(retired_connection_id)
+                .await;
+        }
         let metadata = self.transport.server_metadata(connection_id);
         self.persist_or_purge_discovery_cache(
             &config,
             discovery.discovery_cache_partition.as_ref(),
             &capabilities,
             &tools,
+            &dropped_tools,
             &resources,
             &resource_templates,
             &prompts,
@@ -3300,12 +3643,25 @@ impl McpRegistry {
         let (tools, resources, resource_templates, prompts) = self
             .published_catalogs_for_connection(key, discovery.connection_id, &discovery)
             .await;
+        let dropped_tools = discovery.dropped_tools.clone();
+        if shared_server {
+            self.clear_connection_failure_diagnostic(&server_name).await;
+            self.record_dropped_tool_snapshot(
+                &server_name,
+                discovery.connection_id,
+                dropped_tools.clone(),
+            )
+            .await;
+        }
+        self.clear_dropped_tool_snapshot(slot.cached_connection_id)
+            .await;
         let metadata = self.transport.server_metadata(discovery.connection_id);
         self.persist_or_purge_discovery_cache(
             &slot.expected_config,
             discovery.discovery_cache_partition.as_ref(),
             &capabilities,
             &tools,
+            &dropped_tools,
             &resources,
             &resource_templates,
             &prompts,
@@ -3401,6 +3757,8 @@ impl McpRegistry {
                 _ => false,
             };
             if current_generation {
+                self.record_connection_failure_diagnostic(&slot.expected_config, error)
+                    .await;
                 let auth_response = matches!(
                     error,
                     McpError::HttpResponse {
@@ -3423,6 +3781,8 @@ impl McpRegistry {
                     key.to_string(),
                     Self::connection_failure_state(slot.expected_config.clone(), error),
                 );
+                self.clear_dropped_tool_snapshot(slot.cached_connection_id)
+                    .await;
                 self.clear_prompt_predecessors_for_key(key).await;
                 self.emit_retire_event_if_shared(
                     &slot.expected_config,
@@ -3661,6 +4021,9 @@ impl McpRegistry {
     ) -> Vec<(String, Result<McpConnectionId, McpError>)> {
         use futures_util::future::join_all;
         self.freeze_configuration();
+        for config in &configs {
+            self.remember_server_order(&config.name);
+        }
         let futs = configs.into_iter().map(|config| async move {
             let name = config.name.clone();
             let lifecycle = self.lifecycle_lock(&name);
@@ -3698,6 +4061,269 @@ impl McpRegistry {
         join_all(futs).await.into_iter().flatten().collect()
     }
 
+    /// Run the source's next-user-turn retry scheduler. The caller invokes
+    /// this only after a committed, regular user prompt; timer-driven
+    /// reconnects never set `willRetry`.
+    pub async fn turn_started(self: &Arc<Self>) {
+        let retry_budget = native_next_turn_retry_budget();
+        if retry_budget == 0 {
+            return;
+        }
+
+        let now = Instant::now();
+        let config_order = self
+            .server_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let config_positions: HashMap<String, usize> = config_order
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| (name, index))
+            .collect();
+        let (mut candidates, pending_hold) = {
+            let connections = self.connections.read().await;
+            let diagnostics = self.failure_diagnostics.read().await;
+            let pending_hold = connections
+                .iter()
+                .filter_map(|(name, state)| {
+                    let McpConnectionState::Connecting { config, started_at } = state else {
+                        return None;
+                    };
+                    if config.disabled || config.spec.kind() == "sdk-control" {
+                        return None;
+                    }
+                    Some((
+                        config_positions.get(name).copied().unwrap_or(usize::MAX),
+                        name,
+                        PendingTurnHold {
+                            server_name: name.clone(),
+                            started_at: *started_at,
+                        },
+                    ))
+                })
+                .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
+                .map(|(_, _, hold)| hold);
+            let candidates = connections
+                .iter()
+                .filter_map(|(name, state)| {
+                    let fingerprint = failed_state_fingerprint(state)?;
+                    let config = state.config();
+                    if !native_next_turn_redial_allowed(config) {
+                        return None;
+                    }
+                    let failure = failure_for_state(state, &diagnostics)?;
+                    if !native_next_turn_retryable(config, &failure) {
+                        return None;
+                    }
+                    Some(NextTurnRedialCandidate {
+                        name: name.clone(),
+                        config: config.clone(),
+                        failure,
+                        state: fingerprint,
+                        turns: 0,
+                        order: config_positions.get(name).copied().unwrap_or(usize::MAX),
+                    })
+                })
+                .collect::<Vec<_>>();
+            (candidates, pending_hold)
+        };
+        let has_pending = pending_hold.is_some();
+
+        let active_names: HashSet<String> = candidates
+            .iter()
+            .map(|candidate| candidate.name.clone())
+            .collect();
+        let mut redials = self.next_turn_redials.write().await;
+        redials.retain(|name, state| state.in_flight || active_names.contains(name));
+
+        for candidate in &mut candidates {
+            let entry =
+                redials
+                    .entry(candidate.name.clone())
+                    .or_insert_with(|| NextTurnRedialState {
+                        config: candidate.config.clone(),
+                        failure: candidate.failure.clone(),
+                        turns: 0,
+                        held_turns: 0,
+                        in_flight: false,
+                        last_attempt: None,
+                        held_by: None,
+                        held_since: None,
+                    });
+            if !Self::same_config_snapshot(&entry.config, &candidate.config) {
+                *entry = NextTurnRedialState {
+                    config: candidate.config.clone(),
+                    failure: candidate.failure.clone(),
+                    turns: 0,
+                    held_turns: 0,
+                    in_flight: false,
+                    last_attempt: None,
+                    held_by: None,
+                    held_since: None,
+                };
+            }
+            entry.failure = candidate.failure.clone();
+            candidate.turns = entry.turns;
+            if let Some(pending_hold) = &pending_hold {
+                if entry.held_by.as_ref() != Some(pending_hold) {
+                    entry.held_by = Some(pending_hold.clone());
+                    entry.held_since = Some(now);
+                }
+                let held_since = entry.held_since.get_or_insert(now);
+                let hold_window = (mcp_connection_timeout() * 2).min(Duration::from_secs(600));
+                if now.duration_since(*held_since) >= hold_window
+                    && entry.turns.saturating_add(entry.held_turns) < retry_budget
+                    && entry.last_attempt.is_none_or(|last| {
+                        now.duration_since(last) >= NATIVE_NEXT_TURN_RETRY_COOLDOWN
+                    })
+                {
+                    entry.held_turns = entry.held_turns.saturating_add(1);
+                    entry.last_attempt = Some(now);
+                }
+            } else {
+                entry.held_by = None;
+                entry.held_since = None;
+            }
+        }
+
+        let in_flight = redials.values().filter(|state| state.in_flight).count();
+        if has_pending || in_flight >= NATIVE_NEXT_TURN_MAX_CONCURRENT_REDIALS {
+            return;
+        }
+        candidates.sort_by(|left, right| {
+            left.turns
+                .cmp(&right.turns)
+                .then_with(|| left.order.cmp(&right.order))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let capacity = NATIVE_NEXT_TURN_MAX_CONCURRENT_REDIALS - in_flight;
+        let mut selected = Vec::new();
+        for candidate in candidates {
+            if selected.len() >= capacity {
+                break;
+            }
+            let Some(entry) = redials.get_mut(&candidate.name) else {
+                continue;
+            };
+            if entry.in_flight
+                || entry.turns.saturating_add(entry.held_turns) >= retry_budget
+                || entry
+                    .last_attempt
+                    .is_some_and(|last| now.duration_since(last) < NATIVE_NEXT_TURN_RETRY_COOLDOWN)
+            {
+                continue;
+            }
+            entry.in_flight = true;
+            entry.turns = entry.turns.saturating_add(1);
+            selected.push((candidate.name, candidate.config, candidate.state));
+        }
+        drop(redials);
+
+        for (name, config, state) in selected {
+            let registry = Arc::clone(self);
+            tokio::spawn(async move {
+                registry
+                    .redial_failed_server_on_turn(name, config, state)
+                    .await;
+            });
+        }
+    }
+
+    async fn redial_failed_server_on_turn(
+        self: Arc<Self>,
+        name: String,
+        config: McpServerConfig,
+        expected_state: FailedStateFingerprint,
+    ) {
+        let lifecycle = self.lifecycle_lock(&name);
+        let lifecycle_guard = lifecycle.lock().await;
+        let current = {
+            let connections = self.connections.read().await;
+            connections.get(&name).cloned()
+        };
+        let is_current_failure = current.as_ref().is_some_and(|state| {
+            Self::same_config_snapshot(state.config(), &config)
+                && match (expected_state, failed_state_fingerprint(state)) {
+                    (
+                        FailedStateFingerprint::Disconnected,
+                        Some(FailedStateFingerprint::Disconnected),
+                    ) => {
+                        matches!(
+                            state,
+                            McpConnectionState::Disconnected {
+                                last_error: Some(_),
+                                ..
+                            }
+                        )
+                    }
+                    (
+                        FailedStateFingerprint::Failed { attempts: expected },
+                        Some(FailedStateFingerprint::Failed { attempts: actual }),
+                    ) => expected == actual,
+                    _ => false,
+                }
+        });
+        if !is_current_failure {
+            drop(lifecycle_guard);
+            self.finish_next_turn_redial(&name, &config, false).await;
+            return;
+        }
+
+        let _ = self
+            .connect_locked(config.clone(), Some(name.clone()))
+            .await;
+        drop(lifecycle_guard);
+        self.finish_next_turn_redial(&name, &config, true).await;
+    }
+
+    async fn finish_next_turn_redial(
+        &self,
+        name: &str,
+        config: &McpServerConfig,
+        was_dialed: bool,
+    ) {
+        let current_state = {
+            let connections = self.connections.read().await;
+            connections.get(name).cloned()
+        };
+        let diagnostics = self.failure_diagnostics.read().await;
+        let failure = current_state
+            .as_ref()
+            .filter(|state| Self::same_config_snapshot(state.config(), config))
+            .and_then(|state| failure_for_state(state, &diagnostics));
+        let retryable = failure
+            .as_ref()
+            .is_some_and(|failure| native_next_turn_retryable(config, failure));
+        let is_still_failed = current_state.as_ref().is_some_and(|state| {
+            Self::same_config_snapshot(state.config(), config)
+                && failed_state_fingerprint(state).is_some()
+        });
+        let mut redials = self.next_turn_redials.write().await;
+        let Some(entry) = redials.get(name) else {
+            return;
+        };
+        if !Self::same_config_snapshot(&entry.config, config) {
+            return;
+        }
+        let remove = !(is_still_failed && retryable && failure.is_some());
+        let entry = redials
+            .get_mut(name)
+            .expect("redial state remained present under write lock");
+        if was_dialed {
+            entry.last_attempt = Some(Instant::now());
+        } else {
+            entry.turns = entry.turns.saturating_sub(1);
+        }
+        entry.in_flight = false;
+        if let Some(failure) = failure.filter(|_| !remove) {
+            entry.failure = failure;
+        }
+        if remove {
+            redials.remove(name);
+        }
+    }
+
     /// Background reconnect/backoff loop (claude-code `reconnectWithBackoff`).
     ///
     /// Spawn with `tokio::spawn(registry.clone().run_reconnect_loop())`. The
@@ -3711,19 +4337,46 @@ impl McpRegistry {
     pub async fn run_reconnect_loop(self: Arc<Self>) {
         loop {
             self.kick_pending_transport_cleanups().await;
+            let retry_budget = native_next_turn_retry_budget();
+            let native_managed: HashSet<String> = if retry_budget == 0 {
+                HashSet::new()
+            } else {
+                self.next_turn_redials
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|(_, retry)| {
+                        retry.in_flight
+                            || (retry.turns.saturating_add(retry.held_turns) < retry_budget
+                                && native_next_turn_redial_allowed(&retry.config)
+                                && native_next_turn_retryable(&retry.config, &retry.failure))
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            };
             let candidates: Vec<McpServerConfig> = {
                 let conns = self.connections.read().await;
                 conns
-                    .values()
-                    .filter_map(|state| match state {
+                    .iter()
+                    .filter_map(|(name, state)| match state {
                         McpConnectionState::Disconnected {
                             config,
                             last_error: Some(_),
                         }
-                        | McpConnectionState::Reconnecting { config, .. } => Some(config.clone()),
+                        | McpConnectionState::Reconnecting { config, .. }
+                            if !native_managed.contains(name) =>
+                        {
+                            Some(config.clone())
+                        }
                         _ => None,
                     })
-                    .filter(|config| !config.disabled && config.spec.kind() != "stdio")
+                    .filter(|config| {
+                        !config.disabled
+                            && config.spec.kind() != "stdio"
+                            && !config.is_unconfigured()
+                            && config.config_error.is_none()
+                            && config.connect_time_url_error().is_none()
+                    })
                     .collect()
             };
 
@@ -3768,6 +4421,18 @@ impl McpRegistry {
             let retry = {
                 let lifecycle = self.lifecycle_lock(&name);
                 let _guard = lifecycle.lock().await;
+
+                let next_turn_dial_active = self
+                    .next_turn_redials
+                    .read()
+                    .await
+                    .get(&name)
+                    .is_some_and(|retry| {
+                        retry.in_flight && Self::same_config_snapshot(&retry.config, &config)
+                    });
+                if next_turn_dial_active {
+                    return;
+                }
 
                 match self.connections.read().await.get(&name) {
                     Some(McpConnectionState::Stopped { .. }) | None => {
@@ -3988,6 +4653,13 @@ impl McpRegistry {
         };
         if !transitioned {
             return Ok(());
+        }
+
+        if name == config.name {
+            self.clear_connection_failure_diagnostic(name).await;
+        }
+        if let Some((connection_id, _)) = generation {
+            self.clear_dropped_tool_snapshot(connection_id).await;
         }
 
         // Drop any cached `McpClient` so `get_client(name)` stops returning a
@@ -4309,6 +4981,31 @@ impl McpRegistry {
         out
     }
 
+    /// Current `NeedsAuth` server rows paired with their source config for
+    /// Native SPr projection. Only shared-host entries are returned; scoped
+    /// worker entries are not part of the host MCP client list. The snapshot
+    /// keeps the name and transport config from the same connection-state
+    /// read so a connector-specific predicate never consults a later config.
+    pub async fn needs_auth_deferred_tool_servers(&self) -> Vec<McpNeedsAuthServerSnapshot> {
+        let connections = self.connections.read().await;
+        let mut out: Vec<McpNeedsAuthServerSnapshot> = connections
+            .iter()
+            .filter_map(|(server_key, state)| {
+                if server_key.as_str() != state.config().name.as_str()
+                    || project_action_state(state) != lingxi_core::host::McpActionState::NeedsAuth
+                {
+                    return None;
+                }
+                Some(McpNeedsAuthServerSnapshot {
+                    name: state.name().to_string(),
+                    config: state.config().clone(),
+                })
+            })
+            .collect();
+        out.sort_by(|left, right| left.name.cmp(&right.name));
+        out
+    }
+
     /// Failed servers with their sanitized error text, for the `ToolSearch`
     /// empty-result diagnostics note — a port of claude-code's `wZr(u())`
     /// (`failed_mcp_servers`). Every server whose action state projects to
@@ -4339,6 +5036,128 @@ impl McpRegistry {
             })
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Failed-client source snapshot for deferred tool deltas. This is
+    /// separate from [`Self::failed_action_servers`], whose broader projection
+    /// is retained for ToolSearch diagnostics. Failure-bearing `Disconnected`
+    /// and terminal `Failed` states are returned. While a Native next-turn
+    /// redial runs, a matching `Connecting` state temporarily carries the
+    /// retained source failure because Native keeps the previous failed client
+    /// row in its list until the replacement is ready. Other auth, pending,
+    /// stopped, disabled, and unconfigured clients are excluded.
+    pub async fn failed_deferred_tool_servers(&self) -> Vec<McpFailedServerSnapshot> {
+        let connections = self.connections.read().await;
+        let diagnostics = self.failure_diagnostics.read().await;
+        let redials = self.next_turn_redials.read().await;
+        let retry_budget = native_next_turn_retry_budget();
+        let mut out = Vec::new();
+        for (server_key, state) in connections.iter() {
+            if server_key.as_str() != state.config().name.as_str() {
+                continue;
+            }
+            if state.config().disabled || state.config().is_unconfigured() {
+                continue;
+            }
+            let redial = redials
+                .get(server_key)
+                .filter(|entry| Self::same_config_snapshot(&entry.config, state.config()));
+            let Some(failure) = failure_for_state(state, &diagnostics).or_else(|| {
+                redial
+                    .filter(|entry| {
+                        entry.in_flight
+                            && matches!(
+                                state,
+                                McpConnectionState::Connecting { .. }
+                                    | McpConnectionState::Reconnecting { .. }
+                            )
+                    })
+                    .map(|entry| entry.failure.clone())
+            }) else {
+                continue;
+            };
+            if failure
+                .error_code
+                .as_ref()
+                .and_then(|code| code.string_at(""))
+                == Some("UNCONFIGURED")
+            {
+                continue;
+            }
+            out.push(McpFailedServerSnapshot {
+                name: diagnostics::sanitize_native_mcp_text(state.name()),
+                error_code: failure.error_code.as_ref().map(sanitize_failure_projection),
+                error: merged_failure_display_error(&failure),
+                native_raw_error: failure.error.clone(),
+                will_retry: (native_next_turn_redial_allowed(state.config())
+                    && native_next_turn_retryable(state.config(), &failure)
+                    && redial.is_some_and(|entry| {
+                        entry.in_flight
+                            || entry.turns.saturating_add(entry.held_turns) < retry_budget
+                    }))
+                .then_some(true),
+            });
+        }
+        out.sort_by(|left, right| left.name.cmp(&right.name));
+        out
+    }
+
+    /// Pending client names for the deferred-tools snapshot. A Native
+    /// next-turn redial keeps its original failed client row in `mcp.clients`
+    /// until the replacement connection is ready, so the same server must not
+    /// be projected as both failed and pending while this registry's internal
+    /// state is `Connecting`.
+    pub async fn pending_deferred_tool_servers(&self) -> Vec<String> {
+        let connections = self.connections.read().await;
+        let redials = self.next_turn_redials.read().await;
+        let mut out = Vec::new();
+        for (server_key, state) in connections.iter() {
+            if project_action_state(state) != lingxi_core::host::McpActionState::Pending {
+                continue;
+            }
+            let is_next_turn_redial = redials.get(server_key).is_some_and(|entry| {
+                entry.in_flight && Self::same_config_snapshot(&entry.config, state.config())
+            });
+            if !is_next_turn_redial {
+                out.push(state.name().to_string());
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Return schema-dropped tools for current connected or cache-served
+    /// generations. The records come from each successful `tools/list` schema
+    /// decision; they are not reconstructed from advertised tool names.
+    pub async fn dropped_tool_servers(&self) -> Vec<McpDroppedToolServerSnapshot> {
+        let connections = self.connections.read().await;
+        let dropped = self.dropped_tool_snapshots.read().await;
+        let mut out = Vec::new();
+        for (server_key, state) in connections.iter() {
+            let connection_id = match state {
+                McpConnectionState::Connected { connection_id, .. }
+                | McpConnectionState::Cached { connection_id, .. }
+                    if !state.config().disabled
+                        && state.config().name.as_str() == server_key.as_str() =>
+                {
+                    *connection_id
+                }
+                _ => continue,
+            };
+            let Some((server_name, tools)) = dropped.get(&connection_id) else {
+                continue;
+            };
+            if server_name != &state.config().name || tools.is_empty() {
+                continue;
+            }
+            out.push(McpDroppedToolServerSnapshot {
+                server_name: server_name.clone(),
+                connection_id,
+                tools: tools.clone(),
+            });
+        }
+        out.sort_by(|left, right| left.server_name.cmp(&right.server_name));
         out
     }
 

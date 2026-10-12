@@ -53,6 +53,7 @@ mod fusion_implement_e2e_test;
 mod fusion_pool_admission_test;
 pub mod fusion_recorder;
 pub mod ide;
+mod managed_plist;
 mod pane_teammate;
 mod sandbox_runner;
 pub mod session_agents;
@@ -82,7 +83,7 @@ pub use orchestrator::native_computer::VerifiedComputerProfile;
 use orchestrator::{ConversationOrchestrator, ProviderApiAdapter};
 use permission::gate::PermissionGate;
 
-use skill_api::SkillRegistry;
+use skill::SkillRegistry;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -1628,14 +1629,14 @@ pub fn register_desktop_tools_with_fusion_recorder(
 
 /// Assemble the desktop builtin **skill** registry.
 ///
-/// Delegates to `skill_api::register_desktop`, the single place that names
+/// Delegates to `skill::register_desktop`, the single place that names
 /// the desktop builtin skill set. Empty in M8 (no Rust-bundled skills yet —
 /// skills are markdown loaded from disk by the session loader); the mobile
-/// composition root will call `skill_api::register_mobile` instead.
+/// composition root will call `skill::register_mobile` instead.
 #[must_use]
 pub fn desktop_skill_registry() -> SkillRegistry {
     let mut reg = SkillRegistry::new();
-    skill_api::register_desktop(&mut reg);
+    skill::register_desktop(&mut reg);
     reg
 }
 
@@ -1791,12 +1792,13 @@ pub async fn desktop_command_registry(
     connect_chatgpt: Arc<dyn command_api::builtins::ChatGptConnectDriver>,
     gates: CustomizationGates,
     strict_plugin_only_skills: bool,
-    // `--add-dir` roots. Each contributes `<root>/<DOT_DIR>/skills` to skill
-    // discovery, mirroring upstream's
-    // `for(let e of Up()){ let S = P.join(e,".claude","skills"); … }`
-    // (2.1.267 `src_172414592.js` @5180). Raw roots, NOT skill dirs: the join
-    // happens below so all three registration sites share one answer.
-    add_dir_roots: &[std::path::PathBuf],
+    // Native `host.extensionsConfig.additionalDirectoriesForClaudeMd()` roots
+    // supplied by this host (`--add-dir`). Each contributes
+    // `<root>/<DOT_DIR>/skills` to discovery. Settings
+    // `permissions.additionalDirectories` widen tool access but are not this
+    // host callback and must not create skill roots.
+    native_skill_roots: &[std::path::PathBuf],
+    managed_policy_snapshot_cache: settings_watch::ManagedPolicySnapshotCache,
     // SKILLEXEC: the SAME shared command-registry slot the slash dispatcher and
     // `Skill` tool loader observe (filled by `build()` right after this returns).
     // `/reload-skills` (batch 8) mutates it live so a reload refreshes the set
@@ -1821,8 +1823,9 @@ pub async fn desktop_command_registry(
     // wins over the plain handler `register_core_batch_2` just registered. Hosts
     // without a managed policy tier (mobile) keep the plain, unrestricted handler.
     reg.register_builtin_handler(Arc::new(
-        command_api::builtins::LoginHandler::new(auth)
-            .with_org_policy(Arc::new(crate::desktop::connect::DesktopLoginOrgPolicy)),
+        command_api::builtins::LoginHandler::new(auth).with_org_policy(Arc::new(
+            crate::desktop::connect::DesktopLoginOrgPolicy::new(managed_policy_snapshot_cache),
+        )),
     ));
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle.clone());
@@ -1847,9 +1850,13 @@ pub async fn desktop_command_registry(
     // The `--add-dir` skill tier. `load_skill_markdown_files_with_roots` takes
     // ALREADY-RESOLVED skill directories (a test pins that contract), so the
     // `<root>/<DOT_DIR>/skills` join belongs to the caller — here.
-    let additional_skill_dirs: Vec<std::path::PathBuf> = add_dir_roots
+    let additional_skill_dirs: Vec<std::path::PathBuf> = native_skill_roots
         .iter()
-        .map(|root| root.join(branding::DOT_DIR).join("skills"))
+        .map(|root| {
+            permission_config::expand_trusted_dir(root, cwd, Some(&home))
+                .join(branding::DOT_DIR)
+                .join("skills")
+        })
         .collect();
     // Batch 8: the newly-ported implemented commands (`/fork`, `/goal`,
     // `/recap`, `/reload-skills`, `/skill-doctor`, `/stop`). Wired here (after
@@ -3478,7 +3485,9 @@ fn load_effective_settings_for_config(
 pub(super) fn prompt_cache_ttl_settings_for_config(
     cfg: &DesktopConfig,
 ) -> lingxi_core::settings::schema::PromptCacheTtlSettings {
-    let managed = credentials::managed_settings_raw_tiers_sync();
+    let Ok(managed) = settings_watch::managed_policy_layers_sync(cfg) else {
+        return Default::default();
+    };
     load_effective_settings_for_config(cfg, &managed)
         .map(|settings| settings.settings.prompt_cache_ttl_settings())
         .unwrap_or_default()
@@ -3597,7 +3606,9 @@ fn resolve_bash_edit_diff_with(
 
 static SETTINGS_CACHE: OnceLock<Mutex<Option<MergedSettingsCacheEntry>>> = OnceLock::new();
 
-fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
+fn load_merged_output_style(
+    project_dir: &std::path::Path,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
     load_merged_settings(project_dir).and_then(|eff| eff.settings.output_style)
 }
 
@@ -3724,52 +3735,37 @@ fn load_merged_allow_managed_hooks_only(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The settings an administrator pinned through the managed (policy) layer:
-/// key → value, read from the SAME file-based tiers the merge above consumes
-/// (`managed_settings_raw_tiers`).
-///
-/// Returns the VALUES, not just the key names, because a consumer that only
-/// knew the keys would have to report some lower layer's value for exactly the
-/// keys the lower layer cannot win — managed outranks every file layer in the
-/// engine's precedence (`env → managed → cli → local → project → user →
-/// defaults`). A settings UI given only the keys renders the wrong current
-/// value and puts a padlock next to it.
-///
-/// Tier precedence is preserved from `managed_settings_raw_tiers`, which
-/// returns tiers in ASCENDING priority: a later tier's key overwrites an
-/// earlier one's, so `managed-settings.d` drop-ins win over the base
-/// `managed-settings.json`.
-///
-/// Lives here, not in `bridge-server`, because managed-layer discovery is the
-/// composition root's job — the platform-specific managed directory and its
-/// drop-in ordering are resolved once, in one place. Keys are the raw JSON
-/// names (the wire spelling), so they line up with the keys a settings
-/// snapshot reports.
+/// Return the selected managed policy as a source-preserving JSON projection.
+/// `None` means source selection/read failed; a successfully loaded absence is
+/// represented by an empty object projection. Consumers keep exact UTF-16
+/// keys and values instead of rebuilding a map through `serde_json::Value`.
 #[must_use]
-pub async fn managed_settings_overlay() -> std::collections::BTreeMap<String, serde_json::Value> {
-    let mut overlay: std::collections::BTreeMap<String, serde_json::Value> =
-        std::collections::BTreeMap::new();
-    for raw in crate::desktop::settings_watch::managed_settings_raw_tiers().await {
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
-        {
-            for (key, value) in map {
-                overlay.insert(key, value);
-            }
-        }
+pub async fn managed_settings_overlay(
+    cfg: &DesktopConfig,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    let snapshot = settings_watch::managed_settings_snapshot_for_config(cfg).await;
+    if snapshot.read_failed() {
+        return None;
     }
-    overlay
+    Some(snapshot.effective_projection().cloned().unwrap_or_else(|| {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty object is valid JSON")
+    }))
 }
 
 /// Resolve `askUserQuestionTimeout` from its allowed sources only: user,
 /// `--settings`, and managed policy. Project/local files are intentionally
 /// excluded because an untrusted checkout must not control interaction timing.
 async fn load_ask_user_question_timeout(cfg: &DesktopConfig) -> Option<String> {
-    let managed_layers: Vec<lingxi_core::settings::SettingsJson> =
-        crate::desktop::settings_watch::managed_settings_raw_tiers()
-            .await
-            .into_iter()
-            .filter_map(|raw| serde_json::from_str(&raw).ok())
-            .collect();
+    let managed_snapshot = settings_watch::managed_settings_snapshot_for_config(cfg).await;
+    if managed_snapshot.read_failed() {
+        return None;
+    }
+    let managed_layers: Vec<lingxi_core::settings::SettingsJson> = managed_snapshot
+        .effective_json()
+        .into_iter()
+        .filter_map(|raw| serde_json::from_str(&raw).ok())
+        .collect();
     let empty_env = std::collections::BTreeMap::new();
     lingxi_core::settings::Settings::load_with_layers_from_user_path(
         lingxi_core::settings::LoadInputs {
@@ -4195,6 +4191,7 @@ async fn load_enabled_plugins(
     additional_project_roots: &[std::path::PathBuf],
     include_ambient: bool,
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
+    managed_snapshot: &settings_watch::ManagedSettingsSnapshot,
 ) -> std::collections::BTreeMap<String, bool> {
     let mut merged: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     if include_ambient {
@@ -4239,14 +4236,15 @@ async fn load_enabled_plugins(
 
     // Managed policy is always eligible, including when restricted mode has
     // disabled all ambient file settings.
-    for raw in crate::desktop::settings_watch::managed_settings_raw_tiers().await {
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
-        };
-        if let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) {
-            for (k, v) in map {
-                if let Some(b) = v.as_bool() {
-                    merged.insert(k.clone(), b);
+    if !managed_snapshot.read_failed() {
+        if let Some(raw) = managed_snapshot.effective_json() {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) {
+                    for (k, v) in map {
+                        if let Some(b) = v.as_bool() {
+                            merged.insert(k.clone(), b);
+                        }
+                    }
                 }
             }
         }
@@ -4264,6 +4262,7 @@ async fn load_plugin_configs(
     lingxi_home: &std::path::Path,
     restricted: bool,
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
+    managed_snapshot: &settings_watch::ManagedSettingsSnapshot,
 ) -> std::collections::HashMap<String, plugin::PluginUserConfig> {
     let mut merged: std::collections::HashMap<String, plugin::PluginUserConfig> =
         std::collections::HashMap::new();
@@ -4293,7 +4292,10 @@ async fn load_plugin_configs(
             }
         }
     }
-    for raw in crate::desktop::settings_watch::managed_settings_raw_tiers().await {
+    if managed_snapshot.read_failed() {
+        return std::collections::HashMap::new();
+    }
+    for raw in managed_snapshot.effective_json() {
         let (Ok(typed), Ok(source)) = (
             serde_json::from_str::<lingxi_core::settings::SettingsJson>(&raw),
             Utf16JsonProjection::parse(&raw),
@@ -4314,9 +4316,14 @@ async fn load_plugin_configs(
 
 /// Read the managed-only enabled plugin names (name-part only) used to recover
 /// org-policy provenance for plugin session telemetry.
-async fn load_managed_plugin_names() -> std::collections::HashSet<String> {
+fn load_managed_plugin_names(
+    managed_snapshot: &settings_watch::ManagedSettingsSnapshot,
+) -> std::collections::HashSet<String> {
     let mut managed = std::collections::HashSet::new();
-    for raw in crate::desktop::settings_watch::managed_settings_raw_tiers().await {
+    if managed_snapshot.read_failed() {
+        return managed;
+    }
+    for raw in managed_snapshot.effective_json() {
         let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
             continue;
         };
@@ -4459,9 +4466,14 @@ mod managed_mod_seat_tests {
 
 /// Read the managed-only blocked marketplace policy (`blockedMarketplaces`),
 /// last-write-wins across the managed tiers.
-async fn load_blocked_marketplaces() -> std::collections::HashSet<String> {
+fn load_blocked_marketplaces(
+    managed_snapshot: &settings_watch::ManagedSettingsSnapshot,
+) -> std::collections::HashSet<String> {
     let mut blocked = std::collections::HashSet::new();
-    for raw in crate::desktop::settings_watch::managed_settings_raw_tiers().await {
+    if managed_snapshot.read_failed() {
+        return blocked;
+    }
+    for raw in managed_snapshot.effective_json() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
             continue;
         };
@@ -4495,12 +4507,19 @@ async fn discover_plugin_set(
     additional_project_roots: &[std::path::PathBuf],
     restricted: bool,
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
+    managed_snapshot: &settings_watch::ManagedSettingsSnapshot,
     analytics_bus: &Arc<telemetry::AnalyticsBus>,
 ) -> Vec<(
     lingxi_core::types::PluginId,
     plugin::PluginManifest,
     std::path::PathBuf,
 )> {
+    if managed_snapshot.read_failed() {
+        tracing::warn!(
+            "managed policy selection is incomplete; disabling plugin discovery until policy sources load"
+        );
+        return Vec::new();
+    }
     let mut discovered = if ambient || restricted || flag_settings.is_some() {
         let enabled = load_enabled_plugins(
             lingxi_home,
@@ -4508,6 +4527,7 @@ async fn discover_plugin_set(
             additional_project_roots,
             ambient && !restricted,
             flag_settings,
+            managed_snapshot,
         )
         .await;
         let mut d = plugin::discovery::discover_effective_plugins_with_bus(
@@ -4571,6 +4591,9 @@ struct DesktopRepoRootReloader {
     managed_dir: Option<std::path::PathBuf>,
     home: std::path::PathBuf,
     safe_mode: bool,
+    /// Host-owned extension roots captured from startup `--add-dir`. These
+    /// remain part of skill discovery when a later runtime root is registered.
+    native_skill_roots: Vec<std::path::PathBuf>,
     registered_roots: Arc<RwLock<Vec<std::path::PathBuf>>>,
     plugin_runtime: Arc<RwLock<Option<Arc<PluginRuntime>>>>,
 }
@@ -4580,6 +4603,7 @@ impl DesktopRepoRootReloader {
         registry: Arc<RwLock<CommandRegistry>>,
         cwd: std::path::PathBuf,
         lingxi_home: std::path::PathBuf,
+        native_skill_roots: Vec<std::path::PathBuf>,
         safe_mode: bool,
     ) -> Self {
         Self {
@@ -4589,6 +4613,7 @@ impl DesktopRepoRootReloader {
             managed_dir: Some(crate::desktop::settings_watch::managed_settings_dir()),
             home: dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
             safe_mode,
+            native_skill_roots,
             registered_roots: Arc::new(RwLock::new(Vec::new())),
             plugin_runtime: Arc::new(RwLock::new(None)),
         }
@@ -4618,11 +4643,22 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
 
         let mut outcome = lingxi_core::host::RepoRootReloadOutcome::default();
         if request.reload_skills {
-            let roots = self.registered_roots.read().await.clone();
-            let additional_skill_dirs = roots
+            let dynamic_roots = self.registered_roots.read().await.clone();
+            let additional_skill_dirs = self
+                .native_skill_roots
                 .iter()
-                .map(|root| root.join(branding::DOT_DIR).join("skills"))
-                .collect();
+                .chain(dynamic_roots.iter())
+                .map(|root| {
+                    permission_config::expand_trusted_dir(root, &self.cwd, Some(&self.home))
+                        .join(branding::DOT_DIR)
+                        .join("skills")
+                })
+                .fold(Vec::new(), |mut dirs, dir| {
+                    if !dirs.contains(&dir) {
+                        dirs.push(dir);
+                    }
+                    dirs
+                });
             let handler = command_api::builtins::ReloadSkillsHandler::with_all_roots(
                 self.registry.clone(),
                 self.cwd.clone(),
@@ -4693,6 +4729,7 @@ pub struct PluginRuntime {
     /// ambient user/project/local plugin configuration.
     restricted: bool,
     flag_settings: Option<lingxi_core::settings::SettingsJson>,
+    managed_policy_snapshot_cache: settings_watch::ManagedPolicySnapshotCache,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -4750,11 +4787,23 @@ impl PluginRuntime {
     /// targets so ownership does not overlap or partially duplicate.
     pub async fn refresh(&self) -> PluginRefreshCounts {
         let _refresh_guard = self.refresh_lock.lock().await;
-        let plugin_configs =
-            load_plugin_configs(&self.home, self.restricted, self.flag_settings.as_ref()).await;
-        let blocked_marketplaces = load_blocked_marketplaces().await;
-        let managed_plugin_names = load_managed_plugin_names().await;
-        let managed_tiers = settings_watch::managed_settings_raw_tiers().await;
+        let managed_snapshot = settings_watch::managed_settings_snapshot_for_cache(
+            &self.managed_policy_snapshot_cache,
+        )
+        .await;
+        let plugin_configs = load_plugin_configs(
+            &self.home,
+            self.restricted,
+            self.flag_settings.as_ref(),
+            &managed_snapshot,
+        )
+        .await;
+        let blocked_marketplaces = load_blocked_marketplaces(&managed_snapshot);
+        let managed_plugin_names = load_managed_plugin_names(&managed_snapshot);
+        let managed_tiers = managed_snapshot
+            .effective_json()
+            .into_iter()
+            .collect::<Vec<_>>();
         self.manager
             .replace_runtime_refresh_state(
                 plugin_configs,
@@ -4776,6 +4825,7 @@ impl PluginRuntime {
             &additional_project_roots,
             self.restricted,
             self.flag_settings.as_ref(),
+            &managed_snapshot,
             &self.analytics_bus,
         )
         .await;
@@ -5243,95 +5293,378 @@ mod async_hook_response_buffer_tests {
     }
 }
 
+fn has_native_main_query_source(query_source: &str) -> bool {
+    query_source == orchestrator::QUERY_SOURCE_REPL_MAIN_THREAD
+        || query_source.starts_with(&format!(
+            "{}:outputStyle:",
+            orchestrator::QUERY_SOURCE_REPL_MAIN_THREAD
+        ))
+}
+
+fn native_tool_pool_refresh_callback_for(
+    query_source: &str,
+    agent_context: lingxi_core::host::NativeSettingsAgentContext,
+) -> Option<bool> {
+    if !has_native_main_query_source(query_source) {
+        return None;
+    }
+    match agent_context {
+        lingxi_core::host::NativeSettingsAgentContext::Main => Some(true),
+        lingxi_core::host::NativeSettingsAgentContext::Teammate
+        | lingxi_core::host::NativeSettingsAgentContext::Subagent { .. } => Some(false),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn native_main_refresh_source_includes_output_style_suffixes_only() {
+    assert!(has_native_main_query_source(
+        orchestrator::QUERY_SOURCE_REPL_MAIN_THREAD
+    ));
+    assert!(has_native_main_query_source(&format!(
+        "{}:outputStyle:custom",
+        orchestrator::QUERY_SOURCE_REPL_MAIN_THREAD
+    )));
+    assert!(!has_native_main_query_source("repl_main_thread_custom"));
+    assert!(!has_native_main_query_source("repl_main_thread:resume"));
+    assert!(!has_native_main_query_source(
+        orchestrator::QUERY_SOURCE_SDK
+    ));
+
+    let custom_style = format!(
+        "{}:outputStyle:custom",
+        orchestrator::QUERY_SOURCE_REPL_MAIN_THREAD
+    );
+    assert_eq!(
+        native_tool_pool_refresh_callback_for(
+            &custom_style,
+            lingxi_core::host::NativeSettingsAgentContext::Main,
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        native_tool_pool_refresh_callback_for(
+            &custom_style,
+            lingxi_core::host::NativeSettingsAgentContext::Subagent {
+                is_main_session: false,
+            },
+        ),
+        Some(false)
+    );
+}
+
 fn registry_skill_listing_provider(
     registry: Arc<RwLock<CommandRegistry>>,
     read_file_state: tool_api::read_file_state::ReadFileStateMap,
     include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
-    // Conditional-skill activation is SESSION state, not per-listing: once a
-    // touched file has revealed a skill, a later turn whose touched set no
-    // longer names that file must not hide it again.
-    let conditional = Arc::new(std::sync::Mutex::new(skill_api::ConditionalSkills::new()));
-    let precommit_registry = registry.clone();
-    Arc::new(
-        orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
-            let registry = registry.clone();
-            let conditional = conditional.clone();
-            let read_file_state = read_file_state.clone();
-            async move {
-                use command_api::{CommandSource, SlashCommandKind};
-                let reg = registry.read().await;
-                // The read-state map is an LRU with a 100-entry cap, so a
-                // touched path can be evicted. That is exactly why activation is
-                // remembered rather than recomputed: a skill the model has been
-                // shown must not vanish because its file aged out.
-                let touched = read_file_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .keys();
-                let root =
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                reg.model_invocable_commands() // !disable_model_invocation (registry.rs)
-                    .into_iter()
-                    // TS `cmd.type === 'prompt'` — markdown/plugin commands,
-                    // bundled commands, not builtin/mcp.
-                    .filter(|c| {
-                        matches!(
-                            c.kind,
-                            SlashCommandKind::Markdown { .. }
-                                | SlashCommandKind::Plugin { .. }
-                                // Bundled programmatic skills (`/loop`) are model-invocable.
-                                | SlashCommandKind::Bundled { .. }
-                        )
-                    })
-                    // A CONDITIONAL skill (`paths:`) stays out of the listing
-                    // until the session has touched a matching file (claude-code
-                    // `lhr`). `read_file_state` is this port's record of what the
-                    // session touched.
-                    .filter(|c| match c.paths.as_deref() {
-                        None => true,
-                        Some(patterns) => conditional
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .is_available_named(&c.name, patterns, &touched, &root),
-                    })
-                    // 2.1.286 Gee: builtin prompt or a recognized skill origin,
-                    // otherwise explicit description/whenToUse is required.
-                    .filter(|c| {
-                        c.source == CommandSource::Builtin
-                            || matches!(
-                                c.loaded_from.as_deref(),
-                                Some("bundled" | "skills" | "syncedSkills" | "commands_DEPRECATED")
-                            )
-                            || c.has_user_specified_description
-                            || c.when_to_use.is_some()
-                    })
-                    .map(|c| orchestrator::prompt::skill_listing::SkillListingEntry {
-                        name: c.name.clone(),
-                        description: c.description.clone(),
-                        when_to_use: c.when_to_use.clone().map(Into::into),
-                        // TS `cmd.source === 'bundled'` (prompt.ts) — bundled
-                        // skills are never truncated; mirror via loadedFrom.
-                        is_bundled: c.loaded_from.as_deref() == Some("bundled"),
-                    })
-                    .collect()
-            }
-        })
-        .with_bash_precommit_skills(move |entries| {
-            let registry = precommit_registry.clone();
-            let include_code_review_suggestion = include_code_review_suggestion();
-            async move {
-                let registry = registry.read().await;
-                crate::skill_prompt::bash_precommit_skills(
-                    &registry,
-                    &entries,
-                    include_code_review_suggestion,
-                )
-            }
-        }),
+    registry_skill_listing_provider_with_sources(
+        registry,
+        read_file_state,
+        include_code_review_suggestion,
+        Arc::new(|| NativeSkillListingSettings::default()),
+        Arc::new(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        None,
     )
 }
 
+fn registry_skill_listing_provider_for_desktop(
+    registry: Arc<RwLock<CommandRegistry>>,
+    read_file_state: tool_api::read_file_state::ReadFileStateMap,
+    include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
+    cfg: DesktopConfig,
+    session_cwd: Arc<SessionCwd>,
+) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
+    let settings_cfg = cfg.clone();
+    let settings_cwd = session_cwd.clone();
+    let settings_loader: Arc<dyn Fn() -> NativeSkillListingSettings + Send + Sync> =
+        Arc::new(move || {
+            load_native_skill_listing_settings(&settings_cfg, &settings_cwd.cwd())
+                .unwrap_or_default()
+        });
+    let cwd_source = session_cwd.clone();
+    let cwd_provider: Arc<dyn Fn() -> PathBuf + Send + Sync> =
+        { Arc::new(move || cwd_source.cwd()) };
+    registry_skill_listing_provider_with_sources(
+        registry,
+        read_file_state,
+        include_code_review_suggestion,
+        settings_loader,
+        cwd_provider,
+        Some(cfg.lingxi_home.clone()),
+    )
+}
+
+#[derive(Clone, Default)]
+struct NativeSkillListingSettings {
+    base: Option<lingxi_core::settings::SkillOverrides>,
+    /// Admitted local managed-settings files. This is the reachable managed
+    /// policy source here; Native may compose additional parent/remote/MDM
+    /// policySettings inputs that this host does not currently expose.
+    policy: Option<lingxi_core::settings::SkillOverrides>,
+    flag: Option<lingxi_core::settings::SkillOverrides>,
+    disable_bundled_skills: bool,
+    /// `None` means this host has no PolicyVerdictState, so Native's `eRs()`
+    /// supplies an empty array. `Some(None)` means a verdict exists but its
+    /// remembered-core list is nullish, so Native falls back to its fixed
+    /// remembered-core catalog. `Some(Some(...))` is the actual remembered
+    /// list. Current Desktop composition only supplies the no-verdict case;
+    /// the nested states are also used to exercise the source-defined fallback.
+    policy_remembered_core_skills:
+        Option<Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
+    budget: orchestrator::prompt::skill_listing::SkillListingBudgetSettings,
+}
+
+fn load_native_skill_listing_settings(
+    cfg: &DesktopConfig,
+    cwd: &Path,
+) -> Option<NativeSkillListingSettings> {
+    use lingxi_core::settings::tracer::Source;
+
+    let env = std::env::vars().collect::<BTreeMap<_, _>>();
+    let managed_snapshot = settings_watch::managed_settings_snapshot_sync(cfg)?;
+    if managed_snapshot.read_failed() {
+        return None;
+    }
+    let cli_source = cfg.flag_settings_source.clone().or_else(|| {
+        cfg.flag_settings
+            .as_ref()
+            .and_then(|settings| serde_json::to_string(settings).ok())
+    });
+    let (include_user, include_project) = if cfg.restricted {
+        (false, false)
+    } else {
+        cfg.setting_source_scope
+    };
+    let stack = lingxi_core::settings::Settings::load_raw_layer_stack_from_user_path(
+        lingxi_core::settings::LoadInputs {
+            env: &env,
+            project_dir: cwd,
+            defaults: lingxi_core::settings::SettingsJson::default(),
+        },
+        lingxi_core::settings::FileLayerScope {
+            include_user,
+            include_project,
+            include_local: include_project,
+        },
+        lingxi_core::settings::RawSupplementalLayers {
+            cli_layer: cli_source.as_deref(),
+            managed_policy: Some(&managed_snapshot.selection),
+        },
+        Some(&cfg.lingxi_home.join("settings.json")),
+    )
+    .ok()?;
+
+    let admitted = stack.admitted_typed_layers();
+    let mut policy = lingxi_core::settings::SettingsJson::default();
+    let mut flag = lingxi_core::settings::SettingsJson::default();
+    let mut effective = lingxi_core::settings::SettingsJson::default();
+    for layer in admitted {
+        effective = lingxi_core::settings::merger::merge(effective, layer.settings.clone());
+        match layer.source {
+            Source::Cli => {
+                flag = lingxi_core::settings::merger::merge(flag, layer.settings);
+            }
+            Source::Managed => {
+                policy = lingxi_core::settings::merger::merge(policy, layer.settings);
+            }
+            Source::Defaults | Source::User | Source::Project | Source::Local | Source::Env => {}
+        }
+    }
+
+    Some(NativeSkillListingSettings {
+        // Native cte starts from ft().skillOverrides, the fully merged
+        // settings snapshot, then layers policySettings and flagSettings as
+        // their own alias/rank inputs below.
+        base: effective.skill_overrides.clone(),
+        policy: policy.skill_overrides,
+        flag: flag.skill_overrides,
+        disable_bundled_skills: effective.disable_bundled_skills.unwrap_or(false),
+        policy_remembered_core_skills: None,
+        budget: orchestrator::prompt::skill_listing::SkillListingBudgetSettings {
+            budget_fraction: effective.skill_listing_budget_fraction,
+            max_desc_chars: effective.skill_listing_max_desc_chars,
+        },
+    })
+}
+
+fn registry_skill_listing_provider_with_sources(
+    registry: Arc<RwLock<CommandRegistry>>,
+    read_file_state: tool_api::read_file_state::ReadFileStateMap,
+    include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
+    settings_loader: Arc<dyn Fn() -> NativeSkillListingSettings + Send + Sync>,
+    cwd_provider: Arc<dyn Fn() -> PathBuf + Send + Sync>,
+    skill_usage_home: Option<PathBuf>,
+) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
+    // Conditional-skill activation is SESSION state, not per-listing: once a
+    // touched file has revealed a skill, a later turn whose touched set no
+    // longer names that file must not hide it again.
+    let conditional = Arc::new(std::sync::Mutex::new(skill::ConditionalSkills::new()));
+    let precommit_registry = registry.clone();
+    let provider = orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
+        let registry = registry.clone();
+        let conditional = conditional.clone();
+        let read_file_state = read_file_state.clone();
+        let settings_loader = settings_loader.clone();
+        let cwd_provider = cwd_provider.clone();
+        let skill_usage_home = skill_usage_home.clone();
+        async move {
+            use command_api::CommandSource;
+            use lingxi_core::settings::SkillOverride;
+            let reg = registry.read().await;
+            let settings = settings_loader();
+            let usage = skill_usage_home.as_deref().and_then(|home| {
+                command_api::skill_usage::SkillUsageSnapshot::read(home)
+                        .map_err(|error| {
+                            tracing::debug!(%error, "could not load skill listing usage scores")
+                        })
+                        .ok()
+            });
+            // The read-state map is an LRU with a 100-entry cap, so a
+            // touched path can be evicted. That is exactly why activation is
+            // remembered rather than recomputed: a skill the model has been
+            // shown must not vanish because its file aged out.
+            let touched = read_file_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .keys();
+            let root = cwd_provider();
+            let commands = reg
+                .native_source_ordered_commands()
+                .into_iter()
+                // Native applies the command's current enabled predicate
+                // before constructing either the invocation list or its
+                // name-resolution catalog.
+                .filter(|command| command.is_enabled)
+                .collect::<Vec<_>>();
+            let full_catalog = commands
+                .iter()
+                .map(
+                    |command| orchestrator::prompt::skill_listing::SkillListingCatalogName {
+                        name: command.name.clone(),
+                        user_facing_name: command.user_facing_name.clone(),
+                        aliases: command.aliases.clone(),
+                    },
+                )
+                .collect::<Vec<_>>();
+            let entries = commands
+                .into_iter()
+                // Native `getSkillToolCommands`: preserve the registry's
+                // catalog order and apply the prompt, model, and session
+                // availability gates at the current query.
+                .filter(|c| c.is_enabled && c.is_prompt() && !c.disable_model_invocation)
+                .filter(|c| reg.session_skill_allowed(c))
+                // A CONDITIONAL skill (`paths:`) stays out of the listing
+                // until the session has touched a matching file (claude-code
+                // `lhr`). `read_file_state` is this port's record of what the
+                // session touched.
+                .filter(|c| match c.paths.as_deref() {
+                    None => true,
+                    Some(patterns) => conditional
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_available_named(&c.name, patterns, &touched, &root),
+                })
+                // 2.1.286 Gee: builtin prompt or a recognized skill origin,
+                // otherwise explicit description/whenToUse is required.
+                .filter(|c| {
+                    c.source == CommandSource::Builtin
+                        || matches!(
+                            c.loaded_from.as_deref(),
+                            Some("bundled" | "skills" | "syncedSkills" | "commands_DEPRECATED")
+                        )
+                        || c.has_user_specified_description
+                        || c.when_to_use.is_some()
+                })
+                .filter_map(|c| {
+                    let mut entry = orchestrator::prompt::skill_listing::SkillListingEntry {
+                        name: c.name.clone(),
+                        display_name: c.name.clone(),
+                        user_facing_name: c.user_facing_name.clone(),
+                        unqualified_name: c.unqualified_name.clone(),
+                        is_synced_skill: c.loaded_from.as_deref() == Some("syncedSkills"),
+                        bare_name_reserved: c.bare_name_reserved,
+                        aliases: c.aliases.clone(),
+                        source: c.native_source.clone(),
+                        plugin_name: c.plugin_name.clone(),
+                        description: c.description.clone(),
+                        when_to_use: c.when_to_use.clone().map(Into::into),
+                        is_bundled_prompt: c.is_prompt() && c.source == CommandSource::Bundled,
+                        is_name_only: false,
+                        priority: usage
+                            .as_ref()
+                            .map_or(0.0, |snapshot| snapshot.priority_for_command(&c.name)),
+                    };
+                    entry.display_name = orchestrator::prompt::skill_listing::native_display_name(
+                        &entry,
+                        &full_catalog,
+                    );
+                    let override_value = orchestrator::prompt::skill_listing::native_skill_override(
+                        &entry,
+                        settings.base.as_ref(),
+                        settings.policy.as_ref(),
+                        settings.flag.as_ref(),
+                    );
+                    // Native `rQ` has no LingXi PolicyVerdictState source in
+                    // this composition, so absent host state maps to the
+                    // source's empty remembered-core array. Tests can model a
+                    // real verdict with a nullish list via `Some(None)`, which
+                    // selects Native's fixed remembered-core fallback.
+                    let no_verdict_remembered_core_skills: [
+                        lingxi_core::types::utf16_json::Utf16JsonProjection;
+                        0
+                    ] = [];
+                    let remembered_core_skills = settings
+                        .policy_remembered_core_skills
+                        .as_ref()
+                        .map(|remembered| remembered.as_deref())
+                        .unwrap_or(Some(&no_verdict_remembered_core_skills[..]));
+                    let builtin_gate_active = c.is_prompt()
+                        && c.source == CommandSource::Builtin
+                        && orchestrator::prompt::skill_listing::native_builtin_skill_gate_active(
+                            &entry.name,
+                            settings.disable_bundled_skills
+                                || std::env::var_os("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS")
+                                    .is_some_and(|value| !value.is_empty()),
+                            false,
+                            remembered_core_skills,
+                        );
+                    let listing_mode =
+                        orchestrator::prompt::skill_listing::native_skill_listing_mode(
+                            override_value,
+                            c.source == CommandSource::Plugin,
+                            builtin_gate_active,
+                        );
+                    if matches!(
+                        listing_mode,
+                        SkillOverride::Off | SkillOverride::UserInvocableOnly
+                    ) {
+                        return None;
+                    }
+                    entry.is_name_only = listing_mode == SkillOverride::NameOnly;
+                    Some(entry)
+                })
+                .collect();
+            orchestrator::prompt::skill_listing::SkillListingSnapshot {
+                entries,
+                budget_settings: settings.budget,
+            }
+        }
+    });
+    let provider = provider.with_bash_precommit_skills(move |entries| {
+        let registry = precommit_registry.clone();
+        let include_code_review_suggestion = include_code_review_suggestion();
+        async move {
+            let registry = registry.read().await;
+            crate::skill_prompt::bash_precommit_skills(
+                &registry,
+                &entries,
+                include_code_review_suggestion,
+            )
+        }
+    });
+    Arc::new(provider)
+}
 fn code_review_suggestion_provider(
     cfg: DesktopConfig,
     session_cwd: Arc<SessionCwd>,
@@ -5339,11 +5672,12 @@ fn code_review_suggestion_provider(
     Arc::new(move || {
         let mut current_cfg = cfg.clone();
         current_cfg.cwd = session_cwd.cwd();
-        load_effective_settings_for_config(
-            &current_cfg,
-            &credentials::managed_settings_raw_tiers_sync(),
-        )
-        .is_some_and(|effective| effective.settings.include_code_review_suggestion == Some(true))
+        let Ok(managed) = settings_watch::managed_policy_layers_sync(&current_cfg) else {
+            return false;
+        };
+        load_effective_settings_for_config(&current_cfg, &managed).is_some_and(|effective| {
+            effective.settings.include_code_review_suggestion == Some(true)
+        })
     })
 }
 
@@ -5754,7 +6088,6 @@ pub use credentials::build_shared_credential_stack;
 use credentials::build_shared_credential_stack_for_config;
 pub use credentials::build_shared_credential_stack_with_policy;
 use credentials::capture_legacy_opening_balance;
-use credentials::managed_settings_raw_tiers_sync;
 pub use credentials::resolve_llm_stack;
 use credentials::resolve_llm_stack_with_credentials;
 use credentials::CredentialStoreAuthProvider;

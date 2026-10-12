@@ -9,7 +9,8 @@
 
 use async_trait::async_trait;
 use command_api::builtins::{
-    register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
+    register_all_builtin_commands, register_bundled_skills, register_core_batch_1,
+    register_core_batch_2,
 };
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
@@ -63,6 +64,7 @@ fn fresh() -> (RegistrySlashDispatcher, Arc<MockOrchestratorHandle>) {
         org_id: "org".into(),
     }));
     register_core_batch_2(&mut reg, handle.clone(), auth);
+    register_bundled_skills(&mut reg, false);
     let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
     (d, handle)
 }
@@ -80,12 +82,14 @@ fn builtin_command_aliases_resolve_to_targets() {
         org_id: "org".into(),
     }));
     register_core_batch_2(&mut reg, handle, auth);
+    register_bundled_skills(&mut reg, false);
     for (alias, target) in [
         ("reset", "clear"),
         ("new", "clear"),
         ("quit", "exit"),
         ("settings", "config"),
         ("allowed-tools", "permissions"),
+        ("checkup", "doctor"),
         // #66/#61: cost/stats are now aliases of usage (not standalone cmds).
         ("cost", "usage"),
         ("stats", "usage"),
@@ -283,11 +287,8 @@ async fn status_dispatch() {
 async fn doctor_dispatch() {
     let (d, _) = fresh();
     let r = d.dispatch("/doctor".into()).await;
-    if let SlashDispatchResult::Handled { display } = r {
-        let text = display.string_at("").unwrap();
-        assert!(text.starts_with("Doctor:\n"));
-        assert!(text.contains("Summary:"));
-    } else {
-        panic!("{r:?}");
-    }
+    let SlashDispatchResult::RunAsTurn { prompt } = r else {
+        panic!("Native /doctor is a bundled prompt, got {r:?}");
+    };
+    assert!(prompt.string_at("").unwrap().starts_with("# LingXi Checkup\n"));
 }

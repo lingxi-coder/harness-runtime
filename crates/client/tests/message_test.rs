@@ -76,6 +76,7 @@ fn message_dto_round_trips() {
 #[test]
 fn message_text_keeps_lone_surrogates_as_a_json_string() {
     let message = MessageDto {
+        sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,
         role: "assistant".into(),

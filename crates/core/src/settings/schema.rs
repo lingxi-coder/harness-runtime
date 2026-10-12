@@ -77,6 +77,7 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     ("enabledPlugins", MergeStrategy::DeepMerge),
     ("pluginConfigs", MergeStrategy::DeepMerge),
     ("extraKnownMarketplaces", MergeStrategy::DeepMerge),
+    ("skillOverrides", MergeStrategy::DeepMerge),
     // Per-model effort / cap overrides. Nested `maxEffortLevel` is folded at
     // the consumer (lowest wins); DeepMerge keeps sibling model keys.
     ("modelSettings", MergeStrategy::DeepMerge),
@@ -299,6 +300,501 @@ where
     crate::types::utf16_json::raw_json_serde::serialize_option(value, serializer)
 }
 
+fn deserialize_optional_response_language<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    let root = projection
+        .at_pointer("")
+        .expect("a parsed projection always has a root");
+    if root.is_null() {
+        Ok(None)
+    } else if root.code_units().is_some() {
+        Ok(Some(projection))
+    } else {
+        Err(serde::de::Error::custom("expected a string or null"))
+    }
+}
+
+fn deserialize_optional_output_style<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    if projection
+        .at_pointer("")
+        .and_then(|root| root.code_units())
+        .is_some()
+    {
+        Ok(Some(projection))
+    } else {
+        // Native declares outputStyle as z.string().optional(): an explicit
+        // null is invalid, while a lone UTF-16 surrogate is still a string.
+        Err(serde::de::Error::custom("expected a string"))
+    }
+}
+
+fn deserialize_optional_available_models<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    validate_available_models_projection(&projection).map_err(serde::de::Error::custom)?;
+    Ok(Some(projection))
+}
+
+fn serialize_optional_available_models<S>(
+    value: &Option<Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if let Some(projection) = value {
+        validate_available_models_projection(projection).map_err(serde::ser::Error::custom)?;
+    }
+    crate::types::utf16_json::raw_json_serde::serialize_option(value, serializer)
+}
+
+fn validate_available_models_projection(projection: &Utf16JsonProjection) -> Result<(), String> {
+    let Some(length) = projection.array_len("") else {
+        return Err("availableModels must be an array of strings".into());
+    };
+    for index in 0..length {
+        if projection.string_units(&format!("/{index}")).is_none() {
+            return Err(format!("availableModels[{index}] must be a string"));
+        }
+    }
+    Ok(())
+}
+
+fn serialize_optional_output_style<S>(
+    value: &Option<Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if let Some(projection) = value {
+        if projection
+            .at_pointer("")
+            .and_then(|root| root.code_units())
+            .is_none()
+        {
+            return Err(serde::ser::Error::custom(
+                "output style must be a root-string projection",
+            ));
+        }
+    }
+    crate::types::utf16_json::raw_json_serde::serialize_option(value, serializer)
+}
+
+fn deserialize_optional_proxy_auth_helper<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    let root = projection
+        .at_pointer("")
+        .expect("a parsed projection always has a root");
+    if root.code_units().is_some() {
+        Ok(Some(projection))
+    } else {
+        Err(serde::de::Error::custom("expected a string"))
+    }
+}
+
+fn deserialize_optional_sandbox<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    sandbox_execution_value(&projection).map_err(serde::de::Error::custom)
+}
+
+/// Build the executable sandbox view from its exact source projection.
+///
+/// Claude's settings parser accepts JavaScript strings containing unpaired
+/// UTF-16. Sandbox filesystem restrictions and credential-file paths cross a
+/// filesystem path boundary; those values use Rust strings and are normalized
+/// with the same replacement semantics as OS-facing path conversion. The
+/// `ignoreViolations` map has a source-preserving execution sidecar in the
+/// desktop sandbox config; this serde view removes only strings that serde
+/// cannot represent so valid sibling patterns/settings still parse. The raw
+/// projection must be retained separately by source-aware callers.
+pub fn sandbox_execution_value(
+    source: &Utf16JsonProjection,
+) -> Result<Option<BTreeMap<String, Value>>, &'static str> {
+    let mut projection = source.clone();
+    normalize_sandbox_path_strings(&mut projection)?;
+    filter_unrepresentable_ignore_violation_values_for_typed_view(&mut projection)?;
+    let root = projection
+        .at_pointer("")
+        .ok_or("sandbox source has no root value")?;
+    if root.is_null() {
+        return Ok(None);
+    }
+    if root.object_entries().is_none() {
+        return Err("expected a sandbox object or null");
+    }
+    // Use JavaScript-compatible stringify before serde's boundary. This keeps
+    // native numeric serialization semantics (for example `1.0` stringifies
+    // as `1`) while the source projection retains the original exact input.
+    match serde_json::from_str::<Value>(
+        &projection
+            .to_json_string()
+            .map_err(|_| "failed to stringify sandbox settings")?,
+    )
+    .map_err(|_| "sandbox settings contain a value the execution schema cannot represent")?
+    {
+        Value::Object(value) => Ok(Some(value.into_iter().collect())),
+        _ => Err("expected a sandbox object or null"),
+    }
+}
+
+fn normalize_sandbox_path_strings(
+    projection: &mut Utf16JsonProjection,
+) -> Result<(), &'static str> {
+    for pointer in [
+        "/filesystem/allowWrite",
+        "/filesystem/denyWrite",
+        "/filesystem/denyRead",
+        "/filesystem/allowRead",
+        "/network/allowUnixSockets",
+    ] {
+        normalize_sandbox_path_array(projection, pointer)?;
+    }
+    if let Some(length) = projection.array_len("/credentials/files") {
+        for index in 0..length {
+            let pointer = format!("/credentials/files/{index}/path");
+            let Some(units) = projection.string_units(&pointer) else {
+                continue;
+            };
+            if String::from_utf16(&units).is_err() {
+                let normalized = String::from_utf16_lossy(&units)
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                projection
+                    .set_string_units(&pointer, &normalized)
+                    .map_err(|_| "failed to normalize a sandbox credential path")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_sandbox_path_array(
+    projection: &mut Utf16JsonProjection,
+    array_pointer: &str,
+) -> Result<(), &'static str> {
+    let Some(length) = projection.array_len(array_pointer) else {
+        return Ok(());
+    };
+    for index in 0..length {
+        let pointer = format!("{array_pointer}/{index}");
+        let Some(units) = projection.string_units(&pointer) else {
+            continue;
+        };
+        if String::from_utf16(&units).is_err() {
+            let normalized = String::from_utf16_lossy(&units)
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            projection
+                .set_string_units(&pointer, &normalized)
+                .map_err(|_| "failed to normalize a sandbox path")?;
+        }
+    }
+    Ok(())
+}
+
+/// Keep serde's typed execution view parseable when `ignoreViolations` contains
+/// JavaScript strings Rust `String` cannot represent. Source-aware callers must
+/// retain the original map separately; this helper only filters the typed view
+/// and does not assert that Native would reject or ignore those strings.
+fn filter_unrepresentable_ignore_violation_values_for_typed_view(
+    projection: &mut Utf16JsonProjection,
+) -> Result<(), &'static str> {
+    let Ok(ignore_violations) = projection.subprojection("/ignoreViolations") else {
+        return Ok(());
+    };
+    let Some(entries) = ignore_violations
+        .at_pointer("")
+        .and_then(|value| value.object_entries())
+    else {
+        return Ok(());
+    };
+
+    let mut retained_entries = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Ok(key) = String::from_utf16(entry.code_units) else {
+            continue;
+        };
+        let pointer = format!("/ignoreViolations/{}", escape_json_pointer_token(&key));
+        let patterns = projection
+            .subprojection(&pointer)
+            .map_err(|_| "failed to read an ignoreViolations entry")?;
+        let Some(length) = patterns.array_len("") else {
+            retained_entries.push((entry.code_units.to_vec(), patterns));
+            continue;
+        };
+        let mut retained_patterns = Vec::with_capacity(length);
+        for index in 0..length {
+            let item_pointer = format!("/{index}");
+            let item = patterns
+                .subprojection(&item_pointer)
+                .map_err(|_| "failed to read an ignoreViolations pattern")?;
+            if let Some(units) = item.string_units("") {
+                if String::from_utf16(&units).is_err() {
+                    continue;
+                }
+            }
+            retained_patterns.push(item);
+        }
+        retained_entries.push((
+            entry.code_units.to_vec(),
+            Utf16JsonProjection::array(retained_patterns)
+                .map_err(|_| "failed to rebuild ignoreViolations patterns")?,
+        ));
+    }
+
+    let filtered = Utf16JsonProjection::object_units(retained_entries)
+        .map_err(|_| "failed to rebuild ignoreViolations settings")?;
+    projection
+        .replace_pointer_projection("/ignoreViolations", filtered)
+        .map_err(|_| "failed to replace ignoreViolations settings")
+}
+
+fn escape_json_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+fn serialize_optional_response_language<S>(
+    value: &Option<Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if let Some(projection) = value {
+        let root = projection.at_pointer("").ok_or_else(|| {
+            serde::ser::Error::custom("response language must be a root-string projection")
+        })?;
+        if root.code_units().is_none() {
+            return Err(serde::ser::Error::custom(
+                "response language must be a root-string projection",
+            ));
+        }
+    }
+    crate::types::utf16_json::raw_json_serde::serialize_option(value, serializer)
+}
+
+fn serialize_optional_proxy_auth_helper<S>(
+    value: &Option<Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if let Some(projection) = value {
+        let root = projection.at_pointer("").ok_or_else(|| {
+            serde::ser::Error::custom("proxy auth helper must be a root-string projection")
+        })?;
+        if root.code_units().is_none() {
+            return Err(serde::ser::Error::custom(
+                "proxy auth helper must be a root-string projection",
+            ));
+        }
+    }
+    crate::types::utf16_json::raw_json_serde::serialize_option(value, serializer)
+}
+
+fn deserialize_skill_listing_max_desc_chars<'de, D>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    let Some(value) = projection.number_at("") else {
+        return Err(serde::de::Error::custom(
+            "expected a positive integer number",
+        ));
+    };
+    if value.is_finite() && value > 0.0 && value.fract() == 0.0 {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a positive integer number",
+        ))
+    }
+}
+
+fn deserialize_skill_listing_budget_fraction<'de, D>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    let Some(value) = projection.number_at("") else {
+        return Err(serde::de::Error::custom(
+            "expected a finite number in (0, 1]",
+        ));
+    };
+    if value.is_finite() && value > 0.0 && value <= 1.0 {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a finite number in (0, 1]",
+        ))
+    }
+}
+
+fn deserialize_optional_disable_bundled_skills<'de, D>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Native uses `boolean().optional()`: missing is allowed, but an explicit
+    // JSON null is still a schema error. `Option<bool>`'s default visitor would
+    // collapse null into None, so inspect the present token before converting.
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    serde_json::from_str::<bool>(raw.get())
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+/// Native per-skill presentation override values from `skillOverrides`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SkillOverride {
+    /// Show the skill name and description (the default).
+    On,
+    /// Show the skill name without its description.
+    NameOnly,
+    /// Hide the skill from the model while keeping its slash command.
+    UserInvocableOnly,
+    /// Hide the skill from the model and slash-command listings.
+    Off,
+}
+
+/// Validated `skillOverrides` record with exact UTF-16 skill-name keys.
+///
+/// Settings JSON is parsed by JavaScript before Native's Zod schema, so a
+/// property name may contain an unpaired surrogate. Keep the source projection
+/// alongside its validated enum entries instead of forcing those names through
+/// Rust `String` during settings loading.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillOverrides {
+    source: Utf16JsonProjection,
+    entries: Vec<(Vec<u16>, SkillOverride)>,
+}
+
+impl SkillOverrides {
+    fn from_projection(source: Utf16JsonProjection) -> Result<Self, &'static str> {
+        let entries = source
+            .object_entries()
+            .ok_or("expected a skill override object")?;
+        let mut typed_entries = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let value = source
+                .subprojection_property_units(entry.code_units)
+                .map_err(|_| "failed to read a skill override value")?;
+            let units = value
+                .string_units("")
+                .ok_or("expected a skill override value string")?;
+            let value = String::from_utf16(&units)
+                .map_err(|_| "skill override values must be valid enum strings")?;
+            let value = match value.as_str() {
+                "on" => SkillOverride::On,
+                "name-only" => SkillOverride::NameOnly,
+                "user-invocable-only" => SkillOverride::UserInvocableOnly,
+                "off" => SkillOverride::Off,
+                _ => return Err("unknown skill override value"),
+            };
+            typed_entries.push((entry.code_units.to_vec(), value));
+        }
+        Ok(Self {
+            source,
+            entries: typed_entries,
+        })
+    }
+
+    /// Resolve only an exact UTF-16 skill-name key.
+    #[must_use]
+    pub fn get_units(&self, name: &[u16]) -> Option<SkillOverride> {
+        self.entries
+            .iter()
+            .find(|(key, _)| key.as_slice() == name)
+            .map(|(_, value)| *value)
+    }
+
+    /// Iterate exact names with their validated Native enum values.
+    pub fn iter(&self) -> impl Iterator<Item = (&[u16], SkillOverride)> {
+        self.entries
+            .iter()
+            .map(|(name, value)| (name.as_slice(), *value))
+    }
+
+    pub(crate) fn source_projection(&self) -> &Utf16JsonProjection {
+        &self.source
+    }
+
+    pub(crate) fn from_source_projection(
+        source: Utf16JsonProjection,
+    ) -> Result<Self, &'static str> {
+        Self::from_projection(source)
+    }
+}
+
+impl Serialize for SkillOverrides {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        crate::types::utf16_json::raw_json_serde::serialize(&self.source, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SkillOverrides {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        let source = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+        Self::from_projection(source).map_err(serde::de::Error::custom)
+    }
+}
+
+fn deserialize_optional_skill_overrides<'de, D>(
+    deserializer: D,
+) -> Result<Option<SkillOverrides>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    SkillOverrides::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Attribution {
@@ -403,7 +899,11 @@ pub struct SettingsJson {
     pub lingxi_md_excludes: Option<Vec<String>>,
 
     /// Object-merge field (deep-merge).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_sandbox"
+    )]
     pub sandbox: Option<BTreeMap<String, Value>>,
 
     /// Object-merge field (deep-merge).
@@ -425,9 +925,43 @@ pub struct SettingsJson {
     /// string`, config.ts:181), and `settingsMergeCustomizer` special-cases
     /// only arrays, so a string `outputStyle` takes scalar-override
     /// (settings.ts:538-547) — NOT deep-merge. Typing it as a map made a real
-    /// `"outputStyle": "Explanatory"` settings.json fail the whole load.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_style: Option<String>,
+    /// `"outputStyle": "Explanatory"` settings.json fail the whole load. Keep
+    /// JavaScript UTF-16 units so a lone surrogate does not reject this entire
+    /// tier or get coerced into a different style name during lookup.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_output_style",
+        serialize_with = "serialize_optional_output_style"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub output_style: Option<Utf16JsonProjection>,
+
+    /// User's response-language preference (`settings.language`). This is a
+    /// scalar setting and is independent of the host UI locale. Keep the raw
+    /// UTF-16 string projection because JavaScript JSON permits lone
+    /// surrogates that a Rust `String` cannot represent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_response_language",
+        serialize_with = "serialize_optional_response_language"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub language: Option<Utf16JsonProjection>,
+
+    /// Native proxy authentication helper callback command (`proxyAuthHelper`).
+    /// This is a scalar setting; later settings tiers replace earlier ones.
+    /// Preserve exact JavaScript UTF-16 until the host crosses its shell/OS
+    /// execution boundary.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_proxy_auth_helper",
+        serialize_with = "serialize_optional_proxy_auth_helper"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub proxy_auth_helper: Option<Utf16JsonProjection>,
 
     /// Scalar field (later source wins). `askUserQuestionTimeout`: the idle
     /// window before an `AskUserQuestion` prompt auto-continues with the
@@ -450,6 +984,36 @@ pub struct SettingsJson {
     /// enabled. Schema-only until the marketplace sync consumer lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_claude_ai_skills: Option<bool>,
+
+    /// Per-skill description cap in the model-facing skill listing. Native
+    /// 2.1.295 accepts a finite positive integer JavaScript Number and uses
+    /// 1536 only when this field is absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_skill_listing_max_desc_chars"
+    )]
+    pub skill_listing_max_desc_chars: Option<f64>,
+
+    /// Fraction of the context window reserved for the model-facing skill
+    /// listing. Native accepts finite numbers in `(0, 1]` and uses `0.01`
+    /// only when this field is absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_skill_listing_budget_fraction"
+    )]
+    pub skill_listing_budget_fraction: Option<f64>,
+
+    /// Per-skill presentation overrides. The record keys retain exact UTF-16
+    /// units while each value is validated against Native's four-value enum.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_skill_overrides"
+    )]
+    #[schemars(with = "Option<BTreeMap<String, SkillOverride>>")]
+    pub skill_overrides: Option<SkillOverrides>,
 
     /// Object-merge field (deep-merge). Alias-shaped marketplace declarations
     /// keyed by marketplace name, parallel to `extraKnownMarketplaces`.
@@ -749,6 +1313,16 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_agent_view: Option<bool>,
 
+    /// Scalar field (later source wins). Disable bundled skills and
+    /// workflows while keeping built-in slash commands available. Native
+    /// validates an optional boolean and applies the false default at use.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_disable_bundled_skills"
+    )]
+    pub disable_bundled_skills: Option<bool>,
+
     /// `disableAllHooks` — when true, ALL hooks are disabled (claude hook-dispatch
     /// gate `Ql()`). One half of the `/goal` hooks-restricted gate (`kEt`): a
     /// restricted-hooks session rejects `/goal`. Scalar-override merge.
@@ -774,11 +1348,19 @@ pub struct SettingsJson {
     /// Typically set in managed (`policySettings`) settings by enterprise
     /// administrators. Consumed via [`llm_runtime::model::allowlist`] — matcher +
     /// policy-provenance for the `enforceAvailableModels` gate. Absent ⇒ None
-    /// (no restriction), distinct from `Some(vec![])` (only the default model).
+    /// (no restriction), distinct from a present empty array (only the default
+    /// model). The projection preserves exact JavaScript UTF-16 units,
+    /// including lone surrogates accepted by Native's string schema.
     /// Scalar-override merge (CC `settingsMergeCustomizer` returns the source
     /// array for non-concat arrays), so NOT in `MERGE_STRATEGIES`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub available_models: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_available_models",
+        serialize_with = "serialize_optional_available_models"
+    )]
+    #[schemars(with = "Option<Vec<String>>")]
+    pub available_models: Option<Utf16JsonProjection>,
 
     /// Scalar field (later source wins). `enforceAvailableModels`: gate on the
     /// managed `availableModels` allowlist. CC 2.1.207 zod (verbatim describe):
@@ -1659,6 +2241,10 @@ impl SettingsJson {
     ///
     /// [`SettingsError::SchemaViolation`]: crate::settings::SettingsError::SchemaViolation
     pub fn validate(&self) -> Result<(), crate::settings::SettingsError> {
+        if let Some(available_models) = self.available_models.as_ref() {
+            validate_available_models_projection(available_models)
+                .map_err(crate::settings::SettingsError::SchemaViolation)?;
+        }
         for (field_name, array) in [
             ("trustedDirectories", self.trusted_directories.as_deref()),
             (
@@ -2263,6 +2849,113 @@ mod tests {
     }
 
     #[test]
+    fn skill_listing_number_settings_match_native_validation_and_keep_defaults_absent() {
+        let absent: SettingsJson = serde_json::from_str("{}").expect("empty settings");
+        assert_eq!(absent.skill_listing_max_desc_chars, None);
+        assert_eq!(absent.skill_listing_budget_fraction, None);
+
+        let valid: SettingsJson = serde_json::from_str(
+            r#"{"skillListingMaxDescChars":2e0,"skillListingBudgetFraction":1}"#,
+        )
+        .expect("Native accepts positive integer max chars and fraction through 1");
+        assert_eq!(valid.skill_listing_max_desc_chars, Some(2.0));
+        assert_eq!(valid.skill_listing_budget_fraction, Some(1.0));
+
+        for value in ["null", "0", "-1", "1.5", "\"2\"", "1e400"] {
+            let source = format!(r#"{{"skillListingMaxDescChars":{value}}}"#);
+            assert!(
+                serde_json::from_str::<SettingsJson>(&source).is_err(),
+                "Native rejects maxDescChars {value}"
+            );
+        }
+
+        for value in ["null", "0", "-0.1", "1.0001", "\"0.5\"", "1e400"] {
+            let source = format!(r#"{{"skillListingBudgetFraction":{value}}}"#);
+            assert!(
+                serde_json::from_str::<SettingsJson>(&source).is_err(),
+                "Native rejects skillListingBudgetFraction {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn disable_bundled_skills_accepts_only_optional_booleans() {
+        let absent: SettingsJson = serde_json::from_str("{}").expect("empty settings");
+        assert_eq!(absent.disable_bundled_skills, None);
+        assert!(
+            serde_json::to_value(&absent)
+                .expect("absent settings serialize")
+                .get("disableBundledSkills")
+                .is_none(),
+            "an absent optional setting serializes as absent, not null"
+        );
+
+        for (source, expected) in [
+            (r#"{"disableBundledSkills":true}"#, Some(true)),
+            (r#"{"disableBundledSkills":false}"#, Some(false)),
+        ] {
+            let parsed: SettingsJson = serde_json::from_str(source).expect("boolean setting");
+            assert_eq!(parsed.disable_bundled_skills, expected);
+        }
+
+        for source in [
+            r#"{"disableBundledSkills":null}"#,
+            r#"{"disableBundledSkills":"true"}"#,
+            r#"{"disableBundledSkills":1}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<SettingsJson>(source).is_err(),
+                "Native rejects non-boolean disableBundledSkills {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_overrides_validate_enum_and_preserve_utf16_property_names() {
+        let parsed: SettingsJson = serde_json::from_str(
+            r#"{"skillOverrides":{"full":"on","short":"name-only","slash":"user-invocable-only","hidden":"off","odd-\ud800":"name-only"},"model":"sibling-model"}"#,
+        )
+        .expect("Native skill override record with arbitrary UTF-16 names");
+        assert_eq!(parsed.model.as_deref(), Some("sibling-model"));
+        let overrides = parsed.skill_overrides.as_ref().expect("override record");
+        assert_eq!(
+            overrides.get_units(&"full".encode_utf16().collect::<Vec<_>>()),
+            Some(SkillOverride::On)
+        );
+        assert_eq!(
+            overrides.get_units(&"short".encode_utf16().collect::<Vec<_>>()),
+            Some(SkillOverride::NameOnly)
+        );
+        assert_eq!(
+            overrides.get_units(&"slash".encode_utf16().collect::<Vec<_>>()),
+            Some(SkillOverride::UserInvocableOnly)
+        );
+        assert_eq!(
+            overrides.get_units(&"hidden".encode_utf16().collect::<Vec<_>>()),
+            Some(SkillOverride::Off)
+        );
+        assert_eq!(
+            overrides.get_units(&"odd-".encode_utf16().chain([0xd800]).collect::<Vec<_>>()),
+            Some(SkillOverride::NameOnly)
+        );
+
+        let serialized = serde_json::to_string(&parsed).expect("source projection serialization");
+        assert!(serialized.contains(r#""odd-\ud800":"name-only""#));
+
+        for source in [
+            r#"{"skillOverrides":null}"#,
+            r#"{"skillOverrides":[]}"#,
+            r#"{"skillOverrides":{"x":null}}"#,
+            r#"{"skillOverrides":{"x":"unknown"}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<SettingsJson>(source).is_err(),
+                "Native skillOverrides rejects {source}"
+            );
+        }
+    }
+
+    #[test]
     fn accepts_string_output_style() {
         // OUTSTYLE.1 regression history: `output_style` was once typed as a
         // map, so a real claude-code settings.json carrying the documented
@@ -2274,7 +2967,13 @@ mod tests {
         let json = r#"{ "outputStyle": "Explanatory", "model": "claude-sonnet-4-5" }"#;
         let parsed: SettingsJson =
             serde_json::from_str(json).expect("string outputStyle must parse");
-        assert_eq!(parsed.output_style.as_deref(), Some("Explanatory"));
+        assert_eq!(
+            parsed
+                .output_style
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("Explanatory")
+        );
         assert!(
             parsed.model.is_some(),
             "sibling fields must survive the load"
@@ -2283,6 +2982,263 @@ mod tests {
         assert!(
             strategy_for("outputStyle").is_none(),
             "outputStyle must be scalar-override"
+        );
+    }
+
+    #[test]
+    fn accepts_response_language_setting() {
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"language":"English","outputStyle":"Concise"}"#)
+                .expect("response-language settings must parse");
+        assert_eq!(
+            parsed
+                .language
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("English")
+        );
+        assert_eq!(
+            parsed
+                .output_style
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("Concise")
+        );
+    }
+
+    #[test]
+    fn output_style_lone_surrogate_keeps_valid_sibling_settings() {
+        let parsed: SettingsJson = serde_json::from_str(
+            r#"{"outputStyle":"\ud800","model":"sibling-model","permissions":{"allow":["Read"]}}"#,
+        )
+        .expect("Native outputStyle string may contain an unpaired UTF-16 unit");
+
+        assert_eq!(parsed.model.as_deref(), Some("sibling-model"));
+        assert_eq!(
+            parsed
+                .permissions
+                .as_ref()
+                .and_then(|permissions| permissions.get("allow"))
+                .and_then(Value::as_array)
+                .and_then(|allow| allow.first())
+                .and_then(Value::as_str),
+            Some("Read")
+        );
+        assert_eq!(
+            parsed
+                .output_style
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(vec![0xd800])
+        );
+        let serialized = serde_json::to_string(&parsed).expect("source-preserving serialization");
+        assert!(serialized.contains(r#""outputStyle":"\ud800""#));
+        assert!(
+            serde_json::from_str::<SettingsJson>(r#"{"outputStyle":null}"#).is_err(),
+            "Native outputStyle is optional but does not accept null"
+        );
+    }
+
+    #[test]
+    fn parses_proxy_auth_helper_scalar_setting() {
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"proxyAuthHelper":"/usr/local/bin/proxy-auth-helper"}"#)
+                .expect("proxyAuthHelper settings must parse");
+        assert_eq!(
+            parsed
+                .proxy_auth_helper
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("/usr/local/bin/proxy-auth-helper")
+        );
+        assert!(
+            serde_json::from_str::<SettingsJson>(r#"{"proxyAuthHelper":null}"#).is_err(),
+            "Native proxyAuthHelper uses an optional plain string, not null"
+        );
+    }
+
+    #[test]
+    fn proxy_auth_helper_lone_surrogate_keeps_valid_sibling_settings() {
+        let parsed: SettingsJson = serde_json::from_str(
+            r#"{"proxyAuthHelper":"/tmp/helper-\ud800","model":"sibling-model","permissions":{"allow":["Read"]}}"#,
+        )
+        .expect("Native string values may contain lone UTF-16 units");
+
+        assert_eq!(parsed.model.as_deref(), Some("sibling-model"));
+        assert_eq!(
+            parsed
+                .permissions
+                .as_ref()
+                .and_then(|permissions| permissions.get("allow"))
+                .and_then(Value::as_array)
+                .and_then(|allow| allow.first())
+                .and_then(Value::as_str),
+            Some("Read")
+        );
+        assert_eq!(
+            parsed
+                .proxy_auth_helper
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(
+                "/tmp/helper-"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .collect::<Vec<_>>()
+            )
+        );
+        let serialized = serde_json::to_string(&parsed).expect("projection serializes as a value");
+        assert!(serialized.contains(r#""proxyAuthHelper":"/tmp/helper-\ud800""#));
+    }
+
+    #[test]
+    fn response_language_keeps_lone_surrogates_without_dropping_the_tier() {
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"language":"\ud800","model":"sibling-model"}"#)
+                .expect("a JavaScript language string with a lone surrogate is valid");
+        assert_eq!(parsed.model.as_deref(), Some("sibling-model"));
+        assert_eq!(
+            parsed
+                .language
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(vec![0xd800])
+        );
+        let serialized = serde_json::to_string(&parsed).expect("projection serializes as a value");
+        assert!(serialized.contains(r#""language":"\ud800""#));
+    }
+
+    #[test]
+    fn sandbox_lone_surrogate_keeps_typed_sibling_settings() {
+        let parsed: SettingsJson = serde_json::from_str(
+            r#"{"model":"sibling-model","permissions":{"allow":["Read"]},"sandbox":{"enabled":true,"filesystem":{"allowWrite":["/tmp/\ud800"],"denyRead":["/private/\udfff"]}}}"#,
+        )
+        .expect("sandbox string units must not reject the settings tier");
+
+        assert_eq!(parsed.model.as_deref(), Some("sibling-model"));
+        assert_eq!(
+            parsed
+                .permissions
+                .as_ref()
+                .and_then(|permissions| permissions.get("allow"))
+                .and_then(Value::as_array)
+                .and_then(|allow| allow.first())
+                .and_then(Value::as_str),
+            Some("Read")
+        );
+        let sandbox = parsed.sandbox.expect("sandbox object");
+        assert_eq!(sandbox.get("enabled"), Some(&Value::Bool(true)));
+        assert_eq!(
+            sandbox
+                .get("filesystem")
+                .and_then(|filesystem| filesystem.get("allowWrite"))
+                .and_then(Value::as_array)
+                .and_then(|paths| paths.first())
+                .and_then(Value::as_str),
+            Some("/tmp/\u{fffd}")
+        );
+        assert_eq!(
+            sandbox
+                .get("filesystem")
+                .and_then(|filesystem| filesystem.get("denyRead"))
+                .and_then(Value::as_array)
+                .and_then(|paths| paths.first())
+                .and_then(Value::as_str),
+            Some("/private/\u{fffd}")
+        );
+    }
+
+    #[test]
+    fn sandbox_execution_projection_normalizes_only_filesystem_paths() {
+        let source = Utf16JsonProjection::parse(
+            r#"{"filesystem":{"allowWrite":["/tmp/\ud800"]},"network":{"allowUnixSockets":["/tmp/socket-\udfff"]},"ignoreViolations":{"filesystem":["/tmp/blocked","skip-\ud800-me"],"\udfff":["never-match"],"network":["host-denied"]},"numeric":1.0}"#,
+        )
+        .expect("source projection");
+        let execution = sandbox_execution_value(&source)
+            .expect("path boundary conversion")
+            .expect("sandbox object");
+
+        assert_eq!(
+            execution
+                .get("filesystem")
+                .and_then(|filesystem| filesystem.get("allowWrite"))
+                .and_then(Value::as_array)
+                .and_then(|paths| paths.first())
+                .and_then(Value::as_str),
+            Some("/tmp/\u{fffd}")
+        );
+        assert_eq!(
+            execution
+                .get("ignoreViolations")
+                .and_then(|violations| violations.get("filesystem"))
+                .and_then(Value::as_array)
+                .map(|patterns| patterns
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()),
+            Some(vec!["/tmp/blocked"]),
+            "the typed serde view filters only the unrepresentable pattern"
+        );
+        assert_eq!(
+            execution
+                .get("ignoreViolations")
+                .and_then(|violations| violations.get("network"))
+                .and_then(Value::as_array)
+                .and_then(|patterns| patterns.first())
+                .and_then(Value::as_str),
+            Some("host-denied"),
+            "the typed serde view keeps representable categories"
+        );
+        assert_eq!(
+            execution
+                .get("ignoreViolations")
+                .and_then(|violations| violations.as_object())
+                .map(serde_json::Map::len),
+            Some(2)
+        );
+        assert_eq!(
+            execution
+                .get("network")
+                .and_then(|network| network.get("allowUnixSockets"))
+                .and_then(Value::as_array)
+                .and_then(|paths| paths.first())
+                .and_then(Value::as_str),
+            Some("/tmp/socket-\u{fffd}")
+        );
+        assert_eq!(
+            execution.get("numeric").and_then(Value::as_i64),
+            Some(1),
+            "execution values follow JavaScript JSON encoding for numbers"
+        );
+        let mut expected_units = "/tmp/".encode_utf16().collect::<Vec<_>>();
+        expected_units.push(0xd800);
+        assert_eq!(
+            source.string_units("/filesystem/allowWrite/0"),
+            Some(expected_units),
+            "converting the executable view must not mutate exact source units"
+        );
+        let expected_ignored_units = "skip-"
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("-me".encode_utf16())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source.string_units("/ignoreViolations/filesystem/1"),
+            Some(expected_ignored_units),
+            "non-path strings stay exact in the source projection"
+        );
+        assert_eq!(
+            source
+                .at_pointer("/ignoreViolations")
+                .and_then(|value| value.object_entries())
+                .and_then(|entries| {
+                    entries
+                        .into_iter()
+                        .find(|entry| entry.code_units == [0xdfff])
+                        .map(|entry| entry.code_units.to_vec())
+                }),
+            Some(vec![0xdfff]),
+            "unpaired category keys remain exact in the source projection"
         );
     }
 
@@ -2804,10 +3760,13 @@ mod tests {
             "model": "claude-sonnet-4-5"
         }"#;
         let parsed: SettingsJson = serde_json::from_str(json).expect("managed keys must parse");
-        assert_eq!(
-            parsed.available_models.as_deref(),
-            Some(&["opus".to_string(), "claude-sonnet-4-5".to_string()][..])
-        );
+        let available_models = parsed
+            .available_models
+            .as_ref()
+            .expect("availableModels projection");
+        assert_eq!(available_models.array_len(""), Some(2));
+        assert_eq!(available_models.string_at("/0"), Some("opus"));
+        assert_eq!(available_models.string_at("/1"), Some("claude-sonnet-4-5"));
         assert_eq!(parsed.enforce_available_models, Some(true));
         assert_eq!(
             parsed
@@ -2828,15 +3787,47 @@ mod tests {
 
     #[test]
     fn available_models_absent_vs_empty_are_distinct() {
-        // Absent ⇒ None (no restriction); explicit [] ⇒ Some(vec![]) (only the
-        // default model available) — the two must round-trip distinctly.
+        // Absent ⇒ None (no restriction); explicit [] means only the default
+        // model is available. The projection keeps those states distinct.
         let absent: SettingsJson = serde_json::from_str(r#"{"model":"opus"}"#).unwrap();
         assert!(absent.available_models.is_none());
         assert!(!serde_json::to_string(&absent)
             .unwrap()
             .contains("availableModels"));
         let empty: SettingsJson = serde_json::from_str(r#"{"availableModels":[]}"#).unwrap();
-        assert_eq!(empty.available_models.as_deref(), Some(&[][..]));
+        assert_eq!(
+            empty
+                .available_models
+                .as_ref()
+                .and_then(|projection| projection.array_len("")),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn available_models_preserves_lone_utf16_units_and_requires_string_items() {
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"availableModels":["opus","model-\ud800"]}"#)
+                .expect("Native accepts any JavaScript string units");
+        let models = parsed.available_models.as_ref().expect("model projection");
+        assert_eq!(
+            models.string_units("/1"),
+            Some("model-".encode_utf16().chain([0xd800]).collect())
+        );
+        let serialized = serde_json::to_string(&parsed).expect("serialize exact string units");
+        assert!(serialized.contains(r#""model-\ud800""#), "{serialized}");
+        let roundtrip: SettingsJson = serde_json::from_str(&serialized).expect("roundtrip");
+        assert_eq!(
+            roundtrip
+                .available_models
+                .as_ref()
+                .and_then(|projection| projection.string_units("/1")),
+            Some("model-".encode_utf16().chain([0xd800]).collect())
+        );
+        assert!(serde_json::from_str::<SettingsJson>(r#"{"availableModels":null}"#).is_err());
+        assert!(
+            serde_json::from_str::<SettingsJson>(r#"{"availableModels":["ok",true]}"#).is_err()
+        );
     }
 
     #[test]

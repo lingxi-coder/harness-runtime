@@ -175,7 +175,7 @@ Doctor:
         assert_eq!(h.name(), "doctor");
         assert_eq!(
             h.description(),
-            "Diagnose and verify your LingXi installation and settings"
+            "Health-check your setup and fix issues: unused extensions, duplicated or bloated memory files, slow hooks, permissions"
         );
     }
 }

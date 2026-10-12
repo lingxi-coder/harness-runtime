@@ -260,6 +260,10 @@ pub trait DesktopDiagnosticSink: Send + Sync {
 /// ```
 #[derive(Clone)]
 pub struct DesktopConfig {
+    /// Session-scoped managed-policy snapshot shared by async and synchronous
+    /// consumers. Its explicit uninitialized state is never treated as a
+    /// successfully loaded empty policy.
+    pub(super) managed_policy_snapshot_cache: super::settings_watch::ManagedPolicySnapshotCache,
     pub diagnostics: Option<Arc<dyn DesktopDiagnosticSink>>,
     /// Decorate the platform MCP transport without replacing its registry or
     /// lifecycle. The factory is called once during assembly.
@@ -304,6 +308,11 @@ pub struct DesktopConfig {
     /// bridge-server). Registers the `Visualization` tool and the `visualize`
     /// skill; CLI and headless hosts leave it off.
     pub inline_visualization: bool,
+    /// Native query-agent identity for model-visible settings deltas. Ordinary
+    /// Desktop, CLI, and Headless sessions use `Main`; the CLI sets
+    /// `Subagent { is_main_session: true }` only for an explicit background
+    /// `/fork` launch whose transcript was copied from a main session.
+    pub native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext,
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
@@ -792,23 +801,22 @@ impl DesktopSessionComposition {
         match self {
             Self::Transport => (QUERY_SOURCE_SDK.to_string(), false),
             Self::InteractiveCli | Self::HeadlessCli => {
-                let query_source =
-                    match output_style.filter(|style| !style.is_empty() && *style != "default") {
-                        Some("Concise") => {
-                            format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Concise")
-                        }
-                        Some("Proactive") => {
-                            format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Proactive")
-                        }
-                        Some("Explanatory") => {
-                            format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Explanatory")
-                        }
-                        Some("Learning") => {
-                            format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Learning")
-                        }
-                        Some(_) => format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:custom"),
-                        None => QUERY_SOURCE_REPL_MAIN_THREAD.to_string(),
-                    };
+                let query_source = match output_style.filter(|style| *style != "default") {
+                    Some("Concise") => {
+                        format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Concise")
+                    }
+                    Some("Proactive") => {
+                        format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Proactive")
+                    }
+                    Some("Explanatory") => {
+                        format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Explanatory")
+                    }
+                    Some("Learning") => {
+                        format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Learning")
+                    }
+                    Some(_) => format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:custom"),
+                    None => QUERY_SOURCE_REPL_MAIN_THREAD.to_string(),
+                };
                 (
                     query_source,
                     matches!(self, Self::HeadlessCli) && print_mode,
@@ -919,6 +927,10 @@ impl std::fmt::Debug for DesktopConfig {
         // diagnostics. Trait objects use the same presence-only convention.
         f.debug_struct("DesktopConfig")
             .field(
+                "managed_policy_snapshot_cache_initialized",
+                &self.managed_policy_snapshot_cache.is_initialized(),
+            )
+            .field(
                 "diagnostics",
                 &self.diagnostics.as_ref().map(|_| "<configured>"),
             )
@@ -944,6 +956,10 @@ impl std::fmt::Debug for DesktopConfig {
             .field("host_workspace_trusted", &self.host_workspace_trusted)
             .field("mod_render_surface", &self.mod_render_surface)
             .field("inline_visualization", &self.inline_visualization)
+            .field(
+                "native_settings_agent_context",
+                &self.native_settings_agent_context,
+            )
             .field(
                 "api_base",
                 &if self.api_base.is_empty() {
@@ -1105,6 +1121,8 @@ impl std::fmt::Debug for DesktopConfig {
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
+            managed_policy_snapshot_cache:
+                super::settings_watch::ManagedPolicySnapshotCache::default(),
             diagnostics: None,
             build_info: command_api::builtins::BuildInfo::default(),
             mcp_services_factory: None,
@@ -1120,6 +1138,7 @@ impl Default for DesktopConfig {
             host_workspace_trusted: None,
             mod_render_surface: None,
             inline_visualization: false,
+            native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_source: llm_runtime::CredentialSource::Configured,

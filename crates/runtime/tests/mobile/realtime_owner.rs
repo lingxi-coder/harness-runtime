@@ -162,7 +162,11 @@ fn native_audio_uses_mobile_listener_owner_and_drains_permissions_before_release
             .is_err());
         let permission = tokio::spawn({
             let gate = engine.permission_gate();
-            async move { gate.check("FixtureProtected", &serde_json::json!({})).await }
+            async move {
+                let input = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                    .expect("fixture input is valid source JSON");
+                gate.check("FixtureProtected", &input).await
+            }
         });
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {

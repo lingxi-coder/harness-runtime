@@ -13,6 +13,10 @@ use crate::state::{TaskState, TaskStateBase, TaskStatus};
 use crate::task_trait::{Task, TaskContext, TaskError, TaskSpawnInput};
 use agent::{StateMachinePool, SubagentApiClient};
 use async_trait::async_trait;
+use lingxi_core::host::task_delivery::{
+    TaskDeliveryOutcome, TaskDeliveryPolicy, TaskDeliveryShellOutput, TaskDeliverySnapshot,
+    TaskDeliverySnapshotInput, TaskDeliveryStopCause,
+};
 use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, FusionActivation, FusionCompletionSink,
@@ -252,6 +256,36 @@ struct AgentWaitClaimRecord {
     generation: u64,
     active_waiters: usize,
     agent_id: lingxi_core::types::AgentId,
+}
+
+fn system_time_epoch_millis_i64(time: SystemTime) -> Option<i64> {
+    let milliseconds = match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => i128::try_from(duration.as_millis()).ok()?,
+        Err(error) => -i128::try_from(error.duration().as_millis()).ok()?,
+    };
+    i64::try_from(milliseconds).ok()
+}
+
+/// Convert the spool reader's bounded tail into the source input expected by
+/// Native `PBn`. The reader's own human-readable omission line is removed; its
+/// presence is represented by a nonzero sentinel so the Native formatter can
+/// emit its path-qualified omission message. The current rooted spool reader
+/// exposes truncation and a rounded display header, not an exact omitted-byte
+/// count; Native `PBn` consumes only the zero/nonzero distinction.
+fn task_delivery_output_content(content: String, truncated: bool) -> (String, u64) {
+    if !truncated {
+        return (content, 0);
+    }
+    let Some(after_open) = content.strip_prefix('[') else {
+        return (content, 1);
+    };
+    let Some((kilobytes, body)) = after_open.split_once("KB of earlier output omitted]\n") else {
+        return (content, 1);
+    };
+    if kilobytes.is_empty() || !kilobytes.bytes().all(|byte| byte.is_ascii_digit()) {
+        return (content, 1);
+    }
+    (body.to_owned(), 1)
 }
 
 /// A wait's notification claim is weakly tied to the registry. Dropping the
@@ -4585,14 +4619,17 @@ impl TaskRegistry {
 
     pub async fn take_pending_task_notifications(
         &self,
+        task_delivery_policy: TaskDeliveryPolicy,
     ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
-        self.take_pending_task_notifications_for(None).await
+        self.take_pending_task_notifications_for(None, task_delivery_policy)
+            .await
     }
 
     /// Atomically select and consume notifications belonging to this recipient.
     pub async fn take_pending_task_notifications_for(
         &self,
         recipient: Option<lingxi_core::types::AgentId>,
+        task_delivery_policy: TaskDeliveryPolicy,
     ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
         self.refresh_output_offsets(recipient).await;
         use crate::handle::{status_to_wire, task_type_to_wire};
@@ -4708,8 +4745,15 @@ impl TaskRegistry {
                 .physical_output_is_authoritative(&b.output_file)
                 .await
                 .then(|| b.output_file.to_string_lossy().into_owned());
+            let task_delivery = if recipient.is_none() {
+                self.task_delivery_snapshot_for_state(state, task_delivery_policy)
+                    .await
+            } else {
+                None
+            };
             out.push(lingxi_core::host::task_registry::TaskNotification {
                 task_id: b.id.clone(),
+                task_delivery,
                 recipient_agent_id: Self::notification_recipient(state, &map),
                 task_type: task_type_to_wire(b.task_type).to_string(),
                 status: status_to_wire(b.status).to_string(),
@@ -4887,6 +4931,7 @@ impl TaskRegistry {
             }
             out.push(lingxi_core::host::task_registry::TaskNotification {
                 task_id: b.id.clone(),
+                task_delivery: None,
                 recipient_agent_id: Self::notification_recipient(state, &map),
                 task_type: task_type_to_wire(b.task_type).to_string(),
                 // A resting persistent agent completed this turn-set while its
@@ -4973,6 +5018,67 @@ impl TaskRegistry {
         }
         self.requeue_deferred_rest(deferred_rest).await;
         out
+    }
+
+    async fn task_delivery_snapshot_for_state(
+        &self,
+        state: &TaskState,
+        policy: TaskDeliveryPolicy,
+    ) -> Option<TaskDeliverySnapshot> {
+        if !policy.producer_enabled() {
+            return None;
+        }
+        let TaskState::LocalBash(shell) = state else {
+            return None;
+        };
+        let base = &shell.base;
+        let outcome = match base.status {
+            TaskStatus::Completed => TaskDeliveryOutcome::Completed,
+            TaskStatus::Failed => TaskDeliveryOutcome::Failed,
+            TaskStatus::Killed => TaskDeliveryOutcome::Killed,
+            TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused => return None,
+        };
+        let start_time_ms = system_time_epoch_millis_i64(base.start_time)?;
+        let end_time_ms = system_time_epoch_millis_i64(base.end_time?)?;
+        let output_file = base.output_file.to_string_lossy().into_owned();
+        let output = self
+            .output_manager
+            .read(
+                &base.output_file,
+                crate::output_manager::OutputOptions::default(),
+            )
+            .await
+            .ok()
+            .map(|output| {
+                let (content, omitted_bytes) =
+                    task_delivery_output_content(output.content, output.truncated);
+                TaskDeliveryShellOutput {
+                    content_utf16: content.encode_utf16().collect(),
+                    omitted_bytes,
+                }
+            });
+        let stop_cause = shell.stop_cause.as_deref().and_then(|cause| match cause {
+            "memory_pressure" => Some(TaskDeliveryStopCause::MemoryPressure),
+            "deadline" => Some(TaskDeliveryStopCause::Deadline),
+            _ => None,
+        });
+        let input = TaskDeliverySnapshotInput {
+            task_id: base.id.clone(),
+            outcome,
+            exit_code: shell.exit_code,
+            start_time_ms,
+            end_time_ms,
+            output_file,
+            output,
+            stop_cause,
+        };
+        match TaskDeliverySnapshot::from_local_shell(policy, input) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::debug!(task_id = %base.id, %error, "could not create Native taskDelivery snapshot");
+                None
+            }
+        }
     }
 
     async fn requeue_deferred_rest(&self, deferred_rest: Vec<(String, RestPayload)>) {
@@ -7008,7 +7114,11 @@ mod registry_api_test {
             .await
             .unwrap();
         registry.notify_bash_stall(id, "Continue?").await;
-        let notices = registry.take_pending_task_notifications().await;
+        let notices = registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+            )
+            .await;
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].status, "running");
         assert_eq!(
@@ -7025,7 +7135,11 @@ mod registry_api_test {
             .settle_background_bash(id, Some(0), false)
             .await
             .unwrap();
-        let notices = registry.take_pending_task_notifications().await;
+        let notices = registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+            )
+            .await;
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].status, "completed");
     }
@@ -7101,11 +7215,20 @@ mod registry_api_test {
             .settle_background_bash(id, None, false)
             .await
             .unwrap();
-        let notices = registry.take_pending_task_notifications().await;
+        let notices = registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+            )
+            .await;
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].status, "killed");
         assert_eq!(notices[0].killed_by.as_deref(), Some("memory_pressure"));
-        assert!(registry.take_pending_task_notifications().await.is_empty());
+        assert!(registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty());
         assert!(fs
             .files
             .lock()
@@ -7185,7 +7308,15 @@ mod registry_api_test {
         .await
         .expect("terminal output finalization survives its caller");
         assert!(!registry.claim_bash_memory_pressure_stop(id).await);
-        assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
+        assert_eq!(
+            registry
+                .take_pending_task_notifications(
+                    lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+                )
+                .await
+                .len(),
+            1
+        );
     }
 }
 

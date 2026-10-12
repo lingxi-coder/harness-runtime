@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use client::adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
+use client::adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
 use client::protocol::events::ClientEvent;
 use client::protocol::listings::SessionModeDto;
 use client::protocol::text::ClientTextDto;
@@ -22,7 +22,7 @@ use lingxi_core::host::{
     OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, RwLock};
 use tool_skill::skill::SkillCommandType;
 
 use super::{
@@ -31,10 +31,10 @@ use super::{
     lower_session_agent_snapshot, mobile_cron_schedule_error, mobile_mcp_config_unchanged,
     mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight, mobile_mcp_record_reload_intent,
     mobile_mcp_reload_requires_replacement, mobile_mcp_run_reload_job,
-    mobile_mcp_state_is_transitional, mobile_skill_listing_provider,
-    session_agent_conversation_is_visible, session_agent_transcript_event,
-    session_agent_transcript_revision, McpRegistry, McpServerConfig, MobileConfig,
-    MobileCronStoreHandle, MobileMcpReloadJob, MobileRuntime, MobileSessionAgentObserver,
+    mobile_mcp_state_is_transitional, session_agent_conversation_is_visible,
+    session_agent_transcript_event, session_agent_transcript_revision, McpRegistry,
+    McpServerConfig, MobileConfig, MobileCronStoreHandle, MobileMcpReloadJob,
+    MobileSessionAgentObserver,
 };
 
 fn source_text(text: &str) -> Utf16JsonProjection {
@@ -83,6 +83,7 @@ fn replayed_session_from_jsonl(raw: &str) -> orchestrator::ReplayedSession {
     let runtime_metadata = orchestrator::runtime_metadata_from_messages(&messages);
     orchestrator::ReplayedSession {
         display_history: state.history.clone(),
+        display_timestamps: Default::default(),
         state,
         messages,
         last_message_uuid: None,
@@ -1221,7 +1222,7 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
     let provider = rt.wired_skill_listing_provider.clone();
     let loader = rt.wired_skill_loader.clone();
 
-    let listed = provider.skill_entries().await;
+    let listed = provider.skill_listing_snapshot().await.entries;
     let listed_names: std::collections::BTreeSet<_> = listed
         .iter()
         .map(|entry| entry.name.string_at("").expect("skill name is a string"))
@@ -1277,7 +1278,7 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         .iter()
         .find(|entry| entry.name.string_at("") == Some("loop"))
         .expect("loop listed");
-    assert!(listed_loop.is_bundled, "loop must list as bundled");
+    assert!(listed_loop.is_bundled_prompt, "loop must list as bundled");
 
     write_skill(tmp.path(), "foo", "Foo skill", "FOO BODY v2");
     match rt.dispatcher.dispatch(source_text("/reload-skills")).await {
@@ -1311,7 +1312,7 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         SlashDispatchResult::Handled { .. } => {}
         other => panic!("reload-skills must be handled locally, got {other:?}"),
     }
-    let listed_after_delete = provider.skill_entries().await;
+    let listed_after_delete = provider.skill_listing_snapshot().await.entries;
     let listed_after_delete_names: std::collections::BTreeSet<_> = listed_after_delete
         .iter()
         .map(|entry| entry.name.string_at("").expect("skill name is a string"))
@@ -1352,6 +1353,90 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         "loop must still resolve from bundled after repeated reloads"
     );
     drop(registry_after_delete);
+}
+
+#[tokio::test]
+async fn mobile_bundled_device_skill_is_prompt_discoverable_after_executor_conversion() {
+    let mut registry = command_api::CommandRegistry::new();
+    crate::mobile::device_skills::register_mobile_device_skills(
+        &mut registry,
+        &["device_status".to_owned()],
+    );
+    let mut device_skill = registry
+        .resolve(&source_text("mobile-device"))
+        .expect("mobile device skill is registered")
+        .clone();
+    device_skill.user_facing_name = Some("device-short".into());
+    registry.register_command(device_skill);
+    registry.register_command(command_api::SlashCommand {
+        name: "device-short".into(),
+        description: "disabled alias collision".into(),
+        source: command_api::CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        kind: command_api::SlashCommandKind::Markdown {
+            file_path: std::path::PathBuf::from("disabled-device-short.md"),
+            frontmatter: command_api::CommandFrontmatter::default(),
+            prompt_template: "hidden".into(),
+        },
+        is_enabled: false,
+        native_type: Some(command_api::NativeCommandType::Prompt),
+        has_user_specified_description: true,
+        loaded_from: Some("skills".to_owned()),
+        ..command_api::SlashCommand::default()
+    });
+    registry.register_command(command_api::SlashCommand {
+        name: "disabled-mobile-skill".into(),
+        description: "disabled fixture".into(),
+        source: command_api::CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        kind: command_api::SlashCommandKind::Markdown {
+            file_path: std::path::PathBuf::from("disabled-mobile-skill.md"),
+            frontmatter: command_api::CommandFrontmatter::default(),
+            prompt_template: "hidden".into(),
+        },
+        is_enabled: false,
+        native_type: Some(command_api::NativeCommandType::Prompt),
+        has_user_specified_description: true,
+        loaded_from: Some("skills".to_owned()),
+        ..command_api::SlashCommand::default()
+    });
+    let device_skill = registry
+        .resolve(&source_text("mobile-device"))
+        .expect("mobile device skill is registered");
+    assert!(device_skill.is_prompt());
+    assert!(matches!(
+        &device_skill.kind,
+        command_api::SlashCommandKind::Bundled { .. }
+    ));
+
+    // Exercise the production Mobile listing mapper over the actual bundled
+    // device-skill producer. Its dispatch kind is Bundled, so Native prompt
+    // classification must come from the original markdown factory.
+    let provider = super::mobile_skill_listing_provider_with_settings(
+        Arc::new(RwLock::new(registry)),
+        session::jsonl::SessionMode::Code,
+        None,
+        Arc::new(|| false),
+        None,
+    );
+    let snapshot = provider.skill_listing_snapshot().await;
+    assert!(snapshot
+        .entries
+        .iter()
+        .all(|entry| { entry.name.string_at("") != Some("disabled-mobile-skill") }));
+    let entry = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.name.string_at("") == Some("mobile-device"))
+        .expect("bundled mobile-device prompt must reach the model-facing listing");
+    assert!(entry.is_bundled_prompt);
+    assert_eq!(
+        entry.source.as_ref().and_then(|value| value.string_at("")),
+        Some("built-in")
+    );
+    assert_eq!(
+        entry.display_name.string_at(""),
+        Some("mobile-device (device-short)"),
+        "disabled command names must not shadow Native's full-catalog display-name resolution"
+    );
 }
 
 /// Write a minimal fixture plugin directory `root/{plugin_name}` with one
@@ -1456,7 +1541,11 @@ async fn listing_and_invocation_share_one_registry() {
     // the plugin's command — read through `wired_skill_listing_provider`,
     // the VERY handle the orchestrator's per-turn prompt reads, not a
     // provider the test builds fresh over `rt.slash_registry`.
-    let listed = rt.wired_skill_listing_provider.skill_entries().await;
+    let listed = rt
+        .wired_skill_listing_provider
+        .skill_listing_snapshot()
+        .await
+        .entries;
     assert!(
         listed
             .iter()
@@ -1467,6 +1556,24 @@ async fn listing_and_invocation_share_one_registry() {
             .iter()
             .map(|entry| entry.name.string_at("").unwrap_or_default())
             .collect::<Vec<_>>()
+    );
+    let plugin_entry = listed
+        .iter()
+        .find(|entry| entry.name.string_at("") == Some(namespaced_cmd.as_str()))
+        .expect("plugin prompt appears in the live listing");
+    assert_eq!(
+        plugin_entry
+            .source
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some("plugin")
+    );
+    assert_eq!(
+        plugin_entry
+            .plugin_name
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some(plugin_name)
     );
 
     // Invocation: the Skill tool's OWN loader — `wired_skill_loader` —
@@ -2102,12 +2209,22 @@ async fn workflow_launches_and_completes_on_mobile() {
 
     // Completion surfaces exactly once through the notification drain the
     // orchestrator's `<task-notification>` reminder consumes.
-    let notes = rt.task_registry.take_pending_task_notifications().await;
+    let notes = rt
+        .task_registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert!(
         notes.iter().any(|n| n.task_id == launched.task_id),
         "completed workflow must be drained as a task notification: {notes:?}"
     );
-    let again = rt.task_registry.take_pending_task_notifications().await;
+    let again = rt
+        .task_registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert!(
         !again.iter().any(|n| n.task_id == launched.task_id),
         "consume-once: a second drain must not re-surface it"
@@ -2408,6 +2525,41 @@ fn build_submit_handle_with_platform(
     let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
         .expect("build_mobile_engine failed");
     (handle, listener)
+}
+
+#[test]
+fn mobile_controls_event_contains_the_live_native_proactivity_snapshot() {
+    let root = tempfile::tempdir().expect("mobile controls root");
+    let (handle, listener) = build_submit_handle(root.path());
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::InitializeProactivity {
+                proactivity: Some(true),
+                reinitialize: Some(false),
+            })
+            .await
+            .expect("Mobile routes the Native session opt-in command");
+        let expected = client::adapter::controls::lower_native_proactivity_control_state(
+            lingxi_core::host::OrchestratorHandle::native_proactivity_snapshot(
+                handle.inner.orchestrator.as_ref(),
+            ),
+        );
+        assert!(
+            expected.is_some(),
+            "the production Mobile composition exposes the current opt-in control"
+        );
+
+        handle.emit_controls_snapshot().await;
+        let events = listener.received.lock().await;
+        let controls = events
+            .iter()
+            .find_map(|event| match event {
+                Ev::ConversationControlsChanged { controls } => Some(controls),
+                _ => None,
+            })
+            .expect("Mobile emits a controls snapshot");
+        assert_eq!(controls.proactivity, expected);
+    });
 }
 
 struct AudioHostFakePlatform {
@@ -3322,7 +3474,6 @@ fn mobile_mcp_changed_to_disabled_reloads_without_dialing() {
 
 #[test]
 fn mobile_mcp_reload_revert_invalidates_a_pending_change() {
-    let tmp = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(McpRegistry::new(Arc::new(
         crate::mobile::mcp_transport::MobileMcpTransport::new(Arc::new(
             platform_common::RemoteMcpTransport::new(),
@@ -3381,7 +3532,6 @@ fn mobile_mcp_reload_revert_invalidates_a_pending_change() {
 
 #[test]
 fn mobile_mcp_reload_restore_invalidates_a_pending_delete() {
-    let tmp = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(McpRegistry::new(Arc::new(
         crate::mobile::mcp_transport::MobileMcpTransport::new(Arc::new(
             platform_common::RemoteMcpTransport::new(),
@@ -8027,7 +8177,7 @@ fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
 /// so the barrier is two-stage too: `flush_events` waits until everything
 /// committed is ENQUEUED, then the queue flush waits until everything
 /// enqueued is DELIVERED.
-async fn drain_events(handle: &MobileEngineHandle, listener: &FakeListener) -> Vec<Ev> {
+async fn drain_events(_handle: &MobileEngineHandle, listener: &FakeListener) -> Vec<Ev> {
     std::mem::take(&mut *listener.received.lock().await)
 }
 

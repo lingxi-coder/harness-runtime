@@ -71,6 +71,8 @@ impl MemorySelector {
             model: model.to_string(),
             profile: profile.map(str::to_string),
             system_prompt: Some("You select memory files relevant to the query.".into()),
+            typed_attachment_ids: HashSet::new(),
+            task_deliveries: std::collections::HashMap::new(),
             system_prompt_input: None,
             messages: vec![lingxi_core::types::ConversationMessage::user(
                 lingxi_core::types::MessageId::new(),
@@ -320,12 +322,16 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingClient(std::sync::Mutex<Vec<(String, Option<String>)>>);
+    struct RecordingClient(std::sync::Mutex<Vec<(String, Option<String>, bool)>>);
 
     #[async_trait]
     impl SideQueryClient for RecordingClient {
         async fn query(&self, req: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
-            self.0.lock().unwrap().push((req.model, req.profile));
+            self.0.lock().unwrap().push((
+                req.model,
+                req.profile,
+                req.typed_attachment_ids.is_empty() && req.task_deliveries.is_empty(),
+            ));
             Ok(SideQueryResponse {
                 text: None,
                 structured: Some(
@@ -367,7 +373,7 @@ mod tests {
             *client.0.lock().unwrap(),
             routes
                 .into_iter()
-                .map(|(model, profile)| (model.to_string(), profile.map(str::to_string)))
+                .map(|(model, profile)| (model.to_string(), profile.map(str::to_string), true))
                 .collect::<Vec<_>>()
         );
     }

@@ -83,7 +83,7 @@ async fn surfaces_ancestor_memory_once_then_never_again() {
     push_touched(&orch, &f.trigger);
 
     let text = orch
-        .nested_memory_reminder_messages()
+        .nested_memory_reminder_messages(&[])
         .await
         .into_iter()
         .next()
@@ -93,7 +93,7 @@ async fn surfaces_ancestor_memory_once_then_never_again() {
     assert!(text.contains("pkg guidance"), "got: {text}");
 
     assert!(
-        orch.nested_memory_reminder_messages().await.is_empty(),
+        orch.nested_memory_reminder_messages(&[]).await.is_empty(),
         "`loadedNestedMemoryPaths` must stop a second emission"
     );
 }
@@ -102,7 +102,10 @@ async fn surfaces_ancestor_memory_once_then_never_again() {
 async fn no_touched_file_yields_none() {
     let f = fixture();
     touch(&f.cwd.join("pkg").join(MEM), "pkg guidance");
-    assert!(orch(&f).nested_memory_reminder_messages().await.is_empty());
+    assert!(orch(&f)
+        .nested_memory_reminder_messages(&[])
+        .await
+        .is_empty());
 }
 
 /// A retained raw history body suppresses repetition after ReadState eviction.
@@ -114,7 +117,7 @@ async fn eviction_from_read_state_does_not_resurrect_a_sent_file() {
     let orch = orch(&f);
     push_touched(&orch, &f.trigger);
     assert!(orch
-        .nested_memory_reminder_messages()
+        .nested_memory_reminder_messages(&[])
         .await
         .into_iter()
         .next()
@@ -133,7 +136,7 @@ async fn eviction_from_read_state_does_not_resurrect_a_sent_file() {
     );
 
     assert!(
-        orch.nested_memory_reminder_messages().await.is_empty(),
+        orch.nested_memory_reminder_messages(&[]).await.is_empty(),
         "already-sent memory must stay sent after its read-state entry is evicted"
     );
 }
@@ -149,7 +152,7 @@ async fn a_file_the_model_already_read_is_not_surfaced() {
     push_touched(&orch, &f.trigger);
     push_touched(&orch, &mem);
 
-    assert!(orch.nested_memory_reminder_messages().await.is_empty());
+    assert!(orch.nested_memory_reminder_messages(&[]).await.is_empty());
 }
 
 #[tokio::test]
@@ -160,7 +163,7 @@ async fn surfacing_seeds_read_state_so_a_later_read_dedups() {
     let orch = orch(&f);
     push_touched(&orch, &f.trigger);
     assert!(orch
-        .nested_memory_reminder_messages()
+        .nested_memory_reminder_messages(&[])
         .await
         .into_iter()
         .next()
@@ -204,12 +207,12 @@ async fn a_rule_already_sent_by_conditional_rules_is_not_resent() {
     )
     .with_nested_memory_roots(f.home.clone(), None);
     push_touched(&orch, &f.trigger);
-    let conditional = orch.nested_memory_reminder_messages().await;
+    let conditional = orch.nested_memory_reminder_messages(&[]).await;
     assert_eq!(conditional.len(), 1);
     assert!(conditional[0].text_content().contains("api rule"));
     assert_eq!(orch.nested_memory_history().await.nested[&rule], "api rule");
     assert!(
-        orch.nested_memory_reminder_messages().await.is_empty(),
+        orch.nested_memory_reminder_messages(&[]).await.is_empty(),
         "conditional-rules already sent this rule"
     );
 }

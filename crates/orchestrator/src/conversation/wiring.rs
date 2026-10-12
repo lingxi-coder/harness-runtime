@@ -51,7 +51,7 @@ impl ConversationOrchestrator {
         // session's mode+provider decision rather than the bare `false` default.
         lingxi_core::host::session_flags::set_tool_search_enabled(
             tools.deferral().mode().is_enabled()
-                && tool_search_supported_for_request(&config.model, None),
+                && tool_search_supported_for_request(api.as_ref(), &config.model, None),
         );
         let session = SessionState::empty(SessionId::new(), config.model.clone());
         let main_reports = super::main_reports_impl::MainReportInbox::new(session.session_id);
@@ -62,9 +62,14 @@ impl ConversationOrchestrator {
             .map(|effort| lingxi_core::host::ReasoningSelection::Level { id: effort.clone() })
             .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
         let current_effort_explicit = current_effort.is_some();
+        let response_language = config.language.clone();
         let ultracode = config.ultracode;
         Self {
             config,
+            native_sandbox_host_facts_provider: None,
+            native_policy_host_facts_provider: None,
+            native_proactivity_state: NativeProactivityState::default(),
+            native_tool_pool_refresh_callback_available: None,
             api,
             streaming_api,
             query_chain_id: uuid::Uuid::new_v4().to_string(),
@@ -107,7 +112,7 @@ impl ConversationOrchestrator {
             workspace_trusted: true,
             hooks_restricted: false,
             transcript: TranscriptStore::new(),
-            prompt_runtime: PromptRuntime::new(),
+            prompt_runtime: PromptRuntime::new_with_response_language(response_language),
             compaction_runtime: CompactionRuntime::new(),
             lifecycle_runtime: LifecycleRuntime::new(),
             computer_runtime: crate::native_computer::ComputerRuntime::default(),
@@ -164,6 +169,41 @@ impl ConversationOrchestrator {
         roster: std::sync::Arc<crate::mod_surface_roster::ModSurfaceRoster>,
     ) -> Self {
         self.mod_surface_roster = roster;
+        self
+    }
+
+    /// Supply live host sandbox facts for the model-facing `Bash` sandbox
+    /// attachment. The provider is queried on each user turn so `/sandbox`
+    /// changes and session cwd swaps take effect without rebuilding the loop.
+    #[must_use]
+    pub fn with_native_sandbox_host_facts_provider<F>(mut self, provider: F) -> Self
+    where
+        F: Fn() -> NativeSandboxHostFacts + Send + Sync + 'static,
+    {
+        self.native_sandbox_host_facts_provider = Some(Arc::new(provider));
+        self
+    }
+
+    /// Supply live host facts used by Native's model-facing Auto Mode and
+    /// proactivity attachment producers.
+    #[must_use]
+    pub fn with_native_policy_host_facts_provider<F>(mut self, provider: F) -> Self
+    where
+        F: Fn() -> NativePolicyHostFacts + Send + Sync + 'static,
+    {
+        self.native_policy_host_facts_provider = Some(Arc::new(provider));
+        self
+    }
+
+    /// Set whether this composition root has Native's `options.refreshTools`
+    /// callback. `None` keeps the fact unknown; a ToolRegistry alone does not
+    /// establish callback availability.
+    #[must_use]
+    pub fn with_native_tool_pool_refresh_callback_available(
+        mut self,
+        available: Option<bool>,
+    ) -> Self {
+        self.native_tool_pool_refresh_callback_available = available;
         self
     }
 
@@ -555,6 +595,29 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Seed the raw main model setting separately from the resolved wire id.
+    /// Agent spawn settings remain on their independent inheritance path.
+    pub async fn with_main_model_selection(
+        self,
+        raw_model_setting: Option<String>,
+        provenance: lingxi_core::host::ModelProvenance,
+        restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+    ) -> Self {
+        {
+            let mut session = self.session.lock().await;
+            session.user_model_setting = raw_model_setting;
+            session.user_model_setting_provenance = provenance;
+            session.user_model_setting_source =
+                lingxi_core::session::SessionModelSettingSource::Configured;
+        }
+        *self
+            .model_runtime
+            .main_model_restriction
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = restriction;
+        self
+    }
+
     /// Share the host's model route authority and refresh the initial tool gate.
     #[must_use]
     pub fn with_model_resolution_context_provider(
@@ -607,6 +670,16 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Set Native's actual `agentContext` identity for settings-delta gates.
+    #[must_use]
+    pub fn with_native_settings_agent_context(
+        mut self,
+        context: lingxi_core::host::NativeSettingsAgentContext,
+    ) -> Self {
+        self.prompt_runtime.native_settings_agent_context = context;
+        self
+    }
+
     /// Attach an agent catalog so `list_agents` reports real data.
     /// Wrapped in `RwLock` so the CLI binary can append/reload agents
     /// without rebuilding the orchestrator. (M6-07)
@@ -638,6 +711,27 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_skill_listing(&self) -> bool {
         self.prompt_runtime.skill_listing.is_some()
+    }
+
+    /// Clone the live tool-registry handle already assembled for this
+    /// orchestrator. Host composition roots can reuse the same catalog when
+    /// wrapping the request path with another API client (for example, a
+    /// deterministic transcript replay); this preserves the production tool
+    /// availability gates instead of substituting a test-only registry.
+    #[must_use]
+    pub fn shared_tool_registry(&self) -> Arc<ToolRegistry> {
+        Arc::clone(&self.tools)
+    }
+
+    /// Clone the host-owned provider for the model-invocable Skill catalog.
+    /// Rebound orchestrators must retain this provider together with the Skill
+    /// tool so the `skill_listing` attachment follows the same installed
+    /// command catalog as the production request path.
+    #[must_use]
+    pub fn skill_listing_provider(
+        &self,
+    ) -> Option<Arc<dyn crate::prompt::skill_listing::SkillListingProvider>> {
+        self.prompt_runtime.skill_listing.clone()
     }
 
     /// Attach a memory prefetcher so the per-turn `relevant_memories` surfacing
@@ -889,7 +983,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_skill_discovery_prefetch(
         mut self,
-        prefetch: Arc<skill_api::SkillDiscoveryPrefetch>,
+        prefetch: Arc<skill::SkillDiscoveryPrefetch>,
     ) -> Self {
         self.prompt_runtime.skill_discovery_prefetch = Some(prefetch);
         self

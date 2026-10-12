@@ -83,6 +83,14 @@
         "forced_reasoning": false,
         "editable": true
       }
+    },
+    "proactivity": {
+      "opted_in": false,
+      "selector_gate": false,
+      "selector_gate_ever_on": false,
+      "attachments_enabled": true,
+      "opt_in_available": true,
+      "level": "default"
     }
   }
 }

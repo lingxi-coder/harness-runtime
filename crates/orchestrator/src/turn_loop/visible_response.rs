@@ -134,6 +134,15 @@ pub(super) fn process_visible_response<'a>(
             // consumer selects K and dispatches its original ToolUse blocks.
             assistant_blocks.clone_from(content);
         }
+        orch.record_main_loop_assistant_usage(
+            &assistant_msg,
+            &response.model,
+            (requested_model
+                && request_history_source
+                    == super::mod_batched_step::RequestHistorySource::PhysicalRequest)
+                .then_some(&response.usage),
+        )
+        .await;
         orch.record_mod_turn_response(
             &assistant_msg,
             (requested_model && no_physical_responses).then_some(&response.usage),

@@ -82,10 +82,14 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
         custom_simplify: true,
         code_review: false,
     };
+    let listing = runtime
+        .wired_skill_listing_provider
+        .skill_listing_snapshot()
+        .await;
     assert_eq!(
         runtime
             .wired_skill_listing_provider
-            .bash_precommit_skills()
+            .bash_precommit_skills(&listing.entries)
             .await,
         custom
     );
@@ -107,10 +111,16 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
         SlashDispatchResult::Handled { .. }
     ));
     assert_eq!(
-        runtime
-            .wired_skill_listing_provider
-            .bash_precommit_skills()
-            .await,
+        {
+            let listing = runtime
+                .wired_skill_listing_provider
+                .skill_listing_snapshot()
+                .await;
+            runtime
+                .wired_skill_listing_provider
+                .bash_precommit_skills(&listing.entries)
+                .await
+        },
         custom
     );
     for name in ["verify", "simplify"] {

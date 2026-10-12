@@ -20,7 +20,7 @@ pub struct PermissionRule {
 
 /// The match key for a `PermissionRule`: a tool name plus optional
 /// rule-specific content (for example, a bash command substring).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRuleValue {
     /// Name of the tool this rule applies to (e.g. `"Bash"`, `"Edit"`).
     pub tool_name: String,
@@ -33,7 +33,19 @@ pub struct PermissionRuleValue {
         skip_serializing_if = "Option::is_none"
     )]
     pub rule_content: Option<Utf16JsonProjection>,
+    /// Original stored permission spelling when parsing normalized it. This
+    /// source-only metadata is excluded from serialization and semantic equality.
+    #[serde(skip)]
+    pub original_rule: Option<Utf16JsonProjection>,
 }
+
+impl PartialEq for PermissionRuleValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.tool_name == other.tool_name && self.rule_content == other.rule_content
+    }
+}
+
+impl Eq for PermissionRuleValue {}
 
 impl PermissionRuleValue {
     /// Parse a permission-rule string (`"Tool"` or `"Tool(content)"`) into a
@@ -63,35 +75,44 @@ impl PermissionRuleValue {
             Some(Self {
                 tool_name: normalize_legacy_tool_name(&tool_name),
                 rule_content: None,
+                original_rule: None,
             })
         };
-        let Some(open) = find_first_unescaped_unit(&units, b'(' as u16) else {
-            return bare();
+        let mut value = if let Some(open) = find_first_unescaped_unit(&units, b'(' as u16) {
+            let Some(close) = find_last_unescaped_unit(&units, b')' as u16) else {
+                return bare();
+            };
+            // Malformed / content-after-close → treat the whole string as a tool name.
+            if close <= open || close != units.len() - 1 {
+                return bare();
+            }
+            let tool_name = String::from_utf16(&units[..open]).ok()?;
+            if tool_name.is_empty() {
+                return bare();
+            }
+            let raw_content = &units[open + 1..close];
+            // `Tool()` / `Tool(*)` are tool-wide.
+            if raw_content.is_empty() || raw_content == [b'*' as u16] {
+                Self {
+                    tool_name: normalize_legacy_tool_name(&tool_name),
+                    rule_content: None,
+                    original_rule: None,
+                }
+            } else {
+                let content = unescape_rule_content_units(raw_content);
+                Self {
+                    tool_name: normalize_legacy_tool_name(&tool_name),
+                    rule_content: Some(root_string_projection(content)),
+                    original_rule: None,
+                }
+            }
+        } else {
+            bare()?
         };
-        let Some(close) = find_last_unescaped_unit(&units, b')' as u16) else {
-            return bare();
-        };
-        // Malformed / content-after-close → treat the whole string as a tool name.
-        if close <= open || close != units.len() - 1 {
-            return bare();
+        if value.to_rule_projection() != *rule {
+            value.original_rule = Some(rule.clone());
         }
-        let tool_name = String::from_utf16(&units[..open]).ok()?;
-        if tool_name.is_empty() {
-            return bare();
-        }
-        let raw_content = &units[open + 1..close];
-        // `Tool()` / `Tool(*)` are tool-wide.
-        if raw_content.is_empty() || raw_content == [b'*' as u16] {
-            return Some(Self {
-                tool_name: normalize_legacy_tool_name(&tool_name),
-                rule_content: None,
-            });
-        }
-        let content = unescape_rule_content_units(raw_content);
-        Some(Self {
-            tool_name: normalize_legacy_tool_name(&tool_name),
-            rule_content: Some(root_string_projection(content)),
-        })
+        Some(value)
     }
 
     /// Serialize back to the `"Tool"` / `"Tool(content)"` rule-string form
@@ -108,6 +129,13 @@ impl PermissionRuleValue {
             }
         }
         root_string_projection(units)
+    }
+
+    /// Stored spelling when Native's permission context must distinguish it
+    /// from the canonical projection.
+    #[must_use]
+    pub fn original_rule_projection(&self) -> Option<&Utf16JsonProjection> {
+        self.original_rule.as_ref()
     }
 
     /// UTF-8 display form for existing UI/log boundaries. Source serialization
@@ -328,6 +356,7 @@ impl PermissionRule {
             value: PermissionRuleValue {
                 tool_name: tool.to_string(),
                 rule_content: None,
+                original_rule: None,
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Session,
@@ -481,6 +510,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Bash".to_string(),
                 rule_content: Some("ls".into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Session,
@@ -494,6 +524,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Bash".to_string(),
                 rule_content: None,
+                original_rule: None,
             },
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::Session,
@@ -555,6 +586,29 @@ mod tests {
     }
 
     #[test]
+    fn parser_retains_noncanonical_stored_spelling_without_changing_rule_equality() {
+        let stored = Utf16JsonProjection::from("KillBash");
+        let parsed = PermissionRuleValue::from_rule_projection(&stored).unwrap();
+        assert_eq!(parsed.to_rule_projection().string_at(""), Some("TaskStop"));
+        assert_eq!(
+            parsed
+                .original_rule_projection()
+                .and_then(|rule| rule.string_at("")),
+            Some("KillBash")
+        );
+
+        let canonical = PermissionRuleValue {
+            tool_name: "TaskStop".to_owned(),
+            rule_content: None,
+            original_rule: None,
+        };
+        assert_eq!(parsed, canonical);
+
+        let already_canonical = PermissionRuleValue::from_rule_string("TaskStop");
+        assert!(already_canonical.original_rule_projection().is_none());
+    }
+
+    #[test]
     fn to_rule_string_round_trips() {
         for s in [
             "Bash",
@@ -573,7 +627,8 @@ mod tests {
         assert_eq!(
             PermissionRuleValue {
                 tool_name: "Read".into(),
-                rule_content: None
+                rule_content: None,
+                original_rule: None,
             }
             .to_rule_string(),
             "Read"

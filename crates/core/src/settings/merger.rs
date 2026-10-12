@@ -58,6 +58,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // OUTSTYLE.1: `outputStyle` is a string in claude-code and merges
         // scalar-override (settingsMergeCustomizer special-cases only arrays).
         output_style: next.output_style.or(prev.output_style),
+        // Scalar Override — Native's `settings.language` response preference.
+        language: next.language.or(prev.language),
+        // Scalar Override — Native's proxy authentication helper command.
+        proxy_auth_helper: next.proxy_auth_helper.or(prev.proxy_auth_helper),
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
         // Scalar Override (later source wins), same as `telemetryEnabled`.
         ax_screen_reader: next.ax_screen_reader.or(prev.ax_screen_reader),
@@ -76,6 +80,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // Scalar Override (later source wins) — `disableAgentView` (M-03), same
         // as `enableArtifact`.
         disable_agent_view: next.disable_agent_view.or(prev.disable_agent_view),
+        // Scalar Override (later source wins) — Native bundled skill/workflow
+        // catalog gate. The consumer supplies the false default when absent.
+        disable_bundled_skills: next.disable_bundled_skills.or(prev.disable_bundled_skills),
         disable_all_hooks: next.disable_all_hooks.or(prev.disable_all_hooks),
         allow_managed_hooks_only: next
             .allow_managed_hooks_only
@@ -88,6 +95,16 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         cross_session_inbound: next.cross_session_inbound.or(prev.cross_session_inbound),
         policy_helpers: deep_merge_object(prev.policy_helpers, next.policy_helpers),
         sync_claude_ai_skills: next.sync_claude_ai_skills.or(prev.sync_claude_ai_skills),
+        skill_listing_max_desc_chars: next
+            .skill_listing_max_desc_chars
+            .or(prev.skill_listing_max_desc_chars),
+        skill_listing_budget_fraction: next
+            .skill_listing_budget_fraction
+            .or(prev.skill_listing_budget_fraction),
+        // Native skill overrides are a name-to-enum record and lodash-merges
+        // the object across settings layers; later values replace only the
+        // same exact UTF-16 skill name.
+        skill_overrides: deep_merge_skill_overrides(prev.skill_overrides, next.skill_overrides),
         additional_marketplaces: deep_merge_object(
             prev.additional_marketplaces,
             next.additional_marketplaces,
@@ -231,6 +248,25 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
         fusion: merge_fusion_settings(prev.fusion, next.fusion),
+    }
+}
+
+fn deep_merge_skill_overrides(
+    prev: Option<crate::settings::schema::SkillOverrides>,
+    next: Option<crate::settings::schema::SkillOverrides>,
+) -> Option<crate::settings::schema::SkillOverrides> {
+    match (prev, next) {
+        (None, other) | (other, None) => other,
+        (Some(prev), Some(next)) => {
+            let merged = deep_merge_source_value(
+                prev.source_projection().clone(),
+                next.source_projection().clone(),
+            );
+            Some(
+                crate::settings::schema::SkillOverrides::from_source_projection(merged)
+                    .expect("merging valid skill override records keeps valid enum values"),
+            )
+        }
     }
 }
 
@@ -812,6 +848,7 @@ fn deep_merge_value(prev: serde_json::Value, next: serde_json::Value) -> serde_j
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::schema::SkillOverride;
 
     #[test]
     fn permission_arrays_accumulate_across_sources_in_typed_and_raw_views() {
@@ -1182,6 +1219,9 @@ mod tests {
     fn scalar_override_next_wins_when_set() {
         let prev = SettingsJson {
             model: Some("sonnet".into()),
+            output_style: Some(Utf16JsonProjection::parse(r#""old""#).unwrap()),
+            language: Some(Utf16JsonProjection::parse(r#""English""#).unwrap()),
+            proxy_auth_helper: Some(Utf16JsonProjection::parse(r#""/old/proxy-helper""#).unwrap()),
             telemetry_enabled: Some(false),
             enable_workflows: Some(true),
             workflow_size_guideline: Some("small".into()),
@@ -1189,6 +1229,9 @@ mod tests {
         };
         let next = SettingsJson {
             model: Some("opus".into()),
+            output_style: Some(Utf16JsonProjection::parse(r#""\ud800""#).unwrap()),
+            language: Some(Utf16JsonProjection::parse(r#""Français""#).unwrap()),
+            proxy_auth_helper: Some(Utf16JsonProjection::parse(r#""/new/proxy-helper""#).unwrap()),
             telemetry_enabled: None,
             enable_workflows: Some(false),
             workflow_size_guideline: Some("large".into()),
@@ -1196,6 +1239,29 @@ mod tests {
         };
         let merged = merge(prev, next);
         assert_eq!(merged.model.as_deref(), Some("opus"));
+        assert_eq!(
+            merged
+                .output_style
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(vec![0xd800]),
+            "later outputStyle overrides earlier value without Unicode coercion"
+        );
+        assert_eq!(
+            merged
+                .language
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("Français")
+        );
+        assert_eq!(
+            merged
+                .proxy_auth_helper
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("/new/proxy-helper"),
+            "proxyAuthHelper is a scalar and the later layer replaces the earlier one"
+        );
         assert_eq!(
             merged.telemetry_enabled,
             Some(false),
@@ -1210,6 +1276,118 @@ mod tests {
             merged.workflow_size_guideline.as_deref(),
             Some("large"),
             "workflowSizeGuideline is scalar-override"
+        );
+    }
+
+    #[test]
+    fn disable_bundled_skills_uses_scalar_later_source_wins() {
+        let overridden = merge(
+            SettingsJson {
+                disable_bundled_skills: Some(true),
+                ..Default::default()
+            },
+            SettingsJson {
+                disable_bundled_skills: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(overridden.disable_bundled_skills, Some(false));
+
+        let retained = merge(
+            SettingsJson {
+                disable_bundled_skills: Some(true),
+                ..Default::default()
+            },
+            SettingsJson::default(),
+        );
+        assert_eq!(retained.disable_bundled_skills, Some(true));
+    }
+
+    #[test]
+    fn scalar_proxy_auth_helper_preserves_previous_when_next_missing() {
+        let merged = merge(
+            SettingsJson {
+                proxy_auth_helper: Some(
+                    Utf16JsonProjection::parse(r#""/existing/proxy-helper""#).unwrap(),
+                ),
+                ..Default::default()
+            },
+            SettingsJson::default(),
+        );
+
+        assert_eq!(
+            merged
+                .proxy_auth_helper
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("/existing/proxy-helper")
+        );
+    }
+
+    #[test]
+    fn skill_overrides_deep_merge_by_exact_utf16_key_in_typed_and_raw_paths() {
+        let lower_source = Utf16JsonProjection::parse(
+            r#"{"skillOverrides":{"shared":"on","keep":"off","odd-\ud800":"name-only"}}"#,
+        )
+        .unwrap();
+        let upper_source = Utf16JsonProjection::parse(
+            r#"{"skillOverrides":{"shared":"user-invocable-only","added":"off"}}"#,
+        )
+        .unwrap();
+        let lower: SettingsJson =
+            serde_json::from_str(&lower_source.to_json_string().expect("valid lower source"))
+                .expect("lower skill overrides parse");
+        let upper: SettingsJson =
+            serde_json::from_str(&upper_source.to_json_string().expect("valid upper source"))
+                .expect("upper skill overrides parse");
+
+        let merged = merge(lower, upper);
+        let overrides = merged.skill_overrides.as_ref().expect("merged record");
+        let units = |name: &str| name.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            overrides.get_units(&units("shared")),
+            Some(SkillOverride::UserInvocableOnly)
+        );
+        assert_eq!(
+            overrides.get_units(&units("keep")),
+            Some(SkillOverride::Off)
+        );
+        assert_eq!(
+            overrides.get_units(&units("added")),
+            Some(SkillOverride::Off)
+        );
+        assert_eq!(
+            overrides.get_units(
+                &units("odd-")
+                    .into_iter()
+                    .chain([0xd800])
+                    .collect::<Vec<_>>()
+            ),
+            Some(SkillOverride::NameOnly)
+        );
+
+        let mut raw = Utf16JsonProjection::parse("{}").unwrap();
+        let _lower_unions = merge_raw_source_layer(&mut raw, &lower_source).unwrap();
+        let _upper_unions = merge_raw_source_layer(&mut raw, &upper_source).unwrap();
+        let raw_overrides = raw.subprojection("/skillOverrides").unwrap();
+        assert_eq!(
+            raw_overrides
+                .subprojection_property_units(&units("shared"))
+                .unwrap()
+                .string_at(""),
+            Some("user-invocable-only")
+        );
+        assert_eq!(
+            raw_overrides
+                .subprojection_property_units(
+                    &units("odd-")
+                        .into_iter()
+                        .chain([0xd800])
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap()
+                .string_at(""),
+            Some("name-only")
         );
     }
 
@@ -1601,6 +1779,11 @@ mod tests {
                 json!({"claude-sonnet-4-5": {"effortLevel": "medium"}}),
             ),
             (
+                "skillOverrides",
+                json!({"lower": "on"}),
+                json!({"upper": "off"}),
+            ),
+            (
                 "modelOverrides",
                 json!({"lower": "m1"}),
                 json!({"upper": "m2"}),
@@ -1771,6 +1954,14 @@ mod tests {
             (json!("lower"), json!("upper")),
             (json!(true), json!(false)),
             (json!(1), json!(2)),
+            // `skillListingMaxDescChars` is modeled as f64, so its typed
+            // serde round trip preserves the float-form JSON numbers. Use
+            // integer-valued floats to meet Native's positive-integer schema.
+            (json!(3.0), json!(2.0)),
+            // `skillListingBudgetFraction` is strictly positive and at most
+            // one, so the integer pair above cannot exercise it. Keep a pair
+            // within the Native numeric schema to measure scalar override.
+            (json!(0.25), json!(0.75)),
             // String ENUMS reject the generic `"lower"`/`"upper"` pair, so they
             // need real variants. Appended last on purpose: the search takes the
             // first shape that round-trips, so this can only ever be reached by a
@@ -1780,6 +1971,8 @@ mod tests {
             (json!("china_mainland"), json!("international")),
             (json!("low"), json!("medium")),
             (json!("5m"), json!("1h")),
+            // `skillOverrides` is a record whose values are a string enum.
+            (json!({"lower": "on"}), json!({"upper": "off"})),
         ];
 
         // Whether `{field: value}` survives a `SettingsJson` round trip

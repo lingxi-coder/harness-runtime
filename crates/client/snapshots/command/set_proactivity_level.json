@@ -1,0 +1,5 @@
+{
+  "type": "set_proactivity_level",
+  "level": "proactive",
+  "offer_bypass": false
+}

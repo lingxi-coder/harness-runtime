@@ -131,8 +131,6 @@ impl BridgeMock {
         let tools = tool_names
             .iter()
             .map(|t| McpToolDto {
-                input_schema_projection: None,
-                definition_projection: None,
                 // Emit the empty `<server>` token, exactly like the posix
                 // transport's `list_tools` (mcp.rs:397) does.
                 full_name: format!("mcp____{t}"),
@@ -2597,6 +2595,171 @@ async fn failed_action_servers_reports_sanitized_errors_sorted() {
     );
 }
 
+#[tokio::test]
+async fn deferred_failed_server_snapshot_keeps_codes_filters_unconfigured_and_does_not_guess_retry()
+{
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock as Arc<dyn RawConnectionProvider>,
+    );
+    let config = cfg("auth-server");
+    let classified = McpError::Connection(
+        "Server rejected the configured Authorization header (HTTP 401).\u{200B} token rejected"
+            .into(),
+    );
+    registry.connections.write().await.insert(
+        config.name.clone(),
+        McpConnectionState::Disconnected {
+            config: config.clone(),
+            last_error: Some(classified.to_string()),
+        },
+    );
+    registry
+        .record_connection_failure_diagnostic(&config, &classified)
+        .await;
+
+    let unconfigured = http_cfg("blank-url", "");
+    let unconfigured_error =
+        McpError::Connection(crate::connection::UNCONFIGURED_ERROR.to_string().into());
+    registry.connections.write().await.insert(
+        unconfigured.name.clone(),
+        McpConnectionState::Disconnected {
+            config: unconfigured.clone(),
+            last_error: Some(unconfigured_error.to_string()),
+        },
+    );
+    registry
+        .record_connection_failure_diagnostic(&unconfigured, &unconfigured_error)
+        .await;
+
+    let snapshots = registry.failed_deferred_tool_servers().await;
+    assert_eq!(snapshots.len(), 1, "UNCONFIGURED is excluded");
+    assert_eq!(snapshots[0].name, "auth-server");
+    assert_eq!(
+        snapshots[0]
+            .error_code
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some("AUTH_HEADER_REJECTED")
+    );
+    assert_eq!(
+        snapshots[0]
+            .error
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some("Server rejected the configured Authorization header (HTTP 401). token rejected")
+    );
+    assert_eq!(
+        snapshots[0]
+            .native_raw_error
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some(
+            "Server rejected the configured Authorization header (HTTP 401).\u{200B} token rejected"
+        ),
+        "internal cause classification retains raw source error separately from sanitized display text"
+    );
+    assert_eq!(snapshots[0].will_retry, None);
+}
+
+#[tokio::test]
+async fn deferred_failed_snapshot_does_not_fill_raw_error_from_display_detail() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock as Arc<dyn RawConnectionProvider>,
+    );
+    let config = cfg("display-only");
+    registry.connections.write().await.insert(
+        config.name.clone(),
+        McpConnectionState::Disconnected {
+            config: config.clone(),
+            last_error: Some("source error absent".into()),
+        },
+    );
+    registry.failure_diagnostics.write().await.insert(
+        config.name.clone(),
+        ConnectionFailureDiagnostic {
+            config,
+            failure: McpConnectionFailure {
+                error: None,
+                display_detail: Some(source_json(&serde_json::json!(
+                    "Blocked by enterprise managed policy"
+                ))),
+                error_code: None,
+            },
+        },
+    );
+
+    let snapshots = registry.failed_deferred_tool_servers().await;
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].native_raw_error, None);
+    assert_eq!(
+        snapshots[0]
+            .error
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some("Blocked by enterprise managed policy")
+    );
+}
+
+#[test]
+fn connection_deadline_uses_native_connect_timeout_error_code_flag() {
+    let config = http_cfg("timed-out", "https://mcp.example.test");
+    let error = McpError::Connection(NATIVE_CONNECTION_TIMEOUT_MESSAGE.into());
+    telemetry::test_set_flag(NATIVE_CONNECT_TIMEOUT_RETRY_FLAG, true);
+    assert_eq!(
+        McpRegistry::connection_failure_diagnostics(&config, &error)
+            .error_code
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some("CONNECT_TIMEOUT")
+    );
+
+    telemetry::test_set_flag(NATIVE_CONNECT_TIMEOUT_RETRY_FLAG, false);
+    assert_eq!(
+        McpRegistry::connection_failure_diagnostics(&config, &error).error_code,
+        None
+    );
+    telemetry::test_clear_flag(NATIVE_CONNECT_TIMEOUT_RETRY_FLAG);
+}
+
+#[tokio::test]
+async fn registry_exports_schema_drop_records_from_the_discovery_decision() {
+    let mut mock = BridgeMock::new(&[]);
+    mock.tools = vec![McpToolDto {
+        full_name: "mcp____badSchema".into(),
+        server_name: String::new(),
+        tool_name: "badSchema".into(),
+        description: "unsupported schema".into(),
+        input_schema: source_json(&serde_json::json!({"anyOf": "not-an-array"})),
+        output_schema: None,
+        annotations: None,
+        icons: Vec::new(),
+        meta: None,
+        search_hint: None,
+        always_load: None,
+        requires_user_interaction: false,
+    }];
+    let mock = Arc::new(mock);
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock.clone() as Arc<dyn RawConnectionProvider>,
+    );
+    registry
+        .connect(cfg("schema-server"))
+        .await
+        .expect("connect");
+
+    let snapshots = registry.dropped_tool_servers().await;
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].server_name, "schema-server");
+    assert_eq!(snapshots[0].tools.len(), 1);
+    assert_eq!(snapshots[0].tools[0].tool_name, "badSchema");
+    assert!(snapshots[0].tools[0].reason.contains("anyOf"));
+}
+
 #[test]
 fn sanitize_diagnostic_strips_quotes_controls_and_caps_at_200() {
     // Angle brackets, `"`, `;` and the fancy-quote set collapse to spaces.
@@ -2610,6 +2773,198 @@ fn sanitize_diagnostic_strips_quotes_controls_and_caps_at_200() {
     let capped = sanitize_diagnostic(&"x".repeat(250));
     assert_eq!(capped.chars().count(), 201);
     assert!(capped.ends_with('\u{2026}'));
+}
+
+#[test]
+fn sanitize_native_mcp_text_matches_native_nl_normalization_redaction_and_utf16_limit() {
+    assert_eq!(
+        sanitize_native_mcp_text("  API\u{00A0}key: abc123456789 <bad>; "),
+        "API key [redacted] bad"
+    );
+    assert_eq!(
+        sanitize_native_mcp_text("Authorization: Bearer abcdefgh123456"),
+        "Authorization: Bearer [redacted]"
+    );
+    assert_eq!(sanitize_native_mcp_text("a\u{200B}b\u{2800}c"), "a b c");
+
+    let capped = sanitize_native_mcp_text(&format!("{}😀tail", "x".repeat(199)));
+    assert_eq!(capped, format!("{}…", "x".repeat(199)));
+    assert_eq!(capped.encode_utf16().count(), 200);
+
+    // Native `CZ` compatibility-normalizes through NFKC before the `nl`
+    // credential matcher, so U+212A KELVIN SIGN becomes ASCII `K` here.
+    assert_eq!(
+        sanitize_native_mcp_text("API Key: abc123456789"),
+        "API Key [redacted]"
+    );
+}
+
+#[test]
+fn native_mcp_projection_sanitizer_preserves_utf16_cap_and_surrogate_rules() {
+    fn raw_utf16(units: Vec<u16>) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("source units form a JSON string projection")
+    }
+
+    let mut split_pair = vec![u16::from(b'x'); 4095];
+    split_pair.extend("😀tail".encode_utf16());
+    let sanitized = sanitize_failure_projection(&raw_utf16(split_pair));
+    assert_eq!(
+        sanitized.string_units(""),
+        Some(format!("{}…", "x".repeat(200)).encode_utf16().collect())
+    );
+
+    let malformed_inside_cap = raw_utf16(vec![u16::from(b'a'), 0xD800, u16::from(b'b')]);
+    assert_eq!(
+        sanitize_failure_projection(&malformed_inside_cap).string_at(""),
+        Some("a b")
+    );
+
+    let mut malformed_beyond_cap = vec![u16::from(b'x'); 4096];
+    malformed_beyond_cap.extend([0xD800]);
+    malformed_beyond_cap.extend("API key: abc123456789".encode_utf16());
+    let sanitized = sanitize_failure_projection(&raw_utf16(malformed_beyond_cap));
+    assert_eq!(
+        sanitized.string_at(""),
+        Some(format!("{}…", "x".repeat(200)).as_str())
+    );
+
+    let crossing_output_cap = raw_utf16(
+        format!(
+            "{} API key: abc123456789{}",
+            "x".repeat(190),
+            "y".repeat(100)
+        )
+        .encode_utf16()
+        .collect(),
+    );
+    let sanitized = sanitize_failure_projection(&crossing_output_cap);
+    assert!(!sanitized.to_json_string().unwrap().contains("abc123456789"));
+}
+
+#[test]
+fn native_next_turn_retry_filter_uses_typed_transport_and_error_code() {
+    let http = http_cfg("http", "https://mcp.example.test");
+    let mut sse = cfg("sse");
+    sse.spec = McpTransportSpec::Sse {
+        url: "https://mcp.example.test/sse".into(),
+        headers: Default::default(),
+        headers_helper: None,
+        oauth: None,
+    };
+    let mut proxy = http_cfg("proxy", "https://mcp.example.test");
+    proxy.metadata.transport = Some("claudeai-proxy".into());
+
+    let failure = |code: Option<&str>| McpConnectionFailure {
+        error: None,
+        display_detail: None,
+        error_code: code.map(source_string_projection),
+    };
+    assert!(native_next_turn_retryable(&http, &failure(Some("503"))));
+    assert!(native_next_turn_retryable(
+        &http,
+        &failure(Some("CONNECT_TIMEOUT"))
+    ));
+    assert!(native_next_turn_retryable(
+        &sse,
+        &failure(Some("ECONNRESET"))
+    ));
+    assert!(native_next_turn_retryable(
+        &proxy,
+        &failure(Some("ERR_PROXY_TUNNEL"))
+    ));
+    assert!(!native_next_turn_retryable(&http, &failure(None)));
+    assert!(native_next_turn_retryable(&sse, &failure(None)));
+    assert!(!native_next_turn_retryable(&http, &failure(Some("403"))));
+    assert!(!native_next_turn_retryable(
+        &http,
+        &failure(Some("HEADERS_HELPER_AUTH_REJECTED"))
+    ));
+    assert!(!native_next_turn_retryable(
+        &http,
+        &failure(Some("CLI_OWNED_BEARER_REJECTED"))
+    ));
+    assert!(!native_next_turn_retryable(
+        &cfg("stdio"),
+        &failure(Some("503"))
+    ));
+}
+
+#[test]
+fn native_next_turn_retry_budget_uses_numeric_flag_default_truncation_and_clamp() {
+    telemetry::test_clear_flag_number(NATIVE_NEXT_TURN_FLAG);
+    assert_eq!(native_next_turn_retry_budget(), 0);
+
+    telemetry::test_set_flag_number(NATIVE_NEXT_TURN_FLAG, 4.9);
+    assert_eq!(native_next_turn_retry_budget(), 4);
+    telemetry::test_set_flag_number(NATIVE_NEXT_TURN_FLAG, 20.0);
+    assert_eq!(native_next_turn_retry_budget(), 10);
+    telemetry::test_set_flag_number(NATIVE_NEXT_TURN_FLAG, -2.0);
+    assert_eq!(native_next_turn_retry_budget(), 0);
+    telemetry::test_set_flag_number(NATIVE_NEXT_TURN_FLAG, f64::NAN);
+    assert_eq!(native_next_turn_retry_budget(), 0);
+
+    telemetry::test_clear_flag_number(NATIVE_NEXT_TURN_FLAG);
+}
+
+#[tokio::test]
+async fn turn_started_redials_retryable_http_failure_and_keeps_snapshot_during_dial() {
+    let mock = Arc::new(BridgeMock::new(&["read"]));
+    mock.block_connect.store(true, Ordering::SeqCst);
+    let registry = Arc::new(McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock.clone() as Arc<dyn RawConnectionProvider>,
+    ));
+    let config = http_cfg("remote", "https://mcp.example.test");
+    registry.remember_server_order(&config.name);
+    registry.connections.write().await.insert(
+        config.name.clone(),
+        McpConnectionState::Disconnected {
+            config: config.clone(),
+            last_error: Some("HTTP 503".into()),
+        },
+    );
+    registry
+        .record_connection_failure_diagnostic(
+            &config,
+            &McpError::HttpResponse {
+                status: 503,
+                www_authenticate: None,
+            },
+        )
+        .await;
+    telemetry::test_set_flag_number(NATIVE_NEXT_TURN_FLAG, 1.0);
+
+    registry.turn_started().await;
+    mock.connect_started.notified().await;
+    registry.turn_started().await;
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
+    let snapshots = registry.failed_deferred_tool_servers().await;
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(
+        snapshots[0].error_code.as_ref().unwrap().string_at(""),
+        Some("503")
+    );
+    assert_eq!(snapshots[0].will_retry, Some(true));
+    assert!(registry.pending_deferred_tool_servers().await.is_empty());
+
+    mock.block_connect.store(false, Ordering::SeqCst);
+    mock.connect_release.notify_one();
+    for _ in 0..100 {
+        if matches!(
+            registry.connections.read().await.get(&config.name),
+            Some(McpConnectionState::Connected { .. })
+        ) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(matches!(
+        registry.connections.read().await.get(&config.name),
+        Some(McpConnectionState::Connected { .. })
+    ));
+    assert!(registry.failed_deferred_tool_servers().await.is_empty());
+    telemetry::test_clear_flag_number(NATIVE_NEXT_TURN_FLAG);
 }
 
 #[tokio::test]
@@ -4907,6 +5262,7 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
                 &[],
                 &[],
                 &[],
+                &[],
                 crate::protocol_negotiation::NegotiationMode::Legacy,
                 Some(&grant),
                 Some(&protocol),
@@ -4927,6 +5283,7 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
                 Some(&partition),
                 &caps,
                 &[tool("beta")],
+                &[],
                 &[],
                 &[],
                 &[],
@@ -5041,6 +5398,7 @@ async fn oauth_without_refresh_grant_is_not_partition_or_write_eligible() {
             &cfg,
             None,
             &ServerCapabilitiesDto::default(),
+            &[],
             &[],
             &[],
             &[],
@@ -5316,6 +5674,7 @@ async fn persist_or_purge_removes_an_existing_entry_when_the_gate_is_headers_hel
             &cfg,
             None,
             &ServerCapabilitiesDto::default(),
+            &[],
             &[],
             &[],
             &[],
@@ -5655,6 +6014,7 @@ async fn stale_refresh_era_change_purges_hit_partition_without_replacement_or_st
         },
         capabilities: ServerCapabilitiesDto::default(),
         tools: vec![],
+        dropped_tools: vec![],
         resources: vec![],
         resource_templates: vec![],
         prompts: vec![],
@@ -5754,6 +6114,7 @@ async fn stale_refresh_expected_mode_change_purges_without_publish_strike_or_wri
         },
         capabilities: ServerCapabilitiesDto::default(),
         tools: vec![],
+        dropped_tools: vec![],
         resources: vec![],
         resource_templates: vec![],
         prompts: vec![],
@@ -6682,6 +7043,13 @@ async fn cached_auth_failure_adopts_needs_auth_and_purges_rejected_catalog() {
             project_action_state(&state),
             lingxi_core::host::McpActionState::NeedsAuth
         );
+        let needs_auth = registry.needs_auth_deferred_tool_servers().await;
+        assert_eq!(needs_auth.len(), 1);
+        assert_eq!(needs_auth[0].name, "srv");
+        assert!(matches!(
+            &needs_auth[0].config.spec,
+            McpTransportSpec::Http { url, .. } if url == "https://mcp.example.com/v1"
+        ));
         assert!(registry.servers_with_tools().await.is_empty());
         assert!(registry.servers_pending().await.is_empty());
         assert_eq!(

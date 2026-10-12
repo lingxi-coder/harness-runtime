@@ -4,7 +4,7 @@ use llm_runtime::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
 use lingxi_core::host::OutputEvent;
-use lingxi_core::types::ToolUseId;
+use lingxi_core::types::{ContentBlock, ConversationMessage, ToolUseId};
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -201,17 +201,30 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
 
     let captured = api.captured_msgs().await;
     assert_eq!(captured.len(), 2);
-    // The 2nd call carries a leading `additionalContext` meta message (R-P1c/d,
-    // prepended each turn) followed by: user(prompt), assistant(tool_use),
-    // user(tool_result), then the transient total-tokens reminder.
+    // The fixed inline prefix stays ahead of Native's full-history attachment
+    // projection. The first prompt retains its environment/model/token rows,
+    // and the next token reminder stays after the tool-result boundary.
     let second_call = &captured[1];
-    assert_eq!(second_call.len(), 5);
+    assert_eq!(second_call.len(), 8);
     assert!(
         second_call[0].is_meta(),
         "first message is the leading additionalContext meta; got {:?}",
         second_call[0]
     );
-    assert!(serde_json::to_string(&second_call[3])
-        .unwrap()
-        .contains("tool_result"));
+    assert!(second_call[1].text_content().contains("# Environment\n"));
+    assert!(second_call[2]
+        .text_content()
+        .contains("The exact model ID is "));
+    assert!(second_call[3].text_content().contains("<total_tokens>"));
+    assert_eq!(second_call[4].text_content(), "please check");
+    assert!(matches!(
+        &second_call[5],
+        ConversationMessage::Assistant { .. }
+    ));
+    assert!(matches!(
+        &second_call[6],
+        ConversationMessage::User { content, .. }
+            if matches!(content.first(), Some(ContentBlock::ToolResult { tool_use_id: id, .. }) if *id == tool_use_id)
+    ));
+    assert!(second_call[7].text_content().contains("<total_tokens>"));
 }

@@ -765,7 +765,233 @@ pub(crate) enum SessionCompactDecision {
     },
 }
 
+fn main_loop_context_tokens_from_execution_usage(
+    usage: &llm_runtime::ExecutionUsage,
+) -> Option<f64> {
+    // Match `assistant_usage_value`: the raw provider usage object is what the
+    // assistant row persists when one exists, so prefer its exact counters.
+    // The host-only stream annotations remain available here for Native's
+    // iteration override, then are removed at the transcript boundary.
+    if usage.provider_metadata.is_root_object() {
+        let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            usage.provider_metadata.as_json_source(),
+        )
+        .ok()?;
+        return crate::resume::native_usage_context_tokens_from_projection(&projection);
+    }
+    let counts = usage.report.usage?;
+    let mut projection =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "input_tokens": counts.input_tokens,
+            "cache_creation_input_tokens": counts.cache_write_tokens,
+            "cache_read_input_tokens": counts.cache_read_tokens,
+            "output_tokens": counts.output_tokens,
+        }))
+        .ok()?;
+    if let Ok(metadata) = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+        usage.provider_metadata.as_json_source(),
+    ) {
+        if let Some(iterations) = crate::resume::native_usage_iterations_from_projection(&metadata)
+        {
+            projection.set_field("iterations", iterations).ok()?;
+        }
+    }
+    crate::resume::native_usage_context_tokens_from_projection(&projection)
+}
+
+fn native_synthetic_assistant_text(message: &ConversationMessage) -> bool {
+    let ConversationMessage::Assistant { content, .. } = message else {
+        return false;
+    };
+    let first_text = content.iter().find_map(|block| match block {
+        lingxi_core::types::ContentBlock::Text { text, .. }
+        | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => Some(text.as_str()),
+        _ => None,
+    });
+    first_text.is_some_and(|text| {
+        matches!(
+            text,
+            "[Request interrupted by user]"
+                | "[Request interrupted by user for tool use]"
+                | "No response requested."
+                | "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed."
+                | "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+        )
+    })
+}
+
 impl ConversationOrchestrator {
+    /// Refresh configured model-selection inputs after a live settings reload.
+    /// A session pick remains authoritative until a later user selection; the
+    /// managed restriction is always refreshed because policy edits apply to
+    /// the current session as well.
+    pub async fn refresh_main_model_selection(
+        &self,
+        raw_model_setting: Option<String>,
+        provenance: lingxi_core::host::ModelProvenance,
+        restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+    ) {
+        {
+            let mut session = self.session.lock().await;
+            if session.user_model_setting_source
+                == lingxi_core::session::SessionModelSettingSource::Configured
+            {
+                session.user_model_setting = raw_model_setting;
+                session.user_model_setting_provenance = provenance;
+            }
+        }
+        *self
+            .model_runtime
+            .main_model_restriction
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = restriction;
+    }
+
+    /// Resolve Native's Plan-mode main-loop model from the raw configured
+    /// setting, current permission mode, route facts, and latest assistant
+    /// usage. The stored usage is accepted only when its assistant identity is
+    /// still the last assistant in this exact model-request context.
+    pub(crate) async fn effective_main_loop_selection_for(
+        &self,
+        main_loop_model: &str,
+        model_profile: Option<&str>,
+        history: &[ConversationMessage],
+        apply_main_setting: bool,
+    ) -> (String, Option<String>) {
+        if !apply_main_setting {
+            return (main_loop_model.to_owned(), model_profile.map(str::to_owned));
+        }
+        let raw_model_setting = {
+            let session = self.session.lock().await;
+            session.user_model_setting.clone()
+        };
+        let Some(raw_model_setting) = raw_model_setting else {
+            return (main_loop_model.to_owned(), model_profile.map(str::to_owned));
+        };
+        let Some(provider) = self.model_resolution_context_provider.as_ref() else {
+            return (main_loop_model.to_owned(), model_profile.map(str::to_owned));
+        };
+        let context = match provider.context_for_route(main_loop_model, model_profile) {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::warn!(%error, model = %main_loop_model, ?model_profile,
+                    "main-loop model selection route could not be resolved");
+                return (main_loop_model.to_owned(), model_profile.map(str::to_owned));
+            }
+        };
+        let permission_mode = self
+            .permission_mode()
+            .as_deref()
+            .map(permission::permission_mode_from_cli_string)
+            .unwrap_or(permission::PermissionMode::Default);
+        let latest_request_assistant_id = history.iter().rev().find_map(|message| match message {
+            ConversationMessage::Assistant { id, .. } => Some(*id),
+            _ => None,
+        });
+        let exceeds_200k_tokens = latest_request_assistant_id.is_some_and(|latest_id| {
+            self.model_runtime
+                .main_loop_latest_assistant_usage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|usage| {
+                    usage.message_id == latest_id && usage.context_tokens > 200_000.0
+                })
+        });
+        let restriction = self
+            .model_runtime
+            .main_model_restriction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut warn = |message: &str| {
+            tracing::warn!(%message, "main-loop model selection restriction");
+        };
+        let selected = if let Some((enforcement, catalog)) = restriction.as_ref() {
+            let restriction = agent::model_resolution::ModelRestriction {
+                enforcement,
+                catalog,
+            };
+            agent::model_resolution::resolve_main_loop_model_restricted_with_context(
+                permission_mode,
+                main_loop_model,
+                exceeds_200k_tokens,
+                Some(&raw_model_setting),
+                Some(restriction),
+                &context,
+                &mut warn,
+            )
+        } else {
+            agent::model_resolution::resolve_main_loop_model_restricted_with_context(
+                permission_mode,
+                main_loop_model,
+                exceeds_200k_tokens,
+                Some(&raw_model_setting),
+                None,
+                &context,
+                &mut warn,
+            )
+        };
+        match selected {
+            Ok(model) => (
+                model,
+                context
+                    .route
+                    .profile
+                    .clone()
+                    .or_else(|| model_profile.map(str::to_owned)),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, model = %main_loop_model, ?model_profile,
+                    "main-loop model selection failed; keeping the session route");
+                (main_loop_model.to_owned(), model_profile.map(str::to_owned))
+            }
+        }
+    }
+
+    /// Pair the current real response usage with the assistant row that was
+    /// actually accepted into live history. Any synthetic or Mod-created row
+    /// without this usage invalidates the pair through the identity check.
+    pub(crate) async fn record_main_loop_assistant_usage(
+        &self,
+        assistant: &ConversationMessage,
+        model: &str,
+        usage: Option<&llm_runtime::ExecutionUsage>,
+    ) {
+        let assistant_id = assistant.id();
+        let latest_assistant_id = {
+            let session = self.session.lock().await;
+            session
+                .history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    ConversationMessage::Assistant { id, .. } => Some(*id),
+                    _ => None,
+                })
+        };
+        let snapshot = if latest_assistant_id == Some(assistant_id)
+            && model != "<synthetic>"
+            && !native_synthetic_assistant_text(assistant)
+        {
+            usage
+                .and_then(main_loop_context_tokens_from_execution_usage)
+                .map(
+                    |context_tokens| lingxi_core::host::MainLoopAssistantUsageSnapshot {
+                        message_id: assistant_id,
+                        context_tokens,
+                    },
+                )
+        } else {
+            None
+        };
+        *self
+            .model_runtime
+            .main_loop_latest_assistant_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+    }
+
     async fn cache_safe_system_prompt_input(
         &self,
     ) -> lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput {
@@ -1008,11 +1234,23 @@ impl ConversationOrchestrator {
                 outgoing_history_rewriter: None,
             }
         };
-        if let Some(settings) = crate::scheduled_turn::current() {
+        let scheduled_override = crate::scheduled_turn::current();
+        let query_override = crate::query_model::current();
+        if scheduled_override.is_none() && query_override.is_none() {
+            (draft.model, draft.model_profile) = self
+                .effective_main_loop_selection_for(
+                    &draft.model,
+                    draft.model_profile.as_deref(),
+                    &draft.history_snapshot,
+                    true,
+                )
+                .await;
+        }
+        if let Some(settings) = scheduled_override {
             draft.model = settings.model;
             draft.model_profile = Some(settings.provider);
         }
-        if let Some(route) = crate::query_model::current() {
+        if let Some(route) = query_override {
             draft.model = route.model;
             draft.model_profile = route.profile;
         }
@@ -3797,6 +4035,228 @@ impl ConversationOrchestrator {
 #[cfg(test)]
 mod session_compact_mod_tests {
     use super::*;
+    use std::sync::Arc;
+
+    struct PlanPermissionGate;
+
+    #[async_trait::async_trait]
+    impl lingxi_core::host::PermissionGate for PlanPermissionGate {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> lingxi_core::host::PermissionDecision {
+            lingxi_core::host::PermissionDecision::Allow
+        }
+
+        fn permission_mode(&self) -> Option<String> {
+            Some("plan".into())
+        }
+    }
+
+    fn main_model_selection_context(
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<
+        agent::model_resolution::ModelResolutionContext,
+        agent::model_resolution::ModelResolutionError,
+    > {
+        use agent::model_resolution::{
+            FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+            ModelRouteFacts,
+        };
+        if !matches!(model, "wire-sonnet" | "wire-opus") {
+            return Err(ModelResolutionError::RouteUnavailable {
+                model: model.into(),
+                profile: profile.map(str::to_owned),
+                reason: "fixture route unavailable".into(),
+            });
+        }
+        Ok(ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: model.into(),
+                profile: profile.map(str::to_owned),
+                provider: Some(ModelProviderKind::FirstParty),
+                ..Default::default()
+            },
+            family_defaults: FamilyModelDefaults {
+                opus: Some("wire-opus".into()),
+                sonnet: Some("wire-sonnet".into()),
+                ..Default::default()
+            },
+            registered_model_ids: ["wire-sonnet".into(), "wire-opus".into()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    fn main_model_selection_assistant(id: lingxi_core::types::MessageId) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id,
+            content: vec![lingxi_core::types::ContentBlock::Text {
+                text: "prior response".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn main_loop_selection_uses_only_usage_for_latest_request_assistant() {
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "wire-sonnet".into(),
+                ..Default::default()
+            },
+            Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(PlanPermissionGate),
+            Arc::new(crate::test_support::MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_model_resolution_context_provider(Arc::new(main_model_selection_context));
+        let orch = orch
+            .with_main_model_selection(
+                Some("opusplan".into()),
+                lingxi_core::host::ModelProvenance::UserOrEnv,
+                None,
+            )
+            .await;
+        let assistant_id = lingxi_core::types::MessageId::new();
+        let request_history = vec![main_model_selection_assistant(assistant_id)];
+        orch.restore_main_loop_latest_assistant_usage(Some(
+            lingxi_core::host::MainLoopAssistantUsageSnapshot {
+                message_id: assistant_id,
+                context_tokens: 200_001.0,
+            },
+        ));
+
+        let (model, profile) = orch
+            .effective_main_loop_selection_for(
+                "wire-sonnet",
+                Some("anthropic"),
+                &request_history,
+                true,
+            )
+            .await;
+        assert_eq!(
+            model, "wire-sonnet",
+            "over 200k uses resting opusplan model"
+        );
+        assert_eq!(profile.as_deref(), Some("anthropic"));
+
+        let different_latest_id = lingxi_core::types::MessageId::new();
+        let different_request_history = vec![main_model_selection_assistant(different_latest_id)];
+        let (model, _) = orch
+            .effective_main_loop_selection_for(
+                "wire-sonnet",
+                Some("anthropic"),
+                &different_request_history,
+                true,
+            )
+            .await;
+        assert_eq!(
+            model, "wire-opus",
+            "a measured row absent from the request context cannot cross the threshold"
+        );
+
+        let (model, _) = orch
+            .effective_main_loop_selection_for(
+                "wire-sonnet",
+                Some("anthropic"),
+                &request_history,
+                false,
+            )
+            .await;
+        assert_eq!(
+            model, "wire-sonnet",
+            "non-main selectors stay authoritative"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_iteration_usage_survives_jsonl_and_controls_cold_plan_selection() {
+        let live_usage = llm_runtime::ExecutionUsage {
+            provider_metadata: llm_runtime::services::sdk::protocol::JsonPayload::parse(
+                r#"{"input_tokens":250001,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1,"stream":{"llm_client":{"provider_events":[{"payload":{"usage":{"iterations":[{"type":"message","input_tokens":190000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":7,"opaque":{"n":1.500e0,"text":"\ud800"}},{"type":"advisor_message","input_tokens":900000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},{"type":"compaction","input_tokens":800000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}]}}}]}}}"#,
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            main_loop_context_tokens_from_execution_usage(&live_usage),
+            Some(190_007.0),
+            "the latest applicable message iteration overrides aggregate usage"
+        );
+        assert!(250_001.0 + 1.0 > 200_000.0);
+
+        let persisted = super::super::transcript_impl::persisted_assistant_usage(&live_usage);
+        assert_eq!(
+            persisted.raw_source_at("/iterations").as_deref(),
+            Some(
+                r#"[{"type":"message","input_tokens":190000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":7,"opaque":{"n":1.500e0,"text":"\ud800"}},{"type":"advisor_message","input_tokens":900000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},{"type":"compaction","input_tokens":800000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}]"#
+            ),
+            "iteration source survives without projection"
+        );
+        assert!(persisted.raw_source_at("/stream").is_none());
+        assert!(persisted.raw_source_at("/llm_client").is_none());
+
+        let row_id = uuid::Uuid::new_v4();
+        let line = format!(
+            r#"{{"type":"assistant","uuid":"{row_id}","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-11T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"11111111-2222-3333-4444-555555555555","message":{{"id":"{row_id}","model":"wire-sonnet","role":"assistant","content":[{{"type":"text","text":"answer"}}],"usage":{}}}}}"#,
+            persisted.as_json_source()
+        );
+        let loaded = session::jsonl::route_lines(&line);
+        assert_eq!(loaded.malformed_line_count, 0);
+        assert_eq!(loaded.messages_in_order.len(), 1);
+        let cold = crate::resume::main_loop_latest_assistant_usage_from_messages(
+            &loaded.messages_in_order,
+        )
+        .expect("cold resume restores assistant usage");
+        assert_eq!(
+            cold.message_id,
+            lingxi_core::types::MessageId::from_uuid(row_id)
+        );
+        assert_eq!(cold.context_tokens, 190_007.0);
+
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "wire-sonnet".into(),
+                ..Default::default()
+            },
+            Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(PlanPermissionGate),
+            Arc::new(crate::test_support::MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_model_resolution_context_provider(Arc::new(main_model_selection_context))
+        .with_main_model_selection(
+            Some("opusplan".into()),
+            lingxi_core::host::ModelProvenance::UserOrEnv,
+            None,
+        )
+        .await;
+        orch.restore_main_loop_latest_assistant_usage(Some(cold.clone()));
+        let request_history = vec![main_model_selection_assistant(cold.message_id)];
+        let (model, profile) = orch
+            .effective_main_loop_selection_for(
+                "wire-sonnet",
+                Some("anthropic"),
+                &request_history,
+                true,
+            )
+            .await;
+        assert_eq!(model, "wire-opus", "cold Plan uses iteration context");
+        assert_eq!(profile.as_deref(), Some("anthropic"));
+    }
 
     fn source(value: &serde_json::Value) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(value)

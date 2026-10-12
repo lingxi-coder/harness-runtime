@@ -40,7 +40,7 @@ async fn plan_attachment_precedes_output_style_in_outgoing_order() {
         state.plan_mode = true;
         state.plan_reminder_shown = false;
     }
-    let reminders = orch.collect_turn_reminders(true, true, None).await;
+    let reminders = orch.collect_turn_reminders(true, true, None, &[]).await;
     let plan = reminders
         .transient
         .iter()
@@ -52,6 +52,33 @@ async fn plan_attachment_precedes_output_style_in_outgoing_order() {
         .position(|message| message.text_content() == EXPLANATORY_REMINDER)
         .expect("output style reminder");
     assert!(plan < style, "native attachment fan-out sends plan first");
+}
+
+#[tokio::test]
+async fn live_settings_refresh_can_clear_the_boot_output_style() {
+    let orch = ConversationOrchestrator::new(
+        config_with_style("Explanatory"),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+
+    assert_eq!(
+        orch.active_output_style_setting()
+            .await
+            .and_then(|setting| setting.string_at("").map(str::to_owned)),
+        Some("Explanatory".to_owned())
+    );
+    orch.refresh_native_output_style(None).await;
+    assert!(
+        orch.active_output_style_setting().await.is_none(),
+        "a live clear is distinct from never having received a live refresh"
+    );
+    assert!(orch.resolve_active_output_style().await.is_none());
 }
 
 #[tokio::test]
@@ -97,7 +124,7 @@ async fn mod_attachment_rewrites_the_outgoing_style_reminder_and_caches_by_messa
     )
     .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
 
-    let reminders = orch.collect_turn_reminders(true, true, None).await;
+    let reminders = orch.collect_turn_reminders(true, true, None, &[]).await;
     assert!(reminders.transient.iter().any(|message| {
         text_of(message) == "<system-reminder>\nrewritten 1\n</system-reminder>"
     }));
@@ -180,7 +207,7 @@ async fn mod_attachment_rewrites_the_outgoing_style_reminder_and_caches_by_messa
     )
     .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
     assert!(!learning
-        .collect_turn_reminders(true, true, None)
+        .collect_turn_reminders(true, true, None, &[])
         .await
         .transient
         .iter()
@@ -190,7 +217,13 @@ async fn mod_attachment_rewrites_the_outgoing_style_reminder_and_caches_by_messa
 /// Config with a non-default builtin output style active.
 fn config_with_style(style: &str) -> OrchestratorConfig {
     OrchestratorConfig {
-        output_style: Some(style.to_string()),
+        output_style: Some(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                style.to_string(),
+                style.encode_utf16().collect(),
+            )
+            .unwrap(),
+        ),
         ..OrchestratorConfig::default()
     }
 }
@@ -214,6 +247,106 @@ fn is_reminder(msg: &ConversationMessage, expected: &str) -> bool {
     matches!(msg, ConversationMessage::User { .. }) && text_of(msg) == expected
 }
 
+fn attachment_positions(
+    orch: &ConversationOrchestrator,
+    messages: &[ConversationMessage],
+    kind: &str,
+) -> Vec<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            orch.context_attachment_history(std::slice::from_ref(message))
+                .iter()
+                .any(|attachment| attachment.string_at("/type") == Some(kind))
+                .then_some(index)
+        })
+        .collect()
+}
+
+fn unique_attachment_position(
+    orch: &ConversationOrchestrator,
+    messages: &[ConversationMessage],
+    kind: &str,
+) -> usize {
+    let positions = attachment_positions(orch, messages, kind);
+    assert_eq!(positions.len(), 1, "expected one {kind} attachment");
+    positions[0]
+}
+
+/// An empty ordinary user turn stages the common environment/model rows,
+/// retains the session/date announcements, and stages the usual token row.
+/// A selected style adds its distinct session-settings payload; listing and
+/// budget rows are absent for this empty-tool, unbudgeted fixture.
+fn assert_empty_regular_ingress_inventory(
+    orch: &ConversationOrchestrator,
+    messages: &[ConversationMessage],
+    expected_style: Option<&str>,
+) {
+    let attachments = orch.context_attachment_history(messages);
+    let expected_count = 5 + usize::from(expected_style.is_some());
+    assert_eq!(attachments.len(), expected_count, "typed ingress inventory");
+    let kinds = attachments
+        .iter()
+        .map(|attachment| {
+            attachment
+                .string_at("/type")
+                .expect("typed context attachment")
+        })
+        .collect::<Vec<_>>();
+    let mut expected = vec!["environment", "model"];
+    if expected_style.is_some() {
+        expected.push("output_style_instructions");
+    }
+    expected.extend(["total_tokens_reminder", "session_context", "date"]);
+    assert_eq!(kinds, expected, "Native typed ingress order");
+    if let Some(name) = expected_style {
+        let style = attachments
+            .iter()
+            .find(|attachment| attachment.string_at("/type") == Some("output_style_instructions"))
+            .expect("the selected style has its session-settings payload");
+        assert_eq!(style.string_at("/style/name"), Some(name));
+    }
+}
+
+/// Assert the complete request-local layout, including the transient output
+/// style message which intentionally has no durable typed attachment payload.
+fn assert_regular_request_layout(
+    orch: &ConversationOrchestrator,
+    messages: &[ConversationMessage],
+    prompt: &str,
+    style_reminder: Option<&str>,
+) {
+    let mut expected = vec!["environment".to_owned(), "model".to_owned()];
+    if style_reminder.is_some() {
+        expected.push("output_style_instructions".to_owned());
+        expected.push("output_style".to_owned());
+    }
+    expected.extend(
+        ["total_tokens_reminder", "session_context", "date"]
+            .into_iter()
+            .map(str::to_owned),
+    );
+    let actual = messages
+        .iter()
+        .filter(|message| text_of(message) != prompt)
+        .map(|message| {
+            let attachments = orch.context_attachment_history(std::slice::from_ref(message));
+            if let Some(kind) = attachments
+                .first()
+                .and_then(|attachment| attachment.string_at("/type"))
+            {
+                kind.to_owned()
+            } else if style_reminder.is_some_and(|style| is_reminder(message, style)) {
+                "output_style".to_owned()
+            } else {
+                "<untyped>".to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "Native request attachment order");
+}
+
 /// Empty eager files still announce a durable session-context anchor and date
 /// after the human prompt; the empty anchor has no model projection.
 fn assert_normal_empty_context(
@@ -221,22 +354,34 @@ fn assert_normal_empty_context(
     sent: &[ConversationMessage],
     prompt: &str,
 ) {
-    assert_eq!(text_of(&sent[0]), prompt);
+    assert_eq!(
+        sent.iter()
+            .filter(|message| text_of(message) == prompt)
+            .count(),
+        1,
+        "the original prompt appears once in the request"
+    );
+    let context_index = unique_attachment_position(orch, sent, "session_context");
+    let date_index = unique_attachment_position(orch, sent, "date");
+    assert_ne!(context_index, date_index);
     assert!(
-        matches!(&sent[1], ConversationMessage::System { content, subtype, .. }
+        matches!(&sent[context_index], ConversationMessage::System { content, subtype, .. }
         if content.string_at("").is_some_and(str::is_empty)
             && subtype.as_deref() == Some("model_reminder_attachment"))
     );
     let date = crate::prompt::env_meta::current_date_string();
-    assert_eq!(
-        orch.context_attachment_history(&sent[1..3]),
-        vec![
-            source(&serde_json::json!({"type":"session_context", "context":{}})),
-            source(&serde_json::json!({"type":"date", "date":date})),
-        ]
+    assert!(
+        orch.context_attachment_history(std::slice::from_ref(&sent[context_index]))[0]
+            .semantically_eq(&source(
+                &serde_json::json!({"type":"session_context", "context":{}})
+            ))
+    );
+    assert!(
+        orch.context_attachment_history(std::slice::from_ref(&sent[date_index]))[0]
+            .semantically_eq(&source(&serde_json::json!({"type":"date", "date":date})))
     );
     assert_eq!(
-        text_of(&sent[2]),
+        text_of(&sent[date_index]),
         format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
     );
 }
@@ -295,7 +440,9 @@ async fn builder_emits_byte_exact_learning_reminder() {
 async fn builder_returns_none_for_default_and_unknown_styles() {
     for style in [None, Some("default"), Some(""), Some("Nonexistent")] {
         let cfg = OrchestratorConfig {
-            output_style: style.map(str::to_string),
+            output_style: style.map(|style| {
+                Source::root_string(style.to_owned(), style.encode_utf16().collect()).unwrap()
+            }),
             ..OrchestratorConfig::default()
         };
         let orch = ConversationOrchestrator::new(
@@ -516,35 +663,61 @@ async fn batched_active_style_appends_transient_reminder_not_persisted() {
 
     orch.run_turn("user prompt body").await.expect("turn");
 
-    // Ordinary Or announcements precede the transient style fan-out. The
-    // durable total-token attachment is last, with its original identity.
+    // The selected style adds a durable session-settings row; the ordinary
+    // output-style reminder remains a separate transient row.
     let outgoing = api.captured_msgs().await;
     assert_eq!(outgoing.len(), 1, "exactly one batched API call");
     let sent = &outgoing[0];
     assert_eq!(
         sent.len(),
-        5,
-        "prompt + empty session_context + date + style + total_tokens"
+        8,
+        "prompt + six typed attachments + transient style reminder"
     );
+    assert_empty_regular_ingress_inventory(&orch, sent, Some("Explanatory"));
+    assert_regular_request_layout(&orch, sent, "user prompt body", Some(EXPLANATORY_REMINDER));
     assert_normal_empty_context(&orch, sent, "user prompt body");
-    assert!(is_reminder(&sent[3], EXPLANATORY_REMINDER));
     assert_eq!(
-        orch.context_attachment_history(&sent[4..5])[0].string_at("/type"),
-        Some("total_tokens_reminder")
+        sent.iter()
+            .filter(|message| is_reminder(message, EXPLANATORY_REMINDER))
+            .count(),
+        1,
+        "one transient output-style reminder"
     );
-    assert!(text_of(&sent[4]).contains("<total_tokens>"));
+    let total_tokens_index = unique_attachment_position(&orch, sent, "total_tokens_reminder");
+    assert!(text_of(&sent[total_tokens_index]).contains("<total_tokens>"));
     let history = orch.session.lock().await.history.clone();
     assert_eq!(
         history.len(),
-        5,
-        "human + context anchor + date + total_tokens + assistant"
+        8,
+        "human + environment/model/style ingress + context + date + total_tokens + assistant"
     );
     assert!(history
         .iter()
         .all(|message| !is_reminder(message, EXPLANATORY_REMINDER)));
-    assert_eq!(&history[..3], &sent[..3]);
-    assert_eq!(history[3], sent[4]);
-    assert_eq!(text_of(&history[4]), "assistant body");
+    assert_eq!(text_of(&history[0]), "user prompt body");
+    for kind in [
+        "environment",
+        "model",
+        "output_style_instructions",
+        "session_context",
+        "date",
+        "total_tokens_reminder",
+    ] {
+        let outgoing_index = unique_attachment_position(&orch, sent, kind);
+        let message_id = sent[outgoing_index].id();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| message.id() == message_id)
+                .count(),
+            1,
+            "the durable {kind} row retains its outgoing identity"
+        );
+    }
+    assert_eq!(
+        text_of(history.last().expect("assistant reply")),
+        "assistant body"
+    );
 
     // JSONL retains the ordinary durable attachments, with style reminder text absent.
     let on_disk = std::fs::read_to_string(&session_path).expect("read jsonl");
@@ -582,17 +755,18 @@ async fn batched_default_style_sends_no_reminder() {
 
     let outgoing = api.captured_msgs().await;
     assert_eq!(outgoing.len(), 1);
-    assert_eq!(
-        outgoing[0].len(),
-        4,
-        "prompt + session_context + date + total_tokens"
-    );
+    assert_eq!(outgoing[0].len(), 6, "prompt + five typed attachments");
+    assert_empty_regular_ingress_inventory(&orch, &outgoing[0], None);
+    assert_regular_request_layout(&orch, &outgoing[0], "just the prompt", None);
     assert_normal_empty_context(&orch, &outgoing[0], "just the prompt");
+    let total_tokens_index =
+        unique_attachment_position(&orch, &outgoing[0], "total_tokens_reminder");
     assert_eq!(
-        orch.context_attachment_history(&outgoing[0][3..4])[0].string_at("/type"),
+        orch.context_attachment_history(std::slice::from_ref(&outgoing[0][total_tokens_index]))[0]
+            .string_at("/type"),
         Some("total_tokens_reminder")
     );
-    assert!(text_of(&outgoing[0][3]).contains("<total_tokens>"));
+    assert!(text_of(&outgoing[0][total_tokens_index]).contains("<total_tokens>"));
     assert!(
         !outgoing[0]
             .iter()
@@ -648,16 +822,21 @@ async fn streaming_active_style_appends_transient_reminder_not_persisted() {
     let sent = &calls[0].messages;
     assert_eq!(
         sent.len(),
-        5,
-        "prompt + session_context + date + style + total_tokens"
+        8,
+        "prompt + six typed attachments + transient style reminder"
     );
+    assert_empty_regular_ingress_inventory(&orch, sent, Some("Learning"));
+    assert_regular_request_layout(&orch, sent, "streaming prompt", Some(LEARNING_REMINDER));
     assert_normal_empty_context(&orch, sent, "streaming prompt");
-    assert!(is_reminder(&sent[3], LEARNING_REMINDER));
     assert_eq!(
-        orch.context_attachment_history(&sent[4..5])[0].string_at("/type"),
-        Some("total_tokens_reminder")
+        sent.iter()
+            .filter(|message| is_reminder(message, LEARNING_REMINDER))
+            .count(),
+        1,
+        "one transient output-style reminder"
     );
-    assert!(text_of(&sent[4]).contains("<total_tokens>"));
+    let total_tokens_index = unique_attachment_position(&orch, sent, "total_tokens_reminder");
+    assert!(text_of(&sent[total_tokens_index]).contains("<total_tokens>"));
 
     // STORED history: reminder absent.
     let history = orch.session.lock().await.history.clone();
@@ -667,12 +846,33 @@ async fn streaming_active_style_appends_transient_reminder_not_persisted() {
     );
     assert_eq!(
         history.len(),
-        5,
-        "human + context anchor + date + total_tokens + assistant"
+        8,
+        "human + environment/model/style ingress + context + date + total_tokens + assistant"
     );
-    assert_eq!(&history[..3], &sent[..3]);
-    assert_eq!(history[3], sent[4]);
-    assert_eq!(text_of(&history[4]), "streamed body");
+    assert_eq!(text_of(&history[0]), "streaming prompt");
+    for kind in [
+        "environment",
+        "model",
+        "output_style_instructions",
+        "session_context",
+        "date",
+        "total_tokens_reminder",
+    ] {
+        let outgoing_index = unique_attachment_position(&orch, sent, kind);
+        let message_id = sent[outgoing_index].id();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| message.id() == message_id)
+                .count(),
+            1,
+            "the durable {kind} row retains its outgoing identity"
+        );
+    }
+    assert_eq!(
+        text_of(history.last().expect("assistant reply")),
+        "streamed body"
+    );
 
     // JSONL transcript: reminder text absent.
     let on_disk = std::fs::read_to_string(&session_path).expect("read jsonl");
@@ -713,13 +913,20 @@ async fn streaming_default_style_sends_no_reminder() {
     assert_eq!(calls.len(), 1);
     assert_eq!(
         calls[0].messages.len(),
-        4,
-        "prompt + session_context + date + total_tokens"
+        6,
+        "prompt + five typed attachments"
     );
+    assert_empty_regular_ingress_inventory(&orch, &calls[0].messages, None);
+    assert_regular_request_layout(&orch, &calls[0].messages, "only prompt", None);
     assert_normal_empty_context(&orch, &calls[0].messages, "only prompt");
+    let total_tokens_index =
+        unique_attachment_position(&orch, &calls[0].messages, "total_tokens_reminder");
     assert_eq!(
-        orch.context_attachment_history(&calls[0].messages[3..4])[0].string_at("/type"),
+        orch.context_attachment_history(std::slice::from_ref(
+            &calls[0].messages[total_tokens_index],
+        ))[0]
+            .string_at("/type"),
         Some("total_tokens_reminder")
     );
-    assert!(text_of(&calls[0].messages[3]).contains("<total_tokens>"));
+    assert!(text_of(&calls[0].messages[total_tokens_index]).contains("<total_tokens>"));
 }

@@ -131,6 +131,88 @@ pub fn configure_desktop_request_state(
     config.request_identity = identity;
 }
 
+/// Install the source facts used when a Headless unknown-command fallback
+/// projects the live slash-command pool. This runs after desktop assembly so
+/// the model is the one actually selected for this session, including resume
+/// and provider fallback.
+pub(crate) async fn configure_native_command_catalog(
+    runtime: &crate::desktop::DesktopRuntime,
+    user_agent: Option<&llm_runtime::model::user_agent::UserAgentEnv>,
+    host: &dyn HeadlessHostServices,
+) {
+    let selected_model = runtime.orchestrator.session().lock().await.model.clone();
+    let disable_extra_usage = host
+        .environment_variable("DISABLE_EXTRA_USAGE_COMMAND")
+        .is_some_and(|value| !value.is_empty());
+    let usage_credits_enabled = runtime
+        .subscription
+        .read()
+        .ok()
+        .and_then(|slot| {
+            slot.as_ref()
+                .map(|snapshot| native_usage_credits_enabled(snapshot, disable_extra_usage))
+        })
+        // Native's missing OAuth account/billing type is false. The current
+        // Native rate-limit-status helper is also a source-bound null, so it
+        // cannot enable this command independently.
+        .unwrap_or(false);
+    let context = command_api::NativeHeadlessCatalogContext {
+        entrypoint: user_agent
+            .and_then(|snapshot| snapshot.entrypoint.clone())
+            .map(Into::into),
+        // The Headless runner constructs the top-level CLI session. Its
+        // fork/parent transcript metadata does not make this a child runtime.
+        is_child_session: Some(false),
+        // The Headless embedding has no launch-options producer for Native's
+        // dedicated Claude Code boolean; do not substitute User-Agent
+        // `user_type`, which is an independent field.
+        is_claude_code: Some(false),
+        // Native's `!CLAUDE_CODE_REMOTE` checks JS truthiness: any non-empty
+        // environment value is true, including the string "0".
+        is_remote: Some(
+            host.environment_variable("CLAUDE_CODE_REMOTE")
+                .is_some_and(|value| !value.is_empty()),
+        ),
+        selected_model: Some(selected_model.into()),
+        // This Headless host has no NativeVerdict producer. Native's absent
+        // policy verdict is false for the `insights` command gate.
+        insights_policy_gate: Some(false),
+        usage_credits_enabled: Some(usage_credits_enabled),
+        // The Headless host has no first-party advisor eligibility or enabled
+        // Statsig fact producer. Native's absent `gv()` prerequisites and
+        // default-off rollout resolve to false.
+        advisor_enabled: Some(false),
+    };
+    runtime
+        .shared_command_registry
+        .write()
+        .await
+        .set_native_headless_context(context);
+}
+
+/// Native 2.1.295 `tP()` with its source-bound `KI() === null` status helper:
+/// `!DISABLE_EXTRA_USAGE_COMMAND && bt() && billingType ∈ Yk`.
+fn native_usage_credits_enabled(
+    snapshot: &lingxi_core::host::subscription::SubscriptionSnapshot,
+    disabled: bool,
+) -> bool {
+    const NATIVE_BILLING_TYPES: &[&str] = &[
+        "stripe_subscription",
+        "stripe_subscription_contracted",
+        "stripe_subscription_enterprise_self_serve",
+        "aws_marketplace",
+        "c4e_consumption_trial",
+        "apple_subscription",
+        "google_play_subscription",
+    ];
+    !disabled
+        && snapshot.is_subscriber
+        && snapshot
+            .billing_type
+            .as_deref()
+            .is_some_and(|billing_type| NATIVE_BILLING_TYPES.contains(&billing_type))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +311,44 @@ mod tests {
             assert_eq!(ua.entrypoint.as_deref(), Some(expected));
             assert!(ua.agent_sdk_version.is_none() && ua.client_app.is_none());
         }
+    }
+    #[test]
+    fn usage_credits_gate_uses_native_billing_allowlist_and_disable_env() {
+        const NATIVE_BILLING_TYPES: &[&str] = &[
+            "stripe_subscription",
+            "stripe_subscription_contracted",
+            "stripe_subscription_enterprise_self_serve",
+            "aws_marketplace",
+            "c4e_consumption_trial",
+            "apple_subscription",
+            "google_play_subscription",
+        ];
+        for billing_type in NATIVE_BILLING_TYPES {
+            let snapshot = lingxi_core::host::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                billing_type: Some((*billing_type).into()),
+                ..Default::default()
+            };
+            assert!(
+                native_usage_credits_enabled(&snapshot, false),
+                "{billing_type}"
+            );
+            assert!(
+                !native_usage_credits_enabled(&snapshot, true),
+                "{billing_type}"
+            );
+        }
+        let non_subscriber = lingxi_core::host::subscription::SubscriptionSnapshot {
+            is_subscriber: false,
+            billing_type: Some("stripe_subscription".into()),
+            ..Default::default()
+        };
+        assert!(!native_usage_credits_enabled(&non_subscriber, false));
+        let no_billing_type = lingxi_core::host::subscription::SubscriptionSnapshot {
+            is_subscriber: true,
+            ..Default::default()
+        };
+        assert!(!native_usage_credits_enabled(&no_billing_type, false));
     }
     #[test]
     fn absent_identity_clears_a_prior_snapshot_without_global_identity_creation() {

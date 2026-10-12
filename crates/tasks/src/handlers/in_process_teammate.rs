@@ -652,6 +652,10 @@ pub struct InProcessTeammateHandler {
     /// Host-owned renderer for the default main system prompt. The teammate
     /// appends its canonical addendum and optional custom agent prompt.
     system_prompt_renderer: Arc<OnceLock<Arc<dyn TeammateSystemPromptRenderer>>>,
+    /// Main-session source for the teammate's live Native output-style and
+    /// language settings deltas.
+    native_settings_prompt_provider:
+        Arc<OnceLock<Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>>>,
     /// `task_id` → control block, so `send_message` / `kill` can find the slot.
     entries: Arc<Mutex<HashMap<String, TeammateEntry>>>,
 }
@@ -698,6 +702,7 @@ impl InProcessTeammateHandler {
             status_sink: Arc::new(NoopStatusSink),
             teammate_idle_firer: None,
             system_prompt_renderer: Arc::new(OnceLock::new()),
+            native_settings_prompt_provider: Arc::new(OnceLock::new()),
             entries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -968,6 +973,25 @@ impl InProcessTeammateHandler {
         &self,
     ) -> Arc<OnceLock<Arc<dyn TeammateSystemPromptRenderer>>> {
         self.system_prompt_renderer.clone()
+    }
+
+    /// Attach the main session's live settings producer for teammate turns.
+    #[must_use]
+    pub fn with_native_settings_prompt_provider(
+        self,
+        provider: Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>,
+    ) -> Self {
+        let _ = self.native_settings_prompt_provider.set(provider);
+        self
+    }
+
+    /// Return a set-once cell so the composition root can bind the provider
+    /// after the root orchestrator has been constructed.
+    #[must_use]
+    pub fn native_settings_prompt_provider_handle(
+        &self,
+    ) -> Arc<OnceLock<Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>>> {
+        self.native_settings_prompt_provider.clone()
     }
 
     /// Build the persistent [`SubagentContext`] for a spawn.
@@ -1326,6 +1350,12 @@ impl InProcessTeammateHandler {
             instruction_context: Default::default(),
             instruction_context_is_override: false,
             instruction_provider: self.instruction_provider.clone(),
+            native_settings_prompt_provider: self.native_settings_prompt_provider.get().cloned(),
+            native_settings_prompt_context: lingxi_core::host::NativeSettingsPromptContext {
+                agent_context: lingxi_core::host::NativeSettingsAgentContext::Teammate,
+                bare_fork: None,
+                isolated_context: None,
+            },
             mobile_runtime_workspace_reminder: None,
             content_replacement_state: None,
             agent_memory: None,

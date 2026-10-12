@@ -331,6 +331,10 @@ async fn capture_anthropic(
             Vec::new(),
             None,
             None,
+            // This standalone fixture contains only its user turn; it has no
+            // transcript-attachment rows with typed message identities.
+            std::collections::HashSet::new(),
+            std::collections::HashMap::new(),
         ),
     )
     .await

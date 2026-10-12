@@ -448,16 +448,16 @@ pub(crate) fn logical_cache_key(config: &crate::connection::McpServerConfig) -> 
 
 /// Schema version tag written into every persisted entry (`v` in the oracle
 /// schema `B`, literal `1` there — this port's own numbering, bumped to `2`
-/// when the entry grew a full catalog payload; see [`DiscoveryCacheEntry`]).
+/// for the full catalog and `3` for source schema-drop diagnostics; see
+/// [`DiscoveryCacheEntry`]).
 /// A version this store doesn't recognize is treated as
 /// [`EntryLookup::Corrupt`] — never trusted, never an error. A `v1` entry
 /// (this module's original metadata-only shape) still PARSES cleanly —
-/// every field schema v2 added is `#[serde(default)]`, on purpose, so a
-/// future additive change never needs another version bump — but is
-/// rejected by the explicit `entry.version != CACHE_SCHEMA_VERSION` check in
+/// fields added after v1 have serde defaults so old entries still parse, but
+/// are rejected by the explicit `entry.version != CACHE_SCHEMA_VERSION` check in
 /// [`DiscoveryCacheStore::load`], never trusted with a silently-defaulted
 /// (empty) catalog.
-pub const CACHE_SCHEMA_VERSION: u32 = 2;
+pub const CACHE_SCHEMA_VERSION: u32 = 3;
 
 /// The feature opt-in env var (oracle `MCP_DISCOVERY_CACHE`, read through a
 /// boolean-coerced env schema — `a.MCP_DISCOVERY_CACHE===true`/`===false`).
@@ -928,10 +928,11 @@ pub struct DiscoveryCacheServerInfo {
 
 /// One persisted discovery-cache entry.
 ///
-/// Schema v2: carries the FULL catalog a cache hit would need to serve a
-/// server without dialing (tools/resources/resource_templates/prompts +
-/// capabilities), not just the metadata v1 needed to make the fresh/stale/
-/// miss decision. Still narrower than the oracle's `B` schema; its
+/// Schema v3: carries the FULL catalog and schema-drop diagnostics a cache hit
+/// would need to serve a server without dialing
+/// (tools/resources/resource_templates/prompts + capabilities), not just the
+/// metadata v1 needed to make the fresh/stale/miss decision. Still narrower
+/// than the oracle's `B` schema; its
 /// `negotiatedEra` field is retained here only to compare a stale hit with the
 /// subsequent live revalidation result.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -968,6 +969,9 @@ pub struct DiscoveryCacheEntry {
     /// `tools.is_empty()` directly (oracle `k.tools.length===0`).
     #[serde(default)]
     pub tools: Vec<McpToolDto>,
+    /// Raw source names and schema-decision reasons for omitted tools.
+    #[serde(default)]
+    pub dropped_tools: Vec<crate::connection::McpDroppedToolRecord>,
     /// The cached `resources/list` result.
     #[serde(default)]
     pub resources: Vec<McpResourceDto>,
@@ -1017,6 +1021,7 @@ impl DiscoveryCacheEntry {
             capabilities,
             server_info: None,
             tools,
+            dropped_tools: Vec::new(),
             resources,
             resource_templates,
             prompts,
@@ -1029,6 +1034,16 @@ impl DiscoveryCacheEntry {
     #[must_use]
     pub fn with_server_info(mut self, server_info: DiscoveryCacheServerInfo) -> Self {
         self.server_info = Some(server_info);
+        self
+    }
+
+    /// Attach schema-drop diagnostics from the corresponding `tools/list`.
+    #[must_use]
+    pub fn with_dropped_tools(
+        mut self,
+        dropped_tools: Vec<crate::connection::McpDroppedToolRecord>,
+    ) -> Self {
+        self.dropped_tools = dropped_tools;
         self
     }
 
@@ -1158,12 +1173,12 @@ pub fn decide_with_metadata(
         EntryLookup::Absent => {
             return Decision::Miss {
                 reason: MissReason::Absent,
-            }
+            };
         }
         EntryLookup::Corrupt => {
             return Decision::Miss {
                 reason: MissReason::Corrupt,
-            }
+            };
         }
         EntryLookup::Found(entry) => entry,
     };
@@ -1924,6 +1939,34 @@ mod tests {
     }
 
     #[test]
+    fn cached_catalog_roundtrip_keeps_raw_schema_drop_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DiscoveryCacheStore::new(dir.path());
+        let record = crate::connection::McpDroppedToolRecord {
+            tool_name: "raw_tool".into(),
+            reason: "top-level anyOf is unsupported".into(),
+        };
+        let entry = DiscoveryCacheEntry::new(
+            "logical".into(),
+            1,
+            caps_tools(false),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_dropped_tools(vec![record.clone()]);
+        let partition = "0123456789abcdef0123456789abcdef";
+        store.store_partitioned(&entry, partition).expect("store");
+
+        let EntryLookup::Found(restored) = store.load_partitioned("logical", partition) else {
+            panic!("saved schema-drop records should be restored");
+        };
+        assert_eq!(restored.version, CACHE_SCHEMA_VERSION);
+        assert_eq!(restored.dropped_tools, vec![record]);
+    }
+
+    #[test]
     fn persisted_catalog_restores_exact_schema_and_ui_metadata_without_private_wire_fields() {
         use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
         let dir = tempfile::tempdir().unwrap();
@@ -1987,7 +2030,7 @@ mod tests {
     }
 
     /// An entry with `capabilities.tools=true` and 3 tools — non-degenerate,
-    /// matching every pre-schema-v2 test's implicit assumption.
+    /// matching the cache tests' implicit assumption.
     fn entry_at(saved_at_ms: u64) -> DiscoveryCacheEntry {
         DiscoveryCacheEntry::new(
             "k".into(),
@@ -2428,11 +2471,11 @@ mod tests {
     fn store_load_wrong_schema_version_is_corrupt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = DiscoveryCacheStore::new(dir.path());
-        // Otherwise-complete v2 shape, but a version this store doesn't
-        // recognize — must be Corrupt via the explicit version check, not
-        // the parse-failure path (unlike the v1-shape test below).
+        // Otherwise-complete v2 shape, but an outdated version — must be
+        // Corrupt via the explicit version check, not the parse-failure path
+        // (unlike the v1-shape test below).
         let bad = serde_json::json!({
-            "v": 999,
+            "v": 2,
             "cache_key": "k",
             "saved_at_ms": 1,
             "consecutive_refresh_failures": 0,

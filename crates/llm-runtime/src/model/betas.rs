@@ -59,13 +59,15 @@ pub const MID_CONVERSATION_SYSTEM: &str = "mid-conversation-system-2026-04-07";
 /// system support and before the general per-request effort beta.
 pub const PER_TURN_CONTROL: &str = "per-turn-control-2026-07-01";
 /// Native main-request beta for admitted mid-conversation tool changes.
-pub const MID_CONVERSATION_TOOL_CHANGES: &str = "mid-conversation-tool-changes-2026-07-01";
+pub const MID_CONVERSATION_TOOL_CHANGES: &str =
+    lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges.header();
 /// Native safeguard beta paired with an admitted server-classifier context.
 pub const DANGEROUS_TOOL_USE: &str = "dangerous-tool-use-2026-09-03";
 /// Connector-text summarization (`ewt`, `pewter_owl_header` flag — never emitted).
 pub const SUMMARIZE_CONNECTOR_TEXT: &str = "summarize-connector-text-2026-03-13";
 /// AFK transcript-classifier mode (`PH`).
-pub const AFK_MODE: &str = "afk-mode-2026-01-31";
+pub const AFK_MODE: &str =
+    lingxi_llm_client::providers::anthropic::beta_repair::Beta::AfkMode.header();
 /// Advisor tool integration (`ARr`, per-request advisor tool).
 pub const ADVISOR_TOOL: &str = "advisor-tool-2026-03-01";
 /// OAuth bearer-token auth (`VEe`, subscriber-driven via [`apply_beta_header_with_auth`]).
@@ -140,6 +142,8 @@ pub struct BetaContext {
     pub per_turn_control: bool,
     /// Native admitted mid-conversation tool-change beta for this request.
     pub mid_conversation_tool_changes: bool,
+    /// Native AFK beta after route admission and session/conversation latches.
+    pub afk_mode: bool,
     /// Native admitted server-classifier safeguard beta for this request.
     pub dangerous_tool_use: bool,
     /// Automatic format admitted before explicit extra-body merging.
@@ -166,6 +170,7 @@ impl BetaContext {
             effort: false,
             per_turn_control: false,
             mid_conversation_tool_changes: false,
+            afk_mode: false,
             dangerous_tool_use: false,
             structured_output: false,
             request_kind: Default::default(),
@@ -211,6 +216,12 @@ impl BetaContext {
     #[must_use]
     pub fn with_mid_conversation_tool_changes(mut self, on: bool) -> Self {
         self.mid_conversation_tool_changes = on;
+        self
+    }
+
+    #[must_use]
+    pub fn with_afk_mode(mut self, on: bool) -> Self {
+        self.afk_mode = on;
         self
     }
 
@@ -385,8 +396,196 @@ fn context_1m_active(model: &str) -> bool {
 fn mid_conversation_system(model: &str) -> bool {
     !older_than(model, "claude-opus-4-8")
 }
+
+/// Native `mSe(model)` capability after the caller has admitted the provider
+/// route and `hQ(model)`. Unknown baked-catalog ids and Mythos-5 use the
+/// source's permissive fallback; a known catalog entry without this capability
+/// is a negative observation.
+pub(crate) fn native_mid_conversation_tool_change_supported(
+    raw_model: &str,
+    model_unsupported: bool,
+) -> bool {
+    let force_enabled = native_environment_truthy(
+        std::env::var_os("CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM").as_deref(),
+    );
+    let canonical =
+        lingxi_core::host::model_capabilities::normalize_model_id(&beta_canonical(raw_model));
+    let explicit_capability = lingxi_core::host::model_capabilities::capability_override(
+        &canonical,
+        "mid_conv_tool_change",
+        std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES")
+            .ok()
+            .as_deref(),
+    );
+    let baked_capability = lingxi_core::host::model_capabilities::capabilities_for(&canonical)
+        .contains(&"mid_conv_tool_change");
+    native_mid_conversation_tool_change_supported_with_inputs(
+        &canonical,
+        force_enabled,
+        model_unsupported,
+        explicit_capability,
+        baked_capability,
+        lingxi_core::host::model_capabilities::is_known_model_id(&canonical),
+    )
+}
+
+fn native_mid_conversation_tool_change_supported_with_inputs(
+    canonical_model: &str,
+    force_enabled: bool,
+    model_unsupported: bool,
+    explicit_capability: Option<bool>,
+    baked_capability: bool,
+    known_catalog_model: bool,
+) -> bool {
+    if force_enabled {
+        return true;
+    }
+    if model_unsupported {
+        return false;
+    }
+    if let Some(supported) = explicit_capability.or_else(|| baked_capability.then_some(true)) {
+        return supported;
+    }
+    canonical_model == "claude-mythos-5" || !known_catalog_model
+}
+
+/// Native `TF(model)` fallback used by `hQ` when deciding whether a main
+/// conversation may place system attachments before its closing line. The
+/// service layer applies Native's outer `Ta` lazy memoization around this
+/// fallback. `raw_model` is retained for Native's model-option lookup;
+/// `resolved_model` is the selected route's actual model identity.
+pub(crate) fn native_mid_conversation_system_supported(
+    raw_model: &str,
+    resolved_model: &str,
+    model_option_overrides_allowed: bool,
+) -> bool {
+    let hipaa_tainted = lingxi_core::host::compliance_taints::is_tainted("hipaa");
+    if hipaa_tainted {
+        return false;
+    }
+    let force_enabled = native_environment_truthy(
+        std::env::var_os("CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM").as_deref(),
+    );
+    if force_enabled {
+        return true;
+    }
+    let option_overrides =
+        native_model_option_capability_from_process_env(raw_model, model_option_overrides_allowed);
+    native_mid_conversation_system_supported_with_inputs(
+        resolved_model,
+        model_option_overrides_allowed,
+        false,
+        false,
+        option_overrides,
+        std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn native_mid_conversation_system_supported_with_inputs(
+    resolved_model: &str,
+    model_option_overrides_allowed: bool,
+    hipaa_tainted: bool,
+    force_enabled: bool,
+    model_option_capability: Option<bool>,
+    model_capabilities: Option<&str>,
+) -> bool {
+    if hipaa_tainted {
+        return false;
+    }
+    if force_enabled {
+        return true;
+    }
+    if model_option_overrides_allowed {
+        if let Some(supported) = model_option_capability {
+            return supported;
+        }
+    }
+
+    let canonical = lingxi_core::host::model_capabilities::normalize_model_id(resolved_model);
+    if older_than(&canonical, "claude-opus-4-8") {
+        return false;
+    }
+    lingxi_core::host::model_capabilities::capability_override(
+        &canonical,
+        "mid_conv_system",
+        model_capabilities,
+    )
+    .unwrap_or(true)
+}
+
+const NATIVE_MODEL_OPTION_CAPABILITY_ENVS: [(&str, &str); 5] = [
+    (
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_SUPPORTED_CAPABILITIES",
+    ),
+    (
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_SUPPORTED_CAPABILITIES",
+    ),
+    (
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+    ),
+    (
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_SUPPORTED_CAPABILITIES",
+    ),
+    (
+        "ANTHROPIC_CUSTOM_MODEL_OPTION",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+    ),
+];
+
+fn native_model_option_capability_from_process_env(
+    raw_model: &str,
+    model_option_overrides_allowed: bool,
+) -> Option<bool> {
+    native_model_option_capability_in(raw_model, model_option_overrides_allowed, |name| {
+        std::env::var(name).ok()
+    })
+}
+
+fn native_model_option_capability_in(
+    raw_model: &str,
+    model_option_overrides_allowed: bool,
+    mut get_environment: impl FnMut(&str) -> Option<String>,
+) -> Option<bool> {
+    if !model_option_overrides_allowed {
+        return None;
+    }
+    for (model_env, capabilities_env) in NATIVE_MODEL_OPTION_CAPABILITY_ENVS {
+        let Some(configured_model) = get_environment(model_env) else {
+            continue;
+        };
+        if configured_model.trim().is_empty() {
+            continue;
+        }
+        let Some(capabilities) = get_environment(capabilities_env) else {
+            continue;
+        };
+        if !configured_model.trim().eq_ignore_ascii_case(raw_model) {
+            continue;
+        }
+        return Some(capabilities.split(',').any(|capability| {
+            capability
+                .trim()
+                .eq_ignore_ascii_case("mid_conversation_system")
+        }));
+    }
+    None
+}
+
 fn env_truthy(var: &str) -> bool {
     crate::structured_output::bool_environment(var)
+}
+
+/// Native TF uses a direct JavaScript truthiness check for its force override.
+/// Unlike boolean-valued settings, every nonempty process environment string
+/// (including `"false"` and `"0"`) is truthy.
+fn native_environment_truthy(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
 }
 
 /// Build the first-party (`xLr(model)`) ordered beta set for messages.create.
@@ -526,13 +725,18 @@ fn model_betas_in(
 
 /// Append Native AFK only after the automatic thinking-display beta has been
 /// resolved, preserving Native header order. Callers must pass an admitted main
-/// request fact; unsupported providers are filtered here as a final guard.
+/// request fact; Bedrock carries AFK in the body array instead of this header.
 pub(crate) fn append_afk_mode_after_thinking_display(
     headers: &mut std::collections::BTreeMap<String, String>,
     provider: Provider,
     admitted: bool,
 ) {
-    if admitted && matches!(provider, Provider::Anthropic | Provider::Foundry) {
+    if admitted
+        && matches!(
+            provider,
+            Provider::Anthropic | Provider::Foundry | Provider::Vertex
+        )
+    {
         lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
             headers,
             &[AFK_MODE.to_owned()],
@@ -588,6 +792,9 @@ pub fn bedrock_extra_body_betas(ctx: &BetaContext) -> Vec<String> {
         .collect();
     if ctx.tool_search && ctx.experimental_on() {
         betas.push(TOOL_SEARCH_TOOL_3P.to_string());
+    }
+    if ctx.afk_mode {
+        betas.push(AFK_MODE.to_string());
     }
     betas
 }
@@ -899,11 +1106,24 @@ mod tests {
             Some(AFK_MODE)
         );
 
-        let mut unsupported = std::collections::BTreeMap::new();
-        append_afk_mode_after_thinking_display(&mut unsupported, Provider::Vertex, true);
-        assert!(!unsupported.contains_key("anthropic-beta"));
-        append_afk_mode_after_thinking_display(&mut unsupported, Provider::Anthropic, false);
-        assert!(!unsupported.contains_key("anthropic-beta"));
+        let mut vertex = std::collections::BTreeMap::new();
+        append_afk_mode_after_thinking_display(&mut vertex, Provider::Vertex, true);
+        assert_eq!(
+            vertex.get("anthropic-beta").map(String::as_str),
+            Some(AFK_MODE)
+        );
+
+        let mut bedrock = std::collections::BTreeMap::new();
+        append_afk_mode_after_thinking_display(&mut bedrock, Provider::Bedrock, true);
+        assert!(!bedrock.contains_key("anthropic-beta"));
+        let body_betas = bedrock_extra_body_betas(
+            &BetaContext::for_model("claude-opus-4-8").with_afk_mode(true),
+        );
+        assert!(body_betas.iter().any(|beta| beta == AFK_MODE));
+
+        let mut not_admitted = std::collections::BTreeMap::new();
+        append_afk_mode_after_thinking_display(&mut not_admitted, Provider::Anthropic, false);
+        assert!(!not_admitted.contains_key("anthropic-beta"));
     }
 
     #[test]
@@ -1052,6 +1272,198 @@ mod tests {
         assert!(!mid_conversation_system("claude-sonnet-4-5"));
         assert!(!mid_conversation_system("claude-opus-4-7"));
         assert!(!mid_conversation_system("claude-3-5-sonnet"));
+    }
+
+    #[test]
+    fn native_mid_conversation_system_matches_native_gate_order() {
+        let supports = |model, capabilities| {
+            native_mid_conversation_system_supported_with_inputs(
+                model,
+                true,
+                false,
+                false,
+                None,
+                capabilities,
+            )
+        };
+        assert!(!supports("claude-sonnet-4-6", None));
+        assert!(supports("claude-opus-4-8", None));
+        assert!(supports("claude-mythos-5", None));
+        assert!(supports("claude-mythos-5-1", None));
+        assert!(supports("claude-sonnet-5-5", None));
+        assert!(supports("claude-future-unknown", None));
+
+        // Native QTe is evaluated before the Opus 4.8 age floor, so a matching
+        // model-option capability may admit this older model explicitly.
+        assert!(native_mid_conversation_system_supported_with_inputs(
+            "claude-sonnet-4-6",
+            true,
+            false,
+            false,
+            Some(true),
+            None,
+        ));
+        assert!(!native_mid_conversation_system_supported_with_inputs(
+            "claude-opus-4-8",
+            true,
+            false,
+            false,
+            Some(false),
+            None,
+        ));
+        assert!(!native_mid_conversation_system_supported_with_inputs(
+            "claude-opus-4-8",
+            true,
+            false,
+            false,
+            None,
+            Some("claude-opus-4-8=-mid_conv_system"),
+        ));
+        assert!(!native_mid_conversation_system_supported_with_inputs(
+            "claude-sonnet-4-6",
+            true,
+            false,
+            false,
+            None,
+            Some("claude-sonnet-4-6=mid_conv_system"),
+        ));
+        assert!(!native_mid_conversation_system_supported_with_inputs(
+            "claude-sonnet-4-6",
+            true,
+            true,
+            false,
+            None,
+            None,
+        ));
+        assert!(!native_mid_conversation_system_supported_with_inputs(
+            "claude-sonnet-4-6",
+            true,
+            true,
+            true,
+            Some(true),
+            Some("claude-sonnet-4-6=mid_conv_system"),
+        ));
+        assert!(native_mid_conversation_system_supported_with_inputs(
+            "claude-sonnet-4-6",
+            true,
+            false,
+            true,
+            None,
+            None,
+        ));
+        assert!(native_mid_conversation_system_supported_with_inputs(
+            "claude-opus-4-8",
+            false,
+            false,
+            false,
+            Some(false),
+            None,
+        ));
+    }
+
+    #[test]
+    fn native_mid_conversation_tool_change_uses_explicit_known_and_unknown_order() {
+        let evaluate = |model, force, unsupported, explicit, baked, known| {
+            native_mid_conversation_tool_change_supported_with_inputs(
+                model,
+                force,
+                unsupported,
+                explicit,
+                baked,
+                known,
+            )
+        };
+        assert!(evaluate("claude-opus-4-8", false, false, None, true, true));
+        assert!(!evaluate(
+            "claude-sonnet-4-6",
+            false,
+            false,
+            None,
+            false,
+            true
+        ));
+        assert!(evaluate(
+            "claude-future-model",
+            false,
+            false,
+            None,
+            false,
+            false
+        ));
+        assert!(evaluate("claude-mythos-5", false, false, None, false, true));
+        assert!(!evaluate(
+            "claude-opus-4-8",
+            false,
+            true,
+            Some(true),
+            true,
+            true
+        ));
+        assert!(evaluate(
+            "claude-opus-4-8",
+            true,
+            true,
+            Some(false),
+            false,
+            true
+        ));
+        assert!(!evaluate(
+            "claude-opus-4-8",
+            false,
+            false,
+            Some(false),
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn native_mid_system_force_setting_uses_javascript_truthiness() {
+        assert!(!native_environment_truthy(None));
+        assert!(!native_environment_truthy(Some(std::ffi::OsStr::new(""))));
+        assert!(native_environment_truthy(Some(std::ffi::OsStr::new(
+            "false"
+        ))));
+        assert!(native_environment_truthy(Some(std::ffi::OsStr::new("0"))));
+        assert!(native_environment_truthy(Some(std::ffi::OsStr::new(" "))));
+    }
+
+    #[test]
+    fn native_model_option_capability_matches_native_order_and_parsing() {
+        let env = [
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL", " "),
+            (
+                "ANTHROPIC_DEFAULT_FABLE_SUPPORTED_CAPABILITIES",
+                "mid_conversation_system",
+            ),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", " CLAUDE-OPUS-4-8 "),
+            (
+                "ANTHROPIC_DEFAULT_OPUS_SUPPORTED_CAPABILITIES",
+                "FAST_MODE, MID_CONVERSATION_SYSTEM",
+            ),
+            ("ANTHROPIC_CUSTOM_MODEL_OPTION", "claude-opus-4-8"),
+            (
+                "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+                "-mid_conversation_system",
+            ),
+        ];
+        let lookup = |name: &str| {
+            env.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        };
+        assert_eq!(
+            native_model_option_capability_in("claude-opus-4-8", true, lookup),
+            Some(true)
+        );
+        assert_eq!(
+            native_model_option_capability_in("claude-opus-4-8", false, lookup),
+            None
+        );
+        assert_eq!(
+            native_model_option_capability_in("other-model", true, lookup),
+            None
+        );
     }
 
     /// `context-1m` rides only when the model id carries `[1m]`.

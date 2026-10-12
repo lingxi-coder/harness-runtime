@@ -425,8 +425,9 @@ struct SlashAuthoritySnapshot {
 fn lower_controls(
     controls: lingxi_core::host::ConversationControls,
     requested_permission: String,
+    proactivity: lingxi_core::host::NativeProactivityStatusSnapshot,
 ) -> ConversationControlsDto {
-    let mut controls = lower_conversation_controls(controls);
+    let mut controls = lower_conversation_controls(controls, proactivity);
     controls.permission.requested = requested_permission;
     for option in &mut controls.reasoning.spec.options {
         if matches!(&option.selection, ReasoningSelectionDto::Level { id } if id == "max") {
@@ -469,6 +470,7 @@ fn mobile_skill_listing_provider(
         session_mode,
         read_file_state,
         Arc::new(|| false),
+        None,
     )
 }
 
@@ -477,20 +479,42 @@ fn mobile_skill_listing_provider_with_settings(
     session_mode: session::jsonl::SessionMode,
     read_file_state: Option<tool_api::read_file_state::ReadFileStateMap>,
     include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
+    listing_config: Option<MobileConfig>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     // Session state: once a touched file has revealed a conditional skill, a
     // later turn must not hide it again (the read-state map is an LRU, so the
     // matching path can age out).
-    let conditional = Arc::new(std::sync::Mutex::new(skill_api::ConditionalSkills::new()));
+    let conditional = Arc::new(std::sync::Mutex::new(skill::ConditionalSkills::new()));
     let precommit_registry = registry.clone();
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
             let registry = registry.clone();
             let conditional = conditional.clone();
             let read_file_state = read_file_state.clone();
+            let listing_config = listing_config.clone();
             async move {
-                use command_api::{CommandSource, SlashCommandKind};
+                use command_api::CommandSource;
                 let reg = registry.read().await;
+                let effective_settings = listing_config
+                    .as_ref()
+                    .and_then(|cfg| mobile_provider_settings(cfg).ok());
+                let usage_snapshot = listing_config.as_ref().and_then(|cfg| {
+                    command_api::skill_usage::SkillUsageSnapshot::read(&cfg.lingxi_home).ok()
+                });
+                let full_catalog = reg
+                    .native_source_ordered_commands()
+                    .into_iter()
+                    // Native `Sge`/`sso` visibility gates run before both
+                    // full-catalog alias resolution and prompt listing.
+                    .filter(|command| command.is_enabled)
+                    .map(
+                        |command| orchestrator::prompt::skill_listing::SkillListingCatalogName {
+                            name: command.name.clone(),
+                            user_facing_name: command.user_facing_name.clone(),
+                            aliases: command.aliases.clone(),
+                        },
+                    )
+                    .collect::<Vec<_>>();
                 let touched = read_file_state.as_ref().map_or_else(Vec::new, |m| {
                     m.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -498,18 +522,14 @@ fn mobile_skill_listing_provider_with_settings(
                 });
                 let root =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                reg.model_invocable_commands() // !disable_model_invocation (registry.rs)
+                let entries = reg
+                    .model_invocable_commands() // !disable_model_invocation (registry.rs)
                     .into_iter()
-                    // TS `cmd.type === 'prompt'` — markdown/plugin/bundled
-                    // commands, not builtin/mcp.
-                    .filter(|c| {
-                        matches!(
-                            c.kind,
-                            SlashCommandKind::Markdown { .. }
-                                | SlashCommandKind::Plugin { .. }
-                                | SlashCommandKind::Bundled { .. }
-                        )
-                    })
+                    .filter(|c| c.is_enabled)
+                    // Native `cmd.type === 'prompt'`; dispatch kind alone does
+                    // not classify prompt commands, and builtin prompts use
+                    // the separate `Xwr` bundled-skill gate below.
+                    .filter(|c| c.is_prompt())
                     // A CONDITIONAL skill (`paths:`) stays out of the listing
                     // until the session has touched a matching file
                     // (claude-code `lhr`).
@@ -531,15 +551,78 @@ fn mobile_skill_listing_provider_with_settings(
                             || c.has_user_specified_description
                             || c.when_to_use.is_some()
                     })
-                    .map(|c| orchestrator::prompt::skill_listing::SkillListingEntry {
-                        name: c.name.clone(),
-                        description: c.description.clone(),
-                        when_to_use: c.when_to_use.clone().map(Into::into),
-                        // TS `cmd.source === 'bundled'` (prompt.ts) — bundled
-                        // skills are never truncated.
-                        is_bundled: c.source == CommandSource::Bundled,
+                    .filter_map(|c| {
+                        use orchestrator::prompt::skill_listing::{
+                            native_builtin_skill_gate_active, native_display_name,
+                            native_skill_listing_mode, native_skill_override, SkillListingEntry,
+                        };
+                        let mut entry = SkillListingEntry {
+                            name: c.name.clone(),
+                            display_name: c.name.clone(),
+                            user_facing_name: c.user_facing_name.clone(),
+                            unqualified_name: c.unqualified_name.clone(),
+                            is_synced_skill: c.loaded_from.as_deref() == Some("syncedSkills"),
+                            bare_name_reserved: c.bare_name_reserved,
+                            aliases: c.aliases.clone(),
+                            source: c.native_source.clone(),
+                            plugin_name: c.plugin_name.clone(),
+                            description: c.description.clone(),
+                            when_to_use: c.when_to_use.clone().map(Into::into),
+                            is_bundled_prompt: c.source == CommandSource::Bundled,
+                            is_name_only: false,
+                            priority: usage_snapshot
+                                .as_ref()
+                                .map_or(0.0, |snapshot| snapshot.priority_for_command(&c.name)),
+                        };
+                        let is_builtin_prompt = c.source == CommandSource::Builtin;
+                        let disable_bundled_skills =
+                            std::env::var_os("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS")
+                                .is_some_and(|value| !value.is_empty())
+                                || effective_settings.as_ref().is_some_and(|settings| {
+                                    settings.disable_bundled_skills == Some(true)
+                                });
+                        let builtin_gate_active = is_builtin_prompt
+                            && native_builtin_skill_gate_active(
+                                &c.name,
+                                disable_bundled_skills,
+                                false,
+                                Some(&[]),
+                            );
+                        let mode = native_skill_listing_mode(
+                            native_skill_override(
+                                &entry,
+                                effective_settings
+                                    .as_ref()
+                                    .and_then(|settings| settings.skill_overrides.as_ref()),
+                                None,
+                                None,
+                            ),
+                            c.source == CommandSource::Plugin,
+                            builtin_gate_active,
+                        );
+                        if matches!(
+                            mode,
+                            lingxi_core::settings::SkillOverride::Off
+                                | lingxi_core::settings::SkillOverride::UserInvocableOnly
+                        ) {
+                            return None;
+                        }
+                        entry.is_name_only = mode == lingxi_core::settings::SkillOverride::NameOnly;
+                        entry.display_name = native_display_name(&entry, &full_catalog);
+                        Some(entry)
                     })
-                    .collect()
+                    .collect();
+                let budget_settings = effective_settings.as_ref().map_or_else(
+                    orchestrator::prompt::skill_listing::SkillListingBudgetSettings::default,
+                    |settings| orchestrator::prompt::skill_listing::SkillListingBudgetSettings {
+                        budget_fraction: settings.skill_listing_budget_fraction,
+                        max_desc_chars: settings.skill_listing_max_desc_chars,
+                    },
+                );
+                orchestrator::prompt::skill_listing::SkillListingSnapshot {
+                    entries,
+                    budget_settings,
+                }
             }
         })
         .with_bash_precommit_skills(move |entries| {
@@ -2638,7 +2721,11 @@ impl MobileEngineHandle {
             .unwrap_or_else(|_| controls.permission.requested.clone());
         self.event_sink
             .emit(ClientEvent::ConversationControlsChanged {
-                controls: lower_controls(controls, requested_permission),
+                controls: lower_controls(
+                    controls,
+                    requested_permission,
+                    handle.native_proactivity_snapshot(),
+                ),
             })
             .await;
         self.event_sink
@@ -4405,6 +4492,48 @@ impl MobileEngineHandle {
             ClientCommand::GetConversationControls => {
                 self.emit_controls_snapshot().await;
                 Ok(())
+            }
+
+            ClientCommand::InitializeProactivity {
+                proactivity,
+                reinitialize,
+            } => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle
+                    .apply_native_proactivity_initialize(proactivity, reinitialize.unwrap_or(false))
+                    .await
+                    .map_err(|error| ClientError::Rejected {
+                        message: format!("initialize_proactivity failed: {error}"),
+                    })?;
+                self.emit_controls_snapshot().await;
+                Ok(())
+            }
+
+            ClientCommand::SetProactivityLevel {
+                level,
+                offer_bypass,
+            } => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                match handle
+                    .set_native_proactivity_level(&level, offer_bypass)
+                    .await
+                {
+                    Ok(response) => {
+                        if let Ok(mut requested) = self.inner.requested_permission_mode.lock() {
+                            *requested = response.permission_mode.clone();
+                        }
+                        self.event_sink
+                            .emit(ClientEvent::PermissionModeChanged {
+                                mode: response.permission_mode,
+                            })
+                            .await;
+                        self.emit_controls_snapshot().await;
+                        Ok(())
+                    }
+                    Err(error) => Err(ClientError::Rejected {
+                        message: format!("set_proactivity_level failed: {error}"),
+                    }),
+                }
             }
 
             ClientCommand::SetReasoningSelection { selection } => {

@@ -1,15 +1,11 @@
-//! Finite Agent schema contract captured from the real 2.1.263 executable.
-//! Source excerpts in the fixture document additional, not yet asserted surfaces.
+//! Current Agent schema surface after the 2.1.295 tool-schema projection (`meo` in `src_194447854.js`).
 
 use mobile_linux_api::ProcessOutput;
 
-use serde_json::Value;
-use test_harness::parity::load_fixture;
 use tool_api::tool_trait::Tool;
 
 #[test]
-fn agent_schema_descriptions_match_2_1_263_oracle_bytes() {
-    let fixture: Value = load_fixture("teammate_2_1_263");
+fn agent_schema_uses_current_published_fields() {
     let ctx = tool_api::test_support::shell_test_ctx(ProcessOutput {
         stdout: String::new(),
         stderr: String::new(),
@@ -18,18 +14,40 @@ fn agent_schema_descriptions_match_2_1_263_oracle_bytes() {
     });
     let tool = tool_agent::agent::AgentTool::new(ctx);
     let schema = tool.input_schema();
-    for (field, expected) in fixture["agent_descriptions"]
-        .as_object()
-        .expect("oracle descriptions object")
-    {
-        let pointer = format!("/properties/{field}/description");
-        let actual = schema
-            .string_at(&pointer)
-            .expect("published schema description");
-        assert_eq!(
-            actual.as_bytes(),
-            expected.as_str().expect("oracle literal").as_bytes(),
-            "Agent.{field} description differs from 2.1.263"
+
+    assert_eq!(schema.string_at("/type"), Some("object"));
+    assert_eq!(schema.array_len("/required"), Some(2));
+    assert_eq!(schema.string_at("/required/0"), Some("description"));
+    assert_eq!(schema.string_at("/required/1"), Some("prompt"));
+    for field in [
+        "description",
+        "prompt",
+        "subagent_type",
+        "name",
+        "isolation",
+    ] {
+        assert!(
+            schema.at_pointer(&format!("/properties/{field}")).is_some(),
+            "current Agent schema publishes {field}"
+        );
+    }
+    assert_eq!(
+        schema.string_at("/properties/isolation/enum/0"),
+        Some("worktree")
+    );
+    assert_eq!(
+        schema.string_at("/properties/isolation/enum/1"),
+        Some("remote")
+    );
+
+    // The current model-facing projection excludes old team/mode fields and
+    // the internal cwd override.
+    for obsolete in ["mode", "team_name", "cwd"] {
+        assert!(
+            schema
+                .at_pointer(&format!("/properties/{obsolete}"))
+                .is_none(),
+            "obsolete Agent field {obsolete} is not model-facing"
         );
     }
 }

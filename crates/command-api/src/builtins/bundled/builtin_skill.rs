@@ -18,7 +18,7 @@ impl DesktopBuiltinSkillPromptFn {
 
 impl BundledPromptFn for DesktopBuiltinSkillPromptFn {
     fn build(&self, _args: &Utf16JsonProjection) -> Utf16JsonProjection {
-        skill_api::desktop_builtin_skill_content(self.name)
+        skill::desktop_builtin_skill_content(self.name)
             .expect("slash builtin is registered in the desktop SkillRegistry")
     }
 }
@@ -34,7 +34,7 @@ mod tests {
             ("plugin-authoring", ".lingxi-plugin/\n    plugin.json"),
         ] {
             let prompt = DesktopBuiltinSkillPromptFn::new(name).build(&"".into());
-            let skill = skill_api::desktop_builtin_skill(name).expect("desktop builtin skill");
+            let skill = skill::desktop_builtin_skill(name).expect("desktop builtin skill");
 
             assert_eq!(prompt, skill.content);
             assert!(

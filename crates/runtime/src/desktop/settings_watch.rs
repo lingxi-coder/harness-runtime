@@ -9,12 +9,11 @@
 //! it at the desktop composition root, where the orchestrator (`orch.hooks`),
 //! the `cwd`, the `lingxi_home`, and a `FileSystem` are all in scope.
 //!
-//! ## What this does (and does NOT do)
-//! The watcher fires the hook first, then applies the narrow managed
-//! `disableAutoMode` safety update to an attached live permission gate. It does
-//! not reload ordinary user/project/local settings or rebuild the full policy;
-//! those remain composition-root concerns. It watches the relevant `.claude`
-//! (and managed) directories via the in-tree `fs_watch` primitive
+//! ## What this does
+//! The watcher fires the hook first, then re-reads the managed file and macOS
+//! managed-preferences inputs through one source-aware policy selector. It
+//! watches the relevant `.lingxi`, managed, and macOS managed-preferences
+//! directories via the in-tree `fs_watch` primitive
 //! ([`lingxi_core::host::FileSystem::watch`]), classifies each changed path to a
 //! [`ConfigChangeSource`] layer, and fires
 //! [`ConversationOrchestrator::fire_config_change`] best-effort.
@@ -35,6 +34,8 @@
 //! - `<cwd>/.lingxi/settings.local.json`      → `LocalSettings`
 //! - `<managed_dir>/managed-settings.json`    → `PolicySettings`
 //! - any `*.json` under `<managed_dir>/managed-settings.d/` → `PolicySettings`
+//! - `/Library/Managed Preferences/<user>/com.lingxi.code.plist` → `PolicySettings`
+//! - `/Library/Managed Preferences/com.lingxi.code.plist` → `PolicySettings`
 //!
 //! where `<managed_dir>` is the OS-specific managed root
 //! (`/Library/Application Support/LingXi` on macOS,
@@ -55,6 +56,11 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use hooks::events::ConfigChangeSource;
 use lingxi_core::host::{FileEvent, FileSystem, PermissionGate};
+use lingxi_core::settings::native_policy::{
+    resolve_native_policy, NativePolicyDocument, NativePolicyInputs, NativePolicyLoadState,
+    NativePolicyManagedFileFacts, NativePolicySelection,
+};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
@@ -77,6 +83,226 @@ impl ConfigChangeFirer for orchestrator::ConversationOrchestrator {
     async fn fire_config_change(&self, source: ConfigChangeSource, file_path: Option<PathBuf>) {
         orchestrator::ConversationOrchestrator::fire_config_change(self, source, file_path).await;
     }
+}
+
+/// Live main-model selection refresh seam. This stays separate from the hook
+/// fire because settings changes are applied only after the `ConfigChange`
+/// callback completes.
+#[async_trait]
+pub trait MainModelSelectionRefresher: Send + Sync {
+    /// Replace the configured raw model and managed restriction snapshot.
+    async fn refresh_main_model_selection(
+        &self,
+        raw_model_setting: Option<String>,
+        provenance: lingxi_core::host::ModelProvenance,
+        restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+    );
+}
+
+#[async_trait]
+impl MainModelSelectionRefresher for orchestrator::ConversationOrchestrator {
+    async fn refresh_main_model_selection(
+        &self,
+        raw_model_setting: Option<String>,
+        provenance: lingxi_core::host::ModelProvenance,
+        restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+    ) {
+        orchestrator::ConversationOrchestrator::refresh_main_model_selection(
+            self,
+            raw_model_setting,
+            provenance,
+            restriction,
+        )
+        .await;
+    }
+}
+
+/// Live Native prompt-settings refresh seam. It stays separate from model
+/// selection because output style and response language are prompt inputs.
+#[async_trait]
+pub trait NativeSettingsRefresher: Send + Sync {
+    /// Replace the source-preserving effective output-style and language values.
+    async fn refresh_native_settings(
+        &self,
+        output_style: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        language: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    );
+
+    /// Refresh the process-local `proxyAuthHelper` setting on the existing
+    /// host helper. The command retains exact UTF-16 units through settings
+    /// loading, and `source` is the typed winning contributor from that same
+    /// effective-settings result.
+    async fn refresh_proxy_auth_helper(
+        &self,
+        _command_utf16: Option<Vec<u16>>,
+        _source: Option<lingxi_core::settings::tracer::Source>,
+    ) {
+    }
+}
+
+#[async_trait]
+impl NativeSettingsRefresher for orchestrator::ConversationOrchestrator {
+    async fn refresh_native_settings(
+        &self,
+        output_style: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        language: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    ) {
+        orchestrator::ConversationOrchestrator::refresh_native_output_style(self, output_style)
+            .await;
+        orchestrator::ConversationOrchestrator::refresh_native_response_language(self, language)
+            .await;
+    }
+}
+
+/// The non-secret desktop inputs needed to re-resolve configured main-model
+/// identity after a settings file changes. Keep only the settings projection
+/// here; a long-lived watcher must not retain the full `DesktopConfig`, which
+/// also owns credentials and injected secrets.
+#[derive(Clone)]
+pub struct MainModelSelectionRefresh {
+    default_model: String,
+    default_model_explicit: bool,
+    default_model_env_pinned: bool,
+    restricted: bool,
+    setting_source_scope: (bool, bool),
+    flag_settings: Option<lingxi_core::settings::SettingsJson>,
+    cwd: PathBuf,
+    lingxi_home: PathBuf,
+    model_catalog: Vec<lingxi_core::host::ModelListing>,
+}
+
+impl MainModelSelectionRefresh {
+    /// Snapshot only the immutable settings inputs and route catalog needed by
+    /// future live watcher refreshes.
+    #[must_use]
+    pub fn from_config(
+        config: &super::DesktopConfig,
+        model_catalog: &[lingxi_core::host::ModelListing],
+    ) -> Self {
+        Self {
+            default_model: config.default_model.clone(),
+            default_model_explicit: config.default_model_explicit,
+            default_model_env_pinned: config.default_model_env_pinned,
+            restricted: config.restricted,
+            setting_source_scope: config.setting_source_scope,
+            flag_settings: config.flag_settings.clone(),
+            cwd: config.cwd.clone(),
+            lingxi_home: config.lingxi_home.clone(),
+            model_catalog: model_catalog.to_vec(),
+        }
+    }
+
+    fn settings_config(&self) -> super::DesktopConfig {
+        let mut config = super::DesktopConfig::default();
+        config.default_model.clone_from(&self.default_model);
+        config.default_model_explicit = self.default_model_explicit;
+        config.default_model_env_pinned = self.default_model_env_pinned;
+        config.restricted = self.restricted;
+        config.setting_source_scope = self.setting_source_scope;
+        config.flag_settings.clone_from(&self.flag_settings);
+        config.cwd.clone_from(&self.cwd);
+        config.lingxi_home.clone_from(&self.lingxi_home);
+        config
+    }
+
+    async fn refresh(
+        &self,
+        managed_snapshot: &ManagedSettingsSnapshot,
+        model_refresher: Option<&dyn MainModelSelectionRefresher>,
+        native_settings_refresher: Option<&dyn NativeSettingsRefresher>,
+    ) {
+        let managed_layers = managed_snapshot
+            .effective_json()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let config = self.settings_config();
+        let effective = super::load_effective_settings_for_config(&config, &managed_layers);
+        if let Some(refresher) = native_settings_refresher {
+            refresher
+                .refresh_native_settings(
+                    effective
+                        .as_ref()
+                        .and_then(|settings| settings.settings.output_style.clone()),
+                    effective
+                        .as_ref()
+                        .and_then(|settings| settings.settings.language.clone()),
+                )
+                .await;
+            let command_utf16 = effective.as_ref().and_then(|settings| {
+                settings
+                    .settings
+                    .proxy_auth_helper
+                    .as_ref()
+                    .and_then(|command| command.string_units(""))
+            });
+            let source = effective.as_ref().and_then(|settings| {
+                settings
+                    .effective_for("proxyAuthHelper")
+                    .and_then(|provenance| provenance.contributors.last().copied())
+            });
+            refresher
+                .refresh_proxy_auth_helper(command_utf16, source)
+                .await;
+        }
+        if let Some(refresher) = model_refresher {
+            let provenance =
+                super::permission_config::model_provenance_for_config(&config, effective.as_ref());
+
+            let raw_model_setting =
+                if config.default_model_explicit || config.default_model_env_pinned {
+                    config.default_model.clone()
+                } else {
+                    super::permission_config::managed_model_setting_for_config(
+                        &config,
+                        effective.as_ref(),
+                    )
+                    .or_else(|| non_default_model_setting(effective.as_ref()))
+                    .unwrap_or_else(|| config.default_model.clone())
+                };
+
+            let policy_source =
+                super::permission_config::managed_model_policy_source(&managed_snapshot);
+            let enforcement =
+                llm_runtime::model::allowlist::resolve_enforcement(&policy_source, &mut |_| {});
+            let restriction = match enforcement {
+                active @ llm_runtime::model::allowlist::ModelEnforcement::Active { .. } => Some((
+                    active,
+                    self.model_catalog
+                        .iter()
+                        .map(|model| model.request_model.clone())
+                        .collect(),
+                )),
+                llm_runtime::model::allowlist::ModelEnforcement::Inactive
+                | llm_runtime::model::allowlist::ModelEnforcement::Refused => None,
+            };
+
+            refresher
+                .refresh_main_model_selection(Some(raw_model_setting), provenance, restriction)
+                .await;
+        }
+    }
+}
+
+fn non_default_model_setting(
+    effective: Option<&lingxi_core::settings::EffectiveSettings>,
+) -> Option<String> {
+    use lingxi_core::settings::tracer::Source;
+
+    let effective = effective?;
+    let source = effective
+        .effective_for("model")
+        .and_then(|provenance| provenance.contributors.last())?;
+    if !matches!(
+        source,
+        Source::Env | Source::User | Source::Project | Source::Local | Source::Cli
+    ) {
+        return None;
+    }
+    effective
+        .settings
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty())
 }
 
 /// Env override that relocates the managed (policy) settings root. The real
@@ -104,85 +330,410 @@ pub fn managed_settings_dir() -> PathBuf {
     }
 }
 
-/// Read the file-based managed (policy) settings raw JSON tiers, in ASCENDING
-/// merge priority, faithful to claude-code `loadManagedFileSettings`
-/// (settings.ts:75-122): `managed-settings.json` first (base), then every
-/// `*.json` under `managed-settings.d/` sorted alphabetically (drop-ins win,
-/// later files override). Skips dotfiles. Best-effort: unreadable/absent files
-/// and a missing drop-in dir are silently skipped (TS swallows ENOENT/ENOTDIR).
-/// Returned strings are appended by the caller AFTER the user/project/local
-/// (and flag, if any) tiers so policy wins.
-#[must_use]
-pub async fn managed_settings_raw_tiers() -> Vec<String> {
-    read_managed_settings_snapshot(&managed_settings_dir())
-        .await
-        .raw_tiers
+/// One local managed-settings file read. The original decoded text is retained
+/// beside the exact UTF-16 projection and Core admission result, including an
+/// invalid document that the selector cannot consume as JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ManagedPolicyFileRead {
+    pub path: PathBuf,
+    pub raw_text: Option<String>,
+    pub projection: Option<Utf16JsonProjection>,
+    pub load_state: NativePolicyLoadState,
+    pub diagnostic: Option<String>,
 }
 
-/// The model-policy gate also needs failures that a best-effort settings
-/// consumer can skip. Missing files/directories remain an absent policy.
-#[derive(Debug, Default)]
+/// One failed directory/file read that has no JSON document to attach to the
+/// selector (for example, an unreadable drop-in directory).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ManagedPolicyReadDiagnostic {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+/// Central local policy snapshot. `selection.documents` keeps the raw,
+/// candidate, and normalized UTF-16 projections with exact source paths and
+/// parser provenance; `effective_projection()` is the sole effective policy
+/// carrier used by consumers.
+#[derive(Debug, Clone)]
 pub(super) struct ManagedSettingsSnapshot {
-    pub raw_tiers: Vec<String>,
-    pub read_failed: bool,
+    pub selection: NativePolicySelection,
+    pub file_reads: Vec<ManagedPolicyFileRead>,
+    pub drop_in_directory_state: NativePolicyLoadState,
+    pub read_diagnostics: Vec<ManagedPolicyReadDiagnostic>,
+    pub plist: super::managed_plist::ManagedPlistSnapshot,
 }
 
-pub(super) async fn managed_settings_snapshot() -> ManagedSettingsSnapshot {
-    read_managed_settings_snapshot(&managed_settings_dir()).await
+/// Session-scoped mirror of the one authoritative local-policy selection.
+/// The state distinguishes a cache that has never loaded from a successfully
+/// loaded snapshot whose effective policy is absent.
+#[derive(Clone)]
+pub(super) struct ManagedPolicySnapshotCache {
+    state: Arc<std::sync::RwLock<ManagedPolicySnapshotState>>,
+    initializer: Arc<tokio::sync::Mutex<()>>,
 }
 
-pub(super) async fn read_managed_settings_snapshot(managed: &Path) -> ManagedSettingsSnapshot {
-    use std::io::ErrorKind;
-    let absent = |error: &std::io::Error| {
-        matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
-    };
-    let mut snapshot = ManagedSettingsSnapshot::default();
-    match tokio::fs::read_to_string(managed.join("managed-settings.json")).await {
-        Ok(raw) => snapshot.raw_tiers.push(raw),
-        Err(error) => snapshot.read_failed |= !absent(&error),
+impl Default for ManagedPolicySnapshotCache {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(std::sync::RwLock::new(
+                ManagedPolicySnapshotState::Uninitialized,
+            )),
+            initializer: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ManagedPolicySnapshotError {
+    Uninitialized,
+    Incomplete,
+}
+
+#[derive(Clone, Default)]
+enum ManagedPolicySnapshotState {
+    #[default]
+    Uninitialized,
+    Loaded(ManagedSettingsSnapshot),
+}
+
+impl ManagedPolicySnapshotCache {
+    /// Returns `None` only before a real source read has populated this cache.
+    #[must_use]
+    pub fn snapshot(&self) -> Option<ManagedSettingsSnapshot> {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .loaded()
+    }
+
+    #[must_use]
+    pub fn is_initialized(&self) -> bool {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_loaded()
+    }
+
+    pub fn replace(&self, snapshot: ManagedSettingsSnapshot) {
+        *self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            ManagedPolicySnapshotState::Loaded(snapshot);
+    }
+}
+
+impl ManagedPolicySnapshotState {
+    fn loaded(self) -> Option<ManagedSettingsSnapshot> {
+        match self {
+            Self::Uninitialized => None,
+            Self::Loaded(snapshot) => Some(snapshot),
+        }
+    }
+
+    fn is_loaded(&self) -> bool {
+        matches!(self, Self::Loaded(_))
+    }
+}
+
+/// Async consumers share the initialized session snapshot. Direct/test
+/// composition roots without a cache perform a real read instead of treating
+/// an uninitialized cache as an absent policy document.
+pub(super) async fn managed_settings_snapshot_for_config(
+    config: &super::DesktopConfig,
+) -> ManagedSettingsSnapshot {
+    managed_settings_snapshot_for_cache(&config.managed_policy_snapshot_cache).await
+}
+
+pub(super) async fn managed_settings_snapshot_for_cache(
+    cache: &ManagedPolicySnapshotCache,
+) -> ManagedSettingsSnapshot {
+    if let Some(snapshot) = cache.snapshot() {
+        return snapshot;
+    }
+    let _initialize = cache.initializer.lock().await;
+    if let Some(snapshot) = cache.snapshot() {
+        return snapshot;
+    }
+    let snapshot = managed_settings_snapshot().await;
+    cache.replace(snapshot.clone());
+    snapshot
+}
+
+pub(super) async fn refresh_managed_settings_snapshot_cache(
+    cache: &ManagedPolicySnapshotCache,
+) -> ManagedSettingsSnapshot {
+    let _initialize = cache.initializer.lock().await;
+    let snapshot = managed_settings_snapshot().await;
+    cache.replace(snapshot.clone());
+    snapshot
+}
+
+/// Synchronous consumers must never initiate I/O or block on an async reader.
+/// `None` means the session has not completed its startup policy read.
+pub(super) fn managed_settings_snapshot_sync(
+    config: &super::DesktopConfig,
+) -> Option<ManagedSettingsSnapshot> {
+    config.managed_policy_snapshot_cache.snapshot()
+}
+
+/// Return the selected policy document for a synchronous settings loader.
+/// Uninitialized and incomplete reads stay distinct from a loaded, absent
+/// policy; callers must choose an explicit fail-closed fallback for either
+/// error instead of silently overlaying an empty managed tier.
+pub(super) fn managed_policy_layer_sync(
+    config: &super::DesktopConfig,
+) -> Result<Option<String>, ManagedPolicySnapshotError> {
+    let snapshot =
+        managed_settings_snapshot_sync(config).ok_or(ManagedPolicySnapshotError::Uninitialized)?;
+    if snapshot.read_failed() {
+        return Err(ManagedPolicySnapshotError::Incomplete);
+    }
+    if snapshot.effective_projection().is_none() {
+        return Ok(None);
+    }
+    snapshot
+        .effective_json()
+        .map(Some)
+        .ok_or(ManagedPolicySnapshotError::Incomplete)
+}
+
+pub(super) fn managed_policy_layers_sync(
+    config: &super::DesktopConfig,
+) -> Result<Vec<String>, ManagedPolicySnapshotError> {
+    managed_policy_layer_sync(config).map(|layer| layer.into_iter().collect())
+}
+
+impl ManagedSettingsSnapshot {
+    #[must_use]
+    pub fn effective_projection(&self) -> Option<&Utf16JsonProjection> {
+        self.selection
+            .effective
+            .as_ref()
+            .map(|effective| &effective.projection)
+    }
+
+    /// Compatibility for downstream text-only parsers: serialize the
+    /// selector's normalized projection, never the original file tiers. The
+    /// projection stringifier escapes lone UTF-16 surrogates without losing
+    /// their source code units.
+    #[must_use]
+    pub fn effective_json(&self) -> Option<String> {
+        self.effective_projection()?.to_json_string().ok()
+    }
+
+    #[must_use]
+    pub fn read_failed(&self) -> bool {
+        !self.selection.complete
+            || self.drop_in_directory_state == NativePolicyLoadState::DidNotLoad
+            || !self.read_diagnostics.is_empty()
+    }
+}
+
+/// Read local managed files plus the platform's native managed source and run
+/// the single source-aware policy selector. Remote policy is intentionally not
+/// synthesized by this local host producer.
+pub(super) async fn managed_settings_snapshot() -> ManagedSettingsSnapshot {
+    let managed = managed_settings_dir();
+    let (files, plist) = tokio::join!(
+        read_managed_policy_files(&managed),
+        super::managed_plist::read_native_mdm_plists()
+    );
+    select_managed_policy(files.0, files.1, files.2, plist)
+}
+
+/// Filesystem-isolated reader seam used by focused watcher/source tests. It
+/// deliberately has no remote or parent input; the production entry above
+/// adds the real platform MDM reader before invoking the same selector.
+pub(super) async fn read_managed_settings_snapshot(managed: &Path) -> ManagedSettingsSnapshot {
+    let (files, read_diagnostics, drop_in_directory_state) =
+        read_managed_policy_files(managed).await;
+    select_managed_policy(
+        files,
+        read_diagnostics,
+        drop_in_directory_state,
+        super::managed_plist::ManagedPlistSnapshot::default(),
+    )
+}
+
+fn select_managed_policy(
+    file_reads: Vec<ManagedPolicyFileRead>,
+    read_diagnostics: Vec<ManagedPolicyReadDiagnostic>,
+    drop_in_directory_state: NativePolicyLoadState,
+    plist: super::managed_plist::ManagedPlistSnapshot,
+) -> ManagedSettingsSnapshot {
+    let managed_file_documents = file_reads
+        .iter()
+        .map(|source| {
+            NativePolicyDocument::parse_managed_file(
+                source.projection.clone(),
+                NativePolicyManagedFileFacts {
+                    path: source.path.clone(),
+                    load_state: source.load_state,
+                    document_has_policy_content: None,
+                },
+            )
+        })
+        .collect();
+    let selection = resolve_native_policy(NativePolicyInputs {
+        plist_candidates: plist.native_policy_documents(),
+        managed_file_documents,
+        parent: None,
+        host: None,
+    });
+
+    for diagnostic in &read_diagnostics {
+        tracing::warn!(
+            target: "harness_runtime::desktop::managed_policy",
+            path = %diagnostic.path.display(),
+            error = %diagnostic.message,
+            "could not read a local managed-policy source"
+        );
+    }
+    for source in &file_reads {
+        if let Some(diagnostic) = source.diagnostic.as_deref() {
+            tracing::warn!(
+                target: "harness_runtime::desktop::managed_policy",
+                path = %source.path.display(),
+                error = %diagnostic,
+                "local managed-policy document is unavailable"
+            );
+        }
+    }
+    for candidate in &plist.candidates {
+        let invalid_json = candidate.stdout.is_some() && candidate.projection.is_none();
+        if let Some(reason) = candidate
+            .unread_reason
+            .as_deref()
+            .or_else(|| invalid_json.then_some("plutil output was not valid JSON"))
+        {
+            tracing::warn!(
+                target: "harness_runtime::desktop::managed_policy",
+                path = %candidate.path.display(),
+                source = candidate.label.native_label(),
+                error = %reason,
+                "macOS managed-preferences source is unavailable"
+            );
+        }
+    }
+    for unresolved in &selection.unresolved {
+        tracing::warn!(
+            target: "harness_runtime::desktop::managed_policy",
+            source = ?unresolved.source,
+            reason = %unresolved.reason,
+            "local managed-policy selection is incomplete"
+        );
+    }
+
+    ManagedSettingsSnapshot {
+        selection,
+        file_reads,
+        drop_in_directory_state,
+        read_diagnostics,
+        plist,
+    }
+}
+
+async fn read_managed_policy_files(
+    managed: &Path,
+) -> (
+    Vec<ManagedPolicyFileRead>,
+    Vec<ManagedPolicyReadDiagnostic>,
+    NativePolicyLoadState,
+) {
+    use std::io::ErrorKind;
+
+    let mut files = vec![read_managed_policy_file(managed.join("managed-settings.json")).await];
+    let mut diagnostics = Vec::new();
     let drop_in = managed.join("managed-settings.d");
-    match tokio::fs::read_dir(&drop_in).await {
-        Ok(mut rd) => {
-            let mut names: Vec<std::ffi::OsString> = Vec::new();
+    let drop_in_directory_state = match tokio::fs::read_dir(&drop_in).await {
+        Ok(mut directory) => {
+            let mut names = Vec::new();
+            let mut state = NativePolicyLoadState::Loaded;
             loop {
-                match rd.next_entry().await {
+                match directory.next_entry().await {
                     Ok(Some(entry)) => {
                         let name = entry.file_name();
-                        let n = name.to_string_lossy();
-                        if n.ends_with(".json") && !n.starts_with('.') {
+                        let display = name.to_string_lossy();
+                        if display.ends_with(".json") && !display.starts_with('.') {
                             names.push(name);
                         }
                     }
                     Ok(None) => break,
-                    Err(_) => {
-                        snapshot.read_failed = true;
+                    Err(error) => {
+                        diagnostics.push(ManagedPolicyReadDiagnostic {
+                            path: drop_in.clone(),
+                            message: error.to_string(),
+                        });
+                        state = NativePolicyLoadState::DidNotLoad;
                         break;
                     }
                 }
             }
             names.sort();
             for name in names {
-                match tokio::fs::read_to_string(drop_in.join(name)).await {
-                    Ok(raw) => snapshot.raw_tiers.push(raw),
-                    Err(error) => snapshot.read_failed |= !absent(&error),
-                }
+                files.push(read_managed_policy_file(drop_in.join(name)).await);
             }
+            state
         }
-        Err(error) => snapshot.read_failed |= !absent(&error),
-    }
-    snapshot
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            NativePolicyLoadState::Absent
+        }
+        Err(error) => {
+            diagnostics.push(ManagedPolicyReadDiagnostic {
+                path: drop_in,
+                message: error.to_string(),
+            });
+            NativePolicyLoadState::DidNotLoad
+        }
+    };
+    (files, diagnostics, drop_in_directory_state)
 }
 
-/// Fold the currently loaded managed policy tiers into the one live setting
-/// owned by the permission gate. Managed tiers are already in ascending
-/// precedence; `disableAutoMode` is a sticky admin restriction, so any tier
-/// that says `"disable"` closes the gate.
-#[must_use]
-pub fn auto_mode_disabled_from_managed_tiers(tiers: &[String]) -> bool {
-    tiers
-        .iter()
-        .any(|raw| permission::auto_mode_disabled_from_settings_json(raw))
+async fn read_managed_policy_file(path: PathBuf) -> ManagedPolicyFileRead {
+    use std::io::ErrorKind;
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            // Native file reads use UTF-8 replacement decoding. Keep that text
+            // exactly as the policy parser receives it, then project it with
+            // the source-preserving JSON parser.
+            let raw_text = String::from_utf8_lossy(&bytes).into_owned();
+            match Utf16JsonProjection::parse(&raw_text) {
+                Ok(projection) => ManagedPolicyFileRead {
+                    path,
+                    raw_text: Some(raw_text),
+                    projection: Some(projection),
+                    load_state: NativePolicyLoadState::Loaded,
+                    diagnostic: None,
+                },
+                Err(error) => ManagedPolicyFileRead {
+                    path,
+                    raw_text: Some(raw_text),
+                    projection: None,
+                    load_state: NativePolicyLoadState::DidNotLoad,
+                    diagnostic: Some(format!("managed-policy JSON is invalid: {error}")),
+                },
+            }
+        }
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            ManagedPolicyFileRead {
+                path,
+                raw_text: None,
+                projection: None,
+                load_state: NativePolicyLoadState::Absent,
+                diagnostic: None,
+            }
+        }
+        Err(error) => ManagedPolicyFileRead {
+            path,
+            raw_text: None,
+            projection: None,
+            load_state: NativePolicyLoadState::DidNotLoad,
+            diagnostic: Some(error.to_string()),
+        },
+    }
 }
 
 /// The set of settings paths the watcher cares about, resolved from the
@@ -201,6 +752,9 @@ pub struct SettingsPaths {
     /// `<managed_dir>/managed-settings.d/` drop-in directory; any `*.json`
     /// inside maps to [`ConfigChangeSource::PolicySettings`].
     pub policy_drop_in_dir: PathBuf,
+    /// Exact per-user/device macOS managed-preferences plist source paths.
+    /// Empty on platforms without Native's plist policy reader.
+    pub managed_preference_files: Vec<PathBuf>,
 }
 
 impl SettingsPaths {
@@ -216,6 +770,7 @@ impl SettingsPaths {
             local_settings: cwd.join(branding::DOT_DIR).join("settings.local.json"),
             policy_settings: managed.join("managed-settings.json"),
             policy_drop_in_dir: managed.join("managed-settings.d"),
+            managed_preference_files: super::managed_plist::native_mdm_plist_paths(),
         }
     }
 
@@ -239,6 +794,13 @@ impl SettingsPaths {
             return None;
         }
         if path == self.policy_settings {
+            return Some(ConfigChangeSource::PolicySettings);
+        }
+        if self
+            .managed_preference_files
+            .iter()
+            .any(|managed_path| managed_path == path)
+        {
             return Some(ConfigChangeSource::PolicySettings);
         }
         if path == self.user_settings {
@@ -276,8 +838,29 @@ impl SettingsPaths {
         if !dirs.contains(&self.policy_drop_in_dir) {
             dirs.push(self.policy_drop_in_dir.clone());
         }
+        for source_path in &self.managed_preference_files {
+            if let Some(dir) = source_path.parent() {
+                if !dirs.iter().any(|existing| existing == dir) {
+                    dirs.push(dir.to_path_buf());
+                }
+            }
+        }
         dirs
     }
+}
+
+/// Derive the resolved policy projection's `disableAutoMode` safety gate.
+/// Incomplete policy selection closes the gate rather than being treated as
+/// absent; otherwise the selector's effective value is authoritative.
+#[must_use]
+pub fn auto_mode_disabled_from_policy(snapshot: &ManagedSettingsSnapshot) -> bool {
+    if snapshot.read_failed() {
+        return true;
+    }
+    snapshot
+        .effective_projection()
+        .and_then(|projection| projection.string_at("/disableAutoMode"))
+        == Some("disable")
 }
 
 /// Cloneable owner of the spawned watcher tasks. Hosts use
@@ -424,6 +1007,10 @@ pub struct SettingsWatcher {
     firer: Arc<dyn ConfigChangeFirer>,
     permission_gate: Option<Arc<dyn PermissionGate>>,
     classifier_auto_mode_refresh: Option<ClassifierAutoModeRefresh>,
+    main_model_selection_refresh: Option<MainModelSelectionRefresh>,
+    main_model_selection_refresher: Option<Arc<dyn MainModelSelectionRefresher>>,
+    native_settings_refresher: Option<Arc<dyn NativeSettingsRefresher>>,
+    managed_policy_snapshot_cache: Option<ManagedPolicySnapshotCache>,
 }
 
 #[derive(Clone)]
@@ -443,12 +1030,49 @@ impl SettingsWatcher {
             firer,
             permission_gate: None,
             classifier_auto_mode_refresh: None,
+            main_model_selection_refresh: None,
+            main_model_selection_refresher: None,
+            native_settings_refresher: None,
+            managed_policy_snapshot_cache: None,
         }
     }
 
     #[must_use]
     pub fn with_permission_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
         self.permission_gate = Some(gate);
+        self
+    }
+
+    /// Recompute the configured main-model setting and managed model
+    /// restriction after user/project/local/policy settings changes.
+    #[must_use]
+    pub fn with_main_model_selection_refresh(
+        mut self,
+        inputs: MainModelSelectionRefresh,
+        refresher: Arc<dyn MainModelSelectionRefresher>,
+    ) -> Self {
+        self.main_model_selection_refresh = Some(inputs);
+        self.main_model_selection_refresher = Some(refresher);
+        self
+    }
+
+    /// Refresh Native prompt settings such as output style and response language
+    /// after live user/project/local/policy settings changes.
+    #[must_use]
+    pub fn with_native_settings_refresher(
+        mut self,
+        refresher: Arc<dyn NativeSettingsRefresher>,
+    ) -> Self {
+        self.native_settings_refresher = Some(refresher);
+        self
+    }
+
+    /// Keep all synchronous and asynchronous settings consumers on the same
+    /// session policy snapshot, replacing it after every watched settings
+    /// event (including all local PolicySettings and macOS plist paths).
+    #[must_use]
+    pub fn with_managed_policy_snapshot_cache(mut self, cache: ManagedPolicySnapshotCache) -> Self {
+        self.managed_policy_snapshot_cache = Some(cache);
         self
     }
 
@@ -489,6 +1113,10 @@ impl SettingsWatcher {
             firer,
             permission_gate,
             classifier_auto_mode_refresh,
+            main_model_selection_refresh,
+            main_model_selection_refresher,
+            native_settings_refresher,
+            managed_policy_snapshot_cache,
         } = self;
         // Own each task before awaiting the next watch setup. Cancellation of
         // construction must abort prior loops even before a handle is returned.
@@ -509,6 +1137,10 @@ impl SettingsWatcher {
             let firer = firer.clone();
             let permission_gate = permission_gate.clone();
             let classifier_auto_mode_refresh = classifier_auto_mode_refresh.clone();
+            let main_model_selection_refresh = main_model_selection_refresh.clone();
+            let main_model_selection_refresher = main_model_selection_refresher.clone();
+            let native_settings_refresher = native_settings_refresher.clone();
+            let managed_policy_snapshot_cache = managed_policy_snapshot_cache.clone();
             let mut state = handle
                 .owner
                 .state
@@ -524,6 +1156,10 @@ impl SettingsWatcher {
                     firer,
                     permission_gate,
                     classifier_auto_mode_refresh,
+                    main_model_selection_refresh,
+                    main_model_selection_refresher,
+                    native_settings_refresher,
+                    managed_policy_snapshot_cache,
                 )
                 .await;
             }));
@@ -550,7 +1186,18 @@ pub async fn run_watch_loop_with_permission_gate(
     firer: Arc<dyn ConfigChangeFirer>,
     permission_gate: Option<Arc<dyn PermissionGate>>,
 ) {
-    run_watch_loop_with_settings_refresh(stream, paths, firer, permission_gate, None).await;
+    run_watch_loop_with_settings_refresh(
+        stream,
+        paths,
+        firer,
+        permission_gate,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 }
 
 async fn run_watch_loop_with_settings_refresh(
@@ -559,6 +1206,10 @@ async fn run_watch_loop_with_settings_refresh(
     firer: Arc<dyn ConfigChangeFirer>,
     permission_gate: Option<Arc<dyn PermissionGate>>,
     classifier_auto_mode_refresh: Option<ClassifierAutoModeRefresh>,
+    main_model_selection_refresh: Option<MainModelSelectionRefresh>,
+    main_model_selection_refresher: Option<Arc<dyn MainModelSelectionRefresher>>,
+    native_settings_refresher: Option<Arc<dyn NativeSettingsRefresher>>,
+    managed_policy_snapshot_cache: Option<ManagedPolicySnapshotCache>,
 ) {
     while let Some(event) = stream.next().await {
         handle_event_with_settings_refresh(
@@ -567,6 +1218,10 @@ async fn run_watch_loop_with_settings_refresh(
             firer.as_ref(),
             permission_gate.as_deref(),
             classifier_auto_mode_refresh.as_ref(),
+            main_model_selection_refresh.as_ref(),
+            main_model_selection_refresher.as_deref(),
+            native_settings_refresher.as_deref(),
+            managed_policy_snapshot_cache.as_ref(),
         )
         .await;
     }
@@ -586,7 +1241,18 @@ pub async fn handle_event_with_permission_gate(
     firer: &dyn ConfigChangeFirer,
     permission_gate: Option<&dyn PermissionGate>,
 ) {
-    handle_event_with_settings_refresh(event, paths, firer, permission_gate, None).await;
+    handle_event_with_settings_refresh(
+        event,
+        paths,
+        firer,
+        permission_gate,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 }
 
 async fn handle_event_with_settings_refresh(
@@ -595,35 +1261,66 @@ async fn handle_event_with_settings_refresh(
     firer: &dyn ConfigChangeFirer,
     permission_gate: Option<&dyn PermissionGate>,
     classifier_auto_mode_refresh: Option<&ClassifierAutoModeRefresh>,
+    main_model_selection_refresh: Option<&MainModelSelectionRefresh>,
+    main_model_selection_refresher: Option<&dyn MainModelSelectionRefresher>,
+    native_settings_refresher: Option<&dyn NativeSettingsRefresher>,
+    managed_policy_snapshot_cache: Option<&ManagedPolicySnapshotCache>,
 ) {
     let Some(source) = paths.classify(&event.path) else {
         return;
     };
-    if permission::consume_internal_write(&event.path, std::time::Duration::from_secs(5)) {
-        return;
+    let internal_write =
+        permission::consume_internal_write(&event.path, std::time::Duration::from_secs(5));
+    if !internal_write {
+        firer
+            .fire_config_change(source, Some(event.path.clone()))
+            .await;
     }
-    firer
-        .fire_config_change(source, Some(event.path.clone()))
-        .await;
-    if source == ConfigChangeSource::PolicySettings {
-        if let Some(gate) = permission_gate {
-            let tiers = managed_settings_raw_tiers().await;
-            gate.update_auto_mode_disabled(auto_mode_disabled_from_managed_tiers(&tiers));
+    let managed_snapshot = match managed_policy_snapshot_cache {
+        Some(cache) => refresh_managed_settings_snapshot_cache(cache).await,
+        None => managed_settings_snapshot().await,
+    };
+    if !internal_write {
+        if source == ConfigChangeSource::PolicySettings {
+            if let Some(gate) = permission_gate {
+                gate.update_auto_mode_disabled(auto_mode_disabled_from_policy(&managed_snapshot));
+            }
+        }
+        if matches!(
+            source,
+            ConfigChangeSource::UserSettings | ConfigChangeSource::PolicySettings
+        ) {
+            if let (Some(gate), Some(refresh)) = (permission_gate, classifier_auto_mode_refresh) {
+                let settings = super::permission_config::reload_classifier_auto_mode_settings(
+                    &paths.user_settings,
+                    refresh.include_user_settings,
+                    refresh.flag_settings_configured,
+                    refresh.flag_settings_source.as_deref(),
+                    &managed_snapshot,
+                )
+                .await;
+                gate.update_classifier_auto_mode_settings(settings);
+            }
         }
     }
+    // Internal writes still change the current model setting and managed
+    // restriction. They suppress the user-facing ConfigChange hook above, but
+    // must not leave the live orchestrator on a stale selection snapshot.
     if matches!(
         source,
-        ConfigChangeSource::UserSettings | ConfigChangeSource::PolicySettings
+        ConfigChangeSource::UserSettings
+            | ConfigChangeSource::ProjectSettings
+            | ConfigChangeSource::LocalSettings
+            | ConfigChangeSource::PolicySettings
     ) {
-        if let (Some(gate), Some(refresh)) = (permission_gate, classifier_auto_mode_refresh) {
-            let settings = super::permission_config::reload_classifier_auto_mode_settings(
-                &paths.user_settings,
-                refresh.include_user_settings,
-                refresh.flag_settings_configured,
-                refresh.flag_settings_source.as_deref(),
-            )
-            .await;
-            gate.update_classifier_auto_mode_settings(settings);
+        if let Some(refresh) = main_model_selection_refresh {
+            refresh
+                .refresh(
+                    &managed_snapshot,
+                    main_model_selection_refresher,
+                    native_settings_refresher,
+                )
+                .await;
         }
     }
 }
@@ -633,6 +1330,39 @@ mod tests {
     use super::*;
     use lingxi_core::host::FileEventKind;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn managed_policy_cache_distinguishes_uninitialized_from_loaded_absence_and_refreshes_clones(
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let cache = ManagedPolicySnapshotCache::default();
+        let shared = cache.clone();
+        assert!(!cache.is_initialized());
+        assert!(cache.snapshot().is_none());
+
+        let absent = read_managed_settings_snapshot(root.path()).await;
+        assert!(!absent.read_failed());
+        assert!(absent.effective_projection().is_none());
+        cache.replace(absent);
+        assert!(shared.is_initialized());
+        assert!(shared.snapshot().unwrap().effective_projection().is_none());
+
+        std::fs::write(
+            root.path().join("managed-settings.json"),
+            r#"{"disableAutoMode":"disable"}"#,
+        )
+        .unwrap();
+        let updated = read_managed_settings_snapshot(root.path()).await;
+        cache.replace(updated);
+        assert_eq!(
+            shared
+                .snapshot()
+                .unwrap()
+                .effective_projection()
+                .and_then(|projection| projection.string_at("/disableAutoMode")),
+            Some("disable")
+        );
+    }
 
     #[derive(Default)]
     struct DropBarrier {
@@ -797,10 +1527,15 @@ mod tests {
                 local_settings: project.join("settings.local.json"),
                 policy_settings: root.path().join("absent/policy.json"),
                 policy_drop_in_dir: root.path().join("absent/dropins"),
+                managed_preference_files: Vec::new(),
             },
             firer,
             permission_gate: None,
             classifier_auto_mode_refresh: None,
+            main_model_selection_refresh: None,
+            main_model_selection_refresher: None,
+            native_settings_refresher: None,
+            managed_policy_snapshot_cache: None,
         };
         let task_fs = fs.clone();
         let construction = tokio::spawn(async move { watcher.spawn(task_fs).await });
@@ -828,6 +1563,70 @@ mod tests {
     impl ConfigChangeFirer for RecordingFirer {
         async fn fire_config_change(&self, source: ConfigChangeSource, file_path: Option<PathBuf>) {
             self.fired.lock().unwrap().push((source, file_path));
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingModelSelectionRefresher(
+        Mutex<
+            Vec<(
+                Option<String>,
+                lingxi_core::host::ModelProvenance,
+                Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+            )>,
+        >,
+    );
+
+    #[async_trait]
+    impl MainModelSelectionRefresher for RecordingModelSelectionRefresher {
+        async fn refresh_main_model_selection(
+            &self,
+            raw_model_setting: Option<String>,
+            provenance: lingxi_core::host::ModelProvenance,
+            restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+        ) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((raw_model_setting, provenance, restriction));
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingNativeSettingsRefresher {
+        native: Mutex<
+            Vec<(
+                Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+                Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+            )>,
+        >,
+        proxy_auth_helper: Mutex<
+            Vec<(
+                Option<Vec<u16>>,
+                Option<lingxi_core::settings::tracer::Source>,
+            )>,
+        >,
+    }
+
+    #[async_trait]
+    impl NativeSettingsRefresher for RecordingNativeSettingsRefresher {
+        async fn refresh_native_settings(
+            &self,
+            output_style: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+            language: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        ) {
+            self.native.lock().unwrap().push((output_style, language));
+        }
+
+        async fn refresh_proxy_auth_helper(
+            &self,
+            command_utf16: Option<Vec<u16>>,
+            source: Option<lingxi_core::settings::tracer::Source>,
+        ) {
+            self.proxy_auth_helper
+                .lock()
+                .unwrap()
+                .push((command_utf16, source));
         }
     }
 
@@ -940,6 +1739,10 @@ mod tests {
             &firer,
             Some(&gate),
             Some(&refresh),
+            None,
+            None,
+            None,
+            None,
         )
         .await;
         let first = gate.updates.lock().unwrap()[0].clone().unwrap();
@@ -972,6 +1775,10 @@ mod tests {
             &firer,
             Some(&gate),
             Some(&refresh),
+            None,
+            None,
+            None,
+            None,
         )
         .await;
         let updates = gate.updates.lock().unwrap();
@@ -992,6 +1799,261 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["\"policy-hard\""]
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn model_selection_refresh_uses_live_source_precedence_and_policy_catalog() {
+        let _managed_env = crate::desktop::tests::MANAGED_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var_os(MANAGED_DIR_ENV);
+        struct RestoreManagedDir(Option<std::ffi::OsString>);
+        impl Drop for RestoreManagedDir {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.take() {
+                    std::env::set_var(MANAGED_DIR_ENV, previous);
+                } else {
+                    std::env::remove_var(MANAGED_DIR_ENV);
+                }
+            }
+        }
+        let _restore = RestoreManagedDir(previous);
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("project");
+        let managed = root.path().join("managed");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        std::fs::create_dir_all(&managed).unwrap();
+        std::env::set_var(MANAGED_DIR_ENV, &managed);
+
+        let user_settings = home.join("settings.json");
+        let project_settings = cwd.join(branding::DOT_DIR).join("settings.json");
+        let policy_settings = managed.join("managed-settings.json");
+        std::fs::write(&user_settings, r#"{"model":"user-model"}"#).unwrap();
+        std::fs::write(&project_settings, r#"{"model":"opusplan"}"#).unwrap();
+        std::fs::write(
+            &policy_settings,
+            r#"{"availableModels":["opusplan"],"enforceAvailableModels":true}"#,
+        )
+        .unwrap();
+
+        let model_catalog = vec![
+            lingxi_core::host::ModelListing {
+                display_model: "opusplan".into(),
+                request_model: "opusplan".into(),
+                provider_id: "anthropic".into(),
+                provider_label: "Anthropic".into(),
+                description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
+                supports_reasoning: false,
+                fusion_analyst_capable: false,
+                connection: Default::default(),
+            },
+            lingxi_core::host::ModelListing {
+                display_model: "catalog-model".into(),
+                request_model: "catalog-model".into(),
+                provider_id: "anthropic".into(),
+                provider_label: "Anthropic".into(),
+                description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
+                supports_reasoning: false,
+                fusion_analyst_capable: false,
+                connection: Default::default(),
+            },
+        ];
+        let config = super::super::DesktopConfig {
+            cwd: cwd.clone(),
+            lingxi_home: home,
+            default_model: "catalog-model".into(),
+            setting_source_scope: (true, true),
+            ..Default::default()
+        };
+        let refresh = MainModelSelectionRefresh::from_config(&config, &model_catalog);
+        let paths = SettingsPaths::resolve(&config.lingxi_home, &cwd);
+        let firer = RecordingFirer::default();
+        let refresher = RecordingModelSelectionRefresher::default();
+
+        handle_event_with_settings_refresh(
+            &ev(user_settings.to_str().unwrap()),
+            &paths,
+            &firer,
+            None,
+            None,
+            Some(&refresh),
+            Some(&refresher),
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(firer.fired.lock().unwrap().len(), 1);
+        {
+            let selections = refresher.0.lock().unwrap();
+            assert_eq!(selections.len(), 1);
+            let (raw_model, provenance, restriction) = &selections[0];
+            assert_eq!(raw_model.as_deref(), Some("opusplan"));
+            assert_eq!(*provenance, lingxi_core::host::ModelProvenance::UserOrEnv);
+            let (enforcement, catalog) =
+                restriction.as_ref().expect("managed restriction is active");
+            match enforcement {
+                llm_runtime::model::allowlist::ModelEnforcement::Active { allowlist, .. } => {
+                    assert_eq!(
+                        allowlist,
+                        &Utf16JsonProjection::parse(r#"["opusplan"]"#).unwrap()
+                    );
+                }
+                other => panic!("expected active managed enforcement, got {other:?}"),
+            }
+            assert_eq!(
+                catalog.iter().map(String::as_str).collect::<Vec<_>>(),
+                ["opusplan", "catalog-model"]
+            );
+        }
+
+        std::fs::write(&project_settings, r#"{"model":"project-next"}"#).unwrap();
+        permission::mark_internal_write(&project_settings);
+        handle_event_with_settings_refresh(
+            &ev(project_settings.to_str().unwrap()),
+            &paths,
+            &firer,
+            None,
+            None,
+            Some(&refresh),
+            Some(&refresher),
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            firer.fired.lock().unwrap().len(),
+            1,
+            "internal settings changes still suppress the config hook"
+        );
+        let selections = refresher.0.lock().unwrap();
+        assert_eq!(selections.len(), 2);
+        assert_eq!(
+            selections[1].0.as_deref(),
+            Some("project-next"),
+            "internal model changes still refresh the live model selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_settings_refresh_keeps_lone_surrogates_and_tracks_clear() {
+        let _managed_env = crate::desktop::tests::MANAGED_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var_os(MANAGED_DIR_ENV);
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("user");
+        let cwd = root.path().join("project");
+        let managed = root.path().join("managed");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        std::fs::create_dir_all(&managed).unwrap();
+        std::env::set_var(MANAGED_DIR_ENV, &managed);
+        struct RestoreManagedDir(Option<std::ffi::OsString>);
+        impl Drop for RestoreManagedDir {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.take() {
+                    std::env::set_var(MANAGED_DIR_ENV, previous);
+                } else {
+                    std::env::remove_var(MANAGED_DIR_ENV);
+                }
+            }
+        }
+        let _restore = RestoreManagedDir(previous);
+
+        let user_settings = home.join("settings.json");
+        std::fs::write(
+            &user_settings,
+            r#"{"language":"\ud800","outputStyle":"style-\ud800","proxyAuthHelper":"/helper-\ud800"}"#,
+        )
+        .unwrap();
+        let config = super::super::DesktopConfig {
+            cwd: cwd.clone(),
+            lingxi_home: home.clone(),
+            setting_source_scope: (true, true),
+            ..Default::default()
+        };
+        let refresh = MainModelSelectionRefresh::from_config(&config, &[]);
+        let paths = SettingsPaths::resolve(&home, &cwd);
+        let firer = RecordingFirer::default();
+        let native_refresher = RecordingNativeSettingsRefresher::default();
+
+        handle_event_with_settings_refresh(
+            &ev(user_settings.to_str().unwrap()),
+            &paths,
+            &firer,
+            None,
+            None,
+            Some(&refresh),
+            None,
+            Some(&native_refresher),
+            None,
+        )
+        .await;
+
+        std::fs::write(&user_settings, r#"{"model":"unchanged"}"#).unwrap();
+        permission::mark_internal_write(&user_settings);
+        handle_event_with_settings_refresh(
+            &ev(user_settings.to_str().unwrap()),
+            &paths,
+            &firer,
+            None,
+            None,
+            Some(&refresh),
+            None,
+            Some(&native_refresher),
+            None,
+        )
+        .await;
+
+        let updates = native_refresher.native.lock().unwrap();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(
+            updates[0].0.as_ref().unwrap().string_units(""),
+            Some("style-".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            updates[0].1.as_ref().unwrap().string_units(""),
+            Some(vec![0xd800])
+        );
+        assert!(
+            updates[1].0.is_none(),
+            "removing outputStyle clears its live source"
+        );
+        assert!(
+            updates[1].1.is_none(),
+            "removing language clears its live source"
+        );
+        let helper_updates = native_refresher.proxy_auth_helper.lock().unwrap();
+        assert_eq!(helper_updates.len(), 2);
+        assert_eq!(
+            helper_updates[0].0.as_deref(),
+            Some(
+                "/helper-"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .collect::<Vec<_>>()
+                    .as_slice()
+            )
+        );
+        assert_eq!(
+            helper_updates[0].1,
+            Some(lingxi_core::settings::tracer::Source::User)
+        );
+        assert!(helper_updates[1].0.is_none());
+        assert!(helper_updates[1].1.is_none());
+        assert_eq!(firer.fired.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1040,6 +2102,32 @@ mod tests {
     }
 
     #[test]
+    fn classify_and_watch_exact_managed_preference_candidates() {
+        let user = PathBuf::from("/Library/Managed Preferences/alice/com.lingxi.code.plist");
+        let device = PathBuf::from("/Library/Managed Preferences/com.lingxi.code.plist");
+        let mut paths = paths();
+        paths.managed_preference_files = vec![user.clone(), device.clone()];
+
+        assert_eq!(
+            paths.classify(&user),
+            Some(ConfigChangeSource::PolicySettings)
+        );
+        assert_eq!(
+            paths.classify(&device),
+            Some(ConfigChangeSource::PolicySettings)
+        );
+        assert_eq!(
+            paths.classify(Path::new(
+                "/Library/Managed Preferences/alice/com.other.bundle.plist"
+            )),
+            None
+        );
+        let watched = paths.watch_dirs();
+        assert!(watched.contains(&user.parent().unwrap().to_path_buf()));
+        assert!(watched.contains(&device.parent().unwrap().to_path_buf()));
+    }
+
+    #[test]
     fn classify_unrelated_path_is_none() {
         let p = paths();
         assert_eq!(
@@ -1052,17 +2140,22 @@ mod tests {
         assert_eq!(p.classify(Path::new("/work/proj/.lingxi/other.json")), None);
     }
 
-    #[test]
-    fn managed_auto_mode_fold_covers_base_dropins_and_clear() {
-        let enabled = vec![
-            r#"{"disableAutoMode":"disable"}"#.to_string(),
-            r#"{"permissions":{"allow":["Read"]}}"#.to_string(),
-        ];
-        assert!(auto_mode_disabled_from_managed_tiers(&enabled));
-        assert!(!auto_mode_disabled_from_managed_tiers(&[
-            r#"{"disableAutoMode":"enable"}"#.to_string(),
-            r#"{"permissions":{}}"#.to_string(),
-        ]));
+    #[tokio::test]
+    async fn managed_auto_mode_uses_selected_policy_and_closes_on_unresolved_input() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("managed-settings.json");
+        std::fs::write(&base, r#"{"disableAutoMode":"disable"}"#).unwrap();
+        let disabled = read_managed_settings_snapshot(root.path()).await;
+        assert!(auto_mode_disabled_from_policy(&disabled));
+
+        std::fs::write(&base, r#"{"disableAutoMode":"enable"}"#).unwrap();
+        let enabled = read_managed_settings_snapshot(root.path()).await;
+        assert!(!auto_mode_disabled_from_policy(&enabled));
+
+        std::fs::write(&base, "not-json").unwrap();
+        let unresolved = read_managed_settings_snapshot(root.path()).await;
+        assert!(unresolved.read_failed());
+        assert!(auto_mode_disabled_from_policy(&unresolved));
     }
 
     #[tokio::test]

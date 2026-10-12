@@ -8,7 +8,7 @@
 //! See spec §2.3 (key traits) for the matched design.
 
 use crate::types::utf16_json::Utf16JsonProjection;
-use crate::types::SessionId;
+use crate::types::{MessageId, SessionId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -215,9 +215,67 @@ pub struct ContextUsageSnapshot {
     /// empty list; consumers must then fall back to the aggregate counters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub breakdown: Vec<ContextUsageCategory>,
+    /// Budgeted, model-facing skill-listing rows and their Native token
+    /// estimates. This internal diagnostic is absent when no live listing
+    /// provider is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_listing: Option<ContextSkillListingSnapshot>,
     /// Cumulative session usage/cost, unaffected by compaction.
     #[serde(default)]
     pub cumulative_cost: CostSnapshot,
+}
+
+/// Same-snapshot skill listing diagnostics backing the /context frontmatter
+/// table. Lines and token counts come from the Native listing formatter.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ContextSkillListingSnapshot {
+    /// Rows in the same order as the model-facing listing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<ContextSkillListingRow>,
+    /// Sum of per-row token estimates.
+    #[serde(default)]
+    pub total_tokens: u64,
+    /// Whether Native's description-budget pass reduced any prompt row to its
+    /// name-only form; all names remain present either way.
+    #[serde(default)]
+    pub budget_truncated: bool,
+}
+
+/// One budgeted model-facing skill-listing row and its source metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextSkillListingRow {
+    /// Canonical cmd.name identity, retained as exact UTF-16 units.
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub canonical_name: Utf16JsonProjection,
+    /// Native Oo(cmd) user-facing name.
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub name: Utf16JsonProjection,
+    /// Native Rwt(cmd, fullCatalog) display label.
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub display_name: Utf16JsonProjection,
+    /// Native m$o source tag when the command factory provides it.
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source: Option<Utf16JsonProjection>,
+    /// Plugin manifest name, when the prompt came from a plugin with an
+    /// authoritative plugin identity.
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub plugin_name: Option<Utf16JsonProjection>,
+    /// Exact line emitted by the already-budgeted Native listing formatter.
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub rendered_line: Utf16JsonProjection,
+    /// Native Math.round(UTF16 line length / Eh(model)) estimate.
+    #[serde(default)]
+    pub tokens: u64,
 }
 
 impl ContextUsageSnapshot {
@@ -711,6 +769,26 @@ where
     Ok(serde_json::from_value(value).ok())
 }
 
+/// Latest assistant usage used by Native main-loop Plan model selection.
+/// This is runtime-only resume metadata derived from the latest assistant row;
+/// it is not written as a new transcript field.
+#[derive(Debug, Clone)]
+pub struct MainLoopAssistantUsageSnapshot {
+    /// Identity of the assistant row whose usage was measured.
+    pub message_id: MessageId,
+    /// Native `FI(usage)` result: input + cache creation + cache read + output.
+    pub context_tokens: f64,
+}
+
+impl PartialEq for MainLoopAssistantUsageSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.message_id == other.message_id
+            && self.context_tokens.to_bits() == other.context_tokens.to_bits()
+    }
+}
+
+impl Eq for MainLoopAssistantUsageSnapshot {}
+
 /// Transcript-adjacent runtime state needed by an in-place session resume.
 ///
 /// This leaf-friendly mirror deliberately uses primitive fields instead of
@@ -722,6 +800,8 @@ where
 pub struct ResumeRuntimeSnapshot {
     /// Latest real assistant usage in the restored, post-compaction chain.
     pub current_usage: Option<CurrentUsageSnapshot>,
+    /// Native Plan threshold usage paired with its actual latest assistant row.
+    pub main_loop_latest_assistant_usage: Option<MainLoopAssistantUsageSnapshot>,
     /// Resolved session model to adopt on in-place resume. Empty means "leave
     /// the current live model unchanged" for legacy/default callers.
     pub model: String,
@@ -729,6 +809,17 @@ pub struct ResumeRuntimeSnapshot {
     /// preserves compatibility with transcripts written before profile
     /// metadata was recorded and lets the registry resolve globally by id.
     pub model_profile: Option<String>,
+    /// Raw user model setting used by Native Plan-mode selection, when the
+    /// resume source has an authoritative value. `None` keeps the live
+    /// configured setting; cold JSONL replay uses the current CLI/settings
+    /// value because transcripts store only the resolved wire model.
+    pub user_model_setting: Option<String>,
+    /// Provenance and precedence for a carried raw model setting. These fields
+    /// are paired with `user_model_setting` and ignored when it is absent.
+    pub user_model_setting_provenance: Option<ModelProvenance>,
+    /// Session-user picks stay authoritative across managed/user settings
+    /// refreshes until a new user model selection is made.
+    pub user_model_setting_source: Option<crate::session::SessionModelSettingSource>,
     /// Resolved transcript effort level, when the persisted session carried
     /// one. Present for parity plumbing; runtimes that cannot live-mutate their
     /// provider adapter may ignore it.
@@ -771,6 +862,9 @@ pub struct ResumeRuntimeSnapshot {
         crate::types::MessageId,
         crate::types::utf16_json::Utf16JsonProjection,
     )>,
+    /// Source-typed outer-row identities needed to reproduce native request
+    /// placement and task-delivery metadata after in-place resume.
+    pub native_request_history: crate::host::NativeRequestHistoryMetadata,
     /// Persisted cumulative token count discarded by compaction.
     pub cumulative_dropped_tokens: u64,
     /// Whether this session has compacted at least once.
@@ -2785,6 +2879,39 @@ pub trait OrchestratorHandle: Send + Sync {
         Ok(())
     }
 
+    /// Read the current Native proactivity selector state for a host control
+    /// surface. Engines without this feature report the default opted-out state.
+    fn native_proactivity_snapshot(&self) -> crate::host::NativeProactivityStatusSnapshot {
+        crate::host::NativeProactivityStatusSnapshot::default()
+    }
+
+    /// Apply the proactivity bit from a Native `initialize` control request.
+    /// Missing or non-boolean fields are represented as `None`; a false value
+    /// on a reinitialize is a source-defined no-op.
+    async fn apply_native_proactivity_initialize(
+        &self,
+        value: Option<bool>,
+        reinitialize: bool,
+    ) -> Result<(), HandleError> {
+        let _ = (value, reinitialize);
+        Err(HandleError::Unimplemented(
+            "apply_native_proactivity_initialize".into(),
+        ))
+    }
+
+    /// Apply Native's legal proactivity level and the corresponding live
+    /// permission-mode transition.
+    async fn set_native_proactivity_level(
+        &self,
+        level: &str,
+        offer_bypass: Option<bool>,
+    ) -> Result<crate::host::NativeProactivityControlResponse, HandleError> {
+        let _ = (level, offer_bypass);
+        Err(HandleError::Unimplemented(
+            "set_native_proactivity_level".into(),
+        ))
+    }
+
     // M5-10 additions:
 
     /// Set the orchestrator's internal `should_exit` flag.
@@ -4589,6 +4716,50 @@ mod source_carrier_tests {
                 .expect("format null source"),
             "null"
         );
+    }
+
+    #[test]
+    fn context_skill_listing_snapshot_keeps_raw_utf16_fields() {
+        let snapshot = ContextUsageSnapshot {
+            skill_listing: Some(ContextSkillListingSnapshot {
+                rows: vec![ContextSkillListingRow {
+                    canonical_name: exact_string(vec![b's' as u16, 0xd800]),
+                    name: exact_string(vec![b'n' as u16, 0xdfff]),
+                    display_name: exact_string(vec![b'd' as u16, 0xd800]),
+                    source: Some(exact_string(vec![b'p' as u16, 0xdfff])),
+                    plugin_name: Some(exact_string(vec![b'x' as u16, 0xd800])),
+                    rendered_line: exact_string(vec![b'-' as u16, 0xdfff]),
+                    tokens: 7,
+                }],
+                total_tokens: 7,
+                budget_truncated: true,
+            }),
+            ..ContextUsageSnapshot::default()
+        };
+        let json = serde_json::to_string(&snapshot).expect("serialize context snapshot");
+        assert!(json.contains(r"\ud800"));
+        assert!(json.contains(r"\udfff"));
+        let restored: ContextUsageSnapshot =
+            serde_json::from_str(&json).expect("restore context snapshot");
+        let row = &restored.skill_listing.expect("listing exists").rows[0];
+        assert_eq!(
+            row.canonical_name.string_units(""),
+            Some(vec![b's' as u16, 0xd800])
+        );
+        assert_eq!(row.name.string_units(""), Some(vec![b'n' as u16, 0xdfff]));
+        assert_eq!(
+            row.source
+                .as_ref()
+                .and_then(|source| source.string_units("")),
+            Some(vec![b'p' as u16, 0xdfff])
+        );
+        assert_eq!(
+            row.plugin_name
+                .as_ref()
+                .and_then(|name| name.string_units("")),
+            Some(vec![b'x' as u16, 0xd800])
+        );
+        assert_eq!(row.tokens, 7);
     }
 }
 

@@ -1500,12 +1500,17 @@ mod tests {
                 json!({"query":"rust language"})
             };
             let error = WebSearchTool::new(builtin)
-                .call(input, ctx, tx)
+                .call(generated(input), ctx, tx)
                 .await
                 .unwrap_err();
-            assert!(error.to_string().contains("WebSearch is not supported"));
-            assert!(error.to_string().contains("no-search-model"));
-            assert!(error.to_string().contains(profile));
+            // ToolError's Display is intentionally a concise log label;
+            // the unsupported-capability detail lives in the source-preserving
+            // model-facing projection.
+            let message = error.model_facing_message();
+            let message = message.string_at("").expect("model-facing error string");
+            assert!(message.contains("WebSearch is not supported"));
+            assert!(message.contains("no-search-model"));
+            assert!(message.contains(profile));
             assert_eq!(hosted.calls.load(Ordering::SeqCst), 0);
             assert_eq!(registry.increments(), 0);
         }

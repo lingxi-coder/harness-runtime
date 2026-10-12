@@ -1,5 +1,5 @@
 use super::*;
-use crate::prompt::skill_listing::{SkillListingEntry, SkillListingProvider};
+use crate::prompt::skill_listing::{SkillListingEntry, SkillListingProvider, SkillListingSnapshot};
 use crate::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -17,8 +17,11 @@ use tool_api::tool_trait::{
 struct FixtureSkills(Vec<SkillListingEntry>);
 #[async_trait]
 impl SkillListingProvider for FixtureSkills {
-    async fn skill_entries(&self) -> Vec<SkillListingEntry> {
-        self.0.clone()
+    async fn skill_listing_snapshot(&self) -> SkillListingSnapshot {
+        SkillListingSnapshot {
+            entries: self.0.clone(),
+            budget_settings: Default::default(),
+        }
     }
 }
 
@@ -136,9 +139,19 @@ fn orch_with(
 fn fixture() -> Arc<dyn SkillListingProvider> {
     Arc::new(FixtureSkills(vec![SkillListingEntry {
         name: "debug".into(),
+        display_name: "debug".into(),
+        user_facing_name: None,
+        source: None,
+        plugin_name: None,
+        unqualified_name: None,
+        is_synced_skill: false,
+        bare_name_reserved: false,
+        aliases: Vec::new(),
         description: "Debug a failing test".into(),
         when_to_use: None,
-        is_bundled: false,
+        is_bundled_prompt: false,
+        is_name_only: false,
+        priority: 0.0,
     }]))
 }
 
@@ -212,7 +225,7 @@ async fn mod_attachment_receives_native_plan_details_for_entry_and_exit() {
         orch.session_plan_file_path(&session.session_id)
     };
     let has_plan = std::path::Path::new(&plan_path).exists();
-    let entry = orch.collect_turn_reminders(true, true, None).await;
+    let entry = orch.collect_turn_reminders(true, true, None, &[]).await;
     assert!(entry.transient.iter().any(|message| {
         message.text_content()
             == format!("<system-reminder>\nfull:{plan_path}:{has_plan}\n</system-reminder>")
@@ -224,7 +237,7 @@ async fn mod_attachment_receives_native_plan_details_for_entry_and_exit() {
         session.plan_mode = false;
         session.plan_mode_exit_pending = true;
     }
-    let exit = orch.collect_turn_reminders(true, true, None).await;
+    let exit = orch.collect_turn_reminders(true, true, None, &[]).await;
     assert!(exit.transient.iter().any(|message| {
         message.text_content()
             == format!("<system-reminder>\nexit:{plan_path}:{has_plan}\n</system-reminder>")
@@ -503,17 +516,30 @@ async fn plan_mode_reminder_uses_custom_instructions() {
 struct MutableSkills(std::sync::Arc<std::sync::Mutex<Vec<SkillListingEntry>>>);
 #[async_trait]
 impl SkillListingProvider for MutableSkills {
-    async fn skill_entries(&self) -> Vec<SkillListingEntry> {
-        self.0.lock().unwrap().clone()
+    async fn skill_listing_snapshot(&self) -> SkillListingSnapshot {
+        SkillListingSnapshot {
+            entries: self.0.lock().unwrap().clone(),
+            budget_settings: Default::default(),
+        }
     }
 }
 
 fn skill(name: &str) -> SkillListingEntry {
     SkillListingEntry {
         name: name.into(),
+        display_name: name.into(),
+        user_facing_name: None,
+        source: None,
+        plugin_name: None,
+        unqualified_name: None,
+        is_synced_skill: false,
+        bare_name_reserved: false,
+        aliases: Vec::new(),
         description: format!("desc for {name}").into(),
         when_to_use: None,
-        is_bundled: false,
+        is_bundled_prompt: false,
+        is_name_only: false,
+        priority: 0.0,
     }
 }
 
@@ -597,15 +623,35 @@ async fn skill_listing_deduplicates_names_by_exact_utf16_units() {
         Some(Arc::new(FixtureSkills(vec![
             SkillListingEntry {
                 name: source_name(vec![0xd800]),
+                display_name: source_name(vec![0xd800]),
+                user_facing_name: None,
+                source: None,
+                plugin_name: None,
+                unqualified_name: None,
+                is_synced_skill: false,
+                bare_name_reserved: false,
+                aliases: Vec::new(),
                 description: "lone surrogate skill".into(),
                 when_to_use: None,
-                is_bundled: false,
+                is_bundled_prompt: false,
+                is_name_only: false,
+                priority: 0.0,
             },
             SkillListingEntry {
                 name: source_name(replacement_display.encode_utf16().collect()),
+                display_name: source_name(replacement_display.encode_utf16().collect()),
+                user_facing_name: None,
+                source: None,
+                plugin_name: None,
+                unqualified_name: None,
+                is_synced_skill: false,
+                bare_name_reserved: false,
+                aliases: Vec::new(),
                 description: "replacement character skill".into(),
                 when_to_use: None,
-                is_bundled: false,
+                is_bundled_prompt: false,
+                is_name_only: false,
+                priority: 0.0,
             },
         ]))),
     );
@@ -704,7 +750,7 @@ async fn mod_attachment_receives_each_async_hook_event_origin() {
     let orch = orch_with(ToolRegistry::new(), None)
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)))
         .with_async_hook_responses(provider);
-    let reminders = orch.collect_turn_reminders(true, true, None).await;
+    let reminders = orch.collect_turn_reminders(true, true, None, &[]).await;
     let texts: Vec<_> = reminders
         .transient
         .iter()
@@ -972,7 +1018,7 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     )));
 
     let before = orch.session.lock().await.history.len();
-    let reminders = orch.collect_turn_reminders(true, false, None).await;
+    let reminders = orch.collect_turn_reminders(true, false, None, &[]).await;
     assert_eq!(
         reminders.task_notifications.len(),
         1,
@@ -1005,7 +1051,7 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     // Consume-once still holds: a second drain has nothing left, so the
     // completion cannot be appended twice.
     assert!(
-        orch.collect_turn_reminders(true, false, None)
+        orch.collect_turn_reminders(true, false, None, &[])
             .await
             .task_notifications
             .is_empty(),

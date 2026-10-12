@@ -19,6 +19,7 @@ fn rule(name: &str, behavior: PermissionBehavior) -> PermissionRule {
         value: PermissionRuleValue {
             tool_name: name.into(),
             rule_content: None,
+            original_rule: None,
         },
         behavior,
         source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),

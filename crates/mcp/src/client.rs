@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 type JsonProjection = Utf16JsonProjection;
 
+use crate::connection::McpDroppedToolRecord;
 use crate::hook_dispatch::HookDispatcher;
 use crate::inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
 use crate::initialize_params::InitializeParams;
@@ -683,6 +684,9 @@ pub struct McpClient {
     /// Strictest ceiling computed for the most recent tools/list response.
     /// Kept out of `McpToolDto` to preserve the discovery-cache wire shape.
     effective_permission_ceilings: std::sync::RwLock<BTreeMap<String, McpPermissionCeiling>>,
+    /// Schema decisions that removed tools from the most recent tools/list
+    /// result. The registry scopes this snapshot to the connection generation.
+    dropped_tools: RwLock<Vec<McpDroppedToolRecord>>,
     /// One connection-owned MCP output-schema session, plus the compiled
     /// plans from the latest `tools/list` response.
     output_schema_session: Option<Arc<dyn JsonSchemaValidatorSession>>,
@@ -866,6 +870,7 @@ impl McpClient {
             config_tools: Vec::new(),
             config_tool_permissions: BTreeMap::new(),
             effective_permission_ceilings: std::sync::RwLock::new(BTreeMap::new()),
+            dropped_tools: RwLock::new(Vec::new()),
             output_schema_session: None,
             output_schema_plans: RwLock::new(HashMap::new()),
             transport_kind: McpTransportKind::Stdio,
@@ -1175,6 +1180,7 @@ impl McpClient {
         .map(|resp| McpToolResultDto {
             content: resp.content,
             is_error: resp.is_error,
+            error: resp.error,
             meta: resp.meta,
             structured_content: resp.structured_content,
         })
@@ -1583,6 +1589,7 @@ impl McpClient {
         let skip_prefix = self.skip_mcp_prefix();
 
         let normalized_server = crate::normalization::normalize_name_for_mcp(&self.server_name);
+        let mut dropped_tools = Vec::new();
         let mut tools: Vec<McpToolDto> = raw_tools
             .into_iter()
             .filter_map(|t| {
@@ -1595,6 +1602,10 @@ impl McpClient {
                     &t.input_schema,
                 );
                 if let Some(reason) = decision.drop_reason {
+                    dropped_tools.push(McpDroppedToolRecord {
+                        tool_name: t.name.clone(),
+                        reason: reason.clone(),
+                    });
                     tracing::warn!(
                         server = %self.server_name,
                         tool = %t.name,
@@ -1664,6 +1675,7 @@ impl McpClient {
                 })
             })
             .collect();
+        *self.dropped_tools.write().await = dropped_tools;
         self.apply_config_permission_ceilings(&mut tools);
         if let Some(session) = &self.output_schema_session {
             let mut plans = HashMap::new();
@@ -1683,6 +1695,12 @@ impl McpClient {
             *self.output_schema_plans.write().await = plans;
         }
         Ok(tools)
+    }
+
+    /// Return the actual schema decisions from the most recent successful
+    /// `tools/list` projection, preserving upstream names and decision reasons.
+    pub async fn dropped_tools_snapshot(&self) -> Vec<McpDroppedToolRecord> {
+        self.dropped_tools.read().await.clone()
     }
 
     /// Resolve config-side ceilings against the raw names returned by
@@ -3040,11 +3058,9 @@ fn tool_meta_requires_user_interaction(meta: &Option<Utf16JsonProjection>) -> bo
 
 /// Wire-level shape of a `tools/call` response body.
 ///
-/// The MCP `CallToolResult` also carries two optional, arbitrary-JSON members:
-/// `_meta` and `structuredContent`. Both are parsed as opaque
-/// `Option<serde_json::Value>` and forwarded verbatim (no transformation),
-/// matching claude-code (`services/mcp/client.ts` reads `result._meta` /
-/// `result.structuredContent` straight off the raw result).
+/// Optional `CallToolResult` source members are decoded as raw projections and
+/// forwarded without materializing their JSON values. This preserves explicit
+/// null, exact UTF-16 strings, and Native's top-level `error` fallback.
 #[derive(Debug, Deserialize)]
 struct ToolCallResponse {
     #[serde(
@@ -3054,6 +3070,13 @@ struct ToolCallResponse {
     content: Utf16JsonProjection,
     #[serde(rename = "isError", default)]
     is_error: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    error: Option<Utf16JsonProjection>,
     #[serde(
         rename = "_meta",
         default,
@@ -3078,6 +3101,7 @@ fn decode_tool_call_response(source: &str) -> Result<McpToolResultDto, McpClient
     Ok(McpToolResultDto {
         content: response.content,
         is_error: response.is_error,
+        error: response.error,
         meta: response.meta,
         structured_content: response.structured_content,
     })
@@ -3645,16 +3669,22 @@ mod constructor_tests {
         // owns `_meta` / `structuredContent` decoding. (A full transport
         // loopback is exercised by the constructor tests above; here we assert
         // the byte-faithful passthrough deterministically.)
-        let body = r#"{"content":[{"type":"text","text":"\ud800"}],"isError":false,"_meta":{"anthropic/trace":"abc","nested":{"k":[1,2,3]}},"structuredContent":{"rows":[{"id":7}],"total":1}}"#;
+        let body = r#"{"content":[{"type":"text","text":"\ud800"}],"isError":false,"error":"\udfff","_meta":{"anthropic/trace":"abc","nested":{"k":[1,2,3]}},"structuredContent":{"rows":[{"id":7}],"total":1}}"#;
         let resp = super::decode_tool_call_response(body).expect("decode tools/call body");
         let dto = super::McpToolResultDto {
             content: resp.content,
             is_error: resp.is_error,
+            error: resp.error,
             meta: resp.meta,
             structured_content: resp.structured_content,
         };
 
         assert!(!dto.is_error);
+        assert_eq!(
+            dto.error.as_ref().and_then(|error| error.string_units("")),
+            Some(vec![0xdfff]),
+            "top-level server error source is forwarded exactly"
+        );
         assert_eq!(
             dto.content.string_units("/0/text").as_deref(),
             Some([0xd800].as_slice()),
@@ -3677,13 +3707,14 @@ mod constructor_tests {
     }
 
     #[test]
-    fn call_tool_absent_meta_yields_none_no_empty_object() {
-        // A result WITHOUT `_meta` / `structuredContent` must decode to `None`
-        // for both — never an empty object, never a panic.
+    fn call_tool_absent_members_yield_none_and_explicit_null_stays_present() {
+        // Absent optional result members decode to None, while explicit null
+        // remains a present source projection for Native's String fallback.
         let resp = super::decode_tool_call_response(
             r#"{"content":[{"type":"text","text":"ok"}],"isError":false}"#,
         )
         .expect("decode tools/call body");
+        assert!(resp.error.is_none(), "absent error must be None");
         assert!(resp.meta.is_none(), "absent _meta must be None");
         assert!(
             resp.structured_content.is_none(),
@@ -3692,9 +3723,22 @@ mod constructor_tests {
 
         // Wholly empty body (server returned `{}`) is still safe.
         let empty = super::decode_tool_call_response("{}").expect("decode empty body");
+        assert!(empty.error.is_none());
         assert!(empty.meta.is_none());
         assert!(empty.structured_content.is_none());
         assert!(!empty.is_error);
+
+        let explicit_null =
+            super::decode_tool_call_response(r#"{"content":[],"isError":true,"error":null}"#)
+                .expect("decode explicit null error");
+        assert_eq!(
+            explicit_null
+                .error
+                .as_ref()
+                .and_then(|error| error.at_pointer(""))
+                .map(|value| value.is_null()),
+            Some(true)
+        );
     }
 
     // -- MCP.3: request `_meta` carries `claudecode/toolUseId` ---------------
@@ -3950,6 +3994,42 @@ mod constructor_tests {
     }
 
     // ── Server-level `alwaysLoad` config (parity 2.1.207 P2-01) ─────────────
+
+    #[tokio::test]
+    async fn list_tools_retains_actual_schema_drop_source_records() {
+        let (conn, peer_tx, mut peer_rx) = paired_connection();
+        let client =
+            Arc::new(McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn).await);
+        let list_client = Arc::clone(&client);
+        let handle = tokio::spawn(async move { list_client.list_tools().await });
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("tools/list request within timeout")
+            .expect("frame sent");
+        let request: serde_json::Value = serde_json::from_slice(&frame).expect("request json");
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request["id"].clone(),
+            "result": { "tools": [
+                { "name": "rawBadName", "inputSchema": { "anyOf": "not-an-array" } }
+            ] },
+        });
+        let mut bytes = serde_json::to_vec(&response).expect("encode response");
+        bytes.push(b'\n');
+        peer_tx
+            .send(Bytes::from(bytes))
+            .await
+            .expect("send response");
+
+        assert!(handle.await.expect("join").expect("list tools").is_empty());
+        assert_eq!(
+            client.dropped_tools_snapshot().await,
+            vec![McpDroppedToolRecord {
+                tool_name: "rawBadName".into(),
+                reason: "input schema has top-level anyOf that is not an array".into(),
+            }]
+        );
+    }
 
     /// Drive `tools/list` and return the client's decoded tools after
     /// responding with `tools_json`. Shared by the alwaysLoad tests below.

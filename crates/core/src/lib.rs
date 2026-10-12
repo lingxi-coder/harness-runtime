@@ -15,6 +15,7 @@
 
 pub mod events;
 pub mod host;
+pub mod native_locale;
 pub mod prompt;
 pub mod reducer;
 pub mod session;

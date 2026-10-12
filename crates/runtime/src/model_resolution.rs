@@ -13,6 +13,8 @@ use llm_runtime::{ClientConfig, ModelRuntime, ProviderId, ProviderProfile};
 #[derive(Clone)]
 struct ProfileFacts {
     provider: ModelProviderKind,
+    group: String,
+    connection_order: u32,
     endpoint: String,
     protocol: String,
     family_defaults: FamilyModelDefaults,
@@ -39,6 +41,8 @@ impl RuntimeModelResolutionProvider {
                     profile.profile_name.clone(),
                     ProfileFacts {
                         provider: provider_kind(&profile.provider_id),
+                        group: profile.group().to_owned(),
+                        connection_order: profile.connection.order,
                         endpoint: profile.base_url.clone(),
                         protocol: format!("{:?}", profile.protocol),
                         family_defaults: family_defaults(profile),
@@ -86,89 +90,137 @@ impl RuntimeModelResolutionProvider {
         profile: Option<&str>,
     ) -> Result<(String, String), ModelResolutionError> {
         if let Some(profile) = profile {
-            if !self.profiles.contains_key(profile) {
+            match self.runtime.resolve_media_route(model, Some(profile)) {
+                Ok(route) => return self.resolved_route(model, Some(profile), route.main),
+                Err(_error) if is_family_alias(model) => {
+                    return self.select_family_alias_profile(model, Some(profile))
+                }
+                Err(error) => return Err(self.route_error(model, Some(profile), error)),
+            }
+        }
+
+        // A configured literal model id or catalog alias takes precedence over
+        // a Native family spelling with the same text. For example, a profile
+        // can literally register a model named "opus".
+        match self.runtime.resolve_media_route(model, None) {
+            Ok(route) => return self.resolved_route(model, None, route.main),
+            Err(error) if is_family_alias(model) => {
+                if error.to_string().contains("ambiguous across profiles") {
+                    return Err(self.route_error(model, None, error));
+                }
+                return self.select_family_alias_profile(model, None);
+            }
+            Err(error) => return Err(self.route_error(model, None, error)),
+        }
+    }
+
+    fn resolved_route(
+        &self,
+        requested_model: &str,
+        requested_profile: Option<&str>,
+        route: llm_runtime::ResolvedRoute,
+    ) -> Result<(String, String), ModelResolutionError> {
+        if self.profiles.contains_key(&route.profile_name) {
+            Ok((route.profile_name, route.request_model))
+        } else {
+            Err(ModelResolutionError::RouteUnavailable {
+                model: requested_model.to_owned(),
+                profile: requested_profile.map(str::to_owned),
+                reason: "resolved profile is absent from the host snapshot".into(),
+            })
+        }
+    }
+
+    fn route_error(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        error: llm_runtime::LlmError,
+    ) -> ModelResolutionError {
+        let reason = error.to_string();
+        if reason.contains("ambiguous across profiles") {
+            let profiles = self
+                .profiles
+                .iter()
+                .filter(|(_, facts)| {
+                    facts
+                        .model_keys
+                        .iter()
+                        .any(|key| key.eq_ignore_ascii_case(model))
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            ModelResolutionError::AmbiguousRoute {
+                model: model.to_owned(),
+                profiles,
+            }
+        } else {
+            ModelResolutionError::RouteUnavailable {
+                model: model.to_owned(),
+                profile: profile.map(str::to_owned),
+                reason,
+            }
+        }
+    }
+
+    fn select_family_alias_profile(
+        &self,
+        model: &str,
+        requested_profile: Option<&str>,
+    ) -> Result<(String, String), ModelResolutionError> {
+        let family = family_for_alias(model).expect("recognized family alias");
+        let candidates: Vec<(&String, &ProfileFacts)> = self
+            .profiles
+            .iter()
+            .filter(|(name, facts)| {
+                requested_profile
+                    .is_none_or(|profile| name.as_str() == profile || facts.group == profile)
+                    && facts.family_defaults.get(family).is_some()
+            })
+            .collect();
+
+        let candidate_groups: std::collections::BTreeSet<&str> = candidates
+            .iter()
+            .map(|(_, facts)| facts.group.as_str())
+            .collect();
+        if let Some(profile) = requested_profile {
+            if candidate_groups.is_empty() {
                 return Err(ModelResolutionError::RouteUnavailable {
                     model: model.to_owned(),
                     profile: Some(profile.to_owned()),
-                    reason: "configured profile was not found".to_string(),
-                });
-            }
-            if is_family_alias(model) {
-                return Ok((profile.to_owned(), model.to_owned()));
-            }
-            return self
-                .runtime
-                .resolve_media_route(model, Some(profile))
-                .map(|route| (route.main.profile_name, route.main.request_model))
-                .map_err(|error| ModelResolutionError::RouteUnavailable {
-                    model: model.to_owned(),
-                    profile: Some(profile.to_owned()),
-                    reason: error.to_string(),
-                })
-                .and_then(|(resolved_profile, request_model)| {
-                    if self.profiles.contains_key(&resolved_profile) {
-                        Ok((resolved_profile, request_model))
+                    reason: if self.profiles.contains_key(profile)
+                        || self.profiles.values().any(|facts| facts.group == profile)
+                    {
+                        "configured profile does not provide this family".to_owned()
                     } else {
-                        Err(ModelResolutionError::RouteUnavailable {
-                            model: model.to_owned(),
-                            profile: Some(profile.to_owned()),
-                            reason: "resolved profile is absent from the host snapshot".into(),
-                        })
-                    }
+                        "configured profile was not found".to_owned()
+                    },
                 });
+            }
+        } else if candidate_groups.is_empty() {
+            return Err(ModelResolutionError::RouteUnavailable {
+                model: model.to_owned(),
+                profile: None,
+                reason: "no configured profile provides this family".to_string(),
+            });
         }
 
-        if is_family_alias(model) {
-            let family = family_for_alias(model).expect("recognized family alias");
-            let profiles: Vec<String> = self
-                .profiles
-                .iter()
-                .filter(|(_, facts)| facts.family_defaults.get(family).is_some())
-                .map(|(name, _)| name.clone())
-                .collect();
-            return match profiles.as_slice() {
-                [only] => Ok((only.clone(), model.to_owned())),
-                [] => Err(ModelResolutionError::RouteUnavailable {
-                    model: model.to_owned(),
-                    profile: None,
-                    reason: "no configured profile provides this family".to_string(),
-                }),
-                _ => Err(ModelResolutionError::AmbiguousRoute {
-                    model: model.to_owned(),
-                    profiles,
-                }),
-            };
+        if candidate_groups.len() > 1 {
+            return Err(ModelResolutionError::AmbiguousRoute {
+                model: model.to_owned(),
+                profiles: candidates.iter().map(|(name, _)| (*name).clone()).collect(),
+            });
         }
 
-        self.runtime
-            .resolve_media_route(model, None)
-            .map(|route| (route.main.profile_name, route.main.request_model))
-            .map_err(|error| {
-                let reason = error.to_string();
-                if reason.contains("ambiguous across profiles") {
-                    let profiles = self
-                        .profiles
-                        .iter()
-                        .filter(|(_, facts)| {
-                            facts
-                                .model_keys
-                                .iter()
-                                .any(|key| key.eq_ignore_ascii_case(model))
-                        })
-                        .map(|(name, _)| name.clone())
-                        .collect();
-                    ModelResolutionError::AmbiguousRoute {
-                        model: model.to_owned(),
-                        profiles,
-                    }
-                } else {
-                    ModelResolutionError::RouteUnavailable {
-                        model: model.to_owned(),
-                        profile: None,
-                        reason,
-                    }
-                }
+        let selected = candidates
+            .into_iter()
+            .min_by(|(left_name, left), (right_name, right)| {
+                left.connection_order
+                    .cmp(&right.connection_order)
+                    .then_with(|| left_name.cmp(right_name))
             })
+            .expect("a matching family route exists");
+        Ok((selected.0.clone(), model.to_owned()))
     }
 }
 
@@ -235,15 +287,20 @@ fn family_defaults(profile: &ProviderProfile) -> FamilyModelDefaults {
 }
 
 fn family_override_or_profile(profile: &ProviderProfile, family: &str) -> Option<String> {
-    let override_name = match family {
-        "opus" => "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "sonnet" => "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "haiku" => "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "fable" => "ANTHROPIC_DEFAULT_FABLE_MODEL",
-        _ => return None,
-    };
-    if let Ok(value) = std::env::var(override_name) {
-        // Keep Native's defined-empty distinction.
+    let env_override = family_override_env_name(family).and_then(|name| std::env::var(name).ok());
+    family_override_or_profile_with(profile, family, env_override)
+}
+
+fn family_override_or_profile_with(
+    profile: &ProviderProfile,
+    family: &str,
+    env_override: Option<String>,
+) -> Option<String> {
+    family_override_env_name(family)?;
+    // Native's getDefaultOpusModel/getDefaultSonnetModel/getDefaultHaikuModel
+    // return a defined environment override before consulting route defaults.
+    // In particular, an empty-but-defined value stays distinct from no value.
+    if let Some(value) = env_override {
         return Some(value);
     }
 
@@ -251,9 +308,8 @@ fn family_override_or_profile(profile: &ProviderProfile, family: &str) -> Option
         .models
         .iter()
         .filter(|model| {
-            model
-                .aliases
-                .iter()
+            std::iter::once(&model.display_model)
+                .chain(model.aliases.iter())
                 .any(|alias| alias.eq_ignore_ascii_case(family))
         })
         .map(|model| model.request_model.as_str())
@@ -264,26 +320,22 @@ fn family_override_or_profile(profile: &ProviderProfile, family: &str) -> Option
 
     let provider = provider_kind(&profile.provider_id);
     let baseline = host_family_baseline(provider, family)?;
-    let exact = profile
+    profile
         .models
         .iter()
-        .find(|model| model.request_model == baseline)
-        .map(|model| model.request_model.clone());
-    if exact.is_some() {
-        return exact;
-    }
+        .find(|model| model.request_model.eq_ignore_ascii_case(baseline))
+        .map(|model| model.request_model.clone())
+}
 
-    let needle = format!("claude-{family}");
-    let family_matches: Vec<&str> = profile
-        .models
-        .iter()
-        .filter(|model| {
-            model.request_model.to_ascii_lowercase().contains(&needle)
-                || model.display_model.to_ascii_lowercase().contains(&needle)
-        })
-        .map(|model| model.request_model.as_str())
-        .collect();
-    unique_value(&family_matches).map(str::to_owned)
+fn family_override_env_name(family: &str) -> Option<&'static str> {
+    let name = match family {
+        "opus" => "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "sonnet" => "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "haiku" => "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "fable" => "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        _ => return None,
+    };
+    Some(name)
 }
 
 fn unique_value<'a>(values: &[&'a str]) -> Option<&'a str> {
@@ -293,17 +345,27 @@ fn unique_value<'a>(values: &[&'a str]) -> Option<&'a str> {
 
 fn host_family_baseline(provider: ModelProviderKind, family: &str) -> Option<&'static str> {
     match family {
-        "opus" => Some(if provider == ModelProviderKind::Foundry {
-            "claude-opus-4-6"
-        } else {
-            "claude-opus-4-8"
-        }),
-        "sonnet" => Some(if provider == ModelProviderKind::FirstParty {
-            "claude-sonnet-5"
-        } else {
-            "claude-sonnet-4-5-20250929"
-        }),
-        "haiku" => Some("claude-haiku-4-5"),
+        "opus" => match provider {
+            ModelProviderKind::FirstParty
+            | ModelProviderKind::Bedrock
+            | ModelProviderKind::Vertex => Some("claude-opus-4-8"),
+            ModelProviderKind::Foundry => Some("claude-opus-4-6"),
+            _ => None,
+        },
+        "sonnet" => match provider {
+            ModelProviderKind::FirstParty => Some("claude-sonnet-5"),
+            ModelProviderKind::Bedrock | ModelProviderKind::Vertex | ModelProviderKind::Foundry => {
+                Some("claude-sonnet-4-5-20250929")
+            }
+            _ => None,
+        },
+        "haiku" => match provider {
+            ModelProviderKind::FirstParty
+            | ModelProviderKind::Bedrock
+            | ModelProviderKind::Vertex
+            | ModelProviderKind::Foundry => Some("claude-haiku-4-5"),
+            _ => None,
+        },
         "fable" if provider == ModelProviderKind::FirstParty => Some("claude-fable-5-1"),
         _ => None,
     }
@@ -373,65 +435,40 @@ mod tests {
     }
 
     #[test]
-    fn small_fast_override_is_scoped_to_native_provider_facts() {
-        let native = profile(
-            ProviderId::AnthropicFirstParty,
-            "custom-native-name",
-            "fast-id",
-        );
-        let aliases = catalog_aliases_with_small_fast(&native, Some("fast-id".into()));
-        assert_eq!(
-            aliases.get("small-fast"),
-            Some(&vec!["fast-id".to_string()])
-        );
-        assert!(
-            !catalog_aliases_with_small_fast(&native, Some(String::new()))
-                .contains_key("small-fast")
-        );
-        let foreign = profile(ProviderId::OpenAI, "anthropic", "claude-shaped-id");
-        assert!(
-            !catalog_aliases_with_small_fast(&foreign, Some("fast-id".into()))
-                .contains_key("small-fast")
-        );
+    fn small_fast_environment_setting_is_not_a_family_alias() {
+        assert!(!is_family_alias("small-fast"));
+        assert_eq!(family_override_env_name("small-fast"), None);
     }
 
     #[test]
-    fn anthropic_overrides_do_not_create_other_provider_family_aliases() {
-        for provider in [
-            ProviderId::OpenAI,
-            ProviderId::AzureOpenAI,
-            ProviderId::Gemini,
-            ProviderId::VertexGemini,
-            ProviderId::OpenAICompatible {
-                name: "gateway".into(),
-            },
-            ProviderId::Custom {
-                name: "custom".into(),
-            },
+    fn native_environment_family_override_precedes_route_catalog_on_other_provider() {
+        let profile = profile(ProviderId::OpenAI, "openai", "gpt-4o");
+        for (family, override_model) in [
+            ("opus", "custom-opus"),
+            ("sonnet", "custom-sonnet"),
+            ("haiku", "custom-haiku"),
+            ("fable", "custom-fable"),
         ] {
-            let profile = profile(provider, "non-anthropic", "gpt-4o");
-            for family in ["opus", "sonnet", "haiku", "fable"] {
-                assert_eq!(
-                    family_override_or_profile_with(
-                        &profile,
-                        family,
-                        Some(format!("claude-{family}-configured")),
-                    ),
-                    None,
-                    "Anthropic environment defaults cannot introduce {family} on {:?}",
-                    profile.provider_id,
-                );
-            }
+            assert_eq!(
+                family_override_or_profile_with(&profile, family, Some(override_model.into())),
+                Some(override_model.into()),
+                "Native environment defaults apply before provider route defaults for {family}"
+            );
         }
+        assert_eq!(
+            family_override_or_profile_with(&profile, "opus", Some(String::new())),
+            Some(String::new()),
+            "a defined empty environment default remains distinct from no override"
+        );
     }
 
     #[test]
-    fn configured_non_anthropic_family_alias_wins_over_anthropic_override() {
+    fn native_environment_family_override_precedes_a_configured_other_provider_alias() {
         let mut profile = profile(ProviderId::OpenAI, "openai", "gpt-4o");
         profile.models[0].aliases.push("sonnet".into());
         assert_eq!(
-            family_override_or_profile_with(&profile, "sonnet", Some("claude-sonnet-other".into())),
-            Some("gpt-4o".into()),
+            family_override_or_profile_with(&profile, "sonnet", Some("configured-sonnet".into())),
+            Some("configured-sonnet".into()),
         );
     }
 

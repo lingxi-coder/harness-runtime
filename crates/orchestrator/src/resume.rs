@@ -35,6 +35,7 @@ use lingxi_core::session::{ActiveGoalState, GoalOrigin};
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId, ToolUseId};
 use lingxi_core::SessionState;
+use llm_runtime::services::sdk::protocol::JsonPayload;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use session::jsonl::{
@@ -140,6 +141,112 @@ mod mod_session_turn_resume_tests {
             "attachment":attachment
         }))
         .unwrap()
+    }
+
+    fn prompt_ingress_row(
+        session: Uuid,
+        uuid: Uuid,
+        attachment: Value,
+        rendered_role: &str,
+        rendered: &str,
+    ) -> JsonlMessage {
+        let mut row = hook_attachment_row(session, uuid, attachment);
+        row.extra = Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "rendered": [{"content": rendered}],
+            "renderedRole": rendered_role
+        }))
+        .unwrap();
+        row
+    }
+
+    #[test]
+    fn prompt_ingress_resume_uses_rendered_roles_and_restores_listing_deltas() {
+        let session_id = Uuid::new_v4();
+        let environment_id = Uuid::new_v4();
+        let fallback_id = Uuid::new_v4();
+        let agent_initial_id = Uuid::new_v4();
+        let agent_delta_id = Uuid::new_v4();
+        let skill_id = Uuid::new_v4();
+        let mut skill_row = prompt_ingress_row(
+            session_id,
+            skill_id,
+            serde_json::json!({"type":"skill_listing","names":["skill-🧪"]}),
+            "system",
+            "Skill listing",
+        );
+        skill_row.attachment_projection = Some(
+            Utf16JsonProjection::parse(r#"{"type":"skill_listing","names":["odd-\ud800"]}"#)
+                .unwrap(),
+        );
+        let rows = vec![
+            prompt_ingress_row(
+                session_id,
+                environment_id,
+                serde_json::json!({"type":"environment","snapshot":{}}),
+                "system",
+                "# Environment\nworkspace",
+            ),
+            prompt_ingress_row(
+                session_id,
+                fallback_id,
+                serde_json::json!({"type":"unknown_command_fallback","commandName":"missing"}),
+                "user",
+                "<system-reminder>unknown command</system-reminder>",
+            ),
+            prompt_ingress_row(
+                session_id,
+                agent_initial_id,
+                serde_json::json!({
+                    "type":"agent_listing_delta",
+                    "addedTypes":["alpha"],
+                    "removedTypes":[]
+                }),
+                "system",
+                "Available agent types",
+            ),
+            prompt_ingress_row(
+                session_id,
+                agent_delta_id,
+                serde_json::json!({
+                    "type":"agent_listing_delta",
+                    "addedTypes":["beta"],
+                    "removedTypes":["alpha"]
+                }),
+                "system",
+                "Agent types changed",
+            ),
+            skill_row,
+        ];
+
+        let environment = hook_attachment_message_for_api(&rows[0], environment_id).unwrap();
+        assert!(matches!(
+            &environment,
+            ConversationMessage::User { is_meta: true, .. }
+        ));
+        assert_eq!(environment.text_content(), "# Environment\nworkspace");
+        let fallback = hook_attachment_message_for_api(&rows[1], fallback_id).unwrap();
+        assert!(matches!(
+            &fallback,
+            ConversationMessage::User { is_meta: false, .. }
+        ));
+        assert_eq!(
+            fallback.text_content(),
+            "<system-reminder>unknown command</system-reminder>"
+        );
+
+        let active_ids = rows
+            .iter()
+            .map(|row| MessageId::from_uuid(Uuid::parse_str(&row.uuid).unwrap()))
+            .collect::<HashSet<_>>();
+        let (agents, skills) = prompt_ingress_sent_sets_from_messages(&rows, &active_ids);
+        assert_eq!(agents, HashSet::from(["beta".to_owned()]));
+        assert!(skills.contains(&vec![
+            u16::from(b'o'),
+            u16::from(b'd'),
+            u16::from(b'd'),
+            u16::from(b'-'),
+            0xd800,
+        ]));
     }
 
     #[test]
@@ -375,6 +482,13 @@ impl ReplayedSession {
         });
         lingxi_core::host::ResumeRuntimeSnapshot {
             current_usage: self.runtime_metadata.current_usage,
+            main_loop_latest_assistant_usage: self
+                .runtime_metadata
+                .main_loop_latest_assistant_usage
+                .clone(),
+            user_model_setting: None,
+            user_model_setting_provenance: None,
+            user_model_setting_source: None,
             model: if model_recovered {
                 self.state.model.clone()
             } else {
@@ -417,6 +531,7 @@ impl ReplayedSession {
             model_reminder_attachments: model_reminder_attachments_from_messages(&self.messages)
                 .into_iter()
                 .collect(),
+            native_request_history: self.state.native_request_history.clone(),
             cumulative_dropped_tokens: self.runtime_metadata.cumulative_dropped_tokens,
             compacted: tracking.compacted,
             turn_counter: tracking.turn_counter,
@@ -435,6 +550,8 @@ impl ReplayedSession {
 pub struct ResumeRuntimeMetadata {
     /// Latest real assistant usage, never cumulative session billing.
     pub current_usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
+    /// Native Mge threshold usage paired with the exact latest assistant row.
+    pub main_loop_latest_assistant_usage: Option<lingxi_core::host::MainLoopAssistantUsageSnapshot>,
     /// Last real assistant response's top-level `effort` value.
     pub effort: Option<String>,
     /// Structured reasoning selection persisted by newer runtimes.
@@ -743,6 +860,7 @@ fn build_state_from_jsonl(
         SessionId::from_uuid(session_id),
         crate::config::DEFAULT_MODEL.to_string(),
     );
+    state.native_request_history = native_request_history_from_messages(messages);
     let mut last_uuid: Option<Uuid> = None;
     let mut pending_assistant: Option<PendingAssistant> = None;
     let mut ultracode_state = tool_workflow::UltracodeState::default();
@@ -1225,6 +1343,216 @@ pub(crate) fn model_reminder_attachments_from_messages(
         .collect()
 }
 
+/// Restore the most recently represented MCP status arrays from each raw
+/// deferred-tools attachment in transcript order. Missing optional arrays do
+/// not reset their prior value; explicit empty arrays do.
+pub(crate) fn replay_deferred_mcp_status_from_messages(
+    deferral: &tool_api::DeferralState,
+    messages: &[JsonlMessage],
+) {
+    for message in messages {
+        if message.message_type != "attachment" {
+            continue;
+        }
+        let Some(attachment) = attachment_projection(message) else {
+            continue;
+        };
+        deferral.replay_deferred_mcp_status_attachment(attachment);
+    }
+}
+
+fn restore_deferred_tool_state_from_messages(
+    deferral: &tool_api::DeferralState,
+    messages: &[JsonlMessage],
+) {
+    deferral.replace_loaded(session::jsonl::discovered_tool_names(messages));
+    for message in messages {
+        if message.message_type != "attachment" {
+            continue;
+        }
+        let Some(attachment) = attachment_projection(message) else {
+            continue;
+        };
+        deferral.replay_deferred_tool_state_attachment(attachment, &message.uuid);
+    }
+    replay_deferred_mcp_status_from_messages(deferral, messages);
+}
+
+/// Restore only source-backed Native request-history fields. Placement is an
+/// outer JSONL row field keyed by that row's UUID; taskDelivery is copied only
+/// from a user row's outer `extra` object. Synthetic closing IDs require the
+/// complete `ZCe` shape and are never inferred from text alone.
+pub(crate) fn native_request_history_from_messages(
+    messages: &[JsonlMessage],
+) -> lingxi_core::host::NativeRequestHistoryMetadata {
+    use lingxi_core::host::{NativeRequestHistoryMetadata, TaskDeliveryHistoryEnvelope};
+
+    let mut typed_attachment_ids = HashSet::new();
+    let mut attachment_types = std::collections::HashMap::new();
+    let mut outer_extras = std::collections::HashMap::new();
+    let mut task_deliveries = std::collections::HashMap::new();
+    let mut task_delivery_envelopes = std::collections::HashMap::new();
+    let mut synthetic_closing_ids = HashSet::new();
+
+    for row in messages {
+        let Ok(outer_uuid) = Uuid::parse_str(&row.uuid) else {
+            continue;
+        };
+        let outer_id = MessageId::from_uuid(outer_uuid);
+        match row.message_type.as_str() {
+            "attachment" => {
+                let Some(attachment) = attachment_projection(row) else {
+                    continue;
+                };
+                typed_attachment_ids.insert(outer_id);
+                if let Some(attachment_type) = attachment.string_at("/type") {
+                    attachment_types.insert(outer_id, attachment_type.to_owned());
+                }
+                outer_extras.insert(outer_id, row.extra.clone());
+            }
+            "user" => {
+                if let Ok(task_delivery) = row.extra.subprojection("/taskDelivery") {
+                    task_deliveries.insert(outer_id, task_delivery);
+                }
+                let envelope = TaskDeliveryHistoryEnvelope {
+                    verified_slack_human_turn: row
+                        .extra
+                        .subprojection("/verifiedSlackHumanTurn")
+                        .ok(),
+                    prompt_source: row.extra.subprojection("/promptSource").ok(),
+                    tool_use_result: row.tool_use_result_projection.clone(),
+                };
+                if !envelope.is_empty() {
+                    task_delivery_envelopes.insert(outer_id, envelope);
+                }
+            }
+            "assistant" => {
+                if let Some(message_id) = native_zce_message_id(row) {
+                    synthetic_closing_ids.insert(message_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let before_closing_line_ids =
+        super::conversation::closing_placement::collect_outer_placement_ids(
+            &typed_attachment_ids,
+            &attachment_types,
+            &outer_extras,
+        );
+    NativeRequestHistoryMetadata {
+        before_closing_line_ids,
+        synthetic_closing_ids,
+        task_deliveries,
+        task_delivery_envelopes,
+    }
+}
+
+/// Return the stable `ConversationMessage` ID only when a JSONL assistant row
+/// satisfies Native's exact synthetic closing-line predicate (`ZCe`).
+pub(crate) fn native_zce_message_id(row: &JsonlMessage) -> Option<MessageId> {
+    if row.message_type != "assistant"
+        || row.message.string_at("/model") != Some("<synthetic>")
+        || row
+            .extra
+            .at_pointer("/isApiErrorMessage")
+            .and_then(JsonValueView::as_bool)
+            == Some(true)
+        || row
+            .extra
+            .at_pointer("/isVirtual")
+            .and_then(JsonValueView::as_bool)
+            == Some(true)
+        || !native_no_response_sentinel(row)
+    {
+        return None;
+    }
+    let outer_uuid = Uuid::parse_str(&row.uuid).ok()?;
+    Some(
+        row.message
+            .string_at("/id")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .map(MessageId::from_uuid)
+            .unwrap_or_else(|| MessageId::from_uuid(outer_uuid)),
+    )
+}
+
+fn native_no_response_sentinel(row: &JsonlMessage) -> bool {
+    const SENTINEL: &str = "No response requested.";
+    let expected = SENTINEL.encode_utf16().collect::<Vec<_>>();
+    if row.message.string_units("/content").as_deref() == Some(expected.as_slice()) {
+        return true;
+    }
+    row.message.array_len("/content") == Some(1)
+        && row.message.string_at("/content/0/type") == Some("text")
+        && row.message.string_units("/content/0/text").as_deref() == Some(expected.as_slice())
+}
+
+fn prompt_ingress_sent_sets_from_messages(
+    messages: &[JsonlMessage],
+    active_ids: &HashSet<MessageId>,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<Vec<u16>>,
+) {
+    let mut agents = std::collections::HashSet::new();
+    let mut skills = std::collections::HashSet::new();
+    for message in messages {
+        if message.message_type != "attachment" {
+            continue;
+        }
+        let Some(uuid) = Uuid::parse_str(&message.uuid).ok() else {
+            continue;
+        };
+        if !active_ids.contains(&MessageId::from_uuid(uuid)) {
+            continue;
+        }
+        let Some(attachment) = attachment_projection(message) else {
+            continue;
+        };
+        match attachment.string_at("/type") {
+            Some("agent_listing_delta") => {
+                for (path, remove) in [("/addedTypes", false), ("/removedTypes", true)] {
+                    let Some(values) = attachment.at_pointer(path) else {
+                        continue;
+                    };
+                    let Some(count) = values.array_len() else {
+                        continue;
+                    };
+                    for index in 0..count {
+                        let Some(value) = values.get_index(index).and_then(|value| value.as_str())
+                        else {
+                            continue;
+                        };
+                        if remove {
+                            agents.remove(value);
+                        } else {
+                            agents.insert(value.to_owned());
+                        }
+                    }
+                }
+            }
+            Some("skill_listing") => {
+                if let Some(names) = attachment.at_pointer("/names") {
+                    if let Some(count) = names.array_len() {
+                        for index in 0..count {
+                            if let Some(units) = names
+                                .get_index(index)
+                                .and_then(|value| value.code_units().map(|units| units.to_vec()))
+                            {
+                                skills.insert(units);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (agents, skills)
+}
+
 fn hook_attachment_message_for_api(
     message: &JsonlMessage,
     message_uuid: Uuid,
@@ -1253,13 +1581,32 @@ fn hook_attachment_message_for_api(
                 content.string_units("")?,
             ))
         }
-        "total_tokens_reminder" => Some(ConversationMessage::user_meta(
-            MessageId::from_uuid(message_uuid),
-            format!(
-                "<system-reminder>\n{}\n</system-reminder>",
-                attachment.string_at("/text")?
-            ),
-        )),
+        "environment"
+        | "model"
+        | "deferred_tools_delta"
+        | "mcp_dropped_tools_delta"
+        | "agent_listing_delta"
+        | "skill_listing"
+        | "output_style_instructions"
+        | "language"
+        | "edited_text_file"
+        | "budget_usd"
+        | "unknown_command_fallback" => {
+            rendered_prompt_ingress_message_for_api(message, message_uuid)
+        }
+        "total_tokens_reminder" => rendered_prompt_ingress_message_for_api(message, message_uuid)
+            .or_else(|| {
+                Some(ConversationMessage::user_meta(
+                    MessageId::from_uuid(message_uuid),
+                    format!(
+                        "<system-reminder>\n{}\n</system-reminder>",
+                        attachment.string_at("/text")?
+                    ),
+                ))
+            }),
+        "queued_command" if attachment.string_at("/commandMode") == Some("task-notification") => {
+            queued_task_notification_attachment_message_for_api(message, message_uuid)
+        }
         "hook_stopped_continuation" => {
             let hook_name = attachment.string_at("/hookName")?;
             let reason = attachment.string_at("/message")?;
@@ -1320,6 +1667,35 @@ fn hook_attachment_message_for_api(
     }
 }
 
+/// Rehydrate Native's model-facing prompt-ingress attachments from the exact
+/// rendered cache persisted beside their typed payload. The payload remains
+/// available independently through `model_reminder_attachments_from_messages`.
+fn rendered_prompt_ingress_message_for_api(
+    message: &JsonlMessage,
+    message_uuid: Uuid,
+) -> Option<ConversationMessage> {
+    let role = message.extra.string_at("/renderedRole")?;
+    let rendered = message.extra.subprojection("/rendered/0/content").ok()?;
+    let text = rendered.string_at("")?.to_owned();
+    let units = rendered.string_units("")?;
+    let id = MessageId::from_uuid(message_uuid);
+    match role {
+        "system" => Some(ConversationMessage::user_meta_js_utf16(id, text, units)),
+        "user" => {
+            let mut row = ConversationMessage::user(id, text.clone());
+            if let ConversationMessage::User { content, .. } = &mut row {
+                *content = vec![ContentBlock::TextJsUtf16 {
+                    text,
+                    utf16_code_units: units,
+                    citations: None,
+                }];
+            }
+            Some(row)
+        }
+        _ => None,
+    }
+}
+
 fn queued_human_attachment_message_for_api(
     message: &JsonlMessage,
     message_uuid: Uuid,
@@ -1347,6 +1723,22 @@ fn queued_human_attachment_message_for_api(
     ConversationOrchestrator::queued_human_attachment_projection(id, &prompt).ok()
 }
 
+fn queued_task_notification_attachment_message_for_api(
+    message: &JsonlMessage,
+    message_uuid: Uuid,
+) -> Option<ConversationMessage> {
+    let attachment = attachment_projection(message)?;
+    if attachment.string_at("/type") != Some("queued_command")
+        || attachment.string_at("/commandMode") != Some("task-notification")
+    {
+        return None;
+    }
+    attachment.string_units("/prompt")?;
+    attachment.string_at("/source_uuid")?;
+    attachment.string_at("/delivery_id")?;
+    rendered_prompt_ingress_message_for_api(message, message_uuid)
+}
+
 /// Restore the provenance of model-visible hook attachments from their JSONL
 /// rows. The replay renderer gives the derived history message the attachment
 /// row's UUID, so the same key identifies its original text on later requests.
@@ -1360,15 +1752,34 @@ fn mod_attachment_descriptors_from_messages(
             hook_attachment_message_for_api(message, uuid)?;
             let attachment = attachment_projection(message)?;
             let kind = attachment.string_at("/type")?;
-            let hook_name = attachment.string_at("/hookName");
-            let origin = if kind == "hook_additional_context"
-                && matches!(hook_name, Some("prompt.submit" | "tool.call"))
-            {
-                let event = hook_name?;
-                serde_json::json!({"kind":"plugin","event":event})
+            let is_task_notification = kind == "queued_command"
+                && attachment.string_at("/commandMode") == Some("task-notification");
+            let origin = if is_task_notification
+                || matches!(
+                    kind,
+                    "environment"
+                        | "model"
+                        | "deferred_tools_delta"
+                        | "mcp_dropped_tools_delta"
+                        | "agent_listing_delta"
+                        | "skill_listing"
+                        | "edited_text_file"
+                        | "total_tokens_reminder"
+                        | "budget_usd"
+                        | "unknown_command_fallback"
+                ) {
+                serde_json::json!({"kind":"engine"})
             } else {
-                let event = attachment.string_at("/hookEvent")?;
-                serde_json::json!({"kind":"hook","event":event})
+                let hook_name = attachment.string_at("/hookName");
+                if kind == "hook_additional_context"
+                    && matches!(hook_name, Some("prompt.submit" | "tool.call"))
+                {
+                    let event = hook_name?;
+                    serde_json::json!({"kind":"plugin","event":event})
+                } else {
+                    let event = attachment.string_at("/hookEvent")?;
+                    serde_json::json!({"kind":"hook","event":event})
+                }
             };
             Some((MessageId::from_uuid(uuid), (kind.to_owned(), origin)))
         })
@@ -1813,6 +2224,186 @@ fn current_usage_from_messages(
     None
 }
 
+/// Native Mge selects the last assistant row first, then reads only that row's
+/// usage via sL. It does not scan backward when the latest assistant is
+/// synthetic, unmetered, or has no usage.
+pub(crate) fn main_loop_latest_assistant_usage_from_messages(
+    messages: &[JsonlMessage],
+) -> Option<lingxi_core::host::MainLoopAssistantUsageSnapshot> {
+    let latest = messages
+        .iter()
+        .rev()
+        .find(|message| message.message_type == "assistant" && !message.is_sidechain)?;
+    if latest.message.string_at("/model") == Some("<synthetic>")
+        || latest
+            .extra
+            .at_pointer("/isUnmetered")
+            .and_then(JsonValueView::as_bool)
+            == Some(true)
+    {
+        return None;
+    }
+    let message_id = latest.message.string_at("/id").unwrap_or(&latest.uuid);
+    let uuid = Uuid::parse_str(message_id).ok()?;
+    let first_text = (latest.message.string_at("/content/0/type") == Some("text"))
+        .then(|| latest.message.string_at("/content/0/text"))
+        .flatten();
+    if matches!(
+        first_text,
+        Some(
+            "[Request interrupted by user]"
+                | "[Request interrupted by user for tool use]"
+                | "No response requested."
+                | "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed."
+                | "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+        )
+    ) {
+        return None;
+    }
+    let usage = latest.message.subprojection("/usage").ok()?;
+    let context_tokens = native_usage_context_tokens_from_projection(&usage)?;
+    Some(lingxi_core::host::MainLoopAssistantUsageSnapshot {
+        message_id: MessageId::from_uuid(uuid),
+        context_tokens,
+    })
+}
+
+/// Compute Native `FI(usage)` from the persisted provider usage projection.
+/// `Pre` uses the aggregate counters unless the aggregate has input/cache
+/// context and an iterations array ends in a valid message/fallback_message
+/// entry; when such an entry exists, only its four counters are used.
+pub(crate) fn native_usage_context_tokens_from_projection(
+    usage: &Utf16JsonProjection,
+) -> Option<f64> {
+    if usage
+        .at_pointer("")
+        .and_then(JsonValueView::object_entries)
+        .is_none()
+    {
+        return None;
+    }
+    let number_or_zero = |path: &str| {
+        usage
+            .at_pointer(path)
+            .and_then(JsonValueView::as_number)
+            .unwrap_or(0.0)
+    };
+    let input = number_or_zero("/input_tokens");
+    let cache_creation = number_or_zero("/cache_creation_input_tokens");
+    let cache_read = number_or_zero("/cache_read_input_tokens");
+    let output = number_or_zero("/output_tokens");
+    let aggregate_input = input + cache_creation + cache_read;
+    let aggregate_total = finite_native_token_sum(input, cache_creation, cache_read, output);
+
+    if aggregate_input == 0.0 {
+        return Some(aggregate_total);
+    }
+    let Some(iterations) = native_usage_iterations_from_projection(usage) else {
+        return Some(aggregate_total);
+    };
+    let Some(count) = iterations.array_len("") else {
+        return Some(aggregate_total);
+    };
+    let selected = (0..count).rev().find_map(|index| {
+        let source = iterations.subprojection(&format!("/{index}")).ok()?;
+        let iteration_type = source.string_at("/type")?;
+        (!matches!(iteration_type, "advisor_message" | "compaction")).then_some(source)
+    });
+    let Some(iteration) = selected else {
+        return Some(aggregate_total);
+    };
+    if !matches!(
+        iteration.string_at("/type"),
+        Some("message" | "fallback_message")
+    ) {
+        return Some(aggregate_total);
+    }
+    let Some(input) = native_iteration_counter(&iteration, "/input_tokens") else {
+        return Some(aggregate_total);
+    };
+    let Some(output) = native_iteration_counter(&iteration, "/output_tokens") else {
+        return Some(aggregate_total);
+    };
+    let Some(cache_creation) = native_iteration_counter(&iteration, "/cache_creation_input_tokens")
+    else {
+        return Some(aggregate_total);
+    };
+    let Some(cache_read) = native_iteration_counter(&iteration, "/cache_read_input_tokens") else {
+        return Some(aggregate_total);
+    };
+    if input + cache_creation + cache_read <= 0.0 {
+        return Some(aggregate_total);
+    }
+    Some(finite_native_token_sum(
+        input,
+        cache_creation,
+        cache_read,
+        output,
+    ))
+}
+
+pub(crate) fn native_usage_iterations_from_projection(
+    usage: &Utf16JsonProjection,
+) -> Option<Utf16JsonProjection> {
+    usage
+        .subprojection(&native_usage_iterations_pointer(usage)?)
+        .ok()
+}
+
+/// Select the exact Native iterations array from either its persisted usage
+/// object or an SDK provider event. The JSON pointer is resolved through the
+/// flat UTF-16 projection so unusual property names and string code units are
+/// handled by the same parser as cold resume.
+fn native_usage_iterations_pointer(usage: &Utf16JsonProjection) -> Option<String> {
+    if usage.array_len("/iterations").is_some() {
+        return Some("/iterations".into());
+    }
+    for base in [
+        "",
+        "/provider_metadata",
+        "/stream",
+        "/provider_metadata/stream",
+    ] {
+        let events_path = format!("{base}/llm_client/provider_events");
+        let Some(count) = usage.array_len(&events_path) else {
+            continue;
+        };
+        for index in (0..count).rev() {
+            let path = format!("{events_path}/{index}/payload/usage/iterations");
+            if usage.array_len(&path).is_some() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Return the selected iterations array as an SDK raw-source payload. This
+/// lets transcript persistence promote only the Native usage field without
+/// materializing or reserializing SDK event metadata.
+pub(crate) fn native_usage_iterations_payload(usage: &JsonPayload) -> Option<JsonPayload> {
+    let projection = Utf16JsonProjection::parse(usage.as_json_source()).ok()?;
+    usage.payload_at(&native_usage_iterations_pointer(&projection)?)
+}
+
+fn native_iteration_counter(iteration: &Utf16JsonProjection, path: &str) -> Option<f64> {
+    let value = iteration
+        .at_pointer(path)
+        .and_then(JsonValueView::as_number)?;
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+fn finite_native_token_sum(input: f64, cache_creation: f64, cache_read: f64, output: f64) -> f64 {
+    let total = input + cache_creation + cache_read + output;
+    if total.is_finite() {
+        total
+    } else if total.is_sign_negative() {
+        -f64::MAX
+    } else {
+        f64::MAX
+    }
+}
+
 /// Reconstruct state Claude keeps adjacent to the message array. Boundaries
 /// persist the cumulative counter directly; the rapid-refill window is derived
 /// from the number of completed assistant iterations between adjacent
@@ -1899,6 +2490,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
 
     ResumeRuntimeMetadata {
         current_usage: current_usage_from_messages(messages),
+        main_loop_latest_assistant_usage: main_loop_latest_assistant_usage_from_messages(messages),
         effort,
         reasoning_selection,
         main_thread_agent_type: None,
@@ -2370,6 +2962,17 @@ fn restore_exact_history_strings(
 }
 
 impl ConversationOrchestrator {
+    pub(crate) fn restore_main_loop_latest_assistant_usage(
+        &self,
+        usage: Option<lingxi_core::host::MainLoopAssistantUsageSnapshot>,
+    ) {
+        *self
+            .model_runtime
+            .main_loop_latest_assistant_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = usage;
+    }
+
     pub(crate) fn restore_response_usage(
         &self,
         usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
@@ -2400,7 +3003,13 @@ impl ConversationOrchestrator {
     /// writer for the target session before adopting its history.
     pub async fn restore_resume_runtime_metadata(&self, messages: &[JsonlMessage]) {
         let metadata = resume_runtime_metadata(messages);
+        restore_deferred_tool_state_from_messages(self.tools.deferral(), messages);
+        self.session.lock().await.native_request_history =
+            native_request_history_from_messages(messages);
         self.restore_response_usage(metadata.current_usage);
+        self.restore_main_loop_latest_assistant_usage(
+            metadata.main_loop_latest_assistant_usage.clone(),
+        );
         // A resumed transcript is never allowed to manufacture a missing
         // prompt snapshot on its first subsequent request. Adopt the last
         // valid attachment (if any), otherwise leave prompt assembly live.
@@ -2428,6 +3037,7 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             model_reminder_attachments_from_messages(messages);
+        self.restore_prompt_ingress_sent_sets(messages).await;
     }
 
     /// Restore only metadata that may live off the resumable model chain.
@@ -2455,8 +3065,23 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             model_reminder_attachments_from_messages(messages);
+        self.restore_prompt_ingress_sent_sets(messages).await;
         self.restore_mod_attachment_provenance_from_messages(messages)
             .await;
+    }
+
+    async fn restore_prompt_ingress_sent_sets(&self, messages: &[JsonlMessage]) {
+        let active_ids = self
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<HashSet<_>>();
+        let (agents, skills) = prompt_ingress_sent_sets_from_messages(messages, &active_ids);
+        *self.prompt_runtime.sent_agent_names.lock().await = agents;
+        *self.prompt_runtime.sent_skill_names.lock().await = skills;
     }
 
     async fn restore_mod_attachment_provenance_from_messages(&self, messages: &[JsonlMessage]) {
@@ -2510,8 +3135,7 @@ impl ConversationOrchestrator {
         // Re-seed dynamic-tool discovery from both surviving tool_reference
         // blocks and compact-boundary carry metadata. Scanning only boundaries
         // loses every tool discovered in a session that has not compacted yet.
-        let discovered = session::jsonl::discovered_tool_names(&replayed.messages);
-        tools.deferral().replace_loaded(discovered);
+        restore_deferred_tool_state_from_messages(tools.deferral(), &replayed.messages);
 
         let mut orch = Self::new_with_streaming(
             config,
@@ -2568,6 +3192,12 @@ impl ConversationOrchestrator {
         orch.main_reports
             .reset_for_builder(orch.session.lock().await.session_id);
         orch.restore_response_usage(replayed.runtime_metadata.current_usage);
+        orch.restore_main_loop_latest_assistant_usage(
+            replayed
+                .runtime_metadata
+                .main_loop_latest_assistant_usage
+                .clone(),
+        );
         orch.sync_thinking_signature_strip_flag_to_api().await;
         orch.transcript.last_jsonl_uuid = Arc::new(Mutex::new(
             replayed.last_message_uuid.map(|u| u.to_string()),
@@ -2621,6 +3251,52 @@ impl ConversationOrchestrator {
 mod exact_history_string_tests {
     use super::*;
 
+    fn run_with_large_stack<F, Fut>(build: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(build());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn native_settings_test_orchestrator(
+        config: OrchestratorConfig,
+        session_id: SessionId,
+        cwd: &Path,
+        writer: Arc<JsonlWriter>,
+    ) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            config,
+            Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+            Arc::new(ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(crate::test_support::MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            cwd.to_owned(),
+        )
+        .with_session_id(session_id)
+        .with_jsonl_writer(writer)
+    }
+
+    fn parsed_jsonl_row(source: &str) -> JsonlMessage {
+        let mut loaded = session::jsonl::route_lines(source);
+        assert_eq!(loaded.malformed_line_count, 0);
+        assert_eq!(loaded.messages_in_order.len(), 1);
+        loaded.messages_in_order.pop().unwrap()
+    }
+
     fn row(role: &str, content: &str) -> JsonlMessage {
         row_with_extra(role, content, "")
     }
@@ -2639,6 +3315,526 @@ mod exact_history_string_tests {
         assert_eq!(loaded.malformed_line_count, 0);
         assert_eq!(loaded.messages_in_order.len(), 1);
         loaded.messages_in_order.pop().unwrap()
+    }
+
+    fn assistant_usage_row(
+        row_id: Uuid,
+        message_id: Uuid,
+        usage: Option<&str>,
+        extra_fields: &str,
+    ) -> JsonlMessage {
+        let usage = usage.map_or_else(String::new, |usage| format!(",\"usage\":{usage}"));
+        let extra = if extra_fields.is_empty() {
+            String::new()
+        } else {
+            format!(",{extra_fields}")
+        };
+        let source = format!(
+            r#"{{"type":"assistant","uuid":"{row_id}","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"11111111-2222-3333-4444-555555555555","message":{{"id":"{message_id}","model":"claude-opus-5","role":"assistant","content":[{{"type":"text","text":"answer"}}]{usage}}}{extra}}}"#
+        );
+        let mut loaded = session::jsonl::route_lines(&source);
+        assert_eq!(loaded.malformed_line_count, 0);
+        assert_eq!(loaded.messages_in_order.len(), 1);
+        loaded.messages_in_order.pop().unwrap()
+    }
+
+    #[test]
+    fn native_plan_usage_uses_latest_assistant_and_strict_200k_context_boundary() {
+        let older_id = Uuid::new_v4();
+        let older = assistant_usage_row(
+            Uuid::new_v4(),
+            older_id,
+            Some(r#"{"input_tokens":250001,"output_tokens":0}"#),
+            "",
+        );
+        let latest_id = Uuid::new_v4();
+        let latest = assistant_usage_row(
+            Uuid::new_v4(),
+            latest_id,
+            Some(
+                r#"{"input_tokens":170000,"cache_creation_input_tokens":10000,"cache_read_input_tokens":10000,"output_tokens":10000}"#,
+            ),
+            "",
+        );
+        let snapshot = main_loop_latest_assistant_usage_from_messages(&[older.clone(), latest])
+            .expect("latest assistant usage");
+        assert_eq!(snapshot.message_id, MessageId::from_uuid(latest_id));
+        assert_eq!(snapshot.context_tokens, 200_000.0);
+        assert_ne!(
+            snapshot.context_tokens.partial_cmp(&200_000.0),
+            Some(std::cmp::Ordering::Greater)
+        );
+
+        let over_id = Uuid::new_v4();
+        let over = assistant_usage_row(
+            Uuid::new_v4(),
+            over_id,
+            Some(
+                r#"{"input_tokens":170000,"cache_creation_input_tokens":10000,"cache_read_input_tokens":10000,"output_tokens":10001}"#,
+            ),
+            "",
+        );
+        let snapshot = main_loop_latest_assistant_usage_from_messages(&[older, over])
+            .expect("latest assistant usage");
+        assert_eq!(snapshot.message_id, MessageId::from_uuid(over_id));
+        assert_eq!(snapshot.context_tokens, 200_001.0);
+        assert!(snapshot.context_tokens > 200_000.0);
+    }
+
+    #[test]
+    fn native_request_history_restores_outer_placement_exact_zce_and_user_task_delivery() {
+        let assistant = parsed_jsonl_row(
+            r#"{"type":"assistant","uuid":"11111111-1111-4111-8111-111111111111","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"id":"33333333-3333-4333-8333-333333333333","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#,
+        );
+        let attachment = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"44444444-4444-4444-8444-444444444444","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"environment"},"placement":"before_closing_line"}"#,
+        );
+        let user = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"55555555-5555-4555-8555-555555555555","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[]},"taskDelivery":{"taskId":"r12345678","status":"completed"},"verifiedSlackHumanTurn":false,"promptSource":null,"toolUseResult":null}"#,
+        );
+        let slack_verified = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"66666666-6666-4666-8666-666666666666","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[]},"verifiedSlackHumanTurn":true,"promptSource":false}"#,
+        );
+        let slack_null = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"99999999-9999-4999-8999-999999999999","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[]},"verifiedSlackHumanTurn":null}"#,
+        );
+        let absent_envelope = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"77777777-7777-4777-8777-777777777777","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[]}}"#,
+        );
+        let metadata = native_request_history_from_messages(&[
+            assistant,
+            attachment,
+            user,
+            slack_verified,
+            slack_null,
+            absent_envelope,
+        ]);
+        assert_eq!(
+            metadata.synthetic_closing_ids,
+            HashSet::from([MessageId::from_uuid(
+                Uuid::parse_str("33333333-3333-4333-8333-333333333333").unwrap()
+            )])
+        );
+        assert_eq!(
+            metadata.before_closing_line_ids,
+            HashSet::from([MessageId::from_uuid(
+                Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap()
+            )])
+        );
+        let user_id =
+            MessageId::from_uuid(Uuid::parse_str("55555555-5555-4555-8555-555555555555").unwrap());
+        assert_eq!(
+            metadata.task_deliveries[&user_id].string_at("/taskId"),
+            Some("r12345678")
+        );
+        assert_eq!(
+            metadata.task_deliveries[&user_id].string_at("/status"),
+            Some("completed")
+        );
+        let user_envelope = &metadata.task_delivery_envelopes[&user_id];
+        assert_eq!(
+            user_envelope
+                .verified_slack_human_turn
+                .as_ref()
+                .and_then(|value| value.at_pointer("")?.as_bool()),
+            Some(false),
+            "false remains present but does not equal Native's strict-true exclusion"
+        );
+        assert!(user_envelope
+            .prompt_source
+            .as_ref()
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+        assert!(user_envelope
+            .tool_use_result
+            .as_ref()
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+        let slack_id =
+            MessageId::from_uuid(Uuid::parse_str("66666666-6666-4666-8666-666666666666").unwrap());
+        assert_eq!(
+            metadata.task_delivery_envelopes[&slack_id]
+                .verified_slack_human_turn
+                .as_ref()
+                .and_then(|value| value.at_pointer("")?.as_bool()),
+            Some(true)
+        );
+        let slack_null_id =
+            MessageId::from_uuid(Uuid::parse_str("99999999-9999-4999-8999-999999999999").unwrap());
+        assert!(metadata.task_delivery_envelopes[&slack_null_id]
+            .verified_slack_human_turn
+            .as_ref()
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+        let absent_id =
+            MessageId::from_uuid(Uuid::parse_str("77777777-7777-4777-8777-777777777777").unwrap());
+        assert!(!metadata.task_delivery_envelopes.contains_key(&absent_id));
+    }
+
+    #[test]
+    fn native_origin_absence_and_null_survive_cold_hydration() {
+        let explicit_null = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[]},"origin":null}"#,
+        );
+        let absent = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[]}}"#,
+        );
+        let (state, _, _) = build_state_from_jsonl(
+            Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
+            &[explicit_null, absent],
+        );
+        let ConversationMessage::User { origin: null, .. } = &state.history[0] else {
+            panic!("first cold row is a user message")
+        };
+        assert!(null.as_ref().unwrap().at_pointer("").unwrap().is_null());
+        let ConversationMessage::User { origin: absent, .. } = &state.history[1] else {
+            panic!("second cold row is a user message")
+        };
+        assert!(absent.is_none());
+    }
+
+    #[test]
+    fn deferred_tools_delta_cold_resume_uses_rendered_cache_and_keeps_raw_placement() {
+        let row = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"88888888-8888-4888-8888-888888888888","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"deferred_tools_delta","addedNames":["Read"],"addedLines":["Read"],"removedNames":[],"wireHiddenNames":[],"readdedNames":[]},"renderedRole":"system","rendered":[{"content":"<system-reminder>cached source rendering</system-reminder>"}],"placement":"before_closing_line"}"#,
+        );
+        let row_id =
+            MessageId::from_uuid(Uuid::parse_str("88888888-8888-4888-8888-888888888888").unwrap());
+        let hydrated = hook_attachment_message_for_api(&row, row_id.as_uuid())
+            .expect("deferred attachment replays its persisted model-facing rendering");
+        assert!(matches!(
+            &hydrated,
+            ConversationMessage::User { is_meta: true, .. }
+        ));
+        assert_eq!(
+            hydrated.text_content(),
+            "<system-reminder>cached source rendering</system-reminder>"
+        );
+        assert_eq!(
+            model_reminder_attachments_from_messages(std::slice::from_ref(&row))[&row_id]
+                .string_at("/type"),
+            Some("deferred_tools_delta"),
+            "cold resume retains the typed raw payload separately from rendered prose"
+        );
+        let metadata = native_request_history_from_messages(std::slice::from_ref(&row));
+        assert!(
+            metadata.before_closing_line_ids.contains(&row_id),
+            "the source placement field survives alongside its rendered history row"
+        );
+    }
+
+    #[test]
+    fn mcp_dropped_tools_delta_cold_resume_uses_rendered_cache_and_keeps_raw_placement() {
+        let row = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"mcp_dropped_tools_delta","addedEntries":["mcp__fixture__run"]},"renderedRole":"system","rendered":[{"content":"<system-reminder>cached unavailable MCP tools rendering</system-reminder>"}],"placement":"before_closing_line"}"#,
+        );
+        let row_id =
+            MessageId::from_uuid(Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee").unwrap());
+        let hydrated = hook_attachment_message_for_api(&row, row_id.as_uuid())
+            .expect("dropped MCP tools replay their persisted model-facing rendering");
+        assert!(matches!(
+            &hydrated,
+            ConversationMessage::User { is_meta: true, .. }
+        ));
+        assert_eq!(
+            hydrated.text_content(),
+            "<system-reminder>cached unavailable MCP tools rendering</system-reminder>"
+        );
+        assert_eq!(
+            model_reminder_attachments_from_messages(std::slice::from_ref(&row))[&row_id]
+                .string_at("/type"),
+            Some("mcp_dropped_tools_delta"),
+            "cold resume retains the raw typed payload beside rendered prose"
+        );
+        let metadata = native_request_history_from_messages(std::slice::from_ref(&row));
+        assert!(
+            metadata.before_closing_line_ids.contains(&row_id),
+            "source placement survives with the cold model-history row"
+        );
+    }
+
+    #[test]
+    fn native_settings_rows_rehydrate_through_cold_fork_and_reset_without_duplicate() {
+        run_with_large_stack(|| async {
+            use lingxi_core::host::NativeSettingsAgentContext;
+            use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+            use platform_posix::fs::PosixFileSystem;
+            use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
+            use std::sync::Arc;
+
+            let temp = tempfile::tempdir().unwrap();
+            let root = std::fs::canonicalize(temp.path()).unwrap();
+            let cwd = root.join("project");
+            let home = root.join("home");
+            std::fs::create_dir_all(&cwd).unwrap();
+            std::fs::create_dir_all(&home).unwrap();
+            let cwd_string = cwd.to_string_lossy().into_owned();
+            let fs = Arc::new(PosixFileSystem::new(root.clone()))
+                as Arc<dyn lingxi_core::host::FileSystem>;
+            let session_id = SessionId::new();
+            let transcript = session::jsonl::path::session_path(
+                &home,
+                &cwd_string,
+                &session_id.as_uuid().to_string(),
+            );
+            std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            let writer = Arc::new(JsonlWriter::new(transcript.clone(), fs.clone()));
+            let style = Source::parse(r#""Concise""#).unwrap();
+            let language = Source::parse(r#""English\ud800""#).unwrap();
+            let mut config = OrchestratorConfig::default();
+            config.output_style = Some(style.clone());
+            config.language = Some(language.clone());
+
+            let absent = native_settings_test_orchestrator(
+                OrchestratorConfig::default(),
+                SessionId::new(),
+                &cwd,
+                writer.clone(),
+            );
+            assert!(
+                absent
+                    .native_settings_prompt_ingress_attachments(&[])
+                    .await
+                    .is_empty(),
+                "absent current values do not manufacture initial null rows"
+            );
+
+            let first =
+                native_settings_test_orchestrator(config.clone(), session_id, &cwd, writer.clone());
+            let user_prompt = ConversationMessage::user(MessageId::new(), "start".into());
+            first.session.lock().await.history.push(user_prompt.clone());
+            first.persist_message_to_jsonl(&user_prompt).await;
+            let initial_history = first.session.lock().await.history.clone();
+            let initial_rows = first
+                .native_settings_prompt_ingress_attachments(&initial_history)
+                .await;
+            assert_eq!(
+                initial_rows
+                    .iter()
+                    .filter_map(|row| row.payload.string_at("/type"))
+                    .collect::<Vec<_>>(),
+                ["output_style_instructions", "language"],
+                "the real settings producer keeps Native's style-then-language order"
+            );
+            for row in &initial_rows {
+                first.persist_prompt_ingress_reminder(row).await;
+            }
+            let original_attachment_rows = JsonlReader::new(transcript.clone(), fs.clone())
+                .read_all()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|row| {
+                    row.message_type == "attachment"
+                        && row.attachment_projection.as_ref().is_some_and(|payload| {
+                            matches!(
+                                payload.string_at("/type"),
+                                Some("output_style_instructions" | "language")
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(original_attachment_rows.len(), 2);
+            let language_row = original_attachment_rows
+                .iter()
+                .find(|row| {
+                    row.attachment_projection
+                        .as_ref()
+                        .and_then(|payload| payload.string_at("/type"))
+                        == Some("language")
+                })
+                .unwrap();
+            assert_eq!(
+                language_row
+                    .attachment_projection
+                    .as_ref()
+                    .unwrap()
+                    .string_units("/language"),
+                language.string_units(""),
+                "the actual JSONL writer retains the source language's lone UTF-16 unit"
+            );
+
+            let cold_fork = ConversationOrchestrator::with_resume(
+                config.clone(),
+                session_id.as_uuid(),
+                home.clone(),
+                cwd_string.clone(),
+                fs.clone(),
+                Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+                Arc::new(ToolRegistry::new()),
+                crate::test_support::noop_hook_executor(),
+                Arc::new(crate::test_support::NoOpPermissionGate),
+                Arc::new(crate::test_support::MockOutputStream::new()),
+                Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+                cwd.clone(),
+                Some(writer.clone()),
+            )
+            .await
+            .unwrap()
+            .with_native_settings_agent_context(NativeSettingsAgentContext::Subagent {
+                is_main_session: true,
+            });
+            let cold_history = cold_fork.session.lock().await.history.clone();
+            for row in &original_attachment_rows {
+                let message_id = MessageId::from_uuid(Uuid::parse_str(&row.uuid).unwrap());
+                let hydrated = cold_history
+                    .iter()
+                    .find(|message| message.id() == message_id)
+                    .expect("cold resume restores each settings row into model history");
+                let ConversationMessage::User { content, .. } = hydrated else {
+                    panic!("settings row rehydrates as its model-facing user message");
+                };
+                let [ContentBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                }] = content.as_slice()
+                else {
+                    panic!("rendered settings reminder retains its UTF-16 carrier");
+                };
+                assert_eq!(
+                    Some(utf16_code_units.as_slice()),
+                    row.extra.string_units("/rendered/0/content").as_deref(),
+                    "cold history uses the exact rendered cache, not a fabricated payload rendering"
+                );
+            }
+            assert!(
+                cold_fork
+                    .native_settings_prompt_ingress_attachments(&cold_history)
+                    .await
+                    .is_empty(),
+                "the admitted main-session background fork sees restored payloads and does not resend unchanged settings"
+            );
+
+            cold_fork.refresh_native_output_style(None).await;
+            cold_fork.refresh_native_response_language(None).await;
+            let reset_rows = cold_fork
+                .native_settings_prompt_ingress_attachments(&cold_history)
+                .await;
+            assert_eq!(
+                reset_rows
+                    .iter()
+                    .filter_map(|row| row.payload.string_at("/type"))
+                    .collect::<Vec<_>>(),
+                ["output_style_instructions", "language"]
+            );
+            assert!(reset_rows.iter().all(|row| {
+                row.payload
+                    .at_pointer(
+                        if row.payload.string_at("/type") == Some("output_style_instructions") {
+                            "/style"
+                        } else {
+                            "/language"
+                        },
+                    )
+                    .is_some_and(|value| value.is_null())
+            }));
+            assert_eq!(
+                reset_rows[0].message.text_content(),
+                "<system-reminder>\nThe output style was reset to the default. Respond in your usual style.\n</system-reminder>"
+            );
+            assert_eq!(
+                reset_rows[1].message.text_content(),
+                "<system-reminder>\nThe language preference was cleared. Match the user's language.\n</system-reminder>"
+            );
+            for row in &reset_rows {
+                cold_fork.persist_prompt_ingress_reminder(row).await;
+            }
+
+            let cold_after_reset = ConversationOrchestrator::with_resume(
+                OrchestratorConfig::default(),
+                session_id.as_uuid(),
+                home,
+                cwd_string,
+                fs,
+                Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+                Arc::new(ToolRegistry::new()),
+                crate::test_support::noop_hook_executor(),
+                Arc::new(crate::test_support::NoOpPermissionGate),
+                Arc::new(crate::test_support::MockOutputStream::new()),
+                Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+                cwd,
+                Some(writer),
+            )
+            .await
+            .unwrap()
+            .with_native_settings_agent_context(NativeSettingsAgentContext::Subagent {
+                is_main_session: true,
+            });
+            let reset_history = cold_after_reset.session.lock().await.history.clone();
+            assert!(
+                cold_after_reset
+                    .native_settings_prompt_ingress_attachments(&reset_history)
+                    .await
+                    .is_empty(),
+                "cold fork restores explicit null values and does not send reset rows again"
+            );
+        });
+    }
+
+    #[test]
+    fn deferred_mcp_status_cold_resume_replays_raw_rows_in_transcript_order() {
+        let earlier = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"deferred_tools_delta","addedNames":[],"addedLines":[],"removedNames":[],"wireHiddenNames":[],"readdedNames":[],"pendingMcpServers":["mcp-z","mcp-a"],"needsAuthMcpServers":["auth"],"failedMcpServers":[{"name":"broken"}]}}"#,
+        );
+        let later = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","parentUuid":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","isSidechain":false,"timestamp":"2026-10-07T12:00:01Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"deferred_tools_delta","addedNames":[],"addedLines":[],"removedNames":[],"wireHiddenNames":[],"readdedNames":[],"pendingMcpServers":[],"failedMcpServers":[]}}"#,
+        );
+        let deferral = tool_api::DeferralState::new(tool_api::ToolSearchMode::Enabled, false);
+        restore_deferred_tool_state_from_messages(&deferral, &[earlier, later]);
+
+        let unchanged = deferral.compute_deferred_delta_with_mcp_status(
+            &[],
+            tool_api::DeferredMcpServerStatus {
+                pending: Some(Vec::new()),
+                needs_auth: Some(vec!["auth".into()]),
+                failed: Some(Vec::new()),
+            },
+        );
+        assert!(unchanged.is_empty(), "cold replay restores the last arrays");
+
+        let changed = deferral.compute_deferred_delta_with_mcp_status(
+            &[],
+            tool_api::DeferredMcpServerStatus {
+                pending: None,
+                needs_auth: Some(vec!["auth-next".into()]),
+                failed: Some(Vec::new()),
+            },
+        );
+        assert!(!changed.is_empty());
+        let payload = changed.attachment_payload();
+        assert!(payload.at_pointer("/pendingMcpServers").is_none());
+        assert_eq!(
+            payload.string_at("/needsAuthMcpServers/0"),
+            Some("auth-next")
+        );
+        assert!(payload.array_len("/failedMcpServers") == Some(0));
+    }
+
+    #[test]
+    fn native_plan_usage_does_not_scan_past_unmetered_or_usage_missing_latest_row() {
+        let older = assistant_usage_row(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Some(r#"{"input_tokens":250001,"output_tokens":0}"#),
+            "",
+        );
+        let unmetered = assistant_usage_row(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Some(r#"{"input_tokens":250001,"output_tokens":0}"#),
+            r#""isUnmetered":true"#,
+        );
+        assert!(
+            main_loop_latest_assistant_usage_from_messages(&[older.clone(), unmetered]).is_none()
+        );
+
+        let missing = assistant_usage_row(Uuid::new_v4(), Uuid::new_v4(), None, "");
+        assert!(main_loop_latest_assistant_usage_from_messages(&[older, missing]).is_none());
     }
 
     #[test]

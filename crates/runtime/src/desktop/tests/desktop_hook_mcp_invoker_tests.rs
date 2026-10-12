@@ -185,6 +185,7 @@ fn hook_result_mapping_extracts_text_and_preserves_is_error() {
         ]))
         .unwrap(),
         is_error: false,
+        error: None,
         meta: None,
         structured_content: None,
     });
@@ -198,6 +199,7 @@ fn hook_result_mapping_extracts_text_and_preserves_is_error() {
     let is_error = map_hook_mcp_tool_result(McpToolResultDto {
         content: Utf16JsonProjection::from_serde_value(&serde_json::json!("boom")).unwrap(),
         is_error: true,
+        error: None,
         meta: None,
         structured_content: None,
     });

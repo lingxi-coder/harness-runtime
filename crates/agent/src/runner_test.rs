@@ -70,6 +70,165 @@ fn source_tool(
     }
 }
 
+#[derive(Clone, Default)]
+struct NativeSettingsAttachmentProbe {
+    contexts: Arc<Mutex<Vec<lingxi_core::host::NativeSettingsPromptContext>>>,
+}
+
+#[async_trait]
+impl lingxi_core::host::NativeSettingsPromptAttachmentProvider for NativeSettingsAttachmentProbe {
+    async fn native_settings_prompt_attachments(
+        &self,
+        context: lingxi_core::host::NativeSettingsPromptContext,
+        _prior_payloads: &[(MessageId, Utf16JsonProjection)],
+    ) -> Vec<lingxi_core::host::NativeSettingsPromptAttachment> {
+        self.contexts.lock().unwrap().push(context);
+        let payload =
+            Utf16JsonProjection::parse(r#"{"type":"language","language":"English"}"#).unwrap();
+        vec![lingxi_core::host::NativeSettingsPromptAttachment {
+            message: ConversationMessage::user_meta(MessageId::new(), "settings row".into()),
+            payload,
+            rendered: Utf16JsonProjection::from("rendered settings row"),
+        }]
+    }
+}
+
+#[tokio::test]
+async fn native_settings_runner_uses_exact_agent_identity_and_option_gates() {
+    use lingxi_core::host::{
+        NativeSettingsAgentContext as AgentContext, NativeSettingsPromptContext,
+    };
+
+    let provider = Arc::new(NativeSettingsAttachmentProbe::default());
+
+    let mut admitted = fresh_subagent_ctx();
+    admitted.native_settings_prompt_provider = Some(
+        provider.clone() as Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>
+    );
+    admitted.native_settings_prompt_context = NativeSettingsPromptContext {
+        agent_context: AgentContext::Subagent {
+            is_main_session: true,
+        },
+        bare_fork: None,
+        isolated_context: None,
+    };
+    let (out_tx, mut event_rx) = mpsc::channel(4);
+    let mut history = Vec::new();
+    let mut written = 0;
+    append_native_settings_prompt_attachments(
+        &mut admitted,
+        &mut history,
+        None,
+        &mut written,
+        &out_tx,
+    )
+    .await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        admitted
+            .instruction_context
+            .native_settings_attachments
+            .len(),
+        1
+    );
+    assert_eq!(
+        admitted.instruction_context.native_settings_attachments[0]
+            .1
+            .to_json_string()
+            .unwrap(),
+        r#"{"type":"language","language":"English"}"#
+    );
+    let event = event_rx.try_recv().unwrap();
+    let SubagentEvent::Message { message, .. } = event else {
+        panic!("settings producer must publish the typed attachment event");
+    };
+    assert_eq!(message.string_at("/attachment/type"), Some("language"));
+
+    let mut teammate = fresh_subagent_ctx();
+    teammate.native_settings_prompt_provider = Some(
+        provider.clone() as Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>
+    );
+    teammate.native_settings_prompt_context = NativeSettingsPromptContext {
+        agent_context: AgentContext::Teammate,
+        bare_fork: None,
+        isolated_context: None,
+    };
+    let (out_tx, _rx) = mpsc::channel(4);
+    let mut history = Vec::new();
+    let mut written = 0;
+    append_native_settings_prompt_attachments(
+        &mut teammate,
+        &mut history,
+        None,
+        &mut written,
+        &out_tx,
+    )
+    .await;
+    assert_eq!(history.len(), 1);
+
+    for context in [
+        NativeSettingsPromptContext {
+            agent_context: AgentContext::Subagent {
+                is_main_session: false,
+            },
+            bare_fork: None,
+            isolated_context: None,
+        },
+        NativeSettingsPromptContext {
+            agent_context: AgentContext::Subagent {
+                is_main_session: true,
+            },
+            bare_fork: Some(true),
+            isolated_context: None,
+        },
+        NativeSettingsPromptContext {
+            agent_context: AgentContext::Subagent {
+                is_main_session: true,
+            },
+            bare_fork: None,
+            isolated_context: Some(true),
+        },
+    ] {
+        let mut suppressed = fresh_subagent_ctx();
+        suppressed.native_settings_prompt_provider =
+            Some(provider.clone()
+                as Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>);
+        suppressed.native_settings_prompt_context = context;
+        let (out_tx, _rx) = mpsc::channel(4);
+        let mut history = Vec::new();
+        let mut written = 0;
+        append_native_settings_prompt_attachments(
+            &mut suppressed,
+            &mut history,
+            None,
+            &mut written,
+            &out_tx,
+        )
+        .await;
+        assert!(history.is_empty());
+        assert!(
+            suppressed
+                .instruction_context
+                .native_settings_attachments
+                .is_empty()
+        );
+    }
+
+    let contexts = provider.contexts.lock().unwrap();
+    assert_eq!(
+        contexts.len(),
+        2,
+        "only main-session and teammate passed the gate"
+    );
+    assert_eq!(
+        contexts[0].agent_context,
+        AgentContext::Subagent {
+            is_main_session: true
+        }
+    );
+    assert_eq!(contexts[1].agent_context, AgentContext::Teammate);
+}
+
 #[test]
 fn cumulative_usage_keeps_reasoning_as_output_subset() {
     let mut total = llm_runtime::ExecutionUsage::default();
@@ -877,9 +1036,11 @@ async fn declined_fallback_sweeps_started_tool_before_consuming_target_body() {
     assert_eq!(api.calls.load(Ordering::SeqCst), 1);
     assert_eq!(api.tail_polls.load(Ordering::SeqCst), 0);
     assert_eq!(*registry.updates.lock().unwrap(), [true, false]);
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
     assert!(!events.iter().any(|event| match event {
         SubagentEvent::Message { message, .. } => {
             projection_contains(message, "toolu-after-hop")
@@ -889,8 +1050,8 @@ async fn declined_fallback_sweeps_started_tool_before_consuming_target_body() {
 }
 
 #[tokio::test]
-async fn declined_fallback_sweeps_even_when_discard_indexes_are_not_tools_and_admitted_hop_continues(
-) {
+async fn declined_fallback_sweeps_even_when_discard_indexes_are_not_tools_and_admitted_hop_continues()
+ {
     let denied = run_gated_fallback_case(vec![99], &["primary-model"], Vec::new()).await;
     assert!(denied.3.is_cancelled());
     assert_eq!(denied.0.tail_polls.load(Ordering::SeqCst), 0);
@@ -913,10 +1074,12 @@ async fn declined_fallback_sweeps_even_when_discard_indexes_are_not_tools_and_ad
         *accepted.2.updates.lock().unwrap(),
         [true, false, true, false]
     );
-    assert!(accepted
-        .4
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(
+        accepted
+            .4
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+    );
     assert!(!accepted.4.iter().any(|event| match event {
         SubagentEvent::Message { message, .. } =>
             projection_contains(message, "toolu-before-hop")
@@ -970,9 +1133,11 @@ async fn stream_error_drains_live_tool_use_and_emits_native_cancellation_result(
             && message.string_at("/content/0/content")
                 == Some("The turn ended on an error, so this tool call was cancelled. If it had already started, some of its effects may have happened. Error: provider stream broke")
     }));
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
 }
 
 #[tokio::test]
@@ -1023,9 +1188,11 @@ async fn streamed_tool_invocations_keep_query_history_current_row_and_prior_sibl
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
     run_subagent(ctx, event_rx, out_tx).await;
     let output_events = drain(out_rx).await;
-    assert!(output_events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(
+        output_events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+    );
 
     let physical_calls = api.physical_calls();
     assert_eq!(physical_calls.len(), 2);
@@ -1095,9 +1262,11 @@ async fn streamed_tool_invocations_keep_query_history_current_row_and_prior_sibl
             .text_content()
             .contains("executor assistant context")
     }));
-    assert!(!next_messages
-        .iter()
-        .any(|message| message.text_content().contains("executor system context")));
+    assert!(
+        !next_messages
+            .iter()
+            .any(|message| message.text_content().contains("executor system context"))
+    );
     assert!(next_messages.iter().any(|message| {
         matches!(message, ConversationMessage::User { content, .. }
             if content.iter().any(|block| matches!(block, ContentBlock::Document { .. })))
@@ -1341,9 +1510,11 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
             .collect::<Vec<_>>(),
         [retained.id(), result_a_id, note_a_id, result_b_id]
     );
-    assert!(history
-        .iter()
-        .all(|message| message.text_content() != "discarded non-tool K row"));
+    assert!(
+        history
+            .iter()
+            .all(|message| message.text_content() != "discarded non-tool K row")
+    );
 }
 
 static NEAR_LIMIT_WRAP_UP_FLAG_LOCK: RwLock<()> = RwLock::new(());
@@ -2069,6 +2240,14 @@ fn fresh_subagent_ctx() -> SubagentContext {
         instruction_context: Default::default(),
         instruction_context_is_override: false,
         instruction_provider: None,
+        native_settings_prompt_provider: None,
+        native_settings_prompt_context: lingxi_core::host::NativeSettingsPromptContext {
+            agent_context: lingxi_core::host::NativeSettingsAgentContext::Subagent {
+                is_main_session: false,
+            },
+            bare_fork: None,
+            isolated_context: None,
+        },
         mobile_runtime_workspace_reminder: None,
         content_replacement_state: None,
         agent_memory: None,
@@ -2130,12 +2309,14 @@ async fn agent_terminal_paths_await_cleanup_for_the_exact_agent_and_session() {
         let (_event_tx, event_rx) = mpsc::channel(8);
         let (out_tx, out_rx) = mpsc::channel(64);
         run_subagent(ctx, event_rx, out_tx).await;
-        assert!(invoker
-            .cleanups
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|identity| *identity == (agent, Some(session))));
+        assert!(
+            invoker
+                .cleanups
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|identity| *identity == (agent, Some(session)))
+        );
         assert!(!invoker.cleanups.lock().unwrap().is_empty());
         assert!(drain(out_rx).await.iter().any(|event| matches!(
             event,
@@ -2169,9 +2350,11 @@ async fn failed_input_cleanup_never_reports_success_or_parks_a_persistent_agent(
             SubagentEvent::Failed { error, .. }
                 if error.contains("desktop remains reserved")
         )));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+        );
         assert!(invoker.cleanups.lock().unwrap().len() >= 3);
     }
 }
@@ -2392,10 +2575,12 @@ async fn cleanup_failure_publishes_live_skill_route_before_failed_terminal() {
         .expect("cleanup failure publishes before Failed");
     assert_eq!(route.model, "failure-live-model");
     assert_eq!(route.model_profile.as_deref(), Some("failure-live-profile"));
-    assert!(transcript
-        .messages
-        .iter()
-        .any(|message| message.text_content() == "done on the new route"));
+    assert!(
+        transcript
+            .messages
+            .iter()
+            .any(|message| message.text_content() == "done on the new route")
+    );
     assert_eq!(api.call_count(), 2);
     runner.await.unwrap();
 }
@@ -2413,12 +2598,16 @@ async fn transient_input_cleanup_retries_before_completed_publication() {
     let (out_tx, out_rx) = mpsc::channel(64);
     run_subagent(ctx, event_rx, out_tx).await;
     let events = drain(out_rx).await;
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
     assert!(invoker.cleanups.lock().unwrap().len() >= 3);
 }
 
@@ -2476,17 +2665,21 @@ async fn cancellation_between_agent_tool_calls_awaits_input_cleanup() {
         .await
         .unwrap();
     run.await.unwrap();
-    assert!(invoker
-        .cleanups
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|identity| *identity == (agent, Some(session))));
+    assert!(
+        invoker
+            .cleanups
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|identity| *identity == (agent, Some(session)))
+    );
     assert!(!invoker.cleanups.lock().unwrap().is_empty());
-    assert!(drain(out_rx)
-        .await
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+    assert!(
+        drain(out_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Killed { .. }))
+    );
 }
 
 #[tokio::test]
@@ -2565,7 +2758,8 @@ fn completed_with_server_fallback(
 
 fn active_model_enforcement(models: &[&str]) -> llm_runtime::model::allowlist::ModelEnforcement {
     llm_runtime::model::allowlist::ModelEnforcement::Active {
-        allowlist: models.iter().map(|model| (*model).to_string()).collect(),
+        allowlist: Utf16JsonProjection::array(models.iter().map(|model| (*model).into()).collect())
+            .expect("test model allowlist is an array of strings"),
         overrides: Default::default(),
     }
 }
@@ -2860,12 +3054,16 @@ async fn managed_denial_discards_received_fallback_before_tools_or_reply() {
         }),
         "the typed API-error row is not duplicated as a legacy message event"
     );
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
 }
 
 #[tokio::test]
@@ -2900,9 +3098,11 @@ async fn denied_refusal_fallback_terminates_without_entering_child_cascade() {
     assert_eq!(invoker.call_count(), 0);
     assert!(serialized.contains("declining the swap"));
     assert!(!serialized.contains("forbidden fallback refusal"));
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
     assert!(
         events
             .iter()
@@ -3676,9 +3876,11 @@ async fn workflow_watchdog_does_not_cover_tool_execution() {
         |event| matches!(event, SubagentEvent::Completed { result, .. }
         if result.string_at("/text") == Some("done"))
     ));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
 }
 
 struct TimeoutAfterToolApi {
@@ -3762,12 +3964,14 @@ async fn workflow_watchdog_retries_five_times_then_fails_without_partial_salvage
 
     assert_eq!(inner.calls.load(Ordering::SeqCst), 7);
     assert_eq!(*observer.attempts.lock().unwrap(), vec![2, 3, 4, 5, 6]);
-    assert!(observer
-        .reasons
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|reason| reason.contains("opening the response stream")));
+    assert!(
+        observer
+            .reasons
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|reason| reason.contains("opening the response stream"))
+    );
     assert!(events.iter().any(|event| matches!(
         event,
         SubagentEvent::Failed { error, .. }
@@ -3819,9 +4023,11 @@ async fn run_subagent_emits_streamed_message_before_completed() {
         one_completed(&events).string_at("/stop_reason"),
         Some("end_turn")
     );
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
     let messages: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -4190,10 +4396,12 @@ export function register(on) {
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(failing_ctx, event_rx, out_tx).await;
-    assert!(drain(out_rx)
-        .await
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        drain(out_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
     let failed_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let result = host
@@ -4236,10 +4444,12 @@ export function register(on) {
         .await
         .unwrap();
     run_subagent(abort_ctx, event_rx, out_tx).await;
-    assert!(drain(out_rx)
-        .await
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+    assert!(
+        drain(out_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Killed { .. }))
+    );
     let aborted_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let result = host
@@ -5347,10 +5557,12 @@ export function register(on) {
         .await
         .expect("cancelled child stops")
         .unwrap();
-    assert!(drain(out_rx)
-        .await
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+    assert!(
+        drain(out_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Killed { .. }))
+    );
     assert_eq!(api.calls.load(Ordering::SeqCst), 2);
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -6593,10 +6805,12 @@ async fn registered_panel_rounds_derive_fresh_calls_and_preserve_registration() 
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
-    assert!(drain(out_rx)
-        .await
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(
+        drain(out_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+    );
     let opts = api.opts_seen();
     assert_eq!(opts.len(), 2);
     let first = opts[0].model_attempt.as_ref().unwrap();
@@ -7154,9 +7368,11 @@ async fn permission_abort_fails_subagent_without_recoverable_tool_result() {
         SubagentEvent::Failed { error, .. }
             if error == "Agent aborted: too many classifier denials in headless mode"
     )));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+    );
     assert!(
         !events.iter().any(|event| matches!(
             event,
@@ -7659,10 +7875,12 @@ export function register(on) {
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(rejected, event_rx, out_tx).await;
-    assert!(drain(out_rx)
-        .await
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        drain(out_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
     let result = host
         .dispatch(
             "prompt.submit",
@@ -8453,10 +8671,12 @@ async fn scoped_only_child_fires_frontmatter_stop_without_global_snapshot_buffer
     drop(events);
     let (output, results) = mpsc::channel(32);
     run_subagent(ctx, input, output).await;
-    assert!(drain(results)
-        .await
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(
+        drain(results)
+            .await
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+    );
     assert_eq!(*seen.lock().unwrap(), vec!["completed".to_string()]);
     assert!(
         executor
@@ -9353,9 +9573,11 @@ async fn host_create_transport_retry_preserves_completed_scaffold_and_read() {
         SubagentEvent::Completed { result, usage_complete: false, .. }
             if result.get_property("design").and_then(|value| value.object_entries()).is_some_and(|entries| entries.is_empty())
     )));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while observer.attempts.lock().unwrap().is_empty() {
             tokio::task::yield_now().await;
@@ -9396,9 +9618,11 @@ async fn host_create_transport_retry_shares_watchdog_limit_and_fails_closed() {
     assert!(events.iter().any(|event| matches!(event,
         SubagentEvent::Failed { error, .. } if error.contains("error decoding response body")
     )));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+    );
 }
 
 #[tokio::test]
@@ -9489,9 +9713,11 @@ async fn host_create_transport_retry_never_replays_an_unclosed_server_tool() {
             1,
             "a server tool may already have executed"
         );
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+        );
     }
 }
 
@@ -9534,9 +9760,11 @@ async fn host_create_transport_retry_is_not_a_generic_error_retry() {
         run_subagent(ctx, rx, out).await;
         let events = drain(events).await;
         assert_eq!(api.call_count(), 1);
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+        );
     }
 }
 
@@ -9714,9 +9942,11 @@ async fn host_create_truncation_recovery_is_bounded_by_retries_and_turns() {
         assert!(events.iter().any(|event| matches!(event,
             SubagentEvent::Failed { error, .. } if error.contains("output token limit reached before completion")
         )));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+        );
     }
 }
 
@@ -9775,9 +10005,11 @@ async fn host_create_json_correction_preserves_completed_scaffold_and_read() {
         SubagentEvent::Completed { result, usage_complete: false, .. }
             if result.get_property("design").and_then(|value| value.object_entries()).is_some_and(|entries| entries.is_empty())
     )));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
     let histories = api.histories.lock().unwrap();
     assert!(histories[3].starts_with(&histories[2]));
     assert_eq!(histories[3].len(), histories[2].len() + 1);
@@ -9936,9 +10168,11 @@ async fn host_create_json_correction_rejects_mixed_server_or_incomplete_response
         let events = drain(events).await;
         assert_eq!(api.call_count(), 1, "{other_tool}, first={other_first}");
         assert_eq!(invoker.call_count(), 0);
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+        );
     }
 }
 
@@ -9963,9 +10197,11 @@ async fn host_create_json_correction_rechecks_cancellation_and_budget() {
         run_subagent(ctx, rx, out).await;
         let events = drain(events).await;
         if cancel {
-            assert!(events
-                .iter()
-                .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, SubagentEvent::Killed { .. }))
+            );
         } else {
             assert!(events.iter().any(|event| matches!(event,
                 SubagentEvent::Failed { error, .. } if error.contains("Budget")
@@ -10017,18 +10253,22 @@ async fn design_parse_recovery_preserves_prior_tools_and_reports_retry() {
     assert_eq!(*observer.attempts.lock().unwrap(), vec![2]);
     assert!(events.iter().any(|event| matches!(event, SubagentEvent::Completed { result, usage_complete: false, .. }
         if result.get_property("design").and_then(|value| value.object_entries()).is_some_and(|entries| entries.is_empty()))));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+    );
     let history = api.histories.lock().unwrap();
     assert!(
         history[2].starts_with(&history[1]),
         "completed conversation must survive"
     );
-    assert!(history[2]
-        .iter()
-        .filter_map(user_text)
-        .any(|text| text.contains("JSON correction 1/2")));
+    assert!(
+        history[2]
+            .iter()
+            .filter_map(user_text)
+            .any(|text| text.contains("JSON correction 1/2"))
+    );
 }
 
 #[tokio::test]
@@ -10093,9 +10333,11 @@ async fn design_parse_recovery_cap_is_run_scoped_and_hard_bounded() {
             "two corrections total, even across a successful tool turn"
         );
         assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. } if error.contains("after 2 retries"))));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+        );
     }
 }
 
@@ -10124,9 +10366,11 @@ async fn design_parse_recovery_requires_opt_in_schema_and_structured_tool() {
         let events = drain(events).await;
         assert_eq!(api.call_count(), 1);
         assert_eq!(invoker.call_count(), 0);
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+        );
     }
 }
 
@@ -10157,9 +10401,11 @@ async fn design_parse_recovery_does_not_dispatch_or_retry_mixed_tool_response() 
         let events = drain(events).await;
         assert_eq!(api.call_count(), 1);
         assert_eq!(invoker.call_count(), 0);
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Failed { .. }))
+        );
     }
 }
 
@@ -10218,9 +10464,11 @@ async fn design_parse_recovery_rechecks_cancellation_and_budget() {
         let events = drain(events).await;
         assert_eq!(api.call_count(), 1);
         if cancel {
-            assert!(events
-                .iter()
-                .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, SubagentEvent::Killed { .. }))
+            );
         } else {
             assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. } if error.contains("Budget"))));
         }
@@ -11249,6 +11497,7 @@ impl lingxi_core::host::task_registry::TaskRegistryHandle for OwnerNotificationR
     async fn take_pending_task_notifications_for(
         &self,
         recipient: Option<lingxi_core::types::AgentId>,
+        _policy: lingxi_core::host::task_delivery::TaskDeliveryPolicy,
     ) -> Result<
         Vec<lingxi_core::host::task_registry::TaskNotification>,
         lingxi_core::host::task_registry::TaskRegistryError,
@@ -11359,9 +11608,9 @@ async fn notified_local_agent_removes_only_its_parent_keepalive_reason() {
         stable_agent_id: lingxi_core::host::task_registry::FieldPresence::Value(
             child_agent_id.as_uuid().to_string(),
         ),
-        parent_id: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(ctx
-            .agent_id
-            .to_string())),
+        parent_id: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(
+            ctx.agent_id.to_string()
+        )),
         ..Default::default()
     });
     let mut active_child = lingxi_core::host::task_registry::TaskRecord {
@@ -11375,9 +11624,9 @@ async fn notified_local_agent_removes_only_its_parent_keepalive_reason() {
         stable_agent_id: lingxi_core::host::task_registry::FieldPresence::Value(
             active_child_agent_id.as_uuid().to_string(),
         ),
-        parent_id: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(ctx
-            .agent_id
-            .to_string())),
+        parent_id: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(
+            ctx.agent_id.to_string()
+        )),
         ..Default::default()
     });
     let registry = Arc::new(OwnerNotificationRegistry {
@@ -11461,9 +11710,11 @@ async fn owner_notification_wakes_parked_runner_without_user_message() {
             wake,
             ConversationMessage::User { is_meta: true, .. }
         ));
-        assert!(serde_json::to_string(&wake)
-            .unwrap()
-            .contains("<task-id>achild</task-id>"));
+        assert!(
+            serde_json::to_string(&wake)
+                .unwrap()
+                .contains("<task-id>achild</task-id>")
+        );
         while let Some(event) = out_rx.recv().await {
             if let SubagentEvent::Message { message, .. } = &event {
                 assert!(
@@ -11558,9 +11809,11 @@ async fn owner_notification_folds_after_inflight_request_without_cancelling_it()
         "original provider future survived notification"
     );
     assert_eq!(api.calls.load(Ordering::SeqCst), 2);
-    assert!(serde_json::to_string(&*api.last_messages.lock().unwrap())
-        .unwrap()
-        .contains("<task-id>achild</task-id>"));
+    assert!(
+        serde_json::to_string(&*api.last_messages.lock().unwrap())
+            .unwrap()
+            .contains("<task-id>achild</task-id>")
+    );
     drop(event_tx);
     runner.await.unwrap();
 }
@@ -11782,10 +12035,12 @@ async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
         drop(event_tx);
         let (out_tx, out_rx) = mpsc::channel(64);
         run_subagent(ctx, event_rx, out_tx).await;
-        assert!(drain(out_rx)
-            .await
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        assert!(
+            drain(out_rx)
+                .await
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+        );
         let calls = api.physical_calls();
         let physical_model = if second_tool == Some("NestedReselectInitial") {
             "initial"
@@ -12410,9 +12665,11 @@ async fn child_tool_context_is_one_plugin_attachment_in_the_model_snapshot() {
         serde_json::json!(["source rewritten"])
     );
     assert_eq!(sources[0]["hookName"], "tool.call");
-    assert!(sources[0]["toolUseID"]
-        .as_str()
-        .is_some_and(|id| id.ends_with("-context")));
+    assert!(
+        sources[0]["toolUseID"]
+            .as_str()
+            .is_some_and(|id| id.ends_with("-context"))
+    );
     assert_eq!(sources[0]["hookEvent"], "PostToolUse");
     let entry = transcript
         .lines()
@@ -12518,15 +12775,17 @@ async fn child_session_append_runs_without_a_transcript_filesystem() {
         )
         .await
         .unwrap();
-    assert!(observed
-        .get_property("text")
-        .and_then(|value| value.as_str())
-        .is_some_and(|types| types.split(',').any(|kind| kind == "assistant")));
+    assert!(
+        observed
+            .get_property("text")
+            .and_then(|value| value.as_str())
+            .is_some_and(|types| types.split(',').any(|kind| kind == "assistant"))
+    );
 }
 
 #[tokio::test]
-async fn accepted_text_only_session_append_updates_query_row_without_changing_tool_use_or_request_snapshot(
-) {
+async fn accepted_text_only_session_append_updates_query_row_without_changing_tool_use_or_request_snapshot()
+ {
     let dir = tempfile::tempdir().unwrap();
     let module = dir.path().join("accepted-tool-row.js");
     std::fs::write(
@@ -12592,10 +12851,12 @@ async fn accepted_text_only_session_append_updates_query_row_without_changing_to
     assert_eq!(invoked.len(), 1, "the source ToolUse is dispatched once");
     assert_eq!(invoked[0].0, "Bash");
     assert!(projection_matches_json(&invoked[0].1, &tool_input));
-    assert!(invoked[0]
-        .2
-        .iter()
-        .any(|message| message.id() == pre_query.id()));
+    assert!(
+        invoked[0]
+            .2
+            .iter()
+            .any(|message| message.id() == pre_query.id())
+    );
     assert!(
         !invoked[0]
             .2
@@ -12607,9 +12868,11 @@ async fn accepted_text_only_session_append_updates_query_row_without_changing_to
         .3
         .as_ref()
         .expect("W1 receives the accepted current assistant row");
-    assert!(w1_assistant_row
-        .text_content()
-        .contains("Mod accepted text only"));
+    assert!(
+        w1_assistant_row
+            .text_content()
+            .contains("Mod accepted text only")
+    );
     assert_eq!(
         match w1_assistant_row {
             ConversationMessage::Assistant { content, .. } => content
@@ -12671,9 +12934,11 @@ async fn accepted_text_only_session_append_updates_query_row_without_changing_to
     let physical_calls = api.physical_calls();
     assert_eq!(physical_calls.len(), 2);
     let first_request = &physical_calls[0].request.messages;
-    assert!(first_request
-        .iter()
-        .any(|message| message.id() == pre_query.id()));
+    assert!(
+        first_request
+            .iter()
+            .any(|message| message.id() == pre_query.id())
+    );
     assert!(
         !first_request
             .iter()
@@ -13366,15 +13631,17 @@ fn nested_model_modifiers_resolve_in_order_without_mutating_original_state() {
         .unwrap();
     assert_eq!(original.options.main_loop_model, "start");
     assert_eq!(original.options.model_profile.as_deref(), Some("a"));
-    assert!(apply_nested_tool_context_modifiers(
-        &state,
-        vec![],
-        vec![nested_route_modifier("balanced", None)],
-        "start",
-        Some("a"),
-        None,
-    )
-    .is_err());
+    assert!(
+        apply_nested_tool_context_modifiers(
+            &state,
+            vec![],
+            vec![nested_route_modifier("balanced", None)],
+            "start",
+            Some("a"),
+            None,
+        )
+        .is_err()
+    );
 }
 
 #[async_trait]
@@ -13630,9 +13897,11 @@ async fn concurrency_safe_skill_override_updates_the_next_query_after_same_turn_
     run_subagent(ctx, event_rx, out_tx).await;
     let events = drain(out_rx).await;
 
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+    );
     assert_eq!(api.call_count(), 3);
     assert_eq!(
         meta_seen.load(Ordering::SeqCst),
@@ -13711,8 +13980,10 @@ async fn concurrency_safe_skill_override_updates_the_next_query_after_same_turn_
             .and_then(|source| source.string_at("")),
         Some("modifier two")
     );
-    assert!(snapshots[2]
-        .messages
-        .iter()
-        .any(|message| message.text_content() == "nested injected second"));
+    assert!(
+        snapshots[2]
+            .messages
+            .iter()
+            .any(|message| message.text_content() == "nested injected second")
+    );
 }

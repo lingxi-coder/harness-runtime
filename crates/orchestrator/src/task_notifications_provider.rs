@@ -28,21 +28,52 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lingxi_core::host::task_delivery::TaskDeliveryPolicy;
 use lingxi_core::host::task_registry::{TaskNotification, TaskRegistryHandle};
 
 use crate::prompt::task_notification::TaskNotificationProvider;
 
+/// Host facts consumed by Native's `m1()` gate. The feature value is resolved
+/// at each notification drain so a snapshot reflects the current producer gate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskDeliveryHostFacts {
+    /// Native `Td()` Windows/WSL exclusion.
+    pub windows_or_wsl: bool,
+    /// Native `Oon()` strict-tool-result-pairing exclusion.
+    pub strict_tool_result_pairing: bool,
+    /// Native `ur()` bare/simple-mode exclusion.
+    pub bare_mode: bool,
+}
+
+impl TaskDeliveryHostFacts {
+    fn effective_policy(self) -> TaskDeliveryPolicy {
+        TaskDeliveryPolicy {
+            feature_enabled: telemetry::flag_bool("tengu_violin_rosin", false),
+            windows_or_wsl: self.windows_or_wsl,
+            strict_tool_result_pairing: self.strict_tool_result_pairing,
+            bare_mode: self.bare_mode,
+        }
+    }
+}
+
 /// [`TaskNotificationProvider`] that drains the live registry each turn.
 pub struct RegistryTaskNotifications {
     registry: Arc<dyn TaskRegistryHandle>,
+    task_delivery_host_facts: TaskDeliveryHostFacts,
 }
 
 impl RegistryTaskNotifications {
     /// Wrap the registry handle the composition root shares with the tool
     /// context.
     #[must_use]
-    pub fn new(registry: Arc<dyn TaskRegistryHandle>) -> Self {
-        Self { registry }
+    pub fn new(
+        registry: Arc<dyn TaskRegistryHandle>,
+        task_delivery_host_facts: TaskDeliveryHostFacts,
+    ) -> Self {
+        Self {
+            registry,
+            task_delivery_host_facts,
+        }
     }
 }
 
@@ -65,7 +96,7 @@ impl TaskNotificationProvider for RegistryTaskNotifications {
         // Best-effort: an error degrades to "nothing to surface" so a transient
         // registry failure never breaks the turn.
         self.registry
-            .take_pending_task_notifications()
+            .take_pending_task_notifications(self.task_delivery_host_facts.effective_policy())
             .await
             .unwrap_or_default()
     }
@@ -142,6 +173,7 @@ mod tests {
         }
         async fn take_pending_task_notifications(
             &self,
+            _policy: TaskDeliveryPolicy,
         ) -> Result<Vec<TaskNotification>, TaskRegistryError> {
             // Drain once (consume-once), mirroring the real registry.
             Ok(std::mem::take(&mut *self.0.lock().unwrap()))
@@ -232,7 +264,7 @@ mod tests {
             ..Default::default()
         };
         let reg = Arc::new(FakeRegistry::new(vec![n.clone()]));
-        let provider = RegistryTaskNotifications::new(reg);
+        let provider = RegistryTaskNotifications::new(reg, TaskDeliveryHostFacts::default());
         assert_eq!(provider.take_pending_task_notifications().await, vec![n]);
         // Consume-once: the registry drained, so the second call is empty.
         assert!(provider.take_pending_task_notifications().await.is_empty());
@@ -265,7 +297,10 @@ mod tests {
             Arc::new(StaticMemoryProvider::empty()),
             std::env::temp_dir(),
         )
-        .with_task_notifications(Arc::new(RegistryTaskNotifications::new(registry)));
+        .with_task_notifications(Arc::new(RegistryTaskNotifications::new(
+            registry,
+            TaskDeliveryHostFacts::default(),
+        )));
         (
             crate::ConversationOrchestrator::into_shared(orch),
             api,
@@ -309,18 +344,81 @@ mod tests {
         ) || !message.text_content().is_empty()));
         let native_context = orch.context_attachment_history(&calls[0].messages);
         assert_eq!(
+            native_context
+                .iter()
+                .map(|attachment| attachment.string_at("/type"))
+                .collect::<Vec<_>>(),
+            vec![
+                Some("queued_command"),
+                Some("total_tokens_reminder"),
+                Some("session_context"),
+                Some("date"),
+            ],
+            "the task notification is a typed row before the later reminder fan-out"
+        );
+        let task_attachment = &native_context[0];
+        assert_eq!(
+            task_attachment.string_at("/commandMode"),
+            Some("task-notification")
+        );
+        assert_eq!(task_attachment.string_at("/type"), Some("queued_command"));
+        for absent_native_field in ["origin", "timestamp", "isMeta", "taskDelivery"] {
+            assert!(
+                !task_attachment.contains_property(absent_native_field),
+                "task notification source did not provide {absent_native_field}"
+            );
+        }
+        let task_message = calls[0]
+            .messages
+            .iter()
+            .find(|message| message.text_content().contains("done"))
+            .expect("the task notification has a model-facing history row");
+        let source_uuid = task_attachment
+            .string_at("/source_uuid")
+            .expect("Native queued command source UUID");
+        let delivery_id = task_attachment
+            .string_at("/delivery_id")
+            .expect("Native queued command delivery ID");
+        let outer_uuid = task_message.id().as_uuid().to_string();
+        assert!(uuid::Uuid::parse_str(source_uuid).is_ok());
+        assert!(uuid::Uuid::parse_str(delivery_id).is_ok());
+        assert_ne!(source_uuid, delivery_id);
+        assert_ne!(source_uuid, outer_uuid.as_str());
+        assert_ne!(delivery_id, outer_uuid.as_str());
+        let expected = crate::prompt::task_notification::render_reminder_sources_in_turn(
+            &[TaskNotification {
+                task_id: "done".into(),
+                task_type: "local_bash".into(),
+                status: "completed".into(),
+                description: "background result".into(),
+                ..Default::default()
+            }],
+            false,
+        )
+        .pop()
+        .expect("one task notification renders one body and wrapper");
+        assert_eq!(
+            task_attachment.string_units("/prompt"),
+            expected.0.string_units("")
+        );
+        assert_eq!(
+            task_message.text_content(),
+            expected.1.string_at("").unwrap()
+        );
+        assert_eq!(
             native_context,
             vec![
+                task_attachment.clone(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+                )
+                .unwrap(),
                 lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
                     &serde_json::json!({"type":"session_context","context":{}}),
                 )
                 .unwrap(),
                 lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
                     &serde_json::json!({"type":"date","date":crate::prompt::env_meta::current_date_string()}),
-                )
-                .unwrap(),
-                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
-                    &serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
                 )
                 .unwrap(),
             ],
@@ -376,7 +474,10 @@ mod tests {
             api.captured_calls().await.is_empty(),
             "busy owner must not be interrupted"
         );
-        registry.take_pending_task_notifications().await.unwrap();
+        registry
+            .take_pending_task_notifications(TaskDeliveryPolicy::default())
+            .await
+            .unwrap();
         drop(gate);
         wake.await.unwrap();
         assert!(

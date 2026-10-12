@@ -5,6 +5,106 @@ use hooks::attachment::HookPublicationGuard;
 use hooks::ExactHookText;
 use std::sync::Arc;
 
+const NATIVE_MCP_POLICY_BLOCKED_ERRORS: [&str; 2] = [
+    "Blocked by enterprise managed policy",
+    "Disabled by disableClaudeAiConnectors setting",
+];
+
+fn native_mcp_tool_identity(name: &str) -> Option<(&str, &str)> {
+    let remainder = name.strip_prefix("mcp__")?;
+    let (server, tool) = remainder.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
+}
+
+/// Project Native `wgn`'s `xCt` allowlisted causes for one tool absent from the
+/// current full identity pool. A disconnected/connecting/needs-auth server is
+/// deliberately not a retraction cause.
+fn native_mcp_revocation_cause(
+    name: &str,
+    deny_rules: &[String],
+    state: Option<lingxi_core::host::McpActionState>,
+    config: Option<&mcp::McpServerConfig>,
+    failure: Option<&mcp::McpFailedServerSnapshot>,
+) -> Option<&'static str> {
+    if super::model_reminders_impl::native_mcp_dropped_tool_denied(deny_rules, name) {
+        return Some("denied");
+    }
+    let (_, tool_name) = native_mcp_tool_identity(name)?;
+    let normalized_tool_name = mcp::normalization::normalize_name_for_mcp(tool_name);
+    if config.is_some_and(|config| {
+        config.tool_permissions.get(&normalized_tool_name)
+            == Some(&lingxi_core::host::McpPermissionCeiling::Deny)
+    }) {
+        return Some("org_blocked");
+    }
+    match state {
+        Some(lingxi_core::host::McpActionState::Disabled) => Some(
+            if config.is_some_and(|config| config.spec.kind() == "sdk-control") {
+                "switched_off"
+            } else {
+                "disabled"
+            },
+        ),
+        Some(lingxi_core::host::McpActionState::Failed) => {
+            if failure
+                .and_then(|failure| failure.error_code.as_ref())
+                .and_then(|code| code.string_at(""))
+                == Some("UNCONFIGURED")
+                || config.is_some_and(mcp::McpServerConfig::is_unconfigured)
+            {
+                return Some("not_configured");
+            }
+            let error = failure
+                .and_then(|failure| failure.native_raw_error.as_ref())
+                .and_then(|error| error.string_at(""));
+            NATIVE_MCP_POLICY_BLOCKED_ERRORS
+                .contains(&error?)
+                .then_some("policy_blocked")
+        }
+        // `pye` returns `not_configured` when there is no matching MCP client
+        // row. Other live states (`pending`, `needs-auth`, connected/cached)
+        // map to causes that `xCt` explicitly does not retain.
+        None => Some("not_configured"),
+        Some(
+            lingxi_core::host::McpActionState::Connected
+            | lingxi_core::host::McpActionState::Pending
+            | lingxi_core::host::McpActionState::NeedsAuth
+            | lingxi_core::host::McpActionState::NeedsApproval,
+        ) => None,
+    }
+}
+
+/// Native `pfr(..., {aheadOfRequest:true})` admission for tool-search-free
+/// tool-change announcements. `None` model support is unavailable evidence and
+/// fails closed; `tool_pool_refreshes` mirrors Native's
+/// `options.refreshTools !== undefined` fact. It must come from a caller that
+/// actually exposes that callback, never from ordinary request assembly or a
+/// registry-generation guess.
+fn native_tool_search_absent_admitted(
+    tool_search_filtered_out: bool,
+    native_mctc_supported: Option<bool>,
+    mctc_sent: bool,
+    mctc_rejected: bool,
+    mcs_rejected: bool,
+    tool_change_header_refused: bool,
+    keep_deferred_tools: bool,
+    declared_pool_available: bool,
+    tool_pool_refreshes: Option<bool>,
+    foamy_spring_enabled: bool,
+) -> bool {
+    let pool_refresh_callback_available = tool_pool_refreshes == Some(true);
+    let pool_gate =
+        declared_pool_available || (pool_refresh_callback_available && foamy_spring_enabled);
+    let mctc_gate = (mctc_sent || foamy_spring_enabled) && !mctc_rejected;
+    tool_search_filtered_out
+        && native_mctc_supported == Some(true)
+        && mctc_gate
+        && !mcs_rejected
+        && !tool_change_header_refused
+        && keep_deferred_tools
+        && pool_gate
+}
+
 fn wrap_system_reminder_source(
     source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
 ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
@@ -30,6 +130,272 @@ fn source_user_meta(
         .string_units("")
         .expect("model-visible reminder must be a JSON string");
     ConversationMessage::user_meta_js_utf16(id, String::from_utf16_lossy(&units), units)
+}
+
+fn system_reminder_inner_source(
+    message: &ConversationMessage,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    use lingxi_core::types::ContentBlock;
+    let ConversationMessage::User { content, .. } = message else {
+        return None;
+    };
+    let source = match content.first()? {
+        ContentBlock::Text { text, .. } => {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                text.clone(),
+                text.encode_utf16().collect(),
+            )
+            .ok()?
+        }
+        ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            text.clone(),
+            utf16_code_units.clone(),
+        )
+        .ok()?,
+        _ => return None,
+    };
+    let units = source.string_units("")?;
+    let prefix = "<system-reminder>\n".encode_utf16().collect::<Vec<_>>();
+    let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
+    let inner = units
+        .strip_prefix(prefix.as_slice())?
+        .strip_suffix(suffix.as_slice())?
+        .to_vec();
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&inner),
+        inner,
+    )
+    .ok()
+}
+
+fn prompt_ingress_payload(
+    message: ConversationMessage,
+    payload: lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Option<crate::request_context::PromptIngressAttachment> {
+    let rendered = crate::request_context::rendered_system_message(&message)?;
+    Some(crate::request_context::PromptIngressAttachment {
+        message,
+        payload,
+        rendered,
+    })
+}
+
+/// Build Native `mls` tool-change blocks from one typed deferred-tools delta.
+/// The pre-deferral wire snapshot is captured by the same request build, so
+/// this never serializes a schema by rerunning a tool prompt producer.
+pub(crate) fn native_tool_change_api_system_message(
+    attachment: &crate::request_context::PromptIngressAttachment,
+    complete_wire: &[lingxi_core::host::SourceToolWireDefinition],
+) -> Option<ConversationMessage> {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+    use lingxi_core::types::{ApiSystemMessage, ContentBlock, MessageId};
+
+    if attachment.payload.string_at("/type") != Some("deferred_tools_delta") {
+        return None;
+    }
+    let string_array = |path: &str| {
+        (0..attachment.payload.array_len(path).unwrap_or_default())
+            .filter_map(|index| attachment.payload.string_at(&format!("{path}/{index}")))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let mut removed = (0..attachment
+        .payload
+        .array_len("/retractedTools")
+        .unwrap_or_default())
+        .filter_map(|index| {
+            attachment
+                .payload
+                .string_at(&format!("/retractedTools/{index}/name"))
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    removed.sort();
+    removed.dedup();
+
+    // `surfacedNames` becomes a by-value tool_addition only on Native's
+    // toolSearchAbsent/pfr path. In the normal ToolSearch path Native records
+    // the UUID as name-only instead; it is not a schema announcement.
+    let mut added = if attachment
+        .payload
+        .at_pointer("/toolSearchAbsent")
+        .and_then(|value| value.as_bool())
+        == Some(true)
+    {
+        string_array("/surfacedNames")
+    } else {
+        Vec::new()
+    };
+    added.extend(string_array("/restoredNames"));
+    added.sort();
+    added.dedup();
+
+    let definition_by_name = complete_wire
+        .iter()
+        .map(|definition| (definition.name.as_str(), definition))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut content = Vec::with_capacity(removed.len() + added.len());
+    for name in removed {
+        let reference = Source::object(vec![
+            ("type".into(), Source::from("tool_reference")),
+            ("name".into(), Source::from(name)),
+        ])
+        .ok()?;
+        let block = Source::object(vec![
+            ("type".into(), Source::from("tool_removal")),
+            ("tool".into(), reference),
+        ])
+        .ok()?;
+        content.push(ContentBlock::ProviderContent {
+            protocol: "anthropic_messages".into(),
+            value: block,
+        });
+    }
+    for name in added {
+        let tool = if let Some(definition) = definition_by_name.get(name.as_str()) {
+            let mut fields = vec![
+                ("name".into(), Source::from(definition.name.clone())),
+                ("description".into(), definition.description.clone()),
+                ("input_schema".into(), definition.input_schema.clone()),
+            ];
+            if definition.strict {
+                fields.push(("strict".into(), Source::parse("true").ok()?));
+            }
+            let definition = Source::object(fields).ok()?;
+            Source::object(vec![
+                ("type".into(), Source::from("tool_definition")),
+                ("definition".into(), definition),
+            ])
+            .ok()?
+        } else {
+            Source::object(vec![
+                ("type".into(), Source::from("tool_reference")),
+                ("name".into(), Source::from(name)),
+            ])
+            .ok()?
+        };
+        let block = Source::object(vec![
+            ("type".into(), Source::from("tool_addition")),
+            ("tool".into(), tool),
+        ])
+        .ok()?;
+        content.push(ContentBlock::ProviderContent {
+            protocol: "anthropic_messages".into(),
+            value: block,
+        });
+    }
+    (!content.is_empty()).then(|| {
+        ConversationMessage::api_system(
+            MessageId::new(),
+            ApiSystemMessage {
+                content,
+                output_config: None,
+            },
+        )
+    })
+}
+
+/// Persist the UUID latch when Native `uls` would classify at least one
+/// surfaced name as only announced in ToolSearch text. Native stores the UUID
+/// separately in a `deferred_tools_record` attachment.
+pub(crate) fn deferred_tools_name_only_record_attachment(
+    deferred_delta: &crate::request_context::PromptIngressAttachment,
+    deferral: &tool_api::DeferralState,
+    use_tool_search: bool,
+    mid_conversation_tool_changes_active: bool,
+    inline_tool_names: &std::collections::HashSet<String>,
+    api_system_tool_addition_names: &std::collections::HashSet<String>,
+) -> Option<crate::request_context::PromptIngressAttachment> {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+
+    let surfaced_count = deferred_delta.payload.array_len("/surfacedNames")?;
+    if !use_tool_search
+        || deferred_delta
+            .payload
+            .at_pointer("/toolSearchAbsent")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        || surfaced_count == 0
+    {
+        return None;
+    }
+    let name_only = !mid_conversation_tool_changes_active
+        || (0..surfaced_count).any(|index| {
+            deferred_delta
+                .payload
+                .string_at(&format!("/surfacedNames/{index}"))
+                .is_some_and(|name| {
+                    !inline_tool_names.contains(name)
+                        && !api_system_tool_addition_names.contains(name)
+                })
+        });
+    if !name_only {
+        return None;
+    }
+    let delta_uuid = deferred_delta.message.id().to_string();
+    deferral.mark_name_only_announcement_uuid(delta_uuid.clone());
+    let payload = Source::object(vec![
+        ("type".into(), Source::from("deferred_tools_record")),
+        (
+            "nameOnlyAnnouncements".into(),
+            Source::array(vec![Source::from(delta_uuid)]).ok()?,
+        ),
+    ])
+    .ok()?;
+    let id = MessageId::new();
+    let message = ConversationMessage::user_meta(id, String::new());
+    let rendered = Source::parse("[]").ok()?;
+    Some(crate::request_context::PromptIngressAttachment {
+        message,
+        payload,
+        rendered,
+    })
+}
+
+/// Names already surfaced through API-system tool additions in the current
+/// request, including references without a by-value schema. Native `uls` does
+/// not classify those names as ToolSearch-only announcements.
+pub(crate) fn native_tool_change_addition_names(
+    messages: &[ConversationMessage],
+) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for message in messages {
+        let ConversationMessage::System {
+            api_system: Some(api_system),
+            ..
+        } = message
+        else {
+            continue;
+        };
+        for block in &api_system.content {
+            let lingxi_core::types::ContentBlock::ProviderContent { protocol, value } = block
+            else {
+                continue;
+            };
+            if protocol != "anthropic_messages" || value.string_at("/type") != Some("tool_addition")
+            {
+                continue;
+            }
+            match value.string_at("/tool/type") {
+                Some("tool_reference") => {
+                    if let Some(name) = value.string_at("/tool/name") {
+                        names.insert(name.to_owned());
+                    }
+                }
+                Some("tool_definition") => {
+                    if let Some(name) = value.string_at("/tool/definition/name") {
+                        names.insert(name.to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    names
 }
 
 fn trim_source_root_string(
@@ -596,9 +962,11 @@ impl ConversationOrchestrator {
         Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
-    /// SKILLLIST.1: the per-turn, transient `skill_listing` reminder, or `None`
-    /// when no provider is wired, the `Skill` tool is absent this turn, or there
-    /// are no model-invocable skills.
+    /// SKILLLIST.1: the `skill_listing` model message, or `None` when no
+    /// provider is wired, the `Skill` tool is absent this turn, or there are no
+    /// model-invocable skills. Initial regular-user ingress persists its typed
+    /// payload and rendered cache; later model steps use the message-only
+    /// wrapper below.
     ///
     /// 1:1 with claude-code's `skill_listing` attachment: `getSkillToolCommands`
     /// (`commands.ts:565`) selects the eligible skills, `formatCommandsWithinBudget`
@@ -608,10 +976,10 @@ impl ConversationOrchestrator {
     /// user message: `"The following skills are available for use with the Skill
     /// tool:\n\n{listing}"`. The Skill-tool gate mirrors `attachments.ts:2668`.
     ///
-    /// Like the OUTSTYLE.3 reminder, the message is appended ONLY to the per-turn
-    /// outgoing snapshot (never to `session.history` / JSONL), so it is recomputed
-    /// each turn and never accumulates. `None` keeps the styleless/skilless path
-    /// byte-identical and the locked fixtures green.
+    /// The model-facing message remains a meta user row. The initial regular-user
+    /// ingress stores a typed `skill_listing` attachment with its exact rendered
+    /// cache; later tool steps do not regenerate the initial row. `None` keeps
+    /// the styleless/skilless path byte-identical and the locked fixtures green.
     ///
     /// DELTA (SKILLLIST.1): turn-0 emits the FULL listing; each later turn emits
     /// ONLY skills that have NOT appeared in a prior turn's reminder, tracked via
@@ -716,11 +1084,11 @@ impl ConversationOrchestrator {
             is_subagent: false,
             reminder_type_sparse: sparse,
             // `zx()==="default"` — an unset `output_style` IS the default style.
-            output_style_is_default: self
-                .config
-                .output_style
-                .as_deref()
-                .is_none_or(|style| style == "default"),
+            output_style_is_default: self.config.output_style.as_ref().is_none_or(|style| {
+                style
+                    .string_units("")
+                    .is_some_and(|units| units == "default".encode_utf16().collect::<Vec<_>>())
+            }),
         };
         // All three plan-mode renderers (`M5T` full / `L5T` sparse / `H5T`
         // subagent) return through the batch wrapper `Zy` (2.1.238 @296675470),
@@ -781,17 +1149,26 @@ impl ConversationOrchestrator {
         ))
     }
 
-    pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
+    pub(crate) async fn skill_listing_prompt_ingress_attachment(
+        &self,
+    ) -> Option<crate::request_context::PromptIngressAttachment> {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+
         let provider = self.prompt_runtime.skill_listing.as_ref()?;
         // Gate on the Skill tool being available this turn (attachments.ts:2668).
         self.find_dispatchable_tool("Skill")?;
-        let entries = provider.skill_entries().await;
+        let listing_snapshot = provider.skill_listing_snapshot().await;
+        let entries = listing_snapshot.entries;
 
         // DELTA: keep only skills not yet sent this session, then record them as
         // sent. Turn 0 keeps everything (the set is empty); subsequent turns keep
         // only newly-appeared names. An empty delta ⇒ no reminder this turn.
-        let new_entries: Vec<crate::prompt::skill_listing::SkillListingEntry> = {
+        let (new_entries, is_initial): (
+            Vec<crate::prompt::skill_listing::SkillListingEntry>,
+            bool,
+        ) = {
             let mut sent = self.prompt_runtime.sent_skill_names.lock().await;
+            let is_initial = sent.is_empty();
             let delta: Vec<_> = entries
                 .into_iter()
                 .filter(|entry| {
@@ -810,7 +1187,7 @@ impl ConversationOrchestrator {
                         .expect("skill listing names must be root strings"),
                 );
             }
-            delta
+            (delta, is_initial)
         };
         if new_entries.is_empty() {
             return None;
@@ -826,8 +1203,63 @@ impl ConversationOrchestrator {
         let window =
             compaction::context_window::context_window_for_model(&model, &self.api.active_betas())
                 as usize;
-        let content = crate::prompt::skill_listing::render_reminder(&new_entries, Some(window))?;
-        Some(source_user_meta(MessageId::new(), content))
+        let chars_per_token = memory::native_skill_listing_chars_per_token(Some(&model)) as usize;
+        let settings = listing_snapshot.budget_settings;
+        let rendered_source = crate::prompt::skill_listing::render_reminder(
+            &new_entries,
+            Some(window),
+            chars_per_token,
+            settings,
+        )?;
+        let rendered_units = rendered_source.string_units("")?;
+        let prefix = "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
+        let content_units = rendered_units
+            .strip_prefix(prefix.as_slice())?
+            .strip_suffix(suffix.as_slice())?
+            .to_vec();
+        let content =
+            Source::root_string(String::from_utf16_lossy(&content_units), content_units).ok()?;
+        let names =
+            Source::array(new_entries.iter().map(|entry| entry.name.clone()).collect()).ok()?;
+        let skill_count = Source::parse(&new_entries.len().to_string()).ok()?;
+        let is_initial = Source::from_serde_value(&serde_json::Value::Bool(is_initial)).ok()?;
+        let payload = Source::object(vec![
+            ("type".into(), Source::from("skill_listing")),
+            ("content".into(), content),
+            ("skillCount".into(), skill_count),
+            ("isInitial".into(), is_initial),
+            ("names".into(), names),
+        ])
+        .ok()?;
+        prompt_ingress_payload(source_user_meta(MessageId::new(), rendered_source), payload)
+    }
+
+    pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
+        self.skill_listing_prompt_ingress_attachment()
+            .await
+            .map(|row| row.message)
+    }
+
+    /// Build the source-ordered, tool-gated listing rows used by the Native
+    /// prompt-ingress attachment fan-out. They are persisted with their original
+    /// rendering before Mods screen the request-local copies.
+    pub(crate) async fn prompt_ingress_listing_attachments(
+        &self,
+    ) -> Vec<crate::request_context::PromptIngressAttachment> {
+        let mut rows = Vec::new();
+        for row in [
+            self.agent_listing_prompt_ingress_attachment().await,
+            self.skill_listing_prompt_ingress_attachment().await,
+        ] {
+            let Some(row) = row else {
+                continue;
+            };
+            rows.push(row);
+        }
+        rows
     }
 
     /// The per-turn, transient `async_hook_response` reminder, or `None` when no
@@ -907,9 +1339,11 @@ impl ConversationOrchestrator {
     /// applied to every `task-notification`-origin user message so the model
     /// never treats a machine-generated completion as user consent; it also
     /// escapes any literal `</system-reminder>` in the task output so a task
-    /// cannot close the envelope early). Appended ONLY to the
-    /// per-turn OUTGOING snapshot, never `session.history` / JSONL, so it never
-    /// accumulates. No delta set is needed — draining the registry IS the dedup.
+    /// cannot close the envelope early). Each durable row is paired with a
+    /// `queued_command` transcript attachment carrying the pre-envelope prompt
+    /// and rendered cache, so hot requests and cold resume retain Native's typed
+    /// attachment identity and ordering. Draining the registry remains the
+    /// consume-once dedup boundary.
     ///
     /// REM-14 side effect: a terminal `dream` task in the drained batch is the
     /// port's only signal that the BACKGROUND MEMORY CONSOLIDATOR finished, so
@@ -931,12 +1365,15 @@ impl ConversationOrchestrator {
     pub(crate) async fn task_notification_reminder_messages(&self) -> Vec<ConversationMessage> {
         self.task_notification_reminder_messages_in_turn(false)
             .await
+            .into_iter()
+            .map(|row| row.message)
+            .collect()
     }
 
     pub(crate) async fn task_notification_reminder_messages_in_turn(
         &self,
         in_human_turn: bool,
-    ) -> Vec<ConversationMessage> {
+    ) -> Vec<crate::request_context::PromptIngressAttachment> {
         let Some(provider) = self.prompt_runtime.task_notifications.as_ref() else {
             return Vec::new();
         };
@@ -946,10 +1383,47 @@ impl ConversationOrchestrator {
         // per notification and the envelope is applied per message, so two
         // tasks finishing in the same turn are two user messages. Folding them
         // into one envelope also folded two provenance headers into one.
-        crate::prompt::task_notification::render_reminders_in_turn(&notifications, in_human_turn)
-            .into_iter()
-            .map(|content| source_user_meta(MessageId::new(), content))
-            .collect()
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+
+        let rendered_rows = crate::prompt::task_notification::render_reminder_sources_in_turn(
+            &notifications,
+            in_human_turn,
+        );
+        let mut rows = Vec::with_capacity(rendered_rows.len());
+        for (notification, (prompt, rendered)) in notifications.into_iter().zip(rendered_rows) {
+            let id = MessageId::new();
+            let outer_uuid = id.as_uuid();
+            let source_uuid = loop {
+                let candidate = uuid::Uuid::new_v4();
+                if candidate != outer_uuid {
+                    break candidate;
+                }
+            };
+            let delivery_id = loop {
+                let candidate = uuid::Uuid::new_v4();
+                if candidate != outer_uuid && candidate != source_uuid {
+                    break candidate;
+                }
+            };
+            let mut payload_fields = vec![
+                ("type".into(), Source::from("queued_command")),
+                ("prompt".into(), prompt),
+                ("source_uuid".into(), Source::from(source_uuid.to_string())),
+                ("delivery_id".into(), Source::from(delivery_id.to_string())),
+                ("commandMode".into(), Source::from("task-notification")),
+            ];
+            if let Some(task_delivery) = notification.task_delivery.as_ref() {
+                payload_fields.push(("taskDelivery".into(), task_delivery.as_projection().clone()));
+            }
+            let payload = Source::object(payload_fields)
+                .expect("task notification attachment has a valid Native shape");
+            let message = source_user_meta(id, rendered);
+            rows.push(
+                prompt_ingress_payload(message, payload)
+                    .expect("task notification rendering yields a system-role cache"),
+            );
+        }
+        rows
     }
 
     /// Cap on [`Self::pending_memory_updates`]; oldest entries are dropped.
@@ -1413,6 +1887,62 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
+    /// Typed version used by prompt ingress. The model-facing text and JSONL
+    /// cache are produced together so the row can be persisted before the
+    /// model engine is admitted and later reinserted by ID.
+    pub(crate) async fn total_tokens_prompt_ingress_attachment(
+        &self,
+        is_regular_user_prompt: bool,
+    ) -> Option<crate::request_context::PromptIngressAttachment> {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+        let message = self
+            .total_tokens_reminder_message(is_regular_user_prompt)
+            .await?;
+        let text = system_reminder_inner_source(&message)?;
+        let payload = Source::object(vec![
+            ("type".into(), Source::from("total_tokens_reminder")),
+            ("text".into(), text),
+        ])
+        .ok()?;
+        prompt_ingress_payload(message, payload)
+    }
+
+    /// Build Native's optional max-budget ingress attachment from the already
+    /// configured session ceiling and cost tracker snapshot.
+    pub(crate) async fn budget_usd_prompt_ingress_attachment(
+        &self,
+    ) -> Option<crate::request_context::PromptIngressAttachment> {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+
+        let total_nano_usd = self.config.max_budget_nano_usd?;
+        if total_nano_usd == 0 {
+            return None;
+        }
+        let used_nano_usd = self
+            .cost_state()
+            .await
+            .map_or(0, |state| state.total_nano_usd);
+        #[allow(clippy::cast_precision_loss)]
+        let total_usd = total_nano_usd as f64 / 1_000_000_000.0;
+        #[allow(clippy::cast_precision_loss)]
+        let used_usd = used_nano_usd as f64 / 1_000_000_000.0;
+        let remaining_usd = total_usd - used_usd;
+        let body = format!("USD budget: ${used_usd}/${total_usd}; ${remaining_usd} remaining");
+        let message = ConversationMessage::user_meta(
+            MessageId::new(),
+            format!("<system-reminder>\n{body}\n</system-reminder>"),
+        );
+        let number = |value: f64| Source::parse(&value.to_string()).ok();
+        let payload = Source::object(vec![
+            ("type".into(), Source::from("budget_usd")),
+            ("used".into(), number(used_usd)?),
+            ("total".into(), number(total_usd)?),
+            ("remaining".into(), number(remaining_usd)?),
+        ])
+        .ok()?;
+        prompt_ingress_payload(message, payload)
+    }
+
     /// The tool name that issued `tool_use_id`, recovered from the assistant
     /// line that carried the `tool_use` block.
     pub(super) async fn tool_name_for_use_id(
@@ -1523,9 +2053,9 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     ///   the `is_initial`-conditional header (messages.ts:4197-4199), wrapped as
     ///   a meta user message.
     ///
-    /// Like the skill-listing + conditional-rules reminders, the message is
-    /// appended ONLY to the per-turn OUTGOING snapshot (never `session.history` /
-    /// JSONL), so it is recomputed each turn and never accumulates.
+    /// The initial regular-user ingress stores a typed `agent_listing_delta`
+    /// attachment with its exact rendered cache; its message-only wrapper is
+    /// used on model steps where no initial ingress batch applies.
     ///
     /// AGT-15 — the two branches that used to be documented as deferrals are
     /// now implemented, 1:1 with the oracle renderer @296704484:
@@ -1557,7 +2087,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     ///
     /// A session with the Agent tool sends the concurrency note on its first
     /// listing. The removal branch stays silent until the catalog shrinks.
-    pub(crate) async fn agent_listing_reminder_message(&self) -> Option<ConversationMessage> {
+    pub(crate) async fn agent_listing_prompt_ingress_attachment(
+        &self,
+    ) -> Option<crate::request_context::PromptIngressAttachment> {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+
         // Gate on the Agent tool being available this turn (attachments.ts:1497).
         // This is the ONLY structural gate in the binary's `aLe` — it does NOT
         // gate on a wired
@@ -1574,6 +2108,10 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         // a built-in, matching the inline `AgentTool` prompt's
         // `PoolSubagentSpawner::listing_entries` (built-in < user/project).
         let mut defs = agent::builtin_agent_definitions();
+        let built_in_types = defs
+            .iter()
+            .map(|definition| definition.agent_type.clone())
+            .collect::<std::collections::HashSet<_>>();
         if let Some(catalog) = self.lifecycle_runtime.agent_catalog.as_ref() {
             defs.extend(catalog.read().await.iter().cloned());
         }
@@ -1673,11 +2211,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         // 3. CONCURRENCY NOTE: initial listing only, and only when the plan is
         //    not Pro and the subagent steer is `default`
         //    (`showConcurrencyNote:Cc()!=="pro"&&DZ()==="default"`, @296530704).
-        if !new_entries.is_empty()
+        let show_concurrency_note = !new_entries.is_empty()
             && is_initial
             && !lingxi_core::host::subscription::is_pro_plan()
-            && lingxi_core::host::live_sessions::subagent_steer_is_default()
-        {
+            && lingxi_core::host::live_sessions::subagent_steer_is_default();
+        if show_concurrency_note {
             sections.push(
                 "When you launch multiple agents for independent work, send them in a single \
 message with multiple tool uses so they run concurrently."
@@ -1690,7 +2228,63 @@ message with multiple tool uses so they run concurrently."
         }
         let body = sections.join("\n\n");
         let content = format!("<system-reminder>\n{body}\n</system-reminder>");
-        Some(ConversationMessage::user_meta(MessageId::new(), content))
+        let added_types = Source::array(
+            new_entries
+                .iter()
+                .map(|entry| Source::from(entry.agent_type.clone()))
+                .collect(),
+        )
+        .ok()?;
+        let added_lines = Source::array(
+            new_entries
+                .iter()
+                .map(|entry| {
+                    Source::from(agent::format_agent_line(
+                        entry,
+                        tool_api::dh_simple_system_prompt(self.tools.main_loop_model().as_deref()),
+                    ))
+                })
+                .collect(),
+        )
+        .ok()?;
+        let built_in_types = Source::array(
+            new_entries
+                .iter()
+                .filter(|entry| built_in_types.contains(&entry.agent_type))
+                .map(|entry| Source::from(entry.agent_type.clone()))
+                .collect(),
+        )
+        .ok()?;
+        let removed_types = Source::array(
+            removed_types
+                .iter()
+                .map(|agent_type| Source::from(agent_type.clone()))
+                .collect(),
+        )
+        .ok()?;
+        let is_initial = Source::from_serde_value(&serde_json::Value::Bool(is_initial)).ok()?;
+        let show_concurrency_note =
+            Source::from_serde_value(&serde_json::Value::Bool(show_concurrency_note)).ok()?;
+        let payload = Source::object(vec![
+            ("type".into(), Source::from("agent_listing_delta")),
+            ("addedTypes".into(), added_types),
+            ("addedLines".into(), added_lines),
+            ("builtInTypes".into(), built_in_types),
+            ("removedTypes".into(), removed_types),
+            ("isInitial".into(), is_initial),
+            ("showConcurrencyNote".into(), show_concurrency_note),
+        ])
+        .ok()?;
+        prompt_ingress_payload(
+            ConversationMessage::user_meta(MessageId::new(), content),
+            payload,
+        )
+    }
+
+    pub(crate) async fn agent_listing_reminder_message(&self) -> Option<ConversationMessage> {
+        self.agent_listing_prompt_ingress_attachment()
+            .await
+            .map(|row| row.message)
     }
 
     /// REM-10 — the periodic `tool_search_usage_reminder`, or `None` (the
@@ -1891,7 +2485,7 @@ message with multiple tool uses so they run concurrently."
     pub(crate) async fn changed_files_reminder_messages(
         &self,
         cancel: Option<&lingxi_core::host::CancellationToken>,
-    ) -> Vec<ConversationMessage> {
+    ) -> Vec<crate::request_context::PromptIngressAttachment> {
         // (1) Snapshot the registry without touching recency. Keep each current
         // source route alongside the cache key; live deny rules may name
         // either side of a symlink and Native rechecks the route before its
@@ -2123,12 +2717,32 @@ message with multiple tool uses so they run concurrently."
             return Vec::new();
         }
         // (6) cross-file snippet budget, then (7) render one wrapped meta
-        // message per changed file.
+        // message per changed file. Preserve Native's typed payload and exact
+        // original rendered cache alongside the stable message identity; the
+        // caller persists this row before screening its request-local copy.
         crate::prompt::changed_files::apply_snippet_budget(&mut changed);
         changed
             .iter()
             .filter_map(|file| {
-                crate::prompt::changed_files::render_changed_file_message(file, &read_tool_name)
+                let message = crate::prompt::changed_files::render_changed_file_message(
+                    file,
+                    &read_tool_name,
+                )?;
+                let payload =
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({
+                            "type": "edited_text_file",
+                            "filename": file.filename,
+                            "snippet": file.snippet,
+                        }),
+                    )
+                    .ok()?;
+                let rendered = crate::request_context::rendered_system_message(&message)?;
+                Some(crate::request_context::PromptIngressAttachment {
+                    message,
+                    payload,
+                    rendered,
+                })
             })
             .collect()
     }
@@ -2170,7 +2784,10 @@ message with multiple tool uses so they run concurrently."
 
     /// Consume actual per-context Read/readFor triggers, independent of LRU
     /// contents. One per-trigger acquisition produces current durable rows.
-    pub async fn nested_memory_reminder_messages(&self) -> Vec<ConversationMessage> {
+    pub async fn nested_memory_reminder_messages(
+        &self,
+        context_attachments: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+    ) -> Vec<ConversationMessage> {
         let queue = &self.prompt_runtime.nested_memory_triggers;
         let disabled =
             std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|value| !value.is_empty());
@@ -2193,7 +2810,9 @@ message with multiple tool uses so they run concurrently."
             .await
             .unwrap_or(probe_cwd);
         let mode = self.memory.instruction_files_mode();
-        let prior = self.nested_memory_history().await;
+        let prior = self
+            .nested_memory_history_with_context_attachments(context_attachments)
+            .await;
         let excluder = self.memory.excluder();
         let mut messages = Vec::new();
         let mut cursor = 0;
@@ -2444,7 +3063,7 @@ message with multiple tool uses so they run concurrently."
     /// [`Self::start_memory_prefetch`], mirroring TS `findLast(user/!meta)`). The
     /// per-iteration `findWritePivot` guard (`query.ts:323` — discovery only fires
     /// on write-pivot iterations) is computed from the most recent assistant
-    /// message's requested tools (see [`skill_api::find_write_pivot`],
+    /// message's requested tools (see [`skill::find_write_pivot`],
     /// [RECONSTRUCTED]); on a non-write iteration the prefetch ships empty.
     pub(crate) async fn start_skill_discovery_prefetch(&self) {
         let Some(prefetch) = self.prompt_runtime.skill_discovery_prefetch.as_ref() else {
@@ -2471,7 +3090,7 @@ message with multiple tool uses so they run concurrently."
             let history = s.model_context_history();
             Self::latest_prefetch_query_and_tools(&history)
         };
-        let is_write_pivot = skill_api::find_write_pivot(&last_assistant_tools);
+        let is_write_pivot = skill::find_write_pivot(&last_assistant_tools);
         let pending = prefetch.start(query, is_write_pivot).await;
         *self.prompt_runtime.pending_skill_prefetch.lock().await = Some(pending);
     }
@@ -2487,7 +3106,7 @@ message with multiple tool uses so they run concurrently."
     /// Emits the `hidden_by_main_turn` telemetry field (`query.ts:1617`): `true`
     /// when the prefetch resolved BEFORE collection (it hid under the main turn's
     /// streaming + tool execution; expected >98%). Peeked via
-    /// [`skill_api::PendingSkillDiscoveryPrefetch::is_ready`] before the consuming
+    /// [`skill::PendingSkillDiscoveryPrefetch::is_ready`] before the consuming
     /// `take`.
     ///
     /// DEDUP: a skill is skipped when its `name` is in
@@ -2519,7 +3138,7 @@ message with multiple tool uses so they run concurrently."
         }
 
         // DEDUP by name — skip any skill already surfaced this session.
-        let fresh: Vec<skill_api::DiscoveredSkill> = {
+        let fresh: Vec<skill::DiscoveredSkill> = {
             let mut surfaced = self.prompt_runtime.surfaced_skill_names.lock().await;
             let mut out = Vec::new();
             for s in skills {
@@ -2533,7 +3152,7 @@ message with multiple tool uses so they run concurrently."
         };
 
         // render returns None on empty (TS `return []`).
-        let content = skill_api::render_skill_discovery_block(&fresh)?;
+        let content = skill::render_skill_discovery_block(&fresh)?;
         let source_units = content
             .string_units("")
             .expect("skill discovery block is a source string");
@@ -2545,8 +3164,7 @@ message with multiple tool uses so they run concurrently."
         ))
     }
 
-    /// `deferred_tools_delta` reminder for THIS outgoing model step, prepended to
-    /// the transient snapshot and never persisted.
+    /// `deferred_tools_delta` typed row for THIS outgoing model step.
     ///
     /// Claude Code (`A1s` + the `deferred_tools_delta` attachment renderer)
     /// announces the searchable deferred set as a `<system-reminder>` only when
@@ -2559,10 +3177,11 @@ message with multiple tool uses so they run concurrently."
     /// called at most ONCE per outgoing model step. Callers that rebuild the
     /// snapshot for a retry of the SAME step (streaming recovery / non-streaming
     /// fallback) reuse the value computed here instead of re-invoking it.
-    pub(crate) fn deferred_tools_reminder_message(&self) -> Option<ConversationMessage> {
-        if !self.tools.deferral().is_enabled() {
-            return None;
-        }
+    pub(crate) async fn deferred_tools_prompt_ingress_attachment(
+        &self,
+        current_tool_names: &[String],
+        tool_pool_refresh_callback_available: Option<bool>,
+    ) -> Option<crate::request_context::PromptIngressAttachment> {
         // Currently-deferred (undiscovered) set = oracle `g`: the searchable
         // view minus tools already loaded this session. The view is the
         // `wants_defer` candidate set (which still includes loaded tools), so
@@ -2583,9 +3202,641 @@ message with multiple tool uses so they run concurrently."
             .collect();
         current.sort();
         current.dedup();
-        let delta = self.tools.deferral().compute_deferred_delta(&current);
-        let body = delta.render_reminder()?;
-        Some(ConversationMessage::user_meta(MessageId::new(), body))
+        let deferral = self.tools.deferral();
+        if !deferral.keeps_deferred_tools() {
+            return None;
+        }
+        let prior_declared = deferral.declared_tool_names();
+        let (model, profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        let scope = self.native_tool_search_scope_snapshot();
+        let native_latches = scope.native_tool_search_state();
+        let beta_rejections = scope.beta_rejections();
+        let mctc_beta =
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges;
+        let mcs_beta =
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationSystem;
+        let mctc_rejected = beta_rejections.rejected(mctc_beta);
+        let mcs_rejected = beta_rejections.rejected(mcs_beta);
+        let foamy_spring_enabled = telemetry::feature_flags::flag_bool("tengu_foamy_spring", true);
+        let native_mctc_supported = self
+            .api
+            .native_mid_conversation_tool_change_supported(&model, profile.as_deref());
+        let tool_search_filtered_out = self.tools.find_by_name("ToolSearch").is_some()
+            && !current_tool_names.iter().any(|name| name == "ToolSearch")
+            && !current.is_empty()
+            && super::tool_search_supported_for_request(
+                self.api.as_ref(),
+                &model,
+                profile.as_deref(),
+            );
+        let tool_search_absent = native_tool_search_absent_admitted(
+            tool_search_filtered_out,
+            native_mctc_supported,
+            native_latches.mid_conversation_tool_changes_sent,
+            mctc_rejected,
+            mcs_rejected,
+            native_latches.tool_change_header_refused,
+            deferral.keeps_deferred_tools(),
+            prior_declared.is_some(),
+            tool_pool_refresh_callback_available,
+            foamy_spring_enabled,
+        );
+        if !tool_search_absent && !current_tool_names.iter().any(|name| name == "ToolSearch") {
+            return None;
+        }
+        let pending = Some(match &self.mcp_registry {
+            Some(registry) => registry.pending_deferred_tool_servers().await,
+            None => Vec::new(),
+        });
+        let action_states = match &self.mcp_registry {
+            Some(registry) => registry.action_states().await,
+            None => Vec::new(),
+        };
+        let mcp_states = action_states
+            .iter()
+            .map(|(name, state)| (mcp::normalization::normalize_name_for_mcp(name), *state))
+            .collect::<std::collections::HashMap<_, _>>();
+        // Native supplies this argument only when launchOptions.isInteractive()
+        // is false. Do not derive the gate from querySource or bridge transport.
+        let needs_auth = if !self.prompt_is_interactive() {
+            let mut names = match &self.mcp_registry {
+                Some(registry) => registry
+                    .needs_auth_deferred_tool_servers()
+                    .await
+                    .into_iter()
+                    .map(|server| server.name)
+                    .collect::<Vec<_>>(),
+                None => Vec::new(),
+            };
+            names.sort();
+            Some(names)
+        } else {
+            None
+        };
+        // `wgn` classifies departed names from the full live MCP state even
+        // when the independent `failedMcpServers` attachment flag is off.
+        let failed_snapshots = match &self.mcp_registry {
+            Some(registry) => registry.failed_deferred_tool_servers().await,
+            None => Vec::new(),
+        };
+        let failed_by_name = failed_snapshots
+            .iter()
+            .map(|server| {
+                (
+                    mcp::normalization::normalize_name_for_mcp(&server.name),
+                    server,
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let failed = telemetry::flag_bool("tengu_surface_failed_mcp_servers", true).then(|| {
+            failed_snapshots
+                .iter()
+                .cloned()
+                .map(|server| tool_api::defer::DeferredMcpFailedServer {
+                    name: server.name,
+                    error_code: server.error_code,
+                    error: server.error,
+                    will_retry: server.will_retry,
+                })
+                .collect()
+        });
+        let status = tool_api::defer::DeferredMcpServerStatus {
+            pending,
+            needs_auth,
+            failed,
+        };
+        let deny_rules = self.perms.tool_wide_deny_names().await;
+        let mut configs = std::collections::HashMap::new();
+        if let Some(registry) = &self.mcp_registry {
+            for name in prior_declared.as_deref().unwrap_or_default() {
+                let Some((server_name, _)) = native_mcp_tool_identity(name) else {
+                    continue;
+                };
+                let normalized_server = mcp::normalization::normalize_name_for_mcp(server_name);
+                if !configs.contains_key(&normalized_server) {
+                    configs.insert(normalized_server, registry.get_config(server_name).await);
+                }
+            }
+        }
+        let revoked = prior_declared
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|name| !current_tool_names.iter().any(|current| current == *name))
+            .filter_map(|name| {
+                let (server_name, _) = native_mcp_tool_identity(name)?;
+                let normalized_server = mcp::normalization::normalize_name_for_mcp(server_name);
+                let cause = native_mcp_revocation_cause(
+                    name,
+                    &deny_rules,
+                    mcp_states.get(&normalized_server).copied(),
+                    configs.get(&normalized_server).and_then(Option::as_ref),
+                    failed_by_name.get(&normalized_server).copied(),
+                )?;
+                Some(tool_api::defer::DeferredToolRevocation {
+                    name: name.clone(),
+                    cause: cause.to_owned(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let delta = deferral.compute_deferred_delta_with_native_state(
+            &current,
+            status,
+            tool_api::defer::DeferredToolNativeContext {
+                current_tool_names: current_tool_names.to_vec(),
+                declared_pool_available: prior_declared.is_some(),
+                revoked,
+                // Source-backed Native `pfr` result. Unknown route/model, pool,
+                // and refresh facts fail closed in the predicate above.
+                tool_search_absent,
+                name_only_announcement_uuids: Vec::new(),
+            },
+        );
+        // Consume the previous declared-pool snapshot above, then retain the
+        // current pool for the next request's AQo delta.
+        deferral.record_declared_tool_names(current_tool_names.iter().cloned());
+        if delta.is_empty() {
+            return None;
+        }
+        let payload = delta.attachment_payload();
+        let id = MessageId::new();
+        let (message, rendered) = if let Some(body) = delta.render_reminder() {
+            let message = ConversationMessage::user_meta(id, body);
+            let rendered = crate::request_context::rendered_system_message(&message)?;
+            (message, rendered)
+        } else {
+            // Native can persist a status-clearing delta whose renderer returns
+            // no user row. Keep its JSONL attachment and placement candidate,
+            // while the empty rendered cache stays out of model history.
+            let rendered = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("[]").ok()?;
+            (ConversationMessage::user_meta(id, String::new()), rendered)
+        };
+        Some(crate::request_context::PromptIngressAttachment {
+            message,
+            payload,
+            rendered,
+        })
+    }
+}
+
+#[cfg(test)]
+mod native_deferred_revocation_tests {
+    use super::*;
+
+    #[test]
+    fn native_pfr_tool_search_absence_requires_every_source_gate() {
+        let admitted = || {
+            native_tool_search_absent_admitted(
+                true,
+                Some(true),
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                None,
+                true,
+            )
+        };
+        assert!(admitted());
+        assert!(!native_tool_search_absent_admitted(
+            true, None, false, false, false, false, true, true, None, true,
+        ));
+        assert!(!native_tool_search_absent_admitted(
+            true,
+            Some(true),
+            false,
+            false,
+            true,
+            false,
+            true,
+            true,
+            None,
+            true,
+        ));
+        assert!(!native_tool_search_absent_admitted(
+            true,
+            Some(true),
+            false,
+            true,
+            false,
+            false,
+            true,
+            true,
+            None,
+            true,
+        ));
+        assert!(!native_tool_search_absent_admitted(
+            true,
+            Some(true),
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            None,
+            true,
+        ));
+        assert!(!native_tool_search_absent_admitted(
+            true,
+            Some(true),
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            Some(false),
+            true,
+        ));
+        assert!(native_tool_search_absent_admitted(
+            true,
+            Some(true),
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            Some(true),
+            true,
+        ));
+        assert!(!native_tool_search_absent_admitted(
+            true,
+            Some(true),
+            true,
+            false,
+            false,
+            false,
+            true,
+            false,
+            Some(true),
+            false,
+        ));
+    }
+
+    fn config(spec: lingxi_core::host::McpTransportSpec) -> mcp::McpServerConfig {
+        mcp::McpServerConfig {
+            name: "srv".into(),
+            spec,
+            scope: mcp::ConfigScope::Dynamic,
+            disabled: false,
+            timeout_ms: None,
+            discovery_cache: None,
+            always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
+            config_error: None,
+            metadata: mcp::McpServerMetadata::default(),
+        }
+    }
+
+    fn stdio_config() -> mcp::McpServerConfig {
+        config(lingxi_core::host::McpTransportSpec::Stdio {
+            command: "tool-server".into(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+        })
+    }
+
+    fn source_string(value: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from(value)
+    }
+
+    fn deferred_attachment(payload: &str) -> crate::request_context::PromptIngressAttachment {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+
+        let message =
+            ConversationMessage::user_meta(lingxi_core::types::MessageId::new(), String::new());
+        crate::request_context::PromptIngressAttachment {
+            message,
+            payload: Source::parse(payload).expect("fixture payload is valid JSON"),
+            rendered: Source::parse("[]").expect("empty rendered list is valid JSON"),
+        }
+    }
+
+    #[test]
+    fn deferred_tool_change_blocks_preserve_source_schema_and_order() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+        use lingxi_core::types::ContentBlock;
+
+        let input_schema = Source::parse(
+            r#"{"type":"object","properties":{"2":{"type":"string"},"10":{"type":"number"}}}"#,
+        )
+        .unwrap();
+        let attachment = deferred_attachment(
+            r#"{"type":"deferred_tools_delta","retractedTools":[{"name":"mcp__srv__removed","cause":"disabled"}],"surfacedNames":["mcp__srv__new"],"restoredNames":["mcp__srv__restored"],"toolSearchAbsent":true}"#,
+        );
+        let message = native_tool_change_api_system_message(
+            &attachment,
+            &[lingxi_core::host::SourceToolWireDefinition {
+                name: "mcp__srv__new".into(),
+                description: Source::from("source description"),
+                input_schema: input_schema.clone(),
+                strict: true,
+                defer_loading: true,
+            }],
+        )
+        .expect("tool changes produce one API-system row");
+        let ConversationMessage::System {
+            api_system: Some(api_system),
+            subtype: Some(subtype),
+            ..
+        } = &message
+        else {
+            panic!("tool changes use the existing API-system transcript carrier");
+        };
+        assert_eq!(subtype, "api_system");
+        assert_eq!(api_system.content.len(), 3);
+        let ContentBlock::ProviderContent {
+            protocol: removal_protocol,
+            value: removal,
+        } = &api_system.content[0]
+        else {
+            panic!("first Native block is tool_removal");
+        };
+        assert_eq!(removal_protocol, "anthropic_messages");
+        assert_eq!(removal.string_at("/type"), Some("tool_removal"));
+        assert_eq!(removal.string_at("/tool/type"), Some("tool_reference"));
+        assert_eq!(removal.string_at("/tool/name"), Some("mcp__srv__removed"));
+
+        let ContentBlock::ProviderContent {
+            value: addition, ..
+        } = &api_system.content[1]
+        else {
+            panic!("second Native block is tool_addition");
+        };
+        assert_eq!(addition.string_at("/type"), Some("tool_addition"));
+        assert_eq!(addition.string_at("/tool/type"), Some("tool_definition"));
+        assert_eq!(
+            addition.string_at("/tool/definition/name"),
+            Some("mcp__srv__new")
+        );
+        assert_eq!(
+            addition.string_at("/tool/definition/description"),
+            Some("source description")
+        );
+        assert_eq!(
+            addition
+                .subprojection("/tool/definition/input_schema")
+                .unwrap(),
+            input_schema,
+            "schemas stay as source projections rather than passing through serde"
+        );
+        assert_eq!(
+            addition
+                .at_pointer("/tool/definition/strict")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+
+        let ContentBlock::ProviderContent {
+            value: restored, ..
+        } = &api_system.content[2]
+        else {
+            panic!("third Native block restores a deferred tool");
+        };
+        assert_eq!(restored.string_at("/tool/type"), Some("tool_reference"));
+        assert_eq!(restored.string_at("/tool/name"), Some("mcp__srv__restored"));
+        assert_eq!(
+            native_tool_change_addition_names(std::slice::from_ref(&message)),
+            std::collections::HashSet::from([
+                "mcp__srv__new".to_owned(),
+                "mcp__srv__restored".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn deferred_tool_name_only_record_requires_a_name_only_surfacing_path() {
+        let attachment = deferred_attachment(
+            r#"{"type":"deferred_tools_delta","surfacedNames":["alpha","beta"]}"#,
+        );
+        let delta_uuid = attachment.message.id().to_string();
+        let deferral = tool_api::DeferralState::new(tool_api::ToolSearchMode::Enabled, false);
+        let inline_names = std::collections::HashSet::from(["alpha".to_owned()]);
+        let addition_names = std::collections::HashSet::from(["beta".to_owned()]);
+
+        assert!(deferred_tools_name_only_record_attachment(
+            &attachment,
+            &deferral,
+            false,
+            true,
+            &inline_names,
+            &addition_names,
+        )
+        .is_none());
+        assert!(deferred_tools_name_only_record_attachment(
+            &attachment,
+            &deferral,
+            true,
+            true,
+            &inline_names,
+            &addition_names,
+        )
+        .is_none());
+
+        let name_only = deferred_tools_name_only_record_attachment(
+            &attachment,
+            &deferral,
+            true,
+            true,
+            &inline_names,
+            &std::collections::HashSet::new(),
+        )
+        .expect("a surfaced name missing from both current wire paths latches its UUID");
+        assert_eq!(
+            name_only.payload.string_at("/type"),
+            Some("deferred_tools_record")
+        );
+        assert_eq!(
+            name_only.payload.array_len("/nameOnlyAnnouncements"),
+            Some(1)
+        );
+        assert_eq!(
+            name_only.payload.string_at("/nameOnlyAnnouncements/0"),
+            Some(delta_uuid.as_str())
+        );
+    }
+
+    #[test]
+    fn tool_search_absence_api_system_additions_use_the_current_inline_definitions() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+        use lingxi_core::types::ContentBlock;
+
+        let attachment = deferred_attachment(
+            r#"{"type":"deferred_tools_delta","surfacedNames":["alpha","beta"],"toolSearchAbsent":true}"#,
+        );
+        let message = native_tool_change_api_system_message(
+            &attachment,
+            &[lingxi_core::host::SourceToolWireDefinition {
+                name: "alpha".into(),
+                description: Source::from("alpha description"),
+                input_schema: Source::parse(r#"{"type":"object"}"#).unwrap(),
+                strict: false,
+                defer_loading: true,
+            }],
+        )
+        .expect("Native pfr path defines surfaced names through API-system blocks");
+        let ConversationMessage::System {
+            api_system: Some(api_system),
+            ..
+        } = &message
+        else {
+            panic!("tool additions use an API-system row");
+        };
+        assert_eq!(api_system.content.len(), 2);
+        let ContentBlock::ProviderContent { value: alpha, .. } = &api_system.content[0] else {
+            panic!("first addition is alpha");
+        };
+        assert_eq!(alpha.string_at("/tool/type"), Some("tool_definition"));
+        assert_eq!(alpha.string_at("/tool/definition/name"), Some("alpha"));
+        let ContentBlock::ProviderContent { value: beta, .. } = &api_system.content[1] else {
+            panic!("second addition is beta");
+        };
+        assert_eq!(beta.string_at("/tool/type"), Some("tool_reference"));
+        assert_eq!(beta.string_at("/tool/name"), Some("beta"));
+
+        let ordinary_tool_search =
+            deferred_attachment(r#"{"type":"deferred_tools_delta","surfacedNames":["alpha"]}"#);
+        assert!(native_tool_change_api_system_message(&ordinary_tool_search, &[]).is_none());
+    }
+
+    #[test]
+    fn wgn_retains_only_native_revocation_causes() {
+        let blocked_config = {
+            let mut config = stdio_config();
+            config.tool_permissions.insert(
+                "write".into(),
+                lingxi_core::host::McpPermissionCeiling::Deny,
+            );
+            config
+        };
+        let sdk_config = config(lingxi_core::host::McpTransportSpec::SdkControl {
+            control_channel_id: "host".into(),
+        });
+        let policy_failure = mcp::McpFailedServerSnapshot {
+            name: "srv".into(),
+            error_code: None,
+            error: Some(source_string("Blocked by enterprise managed policy")),
+            native_raw_error: Some(source_string("Blocked by enterprise managed policy")),
+            will_retry: None,
+        };
+        let unconfigured_failure = mcp::McpFailedServerSnapshot {
+            name: "srv".into(),
+            error_code: Some(source_string("UNCONFIGURED")),
+            error: None,
+            native_raw_error: None,
+            will_retry: None,
+        };
+
+        assert_eq!(
+            native_mcp_revocation_cause(
+                "mcp__srv__tool",
+                &["mcp__srv__to*".into()],
+                Some(lingxi_core::host::McpActionState::Connected),
+                None,
+                None,
+            ),
+            Some("denied"),
+            "Native wildcard deny patterns are evaluated on the normalized full MCP name"
+        );
+        assert_eq!(
+            native_mcp_revocation_cause(
+                "mcp__srv__write",
+                &[],
+                Some(lingxi_core::host::McpActionState::Connected),
+                Some(&blocked_config),
+                None,
+            ),
+            Some("org_blocked")
+        );
+        assert_eq!(
+            native_mcp_revocation_cause(
+                "mcp__srv__tool",
+                &[],
+                Some(lingxi_core::host::McpActionState::Disabled),
+                Some(&stdio_config()),
+                None,
+            ),
+            Some("disabled")
+        );
+        assert_eq!(
+            native_mcp_revocation_cause(
+                "mcp__srv__tool",
+                &[],
+                Some(lingxi_core::host::McpActionState::Disabled),
+                Some(&sdk_config),
+                None,
+            ),
+            Some("switched_off")
+        );
+        assert_eq!(
+            native_mcp_revocation_cause(
+                "mcp__srv__tool",
+                &[],
+                Some(lingxi_core::host::McpActionState::Failed),
+                None,
+                Some(&policy_failure),
+            ),
+            Some("policy_blocked")
+        );
+        let display_only_policy_failure = mcp::McpFailedServerSnapshot {
+            name: "srv".into(),
+            error_code: None,
+            error: Some(source_string("Blocked by enterprise managed policy")),
+            native_raw_error: None,
+            will_retry: None,
+        };
+        assert_eq!(
+            native_mcp_revocation_cause(
+                "mcp__srv__tool",
+                &[],
+                Some(lingxi_core::host::McpActionState::Failed),
+                None,
+                Some(&display_only_policy_failure),
+            ),
+            None,
+            "displayDetail-only text must not become a Native policy_blocked cause"
+        );
+        assert_eq!(
+            native_mcp_revocation_cause(
+                "mcp__srv__tool",
+                &[],
+                Some(lingxi_core::host::McpActionState::Failed),
+                None,
+                Some(&unconfigured_failure),
+            ),
+            Some("not_configured")
+        );
+        let disconnected = mcp::McpFailedServerSnapshot {
+            name: "srv".into(),
+            error_code: None,
+            error: Some(source_string("connection reset")),
+            native_raw_error: Some(source_string("connection reset")),
+            will_retry: Some(true),
+        };
+        assert_eq!(
+            native_mcp_revocation_cause(
+                "mcp__srv__tool",
+                &[],
+                Some(lingxi_core::host::McpActionState::Failed),
+                None,
+                Some(&disconnected),
+            ),
+            None,
+            "Native disconnected and retrying failures are not retractedTools causes"
+        );
+        assert_eq!(
+            native_mcp_revocation_cause("mcp__srv__tool", &[], None, None, None),
+            Some("not_configured"),
+            "Native maps a missing current MCP client row to not_configured"
+        );
     }
 }
 

@@ -927,6 +927,19 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::DenyPermission.request_id", "u64");
 
     put(
+        "ClientCommand::InitializeProactivity",
+        "initialize_proactivity",
+    );
+    put(
+        "ClientCommand::InitializeProactivity.proactivity",
+        "Option<bool>",
+    );
+    put(
+        "ClientCommand::InitializeProactivity.reinitialize",
+        "Option<bool>",
+    );
+
+    put(
         "ClientCommand::ApproveComputerAccess",
         "approve_computer_access",
     );
@@ -941,6 +954,15 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::SetPermissionMode", "set_permission_mode");
     put("ClientCommand::SetPermissionMode.mode", "String");
+    put(
+        "ClientCommand::SetProactivityLevel",
+        "set_proactivity_level",
+    );
+    put("ClientCommand::SetProactivityLevel.level", "String");
+    put(
+        "ClientCommand::SetProactivityLevel.offer_bypass",
+        "Option<bool>",
+    );
 
     put(
         "ClientCommand::ListProviderCredentials",
@@ -1674,6 +1696,22 @@ fn current_contract_index() -> ContractIndex {
         "ConversationControlsDto.reasoning",
         "ReasoningControlStateDto",
     );
+    put(
+        "ConversationControlsDto.proactivity",
+        "Option<NativeProactivityControlStateDto>",
+    );
+    put("NativeProactivityControlStateDto.opted_in", "bool");
+    put("NativeProactivityControlStateDto.selector_gate", "bool");
+    put(
+        "NativeProactivityControlStateDto.selector_gate_ever_on",
+        "bool",
+    );
+    put(
+        "NativeProactivityControlStateDto.attachments_enabled",
+        "bool",
+    );
+    put("NativeProactivityControlStateDto.opt_in_available", "bool");
+    put("NativeProactivityControlStateDto.level", "String");
 
     // ── ComputerAccessRequestDto / ComputerAccessResponseDto
     //    (computer_access.rs) ────────────────────────────────────────────
@@ -2285,6 +2323,7 @@ fn contract_index_covers_every_dto() {
                         disabled_reason: None,
                     },
                 },
+                proactivity: None,
             },
         },
         ClientEvent::SessionEnded,

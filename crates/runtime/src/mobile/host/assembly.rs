@@ -681,7 +681,13 @@ pub(super) async fn build_mobile_inner_with_ask(
             &cfg.lingxi_home.join("settings.json"),
         );
     let mut orch_cfg = OrchestratorConfig::default();
+    orch_cfg.model_catalog_restriction =
+        llm_runtime::model::allowlist::catalog_restriction_from_settings(
+            true,
+            provider_settings.available_models.clone(),
+        );
     orch_cfg.output_style = provider_settings.output_style.clone();
+    orch_cfg.language = provider_settings.language.clone();
     orch_cfg.output_style_dirs = vec![
         cfg.lingxi_home.join("output-styles"),
         cfg.cwd.join(branding::DOT_DIR).join("output-styles"),
@@ -1913,7 +1919,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             credentials.clone(),
             Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
             shared_command_registry.clone(),
-            Arc::new(RwLock::new(skill_api::SkillRegistry::new())),
+            Arc::new(RwLock::new(skill::SkillRegistry::new())),
             hook_registry.clone(),
             Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
             mcp_registry.clone(),
@@ -1940,12 +1946,18 @@ pub(super) async fn build_mobile_inner_with_ask(
     // slash dispatcher and listing provider use. The registry is filled below
     // once the orchestrator handle is available, and later `/reload-skills`
     // mutations stay visible to all three surfaces.
+    // Native shares one per-session throttle between slash invocations and the
+    // Skill tool so either surface updates the same usage record at most once
+    // every sixty seconds for a canonical name.
+    let skill_usage_session =
+        command_api::skill_usage::SkillUsageSession::new(cfg.lingxi_home.clone());
     let live_skill_loader = Arc::new(
         crate::mobile::skill_loader::MobileDiskSkillLoader::for_mode(
             shared_command_registry.clone(),
             cfg.session_mode,
         )
-        .with_prompt_cwd(session_cwd.clone()),
+        .with_prompt_cwd(session_cwd.clone())
+        .with_skill_usage_session(skill_usage_session.clone()),
     );
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = live_skill_loader.clone();
     let agent_skill_loader: Arc<dyn lingxi_core::host::skill_loader::SkillLoader> =
@@ -1963,6 +1975,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         cfg.session_mode,
         Some(read_state_map.clone()),
         super::mobile_code_review_suggestion_provider(cfg.clone()),
+        Some(cfg.clone()),
     );
     #[cfg(test)]
     let wired_skill_loader = skill_loader.clone();
@@ -2066,7 +2079,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     let child_skill_listing_provider = wired_skill_listing_provider.clone();
     tools.set_bash_precommit_skills_provider(move || {
         let provider = child_skill_listing_provider.clone();
-        async move { provider.bash_precommit_skills().await }
+        async move {
+            let snapshot = provider.skill_listing_snapshot().await;
+            provider.bash_precommit_skills(&snapshot.entries).await
+        }
     });
     // Oracle `kq` — publish the read-auto-allow probe now that BOTH inputs
     // exist: the policy, and the FINAL tool list. Earlier means an unknown tool
@@ -2315,6 +2331,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // launched workflow finished on the next turn (desktop mirror).
     .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
         task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+        orchestrator::task_notifications_provider::TaskDeliveryHostFacts::default(),
     )))
     // SKILLLIST.1: enumerate model-invocable skills each turn so the model
     // can discover bundled and user skills. Reads the shared registry lazily;
@@ -2575,7 +2592,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             let orch = bundled_prompt_model_orch.clone();
             Box::pin(async move { orch.bundled_prompt_model().await.map(Some) })
         }))
-        .with_skill_usage_home(cfg.lingxi_home.clone());
+        .with_skill_usage_session(skill_usage_session);
     let dispatcher = if cfg.session_mode == session::jsonl::SessionMode::Code {
         let background_command_handle = handle.clone();
         dispatcher
@@ -3120,6 +3137,8 @@ pub fn build_mobile_engine_inner(
                                         text: prompt,
                                         is_meta: true,
                                         message_id: None,
+                                        message_origin: None,
+                                        prompt_source: None,
                                         queue_priority: Some("later".into()),
                                         scheduled_task_id,
                                         scheduled_fire_id,

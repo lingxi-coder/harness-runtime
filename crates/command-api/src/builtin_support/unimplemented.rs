@@ -9,7 +9,7 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 0 step 4 for the byte-locked literal.
 
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{BuiltinCommandHandler, CommandResult, NativeCommandType};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 
@@ -21,6 +21,9 @@ use async_trait::async_trait;
 pub struct UnimplementedCommandHandler {
     name: String,
     description: String,
+    native_type: Option<NativeCommandType>,
+    disable_non_interactive: bool,
+    supports_non_interactive: bool,
 }
 
 impl UnimplementedCommandHandler {
@@ -31,7 +34,24 @@ impl UnimplementedCommandHandler {
         Self {
             name: name.into(),
             description: description.into(),
+            native_type: None,
+            disable_non_interactive: false,
+            supports_non_interactive: false,
         }
+    }
+
+    /// Attach source-bound Native command-pool metadata to this registration.
+    #[must_use]
+    pub fn with_native_metadata(
+        mut self,
+        native_type: Option<NativeCommandType>,
+        disable_non_interactive: bool,
+        supports_non_interactive: bool,
+    ) -> Self {
+        self.native_type = native_type;
+        self.disable_non_interactive = disable_non_interactive;
+        self.supports_non_interactive = supports_non_interactive;
+        self
     }
 
     /// Produce the locked stub literal for a given command name (without `/`).
@@ -58,6 +78,18 @@ impl BuiltinCommandHandler for UnimplementedCommandHandler {
 
     fn description(&self) -> &str {
         &self.description
+    }
+
+    fn native_type(&self) -> Option<NativeCommandType> {
+        self.native_type
+    }
+
+    fn disable_non_interactive(&self) -> bool {
+        self.disable_non_interactive
+    }
+
+    fn supports_non_interactive(&self) -> bool {
+        self.supports_non_interactive
     }
 }
 

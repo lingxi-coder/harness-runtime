@@ -238,6 +238,7 @@ async fn explicit_rules_still_outrank_the_classifier() {
         value: PermissionRuleValue {
             tool_name: "TaskCreate".into(),
             rule_content: None,
+            original_rule: None,
         },
         behavior: PermissionBehavior::Deny,
         source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -284,6 +285,7 @@ fn allow_rule(tool: &str, content: Option<&str>) -> PermissionRule {
         value: PermissionRuleValue {
             tool_name: tool.into(),
             rule_content: content.map(Utf16JsonProjection::from),
+            original_rule: None,
         },
         behavior: PermissionBehavior::Allow,
         source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),

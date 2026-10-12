@@ -25,6 +25,8 @@ const MODEL: &str = "claude-sonnet-4-6";
 enum Failure {
     Transport,
     FileUploadOutcomeUnknown,
+    ProxyAuthHelper407,
+    ProxyTunnel407,
     Status(u16),
     Body,
 }
@@ -56,6 +58,27 @@ impl ProbeTransport {
 fn connection_error() -> LlmError {
     LlmError::Transport {
         message: "connection lost after request dispatch".into(),
+    }
+}
+
+fn proxy_helper_407() -> LlmError {
+    LlmError::ProxyAuthHelperRetry {
+        source: Box::new(LlmError::Authentication {
+            message: "407 {\"error\":\"proxy authentication required\"}".into(),
+        }),
+        challenge: Some(wire::ProxyAuthHelperChallenge {
+            status: 407,
+            proxy_authenticate: Some(b"Basic realm=private-proxy".to_vec()),
+        }),
+    }
+}
+
+fn proxy_tunnel_407() -> LlmError {
+    LlmError::ProxyTunnelResponse {
+        status: 407,
+        proxy_authenticate: Some(wire::ProxyAuthHeader::new(
+            b"Basic realm=private-proxy".to_vec(),
+        )),
     }
 }
 
@@ -92,6 +115,8 @@ impl llm_runtime::test_support::FixtureTransport for ProbeTransport {
             (true, Failure::FileUploadOutcomeUnknown) => Err(LlmError::FileUploadOutcomeUnknown {
                 message: "provider may have accepted the upload".into(),
             }),
+            (true, Failure::ProxyAuthHelper407) => Err(proxy_helper_407()),
+            (true, Failure::ProxyTunnel407) => Err(proxy_tunnel_407()),
             (true, Failure::Status(status)) => Ok(response(status)),
             _ => Ok(response(200)),
         };
@@ -108,6 +133,8 @@ impl llm_runtime::test_support::FixtureTransport for ProbeTransport {
             (true, Failure::FileUploadOutcomeUnknown) => Err(LlmError::FileUploadOutcomeUnknown {
                 message: "provider may have accepted the upload".into(),
             }),
+            (true, Failure::ProxyAuthHelper407) => Err(proxy_helper_407()),
+            (true, Failure::ProxyTunnel407) => Err(proxy_tunnel_407()),
             (true, Failure::Body) => Ok(StreamingResponse {
                 status: 200,
                 headers: BTreeMap::new(),
@@ -562,6 +589,65 @@ async fn hosted_stream_failures_never_retry_or_switch_connections() {
                 "hosted stream must only be dispatched once"
             );
         }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn live_proxy_helper_407_retries_once_on_the_same_request_even_when_hosted() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
+    for streaming in [false, true] {
+        let transport = ProbeTransport::new(Failure::ProxyAuthHelper407);
+        let service = service(transport.clone(), false);
+        if streaming {
+            let stream = service.stream_request(request(true)).await.unwrap();
+            assert!(stream.collect::<Vec<_>>().await.iter().all(Result::is_ok));
+        } else {
+            service
+                .execute_side_query_request(request(true))
+                .await
+                .unwrap();
+        }
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one live helper 407 consumes one retry");
+        assert_eq!(seen[0].url, seen[1].url, "retry stays on the same endpoint");
+        assert_eq!(
+            seen[0].body_json.string_at("/model").as_deref(),
+            Some(MODEL)
+        );
+        assert_eq!(
+            seen[1].body_json.string_at("/model").as_deref(),
+            Some(MODEL),
+            "retry keeps the same model"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn raw_connect_407_is_terminal_without_retry_or_connection_failover() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
+    for streaming in [false, true] {
+        let transport = ProbeTransport::new(Failure::ProxyTunnel407);
+        let service = service(transport.clone(), true);
+        let error = if streaming {
+            match service.stream_request(request(false)).await {
+                Err(error) => error,
+                Ok(stream) => stream
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .find_map(Result::err)
+                    .unwrap_or_else(|| panic!("raw CONNECT 407 unexpectedly opened a stream")),
+            }
+        } else {
+            service
+                .execute_side_query_request(request(false))
+                .await
+                .unwrap_err()
+        };
+        assert!(error.is_proxy_tunnel_auth_rejection());
+        assert!(!error.is_proxy_auth_helper_retry());
+        assert_eq!(ApiService::status_of(&error), Some(407));
+        assert_eq!(transport.count(), 1, "raw tunnel 407 cannot fail over");
     }
 }
 

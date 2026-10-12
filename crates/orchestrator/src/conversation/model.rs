@@ -4,6 +4,124 @@ use super::*;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock};
 use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 
+impl ConversationOrchestrator {
+    /// Native model-selection admission applies on explicit Claude provider
+    /// routes. Other configured providers keep their own catalog admission.
+    pub(crate) fn route_uses_native_model_catalog(route: &llm_runtime::MediaRoute) -> bool {
+        matches!(
+            &route.main.provider_id,
+            llm_runtime::ProviderId::AnthropicFirstParty
+                | llm_runtime::ProviderId::BedrockClaude
+                | llm_runtime::ProviderId::VertexClaude
+                | llm_runtime::ProviderId::FoundryClaude
+        )
+    }
+
+    /// Compare models after the current route resolver has turned aliases and
+    /// qualified references into the actual request model. This is the
+    /// Native `Dt` identity comparison used by model override gates; keeping
+    /// provider/profile identity alongside the model prevents an alias on a
+    /// different configured route from inheriting an exemption.
+    pub(crate) fn same_native_model_identity(
+        api: &dyn OrchestratorApiClient,
+        left_model: &str,
+        left_profile: Option<&str>,
+        right_model: &str,
+        right_profile: Option<&str>,
+    ) -> bool {
+        let resolve = |model: &str, profile: Option<&str>| {
+            api.resolve_media_route(model, profile)
+                .or_else(|_| api.resolve_media_route(model, None))
+                .ok()
+        };
+        let (Some(left), Some(right)) = (
+            resolve(left_model, left_profile),
+            resolve(right_model, right_profile),
+        ) else {
+            return false;
+        };
+        if !Self::route_uses_native_model_catalog(&left)
+            || !Self::route_uses_native_model_catalog(&right)
+            || left.main.provider_id != right.main.provider_id
+            || left.main.profile_name != right.main.profile_name
+        {
+            return false;
+        }
+
+        llm_runtime::model::allowlist::normalize(&left.main.request_model)
+            == llm_runtime::model::allowlist::normalize(&right.main.request_model)
+    }
+
+    /// Native `d_` does not treat the dynamic `best` or plan-strategy alias as
+    /// the default model, even if the current catalog resolves one to the same
+    /// concrete route. Those aliases remain subject to ordinary admission.
+    pub(crate) fn matches_native_default_model_identity(
+        api: &dyn OrchestratorApiClient,
+        candidate: &str,
+        candidate_profile: Option<&str>,
+        default_model: &str,
+        default_profile: Option<&str>,
+    ) -> bool {
+        let candidate_alias =
+            lingxi_core::host::effort::trim_js_whitespace(candidate).to_ascii_lowercase();
+        let candidate_alias = candidate_alias
+            .strip_suffix("[1m]")
+            .unwrap_or(&candidate_alias);
+        if matches!(candidate_alias, "best" | "haiku" | "opusplan") {
+            return false;
+        }
+        Self::same_native_model_identity(
+            api,
+            candidate,
+            candidate_profile,
+            default_model,
+            default_profile,
+        )
+    }
+
+    /// Apply a live host settings reader when available, then fall back to the
+    /// construction snapshot used by headless hosts. The reader's `None` means
+    /// it has no answer for this model, so the explicit configured state still
+    /// decides absent/empty/refused admission.
+    pub(crate) async fn model_catalog_allows(
+        &self,
+        model: &str,
+    ) -> Result<bool, hooks::mods::ModError> {
+        if let Some(reader) = self.mod_settings_reader.as_ref() {
+            if let Some(allowed) = reader.model_allowed(model).await? {
+                return Ok(allowed);
+            }
+        }
+        Ok(llm_runtime::model::allowlist::model_allowed_under_catalog(
+            model,
+            &self.config.model_catalog_restriction,
+            Some(&self.config.server_fallback_regular_model_overrides),
+        ))
+    }
+
+    /// Return `None` when routing does not identify a Native Claude route, so
+    /// provider-owned catalogs keep their existing admission behavior.
+    pub(crate) async fn model_catalog_route_allows(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<Option<bool>, hooks::mods::ModError> {
+        let route = self
+            .api
+            .resolve_media_route(model, profile)
+            .or_else(|_| self.api.resolve_media_route(model, None));
+        let Ok(route) = route else {
+            return Ok(None);
+        };
+        if !Self::route_uses_native_model_catalog(&route) {
+            return Ok(None);
+        }
+        self.model_catalog_allows(&route.main.request_model)
+            .await
+            .map(Some)
+    }
+}
+
 fn mod_projection_display(input: &Utf16JsonProjection, pointer: &str) -> Option<String> {
     String::from_utf16(&input.string_units(pointer)?).ok()
 }
@@ -838,6 +956,9 @@ impl ConversationOrchestrator {
             .resolve_media_route(&model, current_profile.as_deref())
             .or_else(|_| self.api.resolve_media_route(&model, None))
             .ok();
+        let native_catalog_route = route
+            .as_ref()
+            .is_some_and(Self::route_uses_native_model_catalog);
         let (resolved_model, profile) = match route {
             Some(route) => (route.main.request_model, Some(route.main.profile_name)),
             None => (
@@ -847,12 +968,10 @@ impl ConversationOrchestrator {
                     .flatten(),
             ),
         };
-        if let Some(reader) = self.mod_settings_reader.as_ref() {
-            if reader.model_allowed(&resolved_model).await? == Some(false) {
-                return Err(plugin_error(format!(
-                    "{plugin}: $.model.complete: model \"{model}\" is not in this organization's allowlist"
-                )));
-            }
+        if native_catalog_route && !self.model_catalog_allows(&resolved_model).await? {
+            return Err(plugin_error(format!(
+                "{plugin}: $.model.complete: model \"{model}\" is not in this organization's allowlist"
+            )));
         }
         let upper_limit =
             llm_runtime::model::context_window::known_output_token_limit_for_model(&resolved_model)
@@ -904,6 +1023,8 @@ impl ConversationOrchestrator {
         };
         let request = sidequery::SideQueryRequest {
             model_attempt: None,
+            typed_attachment_ids: std::collections::HashSet::new(),
+            task_deliveries: std::collections::HashMap::new(),
             model: resolved_model,
             profile,
             system_prompt: system.filter(|system| !source_text_is_empty(system)),
@@ -1930,6 +2051,37 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             .await;
     }
 
+    /// Save the exact physical history snapshot associated with a successful
+    /// main request. Inline context stays in the separate user-context slot so
+    /// replay can preserve the Native prefix boundary by message identity.
+    pub(crate) async fn save_cache_safe_params_for_request(
+        &self,
+        system: Option<&SystemPromptInput>,
+        model: &str,
+        tools: &[lingxi_core::host::SourceToolWireDefinition],
+        request_history: &[ConversationMessage],
+        inline_context: Option<&ConversationMessage>,
+    ) {
+        let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
+            return;
+        };
+        let mut params = self.build_cache_safe_params(system, model, tools).await;
+        params.fork_context_messages = request_history
+            .iter()
+            .filter(|message| inline_context.is_none_or(|context| message.id() != context.id()))
+            .cloned()
+            .collect();
+        params.typed_attachment_ids =
+            self.typed_attachment_ids_for_snapshot(&params.fork_context_messages);
+        params.task_deliveries = self
+            .task_deliveries_for_snapshot(&params.fork_context_messages)
+            .await;
+        if let Some(inline_context) = inline_context {
+            params.user_context_message = Some(inline_context.clone());
+        }
+        slot.save(params).await;
+    }
+
     /// Assemble a prefix without publishing it as a main-thread request.
     async fn build_cache_safe_params(
         &self,
@@ -1939,12 +2091,12 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     ) -> sidequery::CacheSafeParams {
         let (fork_context_messages, session_id, model_profile) = {
             let s = self.session.lock().await;
-            (
-                s.model_context_history(),
-                s.session_id,
-                s.model_profile.clone(),
-            )
+            let fork_context_messages = s.model_context_history();
+            (fork_context_messages, s.session_id, s.model_profile.clone())
         };
+        let task_deliveries = self
+            .task_deliveries_for_snapshot(&fork_context_messages)
+            .await;
         let transcript_path = self
             .transcript
             .jsonl_writer
@@ -1963,6 +2115,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         } else {
             self.additional_context_message().await
         };
+        let typed_attachment_ids = self.typed_attachment_ids_for_snapshot(&fork_context_messages);
         sidequery::CacheSafeParams {
             system_prompt: Arc::new(
                 system
@@ -1987,6 +2140,8 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                 append_system_prompt: None,
             },
             fork_context_messages,
+            typed_attachment_ids,
+            task_deliveries,
             transcript_path: (!transcript_path.as_os_str().is_empty()).then_some(transcript_path),
             // Overwritten by the slot on save; the value here is irrelevant.
             generation: 0,
@@ -3033,6 +3188,35 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         Some(tracker.session_scope(session_id).model_safety_observer())
     }
 
+    /// Publish the SDK's AFK-beta refusal to the host permission policy after a
+    /// model request settles. The SDK latch is conversation-scoped; checking
+    /// scope identity prevents a late request from tripping a replacement
+    /// session after `/clear`.
+    pub(crate) fn record_native_afk_beta_rejection_if_any(&self) {
+        let Some(scope) = llm_runtime::thinking_scope::current() else {
+            return;
+        };
+        self.record_native_afk_beta_rejection_for_scope(&scope);
+    }
+
+    fn record_native_afk_beta_rejection_for_scope(
+        &self,
+        scope: &llm_runtime::thinking_scope::ThinkingRecoveryScope,
+    ) {
+        let active_scope = self
+            .transcript
+            .thinking_recovery
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if active_scope == *scope
+            && scope
+                .beta_rejected(lingxi_llm_client::providers::anthropic::beta_repair::Beta::AfkMode)
+        {
+            self.perms.record_native_afk_beta_rejection();
+        }
+    }
+
     pub(crate) fn scope_api_session<'a, F: std::future::Future + 'a>(
         &'a self,
         non_interactive: bool,
@@ -3091,14 +3275,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 request_session_id,
                 future,
             );
-            llm_runtime::thinking_scope::scope_thinking_recovery(
-                scope,
+            let result = llm_runtime::thinking_scope::scope_thinking_recovery(
+                scope.clone(),
                 lingxi_core::host::session_flags::scope_non_interactive_session(
                     non_interactive,
                     future,
                 ),
             )
-            .await
+            .await;
+            self.record_native_afk_beta_rejection_for_scope(&scope);
+            result
         }
     }
 

@@ -36,6 +36,7 @@
 //!   access to the nested deny. It re-denies only non-glob deny paths STRICTLY
 //!   inside a re-allowed subpath, so it never over-denies.
 
+use crate::config::Utf16IgnoreViolationsConfig;
 use crate::env::{encode_sandboxed_command, Platform};
 use crate::fs_args::{ReadConfig, WriteConfig};
 #[cfg(test)]
@@ -1029,6 +1030,20 @@ pub fn parse_violation_chunk(
     chunk: &str,
     ignore_violations: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> Option<LogViolation> {
+    parse_violation_chunk_with_utf16(chunk, ignore_violations, None)
+}
+
+/// Parse a Native macOS monitor chunk while consulting an exact UTF-16
+/// `ignoreViolations` source map when the host retained it. JavaScript's
+/// `String.includes` compares UTF-16 code units, so a lone-surrogate pattern
+/// can match one half of a supplementary character in a log line or command.
+#[allow(clippy::implicit_hasher)]
+#[must_use]
+pub fn parse_violation_chunk_with_utf16(
+    chunk: &str,
+    ignore_violations: Option<&std::collections::HashMap<String, Vec<String>>>,
+    ignore_violations_utf16: Option<&Utf16IgnoreViolationsConfig>,
+) -> Option<LogViolation> {
     let lines: Vec<&str> = chunk.split('\n').collect();
 
     // Violation line: contains "Sandbox:" AND "deny".
@@ -1042,7 +1057,17 @@ pub fn parse_violation_chunk(
     let violation_details = {
         let idx = violation_line.find("Sandbox:")?;
         let rest = &violation_line[idx + "Sandbox:".len()..];
-        let trimmed = rest.trim_start_matches([' ', '\t']);
+        let whitespace_bytes = rest
+            .char_indices()
+            .take_while(|(_, ch)| is_ecmascript_whitespace(*ch))
+            .map(|(index, ch)| index + ch.len_utf8())
+            .last()?;
+        let trimmed = &rest[whitespace_bytes..];
+        let trimmed = trimmed
+            .strip_suffix('\r')
+            .or_else(|| trimmed.strip_suffix('\u{2028}'))
+            .or_else(|| trimmed.strip_suffix('\u{2029}'))
+            .unwrap_or(trimmed);
         if trimmed.is_empty() {
             return None;
         }
@@ -1075,23 +1100,36 @@ pub fn parse_violation_chunk(
         return None;
     }
 
-    // Ignore-list filtering (only when we recovered a command).
-    if let (Some(ignore), Some(cmd)) = (ignore_violations, command.as_ref()) {
-        // Wildcard patterns first.
-        if let Some(wildcard_paths) = ignore.get("*") {
-            if wildcard_paths.iter().any(|p| violation_details.contains(p)) {
-                return None;
-            }
-        }
-        // Command-specific patterns.
-        for (pattern, paths) in ignore {
-            if pattern == "*" {
-                continue;
-            }
-            if cmd.contains(pattern) && paths.iter().any(|p| violation_details.contains(p)) {
-                return None;
-            }
-        }
+    // Wildcard path filters apply even when the monitor could not recover a
+    // command; command-specific filters require the decoded command.
+    let ignored = if let Some(ignore) = ignore_violations_utf16 {
+        ignore.entries.iter().any(|(pattern, paths)| {
+            let wildcard = pattern.len() == 1 && pattern[0] == b'*' as u16;
+            let command_matches = wildcard
+                || command
+                    .as_deref()
+                    .is_some_and(|cmd| utf16_includes(cmd, pattern));
+            command_matches
+                && paths
+                    .iter()
+                    .any(|path| utf16_includes(&violation_details, path))
+        })
+    } else if let Some(ignore) = ignore_violations {
+        ignore
+            .get("*")
+            .is_some_and(|paths| paths.iter().any(|p| violation_details.contains(p)))
+            || command.as_deref().is_some_and(|cmd| {
+                ignore.iter().any(|(pattern, paths)| {
+                    pattern != "*"
+                        && cmd.contains(pattern)
+                        && paths.iter().any(|p| violation_details.contains(p))
+                })
+            })
+    } else {
+        false
+    };
+    if ignored {
+        return None;
     }
 
     Some(LogViolation {
@@ -1102,13 +1140,85 @@ pub fn parse_violation_chunk(
     })
 }
 
+fn is_ecmascript_whitespace(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0009}'
+            | '\u{000b}'
+            | '\u{000c}'
+            | '\u{0020}'
+            | '\u{00a0}'
+            | '\u{feff}'
+            | '\u{000d}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+    )
+}
+
+/// Consume the byte chunks read from Native's `log stream` stdout. The Native
+/// data handler parses each stdout chunk independently, so the command marker
+/// must not be retained across reads: a later deny record without a `CMD64_`
+/// line has no recovered command. `Buffer.toString()` uses replacement
+/// characters for malformed UTF-8; `from_utf8_lossy` keeps that behavior.
+fn consume_macos_log_stream<R, F>(
+    mut reader: R,
+    ignore_violations: Option<&std::collections::HashMap<String, Vec<String>>>,
+    ignore_violations_utf16: Option<&Utf16IgnoreViolationsConfig>,
+    mut callback: F,
+) -> std::io::Result<()>
+where
+    R: std::io::Read,
+    F: FnMut(LogViolation),
+{
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes_read = match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(bytes_read) => bytes_read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+
+        let chunk = String::from_utf8_lossy(&buffer[..bytes_read]);
+        if let Some(violation) =
+            parse_violation_chunk_with_utf16(&chunk, ignore_violations, ignore_violations_utf16)
+        {
+            callback(violation);
+        }
+    }
+}
+
+/// Terminate and reap an owned monitor process. `Child::drop` does not wait,
+/// so every monitor shutdown path must call this before releasing the child.
+fn terminate_and_reap(
+    child: &mut std::process::Child,
+) -> std::io::Result<std::process::ExitStatus> {
+    // `kill` can fail when the process has already exited; `wait` still needs
+    // to collect that status and reap it.
+    let _ = child.kill();
+    child.wait()
+}
+
+fn utf16_includes(haystack: &str, needle: &[u16]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .encode_utf16()
+        .collect::<Vec<_>>()
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 /// Start monitoring macOS system logs for sandbox violations.
 ///
 /// Spawns `log stream --predicate '(eventMessage ENDSWITH "<sessionSuffix>")'
-/// --style compact` and feeds each chunk through [`parse_violation_chunk`]; every
-/// surfaced [`LogViolation`] is handed to `callback`. Returns a join handle plus
-/// a stop closure that kills the `log` process (mirroring the TS returned
-/// `() => logProcess.kill('SIGTERM')`).
+/// --style compact` and feeds each stdout chunk through
+/// [`parse_violation_chunk`]; every surfaced [`LogViolation`] is handed to
+/// `callback`. The returned handle kills and reaps the `log` process on stop or
+/// drop, then joins the reader thread.
 ///
 /// macOS-gated because it shells `log stream` (unavailable elsewhere). The pure
 /// parsing/filtering lives in [`parse_violation_chunk`] and is tested on every
@@ -1120,11 +1230,12 @@ pub fn parse_violation_chunk(
 pub fn start_macos_sandbox_log_monitor<F>(
     callback: F,
     ignore_violations: Option<std::collections::HashMap<String, Vec<String>>>,
+    ignore_violations_utf16: Option<Utf16IgnoreViolationsConfig>,
 ) -> std::io::Result<MacosLogMonitor>
 where
     F: Fn(LogViolation) + Send + 'static,
 {
-    use std::io::{BufRead, BufReader};
+    use std::io::BufReader;
     use std::process::{Command, Stdio};
 
     let predicate = format!("(eventMessage ENDSWITH \"{}\")", session_suffix());
@@ -1134,30 +1245,31 @@ where
         .stderr(Stdio::null())
         .spawn()?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("log stream: no stdout"))?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = terminate_and_reap(&mut child);
+        return Err(std::io::Error::other("log stream: no stdout"));
+    };
 
-    // The TS handler splits each `data` chunk on newlines and looks for a
-    // Sandbox line + an adjacent CMD64 line. `log --style compact` emits one
-    // record per line; we accumulate a small rolling window so a CMD64 line and
-    // its Sandbox line in the same flush are seen together.
-    let handle = std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        let mut window: Vec<String> = Vec::new();
-        for line in reader.lines().map_while(Result::ok) {
-            window.push(line);
-            if window.len() > 8 {
-                window.remove(0);
-            }
-            let chunk = window.join("\n");
-            if let Some(v) = parse_violation_chunk(&chunk, ignore_violations.as_ref()) {
-                callback(v);
-                window.clear();
-            }
+    // Native's callback selects the first Sandbox-deny and first CMD64 line
+    // from one stdout data chunk. Keep that scope: a rolling line window can
+    // associate a stale command with a later unrelated violation.
+    let handle = match std::thread::Builder::new()
+        .name("sandbox-log-stream".to_string())
+        .spawn(move || {
+            let reader = BufReader::new(stdout);
+            let _ = consume_macos_log_stream(
+                reader,
+                ignore_violations.as_ref(),
+                ignore_violations_utf16.as_ref(),
+                callback,
+            );
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = terminate_and_reap(&mut child);
+            return Err(error);
         }
-    });
+    };
 
     Ok(MacosLogMonitor {
         child,
@@ -1165,8 +1277,9 @@ where
     })
 }
 
-/// Handle for a running [`start_macos_sandbox_log_monitor`]. Call [`MacosLogMonitor::stop`]
-/// (or drop) to terminate the underlying `log stream` process.
+/// Handle for a running [`start_macos_sandbox_log_monitor`]. Call
+/// [`MacosLogMonitor::stop`] (or drop) to terminate and reap the underlying
+/// `log stream` process.
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
 pub struct MacosLogMonitor {
@@ -1176,10 +1289,9 @@ pub struct MacosLogMonitor {
 
 #[cfg(target_os = "macos")]
 impl MacosLogMonitor {
-    /// Kill the `log stream` process and join the reader thread (mirrors the TS
-    /// returned `() => logProcess.kill('SIGTERM')`).
+    /// Kill and reap the `log stream` process, then join its reader thread.
     pub fn stop(mut self) {
-        let _ = self.child.kill();
+        let _ = terminate_and_reap(&mut self.child);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -1189,7 +1301,7 @@ impl MacosLogMonitor {
 #[cfg(target_os = "macos")]
 impl Drop for MacosLogMonitor {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        let _ = terminate_and_reap(&mut self.child);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -1608,6 +1720,16 @@ mod profile_text_tests {
     }
 
     #[test]
+    fn parse_violation_requires_native_regex_whitespace_and_strips_crlf() {
+        assert!(parse_violation_chunk("Sandbox:deny file-write /tmp/x", None).is_none());
+
+        let violation =
+            parse_violation_chunk("Sandbox:\u{000b}process(1) deny file-write /tmp/x\r", None)
+                .expect("Native's \\s+ accepts vertical tab");
+        assert_eq!(violation.line, "process(1) deny file-write /tmp/x");
+    }
+
+    #[test]
     fn parse_violation_filters_noisy() {
         let chunk = "Sandbox: foo(1) deny mach-lookup com.apple.diagnosticd";
         assert!(parse_violation_chunk(chunk, None).is_none());
@@ -1636,6 +1758,133 @@ mod profile_text_tests {
         let mut ignore = std::collections::HashMap::new();
         ignore.insert("npm".to_string(), vec![".npmrc".to_string()]);
         assert!(parse_violation_chunk(&chunk, Some(&ignore)).is_none());
+    }
+
+    #[test]
+    fn utf16_command_pattern_matches_surrogate_half_inside_supplementary_text() {
+        let enc = encode_sandboxed_command("tool😀");
+        let chunk = format!("CMD64_{enc}_END_z_SBX\nSandbox: tool(1) deny file-write /tmp/blocked");
+        let config = Utf16IgnoreViolationsConfig {
+            entries: vec![(vec![0xd83d], vec!["/tmp/blocked".encode_utf16().collect()])],
+        };
+
+        assert!(parse_violation_chunk_with_utf16(&chunk, None, Some(&config)).is_none());
+    }
+
+    #[test]
+    fn utf16_wildcard_path_pattern_matches_surrogate_half_inside_supplementary_path() {
+        let chunk = "Sandbox: tool(1) deny file-write /tmp/😀/blocked";
+        let config = Utf16IgnoreViolationsConfig {
+            entries: vec![(
+                vec![b'*' as u16],
+                vec!["/tmp/".encode_utf16().chain([0xd83d]).collect()],
+            )],
+        };
+
+        assert!(parse_violation_chunk_with_utf16(chunk, None, Some(&config)).is_none());
+    }
+
+    #[derive(Debug)]
+    struct ChunkedReader(std::collections::VecDeque<Vec<u8>>);
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let Some(chunk) = self.0.pop_front() else {
+                return Ok(0);
+            };
+            let count = output.len().min(chunk.len());
+            output[..count].copy_from_slice(&chunk[..count]);
+            if count < chunk.len() {
+                self.0.push_front(chunk[count..].to_vec());
+            }
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn log_stream_does_not_reuse_command_from_a_previous_chunk() {
+        let encoded = encode_sandboxed_command("first command");
+        let reader = ChunkedReader(std::collections::VecDeque::from([
+            format!("CMD64_{encoded}_END_x_SBX\n").into_bytes(),
+            b"Sandbox: second(22) deny file-write /tmp/blocked\n".to_vec(),
+        ]));
+        let mut violations = Vec::new();
+
+        consume_macos_log_stream(reader, None, None, |violation| {
+            violations.push(violation);
+        })
+        .expect("consume log chunks");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].line,
+            "second(22) deny file-write /tmp/blocked"
+        );
+        assert_eq!(violations[0].command, None);
+        assert_eq!(violations[0].encoded_command, None);
+    }
+
+    #[test]
+    fn log_stream_uses_native_first_markers_without_pid_pairing() {
+        let first = encode_sandboxed_command("command from pid 10");
+        let second = encode_sandboxed_command("command from pid 20");
+        let chunk = format!(
+            "CMD64_{first}_END_x_SBX\nCMD64_{second}_END_x_SBX\nSandbox: process(20) deny file-write /tmp/blocked\n"
+        );
+        let reader = ChunkedReader(std::collections::VecDeque::from([chunk.into_bytes()]));
+        let mut violations = Vec::new();
+
+        consume_macos_log_stream(reader, None, None, |violation| {
+            violations.push(violation);
+        })
+        .expect("consume log chunk");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].command.as_deref(),
+            Some("command from pid 10")
+        );
+        assert!(
+            violations[0].line.contains("process(20)"),
+            "Native selects the first command and first deny within one data chunk without PID pairing"
+        );
+    }
+
+    #[test]
+    fn log_stream_decodes_malformed_utf8_with_node_replacement_semantics() {
+        let reader = ChunkedReader(std::collections::VecDeque::from([
+            b"Sandbox: process(1) deny file-write /tmp/\xff\n".to_vec(),
+        ]));
+        let mut violations = Vec::new();
+
+        consume_macos_log_stream(reader, None, None, |violation| {
+            violations.push(violation);
+        })
+        .expect("consume malformed log chunk");
+
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].line.contains("/tmp/\u{fffd}"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod monitor_process_lifecycle_tests {
+    use super::terminate_and_reap;
+    use std::process::Command;
+
+    #[test]
+    fn monitor_shutdown_kills_and_reaps_its_child() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn disposable monitor child");
+
+        let status = terminate_and_reap(&mut child).expect("kill and reap monitor child");
+        assert!(
+            !status.success(),
+            "the live child should have been terminated"
+        );
+        assert!(child.try_wait().expect("inspect reaped child").is_some());
     }
 }
 

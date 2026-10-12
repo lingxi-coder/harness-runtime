@@ -242,16 +242,21 @@ impl McpRegistry {
         };
 
         enum Refreshed {
-            Tools(Vec<lingxi_core::host::McpToolDto>),
+            Tools(
+                Vec<lingxi_core::host::McpToolDto>,
+                Vec<crate::connection::McpDroppedToolRecord>,
+            ),
             Prompts(Vec<lingxi_core::host::McpPromptDto>),
             Resources(Vec<lingxi_core::host::McpResourceDto>),
         }
         let refreshed = match change.kind {
-            McpCatalogKind::Tools => client
-                .list_tools()
-                .await
-                .map(Refreshed::Tools)
-                .map_err(|e| McpError::Internal(e.to_string().into()))?,
+            McpCatalogKind::Tools => {
+                let tools = client
+                    .list_tools()
+                    .await
+                    .map_err(|e| McpError::Internal(e.to_string().into()))?;
+                Refreshed::Tools(tools, client.dropped_tools_snapshot().await)
+            }
             McpCatalogKind::Prompts => client
                 .list_prompts()
                 .await
@@ -279,9 +284,13 @@ impl McpRegistry {
             return Ok(None);
         }
         let new_count = match refreshed {
-            Refreshed::Tools(next) => {
+            Refreshed::Tools(next, dropped_tools) => {
                 let new_count = next.len();
                 *tools = next;
+                self.dropped_tool_snapshots
+                    .write()
+                    .await
+                    .insert(current_id, (change.server_name.clone(), dropped_tools));
                 new_count
             }
             Refreshed::Prompts(next) => {

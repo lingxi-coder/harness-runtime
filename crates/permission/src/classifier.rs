@@ -771,6 +771,7 @@ mod tests {
             value: crate::PermissionRuleValue {
                 tool_name: "Bash".to_string(),
                 rule_content: None,
+                original_rule: None,
             },
         };
         assert!(!reason_allows_classifier(

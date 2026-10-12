@@ -277,7 +277,15 @@ async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
         !sink.is_terminal("aparktest").await,
         "completed turn is not a dead runner"
     );
-    assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
+    assert_eq!(
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
+        1
+    );
     // An expired deadline cannot evict the parked runner even after notification.
     registry
         .tasks
@@ -287,7 +295,12 @@ async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
         .unwrap()
         .base_mut()
         .evict_after = Some(SystemTime::UNIX_EPOCH);
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     assert!(registry.get("aparktest").await.is_some());
     sink.set_status("aparktest", TaskStatus::Running).await;
     let running = TaskRegistryHandle::get(registry.as_ref(), "aparktest")
@@ -309,7 +322,15 @@ async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
         None,
     )
     .await;
-    assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
+    assert_eq!(
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
+        1
+    );
     registry
         .kill_with_reason("aparktest", "user")
         .await
@@ -337,7 +358,11 @@ async fn parked_agent_notification_preserves_exact_result_units() {
         .mark_task_rested("asource01", Some(result), None, None, None, None, None)
         .await;
 
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 1);
     assert_eq!(
         notifications[0]
@@ -378,7 +403,12 @@ async fn resumed_agent_clears_exhausted_turn_note_before_normal_rest() {
         )
         .await;
     assert_eq!(
-        registry.take_pending_task_notifications().await[0].max_turns_reached,
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await[0]
+            .max_turns_reached,
         Some(2)
     );
     registry
@@ -406,7 +436,11 @@ async fn resumed_agent_clears_exhausted_turn_note_before_normal_rest() {
             None,
         )
         .await;
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 1);
     assert_eq!(
         notifications[0].max_turns_reached, None,
@@ -437,13 +471,24 @@ async fn notification_resume_clears_exhausted_turn_note() {
     registry
         .mark_task_rested("anoturn1", None, None, Some(owner), None, None, None)
         .await;
-    assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
+    assert_eq!(
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
+        1
+    );
     let mut child = agent_state("cnoturn1", TaskStatus::Completed);
     child.base_mut().creator_agent_id = Some(owner);
     registry.insert_state_for_test(child).await;
     assert_eq!(
         registry
-            .take_pending_task_notifications_for(Some(owner))
+            .take_pending_task_notifications_for(
+                Some(owner),
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
             .await
             .len(),
         1
@@ -504,12 +549,20 @@ async fn nested_parked_keepalive_defers_notifications_and_cascades_only_its_tree
         )
         .await;
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "A cannot notify while parked B still owns running C"
     );
     assert!(
         registry
-            .take_pending_task_notifications_for(Some(a))
+            .take_pending_task_notifications_for(
+                Some(a),
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
             .await
             .is_empty(),
         "B cannot notify before C finishes"
@@ -560,12 +613,20 @@ async fn completed_child_keeps_parked_ancestors_until_recipient_fold() {
         .await
         .unwrap();
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "the child's terminal notice has not reached its owner yet"
     );
     assert_eq!(
         registry
-            .take_pending_task_notifications_for(Some(a))
+            .take_pending_task_notifications_for(
+                Some(a),
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
             .await
             .len(),
         1
@@ -582,7 +643,12 @@ async fn completed_child_keeps_parked_ancestors_until_recipient_fold() {
         )
         .await;
     assert_eq!(
-        registry.take_pending_task_notifications().await.len(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
         1,
         "folding the child releases the parent's rest"
     );
@@ -624,7 +690,11 @@ async fn notified_empty_park_does_not_hold_its_parent() {
             None,
         )
         .await;
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].task_id, "aempty01");
     assert!(
@@ -1372,12 +1442,27 @@ async fn attachment_pass_advances_running_output_byte_offsets_without_emitting_t
         .append(&path, "你好\n")
         .await
         .unwrap();
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     assert_eq!(registry.get(&id).await.unwrap().base().output_offset, 7);
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     assert_eq!(registry.get(&id).await.unwrap().base().output_offset, 7);
     registry.output_manager.append(&path, "next").await.unwrap();
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     assert_eq!(registry.get(&id).await.unwrap().base().output_offset, 11);
 }
 
@@ -1460,7 +1545,11 @@ async fn background_bash_identity_is_registered_settled_and_notified() {
     );
 
     // 4. …and exactly one completion notification is queued for the model.
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let mine: Vec<_> = notifications
         .iter()
         .filter(|n| n.task_id == task_id)
@@ -1468,7 +1557,68 @@ async fn background_bash_identity_is_registered_settled_and_notified() {
     assert_eq!(mine.len(), 1, "one completion notification for one command");
     assert_eq!(mine[0].task_type, "local_bash");
     assert_eq!(mine[0].status, "completed");
+    assert!(
+        mine[0].task_delivery.is_none(),
+        "Native taskDelivery stays disabled when the resolved feature gate is false"
+    );
     assert_eq!(task_notification_description(mine[0]), Some("wait a bit"));
+}
+
+#[tokio::test]
+async fn background_bash_task_delivery_uses_native_snapshot_only_when_enabled() {
+    let (_dir, registry) = make_registry();
+    let (task_id, path) = registry.allocate_bash_output().await.unwrap();
+    registry
+        .register_background_bash(
+            task_id.clone(),
+            "printf output".into(),
+            "emit a result".into(),
+            None,
+            Some("/work".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    registry
+        .output_manager
+        .append(&path, "native-result-body\n")
+        .await
+        .unwrap();
+    registry
+        .settle_background_bash(&task_id, Some(0), false)
+        .await
+        .unwrap();
+
+    let policy = lingxi_core::host::task_delivery::TaskDeliveryPolicy {
+        feature_enabled: true,
+        ..Default::default()
+    };
+    let notifications = registry.take_pending_task_notifications(policy).await;
+    let notification = notifications
+        .iter()
+        .find(|notification| notification.task_id == task_id)
+        .expect("the terminal local shell is drained");
+    let snapshot = notification
+        .task_delivery
+        .as_ref()
+        .expect("the enabled local-shell producer includes taskDelivery");
+    assert_eq!(snapshot.task_id(), task_id);
+    let projection = snapshot.as_projection();
+    assert_eq!(projection.string_at("/status"), Some("completed"));
+    assert!(projection
+        .string_at("/statusMessage")
+        .is_some_and(|message| message.contains(path.to_str().unwrap())));
+    assert_eq!(
+        projection
+            .at_pointer("/result/isError")
+            .and_then(|value| value.as_bool()),
+        Some(false)
+    );
+    let output = projection
+        .string_at("/result/content/0/text")
+        .expect("completed shell delivery carries a text result");
+    assert!(output.starts_with("native-result-body"));
+    assert!(output.contains("[exited with code 0]"));
 }
 
 #[tokio::test]
@@ -1589,7 +1739,11 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
             None,
         )
         .await;
-    let held = registry.take_pending_task_notifications().await;
+    let held = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert!(
         !held.iter().any(|n| n.task_id == agent_task),
         "the rest notification must wait for the agent's own background shell",
@@ -1600,10 +1754,18 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
         .settle_background_bash(&shell_id, Some(0), false)
         .await
         .unwrap();
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     assert_eq!(
         registry
-            .take_pending_task_notifications_for(Some(owner))
+            .take_pending_task_notifications_for(
+                Some(owner),
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
             .await
             .len(),
         1
@@ -1619,7 +1781,11 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
             None,
         )
         .await;
-    let released = registry.take_pending_task_notifications().await;
+    let released = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert!(
         released.iter().any(|n| n.task_id == agent_task),
         "the rest notification must be released once no live child remains, got: {:?}",
@@ -1734,7 +1900,12 @@ async fn an_armed_foreground_row_is_visible_and_then_withdrawn() {
         "the row must be withdrawn when the command finishes in the foreground",
     );
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "and withdrawing it must not narrate a completion",
     );
 }
@@ -1847,10 +2018,17 @@ async fn a_finishing_agent_also_silences_shells_it_already_finished() {
         "nothing was still running to kill"
     );
 
-    let mut drained = registry.take_pending_task_notifications().await;
+    let mut drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     drained.extend(
         registry
-            .take_pending_task_notifications_for(Some(theirs))
+            .take_pending_task_notifications_for(
+                Some(theirs),
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+            )
             .await,
     );
     let surfaced: Vec<&str> = ids
@@ -1923,7 +2101,11 @@ async fn a_finishing_agent_stops_only_its_own_background_shells() {
     // dequeues the notifications that produced (`dG((r)=>r.agentId===e)`), so
     // tidying up after a subagent must not narrate itself into the main
     // session. The other two shells are untouched and still notify normally.
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let swept: Vec<String> = ids
         .iter()
         .filter(|(label, _)| label.starts_with("mine"))
@@ -1952,7 +2134,11 @@ async fn a_finishing_agent_stops_only_its_own_background_shells() {
         .settle_background_bash(&untouched, Some(0), false)
         .await
         .unwrap();
-    let after = registry.take_pending_task_notifications().await;
+    let after = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert!(
         after.iter().any(|n| n.task_id == untouched),
         "an ordinary shell completion must still notify, got: {:?}",
@@ -2185,8 +2371,16 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
 
     // The sweep runs on the notification-drain pass, evicting what an earlier
     // pass already announced. Two passes is the window a waiter sits in.
-    let _ = registry.take_pending_task_notifications().await;
-    let _ = registry.take_pending_task_notifications().await;
+    let _ = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
+    let _ = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
 
     assert!(
         registry.get(&id).await.is_some(),
@@ -2200,8 +2394,16 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
             lingxi_core::host::FusionPublicationReceipt::published(),
         )
         .await;
-    let _ = registry.take_pending_task_notifications().await;
-    let _ = registry.take_pending_task_notifications().await;
+    let _ = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
+    let _ = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert!(
         registry.get(&id).await.is_none(),
         "a settled Fusion row is evictable like any other terminal row"
@@ -2273,7 +2475,11 @@ async fn a_finished_fusion_run_wakes_an_idle_host_with_the_material_as_result() 
     );
     assert!(registry.has_pending_task_notifications_for(None).await);
 
-    let pending = registry.take_pending_task_notifications().await;
+    let pending = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].task_type, "local_fusion");
     assert_eq!(pending[0].status, "completed");
@@ -4272,7 +4478,11 @@ async fn notification_drain_obeys_real_shell_grace_and_parked_agent_retention() 
     )
     .await;
 
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 2);
     assert!(notifications.iter().any(|notice| notice.task_id == b));
     assert!(notifications
@@ -4292,7 +4502,12 @@ async fn notification_drain_obeys_real_shell_grace_and_parked_agent_retention() 
     );
     assert!(registry.get("aretained").await.unwrap().is_parked());
 
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     assert!(
         registry.get(&b).await.is_none(),
         "next pass evicts the notified shell"
@@ -4322,7 +4537,11 @@ async fn take_pending_drains_terminal_bash_once_with_exit_code() {
         .await;
 
     // Drain 1: exactly one notification carrying the bash fields.
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(drained.len(), 1, "one terminal task ⇒ one notification");
     let n = &drained[0];
     assert_eq!(n.task_id, id);
@@ -4344,7 +4563,12 @@ async fn take_pending_drains_terminal_bash_once_with_exit_code() {
 
     // Drain 2: consume-once — nothing left.
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "a drained completion is not reported a second time"
     );
 }
@@ -4420,7 +4644,11 @@ async fn take_pending_drains_local_fusion_error_through_status_sink() {
         .await;
     sink.set_status(id, TaskStatus::Failed).await;
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(
         drained.len(),
         1,
@@ -4474,7 +4702,11 @@ async fn take_pending_drains_local_fusion_egress_and_usage_through_status_sink()
     )
     .await;
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(
         drained.len(),
         1,
@@ -4638,7 +4870,11 @@ async fn fusion_publication_failure_keeps_answer_and_never_sets_legacy_published
     );
     assert_eq!(fusion.publication_error.as_deref(), Some("append failed"));
 
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 1);
     assert_eq!(
         task_notification_result(&notifications[0]),
@@ -4831,7 +5067,11 @@ async fn take_pending_carries_workflow_resume_and_terminal_metadata() {
         }))
         .await;
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(drained.len(), 1);
     let notification = &drained[0];
     assert_eq!(
@@ -4907,7 +5147,11 @@ async fn workflow_notification_omits_default_progress_counts() {
         }))
         .await;
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(drained.len(), 1);
     let notification = &drained[0];
     assert_eq!(notification.workflow_agent_count, Some(2));
@@ -4963,7 +5207,11 @@ async fn take_pending_carries_agent_error() {
         }))
         .await;
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(drained.len(), 1);
     let n = &drained[0];
     assert_eq!(n.task_type, "local_agent");
@@ -5050,7 +5298,11 @@ async fn take_pending_carries_agent_result_usage_and_worktree() {
         .await
         .unwrap();
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(drained.len(), 1);
     let n = &drained[0];
     assert_eq!(task_notification_result(n), Some("the answer"));
@@ -5146,7 +5398,11 @@ async fn the_missing_deadline_defaults_point_opposite_ways() {
     workflow.base_mut().notified = true;
     registry.insert_state_for_test(workflow).await;
 
-    let _ = registry.take_pending_task_notifications().await;
+    let _ = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
 
     assert!(
         registry.get("akeep0001").await.is_some(),
@@ -5172,7 +5428,11 @@ async fn an_mcp_task_is_held_for_thirty_seconds_after_it_ends() {
     stale.base_mut().end_time = Some(SystemTime::now() - std::time::Duration::from_secs(31));
     registry.insert_state_for_test(stale).await;
 
-    let _ = registry.take_pending_task_notifications().await;
+    let _ = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
 
     assert!(
         registry.get("kfresh001").await.is_some(),
@@ -5271,7 +5531,11 @@ async fn take_pending_carries_the_exhausted_turn_budget() {
         .await
         .unwrap();
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].max_turns_reached, Some(12));
 }
@@ -5299,7 +5563,11 @@ async fn take_pending_leaves_the_turn_budget_unset_for_a_normal_completion() {
         .await
         .unwrap();
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].max_turns_reached, None);
 }
@@ -5328,7 +5596,11 @@ async fn set_agent_outcome_error_reaches_the_failed_summary() {
         .await
         .unwrap();
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(drained[0].error.as_deref(), Some("model refused"));
 }
 
@@ -5366,7 +5638,11 @@ async fn set_agent_outcome_merges_rather_than_replaces() {
         .await
         .unwrap();
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(
         task_notification_result(&drained[0]),
         Some("partial answer")
@@ -5395,7 +5671,11 @@ async fn kill_with_reason_records_the_stop_initiator() {
             None => registry.kill(id).await.unwrap(),
         }
 
-        let drained = registry.take_pending_task_notifications().await;
+        let drained = registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+            )
+            .await;
         assert_eq!(drained.len(), 1, "{id}: killed task drains once");
         assert_eq!(drained[0].status, "killed");
         assert_eq!(drained[0].killed_by.as_deref(), expected, "{id}");
@@ -5772,7 +6052,12 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
 
     // No rest armed yet ⇒ a Running task surfaces NOTHING.
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "a running-but-not-rested agent is not notified"
     );
 
@@ -5792,7 +6077,11 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
             None,
         )
         .await;
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let parked = registry.get("a-rest-1").await.unwrap();
     assert_eq!(parked.base().status, TaskStatus::Completed);
     assert!(
@@ -5827,7 +6116,12 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
 
     // The arm is one-shot: a second drain (no new rest) is empty.
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "the rest notification fires exactly once until re-armed"
     );
 
@@ -5836,7 +6130,12 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
         .mark_task_rested("a-rest-1", None, None, None, None, None, None)
         .await;
     assert_eq!(
-        registry.take_pending_task_notifications().await.len(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
         1,
         "each subsequent rest re-arms the notification"
     );
@@ -5936,7 +6235,12 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
         .await;
 
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "an unnamed rested agent stays quiet while its live workflow child is still running"
     );
 
@@ -5946,11 +6250,19 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
         .expect("child terminal transition should succeed");
 
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "the child's owner must fold its completion first"
     );
     let owned = registry
-        .take_pending_task_notifications_for(Some(parent_agent_id))
+        .take_pending_task_notifications_for(
+            Some(parent_agent_id),
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
         .await;
     assert_eq!(owned.len(), 1);
     assert_eq!(owned[0].task_id, "w-child-live");
@@ -5969,7 +6281,11 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
             None,
         )
         .await;
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(
         drained.len(),
         1,
@@ -6096,7 +6412,11 @@ async fn a_monitors_stdout_byte_count_reaches_the_notification() {
             .unwrap();
     }
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let silent = drained
         .iter()
         .find(|n| n.task_id == "m-silent")
@@ -6160,7 +6480,11 @@ async fn stopping_a_shell_is_silent_but_stopping_an_agent_is_not() {
         TaskStatus::Killed
     );
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let ids: Vec<&str> = drained.iter().map(|n| n.task_id.as_str()).collect();
     assert!(
         !ids.contains(&shell.as_str()),
@@ -6251,7 +6575,11 @@ async fn a_kill_still_silences_a_row_its_handler_flipped_to_killed_first() {
         TaskStatus::Killed,
         "premise: the handler's sink really did flip the row",
     );
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let ids: Vec<&str> = drained.iter().map(|n| n.task_id.as_str()).collect();
     assert!(
         !ids.contains(&id.as_str()),
@@ -6492,7 +6820,11 @@ async fn stopping_a_resting_parent_cascades_to_its_whole_subtree_silently() {
 
     // The oracle stamps `notified` before each child kill, so a cascade is
     // silent. Only the directly stopped task may surface.
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let ids: Vec<&str> = drained.iter().map(|n| n.task_id.as_str()).collect();
     assert!(
         !ids.contains(&"a-child") && !ids.contains(&"a-grandchild"),
@@ -6640,7 +6972,12 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
         .await;
 
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "a rested agent stays quiet while it still owns live background children"
     );
 
@@ -6649,7 +6986,11 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
         .await
         .expect("child terminal transition should succeed");
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(
         drained.len(),
         2,
@@ -6784,7 +7125,11 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
         .await
         .expect("child terminal transition should succeed");
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let rest = drained
         .iter()
         .find(|notification| notification.task_id == "a-rest-parent")
@@ -6931,7 +7276,11 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
         )
         .await;
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let rest_a = drained
         .iter()
         .find(|notification| notification.task_id == "a-rest-a")
@@ -6948,10 +7297,18 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
         .set_status("b-child-live", TaskStatus::Completed)
         .await
         .expect("child terminal transition should succeed");
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     assert_eq!(
         registry
-            .take_pending_task_notifications_for(Some(owner_b))
+            .take_pending_task_notifications_for(
+                Some(owner_b),
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
             .await
             .len(),
         1
@@ -6967,7 +7324,11 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
             None,
         )
         .await;
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     let rest_b = drained
         .iter()
         .find(|notification| notification.task_id == "a-rest-b")
@@ -7029,7 +7390,11 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
         .force_bash_terminal_for_test(&fresh, TaskStatus::Completed, Some(0))
         .await;
 
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(
         drained.len(),
         1,
@@ -7234,7 +7599,12 @@ async fn register_mcp_task_inserts_running_working_state() {
         other => panic!("expected McpTask, got {other:?}"),
     }
     // A running task is not terminal → no notification yet.
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -7260,7 +7630,11 @@ async fn mcp_saved_hint_settles_atomically_and_survives_notification_drain() {
         )
         .await
         .unwrap());
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 1);
     assert_eq!(task_notification_result(&notifications[0]), Some("partial"));
     assert_eq!(
@@ -7282,7 +7656,12 @@ async fn mcp_saved_hint_settles_atomically_and_survives_notification_drain() {
         )
         .await
         .unwrap());
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -7321,7 +7700,11 @@ async fn settle_mcp_task_writes_result_and_drains_notification() {
     );
 
     // Drains exactly one notification carrying the mcp_task fields.
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(drained.len(), 1, "one settled mcp_task ⇒ one notification");
     let n = &drained[0];
     assert_eq!(n.task_id, id);
@@ -7354,7 +7737,12 @@ async fn settle_mcp_task_writes_result_and_drains_notification() {
     assert_eq!(meta.status_message, None);
     // consume-once.
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "a settled mcp_task is not reported twice"
     );
 }
@@ -7387,7 +7775,11 @@ async fn settle_mcp_task_failed_marks_failed() {
         }
         other => panic!("expected McpTask, got {other:?}"),
     }
-    let drained = registry.take_pending_task_notifications().await;
+    let drained = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(
         drained[0].result, None,
         "and it must not reach the notification"
@@ -7714,7 +8106,9 @@ async fn owner_scoped_drain_preserves_other_owners_and_wakes_on_completion() {
         .unwrap();
     assert_eq!(
         registry
-            .take_pending_task_notifications()
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
             .await
             .iter()
             .map(|n| n.task_id.as_str())
@@ -7727,18 +8121,27 @@ async fn owner_scoped_drain_preserves_other_owners_and_wakes_on_completion() {
             .await
     );
     let notes = registry
-        .take_pending_task_notifications_for(Some(owner))
+        .take_pending_task_notifications_for(
+            Some(owner),
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
         .await;
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].task_id, "aowner");
     assert_eq!(notes[0].recipient_agent_id, Some(owner));
     assert!(registry
-        .take_pending_task_notifications_for(Some(owner))
+        .take_pending_task_notifications_for(
+            Some(owner),
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
         .await
         .is_empty());
     assert_eq!(
         registry
-            .take_pending_task_notifications_for(Some(other))
+            .take_pending_task_notifications_for(
+                Some(other),
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
             .await[0]
             .task_id,
         "aother"
@@ -7768,7 +8171,12 @@ async fn owner_scoped_rest_is_not_consumed_by_main() {
             None,
         )
         .await;
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     assert!(
         registry
             .has_pending_task_notifications_for(Some(owner))
@@ -7776,13 +8184,19 @@ async fn owner_scoped_rest_is_not_consumed_by_main() {
     );
     assert_eq!(
         registry
-            .take_pending_task_notifications_for(Some(owner))
+            .take_pending_task_notifications_for(
+                Some(owner),
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
             .await[0]
             .task_id,
         "arestowner"
     );
     assert!(registry
-        .take_pending_task_notifications_for(Some(owner))
+        .take_pending_task_notifications_for(
+            Some(owner),
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
         .await
         .is_empty());
     assert!(registry.get("arestowner").await.unwrap().is_parked());
@@ -7817,12 +8231,13 @@ async fn auto_mode_scan_is_visible_cancellable_and_never_notifies_chat() {
         registry.get(&id).await.unwrap().base().status,
         TaskStatus::Killed
     );
-    assert!(
-        TaskRegistryHandle::take_pending_task_notifications(&registry)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(TaskRegistryHandle::take_pending_task_notifications(
+        &registry,
+        lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+    )
+    .await
+    .unwrap()
+    .is_empty());
 }
 
 #[tokio::test]
@@ -7882,10 +8297,17 @@ async fn terminated_owner_returns_child_notification_to_main_session() {
     child.base_mut().creator_agent_id = Some(owner);
     registry.insert_state_for_test(child).await;
     assert!(registry
-        .take_pending_task_notifications_for(Some(owner))
+        .take_pending_task_notifications_for(
+            Some(owner),
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
         .await
         .is_empty());
-    let notes = registry.take_pending_task_notifications().await;
+    let notes = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].task_id, "aorphan");
     assert_eq!(notes[0].recipient_agent_id, None);
@@ -7923,7 +8345,12 @@ async fn shell_stop_emits_one_sdk_stopped_event_and_no_model_notification() {
         ]
     );
     assert!(registry.get(&id).await.unwrap().base().notified);
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
 }
 
 struct PausedShellKillHandler {
@@ -7988,7 +8415,12 @@ async fn shell_stop_does_not_leak_model_notification_between_handler_and_stamp()
         .unwrap();
     assert!(!registry.has_pending_task_notifications_for(None).await);
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "handler-published Killed must remain silent before registry stamps notified"
     );
     finish.notify_one();
@@ -8001,7 +8433,12 @@ async fn shell_stop_does_not_leak_model_notification_between_handler_and_stamp()
         }
     }
     assert_eq!(stopped_count, 1);
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -8092,7 +8529,11 @@ async fn websocket_stop_separates_sdk_receipt_from_optional_housekeeping() {
     registry.kill("sexplicit").await.unwrap();
     registry.publish_task_stopped("squiet").await;
     registry.publish_task_stopped("squiet").await;
-    let notes = registry.take_pending_task_notifications().await;
+    let notes = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(
         notes.len(),
         1,
@@ -8335,7 +8776,12 @@ async fn foreground_owner_really_parks_and_folds_owned_child_completion_before_d
     );
     assert_eq!(pool.slot_count().await, 1);
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "live owned child keeps parent rest out of main session"
     );
     let child = fixture.child.lock().unwrap().clone().unwrap();
@@ -8359,7 +8805,11 @@ async fn foreground_owner_really_parks_and_folds_owned_child_completion_before_d
         !worker.is_finished(),
         "backgrounded owner remains resumable after rest"
     );
-    let notes = registry.take_pending_task_notifications().await;
+    let notes = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notes.len(), 1);
     assert_eq!(task_notification_result(&notes[0]), Some("observed child"));
     let owner = fixture.owner.lock().unwrap().unwrap();
@@ -8438,7 +8888,12 @@ async fn queued_memory_stop_keeps_nested_owners_alive_until_delivery_or_cascade(
             "row no longer carries the pending delivery"
         );
         assert!(
-            registry.take_pending_task_notifications().await.is_empty(),
+            registry
+                .take_pending_task_notifications(
+                    lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+                )
+                .await
+                .is_empty(),
             "queue addressed to parked B must still hold A's rest"
         );
         assert_eq!(
@@ -8458,7 +8913,12 @@ async fn queued_memory_stop_keeps_nested_owners_alive_until_delivery_or_cascade(
                 "parent stop must cascade through queued recipient work"
             );
         } else {
-            let notes = registry.take_pending_task_notifications_for(Some(b)).await;
+            let notes = registry
+                .take_pending_task_notifications_for(
+                    Some(b),
+                    lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+                )
+                .await;
             assert_eq!(notes.len(), 1);
             assert_eq!(notes[0].task_id, child);
             let owner = registry.get("bqueueowner").await.unwrap();
@@ -8469,7 +8929,12 @@ async fn queued_memory_stop_keeps_nested_owners_alive_until_delivery_or_cascade(
             );
             assert!(!owner.is_parked());
             assert!(
-                registry.take_pending_task_notifications().await.is_empty(),
+                registry
+                    .take_pending_task_notifications(
+                        lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+                    )
+                    .await
+                    .is_empty(),
                 "reactivated B continues holding A while it processes the result"
             );
         }
@@ -8525,8 +8990,21 @@ async fn natural_sdk_terminal_receipt_is_once_only_and_does_not_consume_model_no
             !registry.get(&id).await.unwrap().base().notified,
             "SDK receipt does not acknowledge model delivery"
         );
-        assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
-        assert!(registry.take_pending_task_notifications().await.is_empty());
+        assert_eq!(
+            registry
+                .take_pending_task_notifications(
+                    lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+                )
+                .await
+                .len(),
+            1
+        );
+        assert!(registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty());
         while let Ok(event) = events.try_recv() {
             let event = lifecycle_event_json(&event);
             assert_ne!(event["subtype"], "task_notification");
@@ -8591,7 +9069,9 @@ async fn natural_sdk_receipt_preserves_usage_and_scan_gates() {
     assert_eq!(scan_event["skip_transcript"], true);
     assert_eq!(scan_event["ambient"], true);
     assert!(!registry
-        .take_pending_task_notifications()
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
         .await
         .iter()
         .any(|note| note.task_id == scan));
@@ -8905,8 +9385,21 @@ async fn adopted_shell_batch_retains_metadata_and_delivers_once_after_activation
         }
     }
     assert_eq!(receipts.len(), 1);
-    assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert_eq!(
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
+        1
+    );
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -8943,7 +9436,12 @@ async fn adopted_shell_bad_identity_and_failed_batch_leave_no_completion_owner()
     assert!(registry.get(&first.task_id).await.is_none());
     assert!(registry.get(&second.task_id).await.is_none());
     assert!(process.sinks.lock().unwrap().is_empty());
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     while let Ok(event) = sdk.try_recv() {
         let event = lifecycle_event_json(&event);
         assert_ne!(event["subtype"], "task_notification");
@@ -9135,7 +9633,12 @@ async fn task_output_cannot_consume_completion_inside_shell_transfer_fence() {
     registry.mark_notified(&record.task_id).await.unwrap();
     assert!(!registry.get(&record.task_id).await.unwrap().base().notified);
     assert!(!registry.has_pending_task_notifications_for(None).await);
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     // Source completion won before commit: it is rejected from the accepted
     // set but remains fenced until the host has durably recorded that fact.
     assert!(registry
@@ -9157,7 +9660,15 @@ async fn task_output_cannot_consume_completion_inside_shell_transfer_fence() {
             .done
     );
     assert!(registry.has_pending_task_notifications_for(None).await);
-    assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
+    assert_eq!(
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -9190,7 +9701,11 @@ async fn adopted_shell_observer_preserves_stall_pressure_and_failure_semantics()
         .unwrap()
         .clone();
     sink.on_stall(&record.task_id, "Password:").await;
-    let notices = registry.take_pending_task_notifications().await;
+    let notices = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notices.len(), 1);
     assert_eq!(notices[0].status, "running");
     assert_eq!(
@@ -9291,10 +9806,19 @@ async fn background_deadline_cause_survives_early_and_registered_completion() {
         assert!(
             matches!(state, TaskState::LocalBash(shell) if shell.stop_cause.as_deref() == Some("deadline"))
         );
-        let notices = registry.take_pending_task_notifications().await;
+        let notices = registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+            )
+            .await;
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].killed_by.as_deref(), Some("deadline"));
-        assert!(registry.take_pending_task_notifications().await.is_empty());
+        assert!(registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty());
         assert_eq!(
             registry
                 .output_manager
@@ -9341,8 +9865,21 @@ async fn shell_exit_before_registration_is_replayed_once_and_never_installs_stal
         .unwrap();
     assert!(!registry.cleanups.lock().await.contains_key(&id));
     assert_eq!(killed.load(Ordering::SeqCst), 0);
-    assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert_eq!(
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
+        1
+    );
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     assert_eq!(
         registry
             .output_manager
@@ -9435,7 +9972,15 @@ async fn rollback_restores_source_observer_after_release_before_row_commit() {
         TaskStatus::Completed
     );
     assert!(registry.has_pending_task_notifications_for(None).await);
-    assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
+    assert_eq!(
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -9495,7 +10040,15 @@ async fn cancelled_adoption_cleans_staged_observer_before_retry_can_activate() {
         .cloned()
         .unwrap();
     current.on_exit(&record.task_id, Some(0)).await;
-    assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
+    assert_eq!(
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -9745,8 +10298,21 @@ async fn cached_shell_exit_survives_registration_cancel_and_preserves_hook_order
         1,
         "the detached lifecycle job must finish its terminal marker"
     );
-    assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert_eq!(
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .len(),
+        1
+    );
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
 }
 
 // ── AUDIT-04: the sink-flipped shell still gets its `[killed]` trailer ──────
@@ -10264,7 +10830,11 @@ async fn agent_finalizing_is_atomic_with_completed_status_and_clears_after_notif
         FieldPresence::Value(serde_json::json!("running"))
     );
 
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 1);
     let after_notification = TaskRegistryHandle::list(registry.as_ref(), TaskListFilter::default())
         .await
@@ -10343,7 +10913,12 @@ async fn claimed_running_agent_finishes_finalizing_through_direct_wait_handoff()
     assert!(matches!(outcome, AgentTerminalWaitOutcome::Completed(_)));
     original_claim.release().await;
     assert!(
-        registry.take_pending_task_notifications().await.is_empty(),
+        registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty(),
         "the claimed completion must not produce a second notification"
     );
 
@@ -10401,7 +10976,11 @@ async fn persistent_rest_publishes_finalizing_with_the_completed_parked_row() {
         rested.agent_list_lifecycle.finalizing,
         lingxi_core::host::task_registry::FieldPresence::Value(true)
     );
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 1);
     let TaskState::LocalAgent(rested) = registry.get("agent-finalizing-rest").await.unwrap() else {
         panic!("rest transition keeps a local Agent row")
@@ -10456,7 +11035,12 @@ async fn observer_rest_finishes_finalizing_after_its_suppressed_notification_han
         FieldPresence::Value(false),
         "the suppressed-notification branch still runs producer finalization"
     );
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -10489,7 +11073,11 @@ async fn parked_foreground_completion_keeps_finalizing_until_its_notification_dr
         lingxi_core::host::task_registry::FieldPresence::Value(true)
     );
 
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 1);
     assert_eq!(
         task_notification_result(&notifications[0]),
@@ -10777,7 +11365,11 @@ async fn dropped_agent_wait_after_claim_releases_before_later_completion() {
         .set_agent_status_with_finalizing(task_id, TaskStatus::Completed, true)
         .await
         .unwrap();
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert_eq!(notifications.len(), 1);
     let TaskState::LocalAgent(agent) = registry.get(task_id).await.unwrap() else {
         panic!("completed row remains a local Agent")
@@ -10842,7 +11434,11 @@ async fn dropped_agent_wait_racing_completion_finishes_terminal_finalizing() {
         tokio::task::yield_now().await;
     }
 
-    let notifications = registry.take_pending_task_notifications().await;
+    let notifications = registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
+        .await;
     assert!(
         notifications.is_empty(),
         "terminal cleanup retains K3's completed claim instead of fabricating a second notification"
@@ -10949,7 +11545,12 @@ async fn cancelled_claim_finish_while_rows_locked_clears_terminal_finalizing() {
         tokio::task::yield_now().await;
     }
     assert!(registry.get(task_id).await.unwrap().base().notified);
-    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(registry
+        .take_pending_task_notifications(
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+        )
+        .await
+        .is_empty());
     let records = TaskRegistryHandle::list(registry.as_ref(), TaskListFilter::default())
         .await
         .unwrap();

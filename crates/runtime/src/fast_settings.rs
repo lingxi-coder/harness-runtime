@@ -70,7 +70,13 @@ mod tests {
         assert!(policy.flag_fast);
         assert_eq!(policy.policy_fast, Some(false));
         assert_eq!(policy.policy_session_opt_in, Some(true));
-        assert_eq!(policy.allowed_models, Some(vec!["sonnet".into()]));
+        assert_eq!(
+            policy.allowed_models,
+            Some(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"["sonnet"]"#)
+                    .unwrap()
+            )
+        );
     }
 }
 

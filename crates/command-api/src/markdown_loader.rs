@@ -31,8 +31,8 @@
 //!   is a *file* (worktree marker) pointing at a `gitdir`, the resolved main
 //!   repo's `.lingxi/<subdir>` is added iff the worktree itself lacks one.
 //! * Frontmatter parsing reuses the existing `serde_yaml` dependency and the
-//!   `---`/`\n---\n` splitter pattern from `skill-api::frontmatter`
-//!   (`parse_skill_markdown`) without depending on `skill-api`. It mirrors the
+//!   `---`/`\n---\n` splitter pattern from `skill::frontmatter`
+//!   (`parse_skill_markdown`) without depending on `skill`. It mirrors the
 //!   Native YAML repair retry for selected plain scalars and leading tabs; a
 //!   closed block still separates its body when metadata parsing ultimately
 //!   fails.
@@ -41,7 +41,12 @@
 //!   the `SKILL.md` file stem.
 
 use crate::argument_substitution::{parse_argument_names, FrontmatterArgs};
-use crate::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
+use crate::model::{
+    CommandFrontmatter, CommandSource, NativeCommandType, SlashCommand, SlashCommandKind,
+};
+use crate::native_locale_collation::native_skill_name_collator;
+use icu_collator::CollatorBorrowed;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -64,6 +69,9 @@ pub struct MarkdownCommandFile {
     pub base_dir: PathBuf,
     /// Parsed YAML frontmatter (defaults when absent).
     pub frontmatter: CommandFrontmatter,
+    /// Native plugin prompt factory's `X8t(frontmatter.name, …)` result. Other
+    /// command producers may ignore this and keep their own name contract.
+    pub frontmatter_name: Option<Utf16JsonProjection>,
     /// Markdown body after the frontmatter block.
     pub content: String,
     /// Which configuration layer the file came from.
@@ -79,6 +87,10 @@ pub struct SkillMarkdownCommandFile {
     pub skill_root: PathBuf,
     /// Parsed YAML frontmatter.
     pub frontmatter: CommandFrontmatter,
+    /// Native `Ibe` display name parsed from frontmatter `name`, before the
+    /// command factory's fallback to the skill-directory name. Values longer
+    /// than Native's 256 UTF-16-unit cap are omitted at parse time.
+    pub frontmatter_name: Option<Utf16JsonProjection>,
     /// Markdown body after the frontmatter block.
     pub content: String,
     /// Raw file byte length.
@@ -92,6 +104,10 @@ pub struct SkillMarkdownCommandFile {
 /// keys are ignored (TS `[key: string]: unknown`).
 #[derive(Debug, Default, Deserialize)]
 struct RawFrontmatter {
+    /// Native `X8t` display-name source. Its JS `String(...)` coercion is
+    /// applied before the 256 UTF-16-unit cap.
+    #[serde(default)]
+    name: Option<serde_yaml::Value>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default, rename = "allowed-tools")]
@@ -512,26 +528,31 @@ pub async fn load_skill_markdown_files_with_roots(
     additional_skill_dirs: &[PathBuf],
 ) -> Vec<SkillMarkdownCommandFile> {
     let mut all_files = Vec::new();
+    let collator = native_skill_name_collator();
     if let Some(managed_dir) = managed_dir {
         all_files.extend(load_skill_dir(
             &managed_dir.join(branding::DOT_DIR).join("skills"),
             CommandSource::Settings(lingxi_core::types::SettingsScope::Managed),
+            &collator,
         ));
     }
     all_files.extend(load_skill_dir(
         &lingxi_home.join("skills"),
         CommandSource::Settings(lingxi_core::types::SettingsScope::User),
+        &collator,
     ));
     for project_dir in project_dirs_up_to_home("skills", cwd, home) {
         all_files.extend(load_skill_dir(
             &project_dir,
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            &collator,
         ));
     }
     for dir in additional_skill_dirs {
         all_files.extend(load_skill_dir(
             dir,
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            &collator,
         ));
     }
     deduplicate_skill_files_by_inode(all_files)
@@ -543,13 +564,19 @@ pub async fn load_skill_markdown_files_with_roots(
 pub async fn load_managed_skill_markdown_files(
     managed_dir: &Path,
 ) -> Vec<SkillMarkdownCommandFile> {
+    let collator = native_skill_name_collator();
     deduplicate_skill_files_by_inode(load_skill_dir(
         &managed_dir.join(branding::DOT_DIR).join("skills"),
         CommandSource::Settings(lingxi_core::types::SettingsScope::Managed),
+        &collator,
     ))
 }
 
-fn load_skill_dir(dir: &Path, source: CommandSource) -> Vec<SkillMarkdownCommandFile> {
+fn load_skill_dir(
+    dir: &Path,
+    source: CommandSource,
+    collator: &CollatorBorrowed<'static>,
+) -> Vec<SkillMarkdownCommandFile> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -563,16 +590,31 @@ fn load_skill_dir(dir: &Path, source: CommandSource) -> Vec<SkillMarkdownCommand
         let Ok(raw) = std::fs::read_to_string(&file_path) else {
             continue;
         };
-        let (frontmatter, content) = parse_frontmatter(&raw);
+        let (frontmatter, frontmatter_name, content) = parse_skill_frontmatter(&raw);
         out.push(SkillMarkdownCommandFile {
             file_path,
             skill_root,
             frontmatter,
+            frontmatter_name,
             content,
             content_length: raw.len(),
             source,
         });
     }
+    out.sort_by(|left, right| {
+        let left_name = left
+            .skill_root
+            .file_name()
+            .map(|name| name.to_string_lossy());
+        let right_name = right
+            .skill_root
+            .file_name()
+            .map(|name| name.to_string_lossy());
+        collator.compare(
+            left_name.as_deref().unwrap_or(""),
+            right_name.as_deref().unwrap_or(""),
+        )
+    });
     out
 }
 
@@ -651,11 +693,12 @@ fn load_markdown_dir(dir: &Path, source: CommandSource) -> Vec<MarkdownCommandFi
     for file_path in files {
         match std::fs::read_to_string(&file_path) {
             Ok(raw) => {
-                let (frontmatter, content) = parse_frontmatter(&raw);
+                let (frontmatter, frontmatter_name, content) = parse_skill_frontmatter(&raw);
                 out.push(MarkdownCommandFile {
                     file_path,
                     base_dir: dir.to_path_buf(),
                     frontmatter,
+                    frontmatter_name,
                     content,
                     source,
                 });
@@ -748,14 +791,60 @@ pub fn parse_command_markdown(
     base_dir: PathBuf,
     source: CommandSource,
 ) -> MarkdownCommandFile {
-    let (frontmatter, content) = parse_frontmatter(raw);
+    let (frontmatter, frontmatter_name, content) = parse_skill_frontmatter(raw);
     MarkdownCommandFile {
         file_path,
         base_dir,
         frontmatter,
+        frontmatter_name,
         content,
         source,
     }
+}
+
+/// Native plugin prompt commands namespace a valid frontmatter display name
+/// with the plugin prefix and expose a bare alias only when the source name has
+/// no colon. The canonical command name is passed after the plugin loader has
+/// applied its actual command-path name.
+#[must_use]
+pub fn plugin_prompt_name_metadata(
+    canonical_name: &Utf16JsonProjection,
+    frontmatter_name: Option<&Utf16JsonProjection>,
+) -> (Utf16JsonProjection, Vec<Utf16JsonProjection>) {
+    let Some(frontmatter_name) = frontmatter_name else {
+        return (canonical_name.clone(), Vec::new());
+    };
+    let Some(display_units) = frontmatter_name.string_units("") else {
+        return (canonical_name.clone(), Vec::new());
+    };
+    if display_units.is_empty() {
+        return (canonical_name.clone(), Vec::new());
+    }
+
+    let canonical_units = canonical_name.string_units("").unwrap_or_default();
+    let prefix_end = canonical_units
+        .iter()
+        .rposition(|unit| *unit == b':' as u16)
+        .map_or(0, |index| index + 1);
+    let prefix = &canonical_units[..prefix_end];
+    let mut user_facing_units = if display_units.starts_with(prefix) {
+        display_units.to_vec()
+    } else {
+        let mut namespaced = prefix.to_vec();
+        namespaced.extend_from_slice(&display_units);
+        namespaced
+    };
+    let user_facing_name = Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&user_facing_units),
+        std::mem::take(&mut user_facing_units),
+    )
+    .expect("Native plugin display name is a root string");
+    let aliases = if display_units.contains(&(b':' as u16)) {
+        Vec::new()
+    } else {
+        vec![frontmatter_name.clone()]
+    };
+    (user_facing_name, aliases)
 }
 
 /// Parse one directory-format skill markdown buffer that was discovered by an
@@ -771,11 +860,12 @@ pub fn parse_skill_command_markdown(
     skill_root: PathBuf,
     source: CommandSource,
 ) -> SkillMarkdownCommandFile {
-    let (frontmatter, content) = parse_frontmatter(raw);
+    let (frontmatter, frontmatter_name, content) = parse_skill_frontmatter(raw);
     SkillMarkdownCommandFile {
         file_path,
         skill_root,
         frontmatter,
+        frontmatter_name,
         content,
         content_length: raw.len(),
         source,
@@ -783,23 +873,77 @@ pub fn parse_skill_command_markdown(
 }
 
 /// Split a raw markdown string. Mirrors the
-/// `skill-api::frontmatter::parse_skill_markdown` `---`/`\n---\n` splitter (the
-/// shape the spec asks to reuse without depending on `skill-api`). Closed
+/// `skill::frontmatter::parse_skill_markdown` `---`/`\n---\n` splitter (the
+/// shape the spec asks to reuse without depending on `skill`). Closed
 /// frontmatter keeps its body even when both metadata parse attempts fail;
 /// absent or unterminated frontmatter yields defaults and the raw input.
+#[cfg(test)]
 fn parse_frontmatter(raw: &str) -> (CommandFrontmatter, String) {
+    let (frontmatter, _, content) = parse_skill_frontmatter(raw);
+    (frontmatter, content)
+}
+
+/// Parse the common markdown frontmatter while retaining the `name` value used
+/// by Native's prompt-command factory as its separate `userFacingName` result.
+fn parse_skill_frontmatter(raw: &str) -> (CommandFrontmatter, Option<Utf16JsonProjection>, String) {
     let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
     if let Some(rest) = raw.strip_prefix("---") {
         if let Some(end) = rest.find("\n---\n") {
             let yaml = &rest[..end];
             let body = &rest[end + 5..];
-            let frontmatter = parse_frontmatter_yaml(yaml)
-                .map(build_frontmatter)
+            let (frontmatter, frontmatter_name) = parse_frontmatter_yaml(yaml)
+                .map(|mut raw_frontmatter| {
+                    let frontmatter_name = raw_frontmatter
+                        .name
+                        .take()
+                        .and_then(native_frontmatter_name)
+                        .filter(|name| name.encode_utf16().count() <= 256)
+                        .map(Into::into);
+                    (build_frontmatter(raw_frontmatter), frontmatter_name)
+                })
                 .unwrap_or_default();
-            return (frontmatter, body.trim_start().to_string());
+            return (frontmatter, frontmatter_name, body.trim_start().to_string());
         }
     }
-    (CommandFrontmatter::default(), raw.to_string())
+    (CommandFrontmatter::default(), None, raw.to_string())
+}
+
+/// JS `String(value)` coercion used by Native `X8t(frontmatter.name, …)`.
+fn native_frontmatter_name(value: serde_yaml::Value) -> Option<String> {
+    use serde_yaml::Value;
+
+    match value {
+        Value::Null => None,
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::String(value) => Some(value),
+        Value::Sequence(values) => Some(
+            values
+                .into_iter()
+                .map(|value| native_array_element_string(value).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        Value::Mapping(_) => Some("[object Object]".to_string()),
+        Value::Tagged(value) => native_frontmatter_name(value.value),
+    }
+}
+
+fn native_array_element_string(value: serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::Null => None,
+        value => native_frontmatter_name(value),
+    }
+}
+
+fn native_effective_user_facing_name(
+    canonical_name: &Utf16JsonProjection,
+    frontmatter_name: Option<&Utf16JsonProjection>,
+) -> Utf16JsonProjection {
+    frontmatter_name
+        .filter(|name| name.string_units("").is_some_and(|units| !units.is_empty()))
+        .cloned()
+        .unwrap_or_else(|| canonical_name.clone())
 }
 
 /// Parse Native's frontmatter YAML with its one repair retry. Native 2.1.295
@@ -1103,6 +1247,9 @@ fn parse_tool_list_from_cli(tools: &[String]) -> Vec<String> {
 #[must_use]
 pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource) -> SlashCommand {
     let name = command_name_from_path(&file.file_path, &file.base_dir);
+    let name_source: Utf16JsonProjection = name.clone().into();
+    let user_facing_name =
+        native_effective_user_facing_name(&name_source, file.frontmatter_name.as_ref());
     // Mirrors TS `hasUserSpecifiedDescription`: true when the frontmatter
     // carried an explicit `description`, false when we auto-derive it from the
     // body (`Custom command` fallback).
@@ -1116,11 +1263,16 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
         name: name.into(),
         description: description.into(),
         source,
+        native_source: Some(native_skill_listing_source(&source)),
         kind: SlashCommandKind::Markdown {
             file_path: file.file_path.clone(),
             frontmatter: file.frontmatter.clone(),
             prompt_template: file.content.clone().into(),
         },
+        // Markdown-backed custom commands are Native prompt commands. Some
+        // hosts replace Markdown with a bundled executor after construction,
+        // so set this source classification before that conversion.
+        native_type: Some(NativeCommandType::Prompt),
         has_user_specified_description,
         // SLASH.2: TS `createSkillCommand` copies the frontmatter `argument-hint`
         // onto the top-level command (`argumentHint`). The frontmatter parser
@@ -1154,6 +1306,7 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
         disable_model_invocation: file.frontmatter.disable_model_invocation,
         when_to_use: file.frontmatter.when_to_use.clone(),
         paths: file.frontmatter.paths.clone(),
+        user_facing_name: Some(user_facing_name),
         ..SlashCommand::default()
     }
 }
@@ -1165,6 +1318,9 @@ pub fn build_skill_command(file: &SkillMarkdownCommandFile, source: CommandSourc
         .skill_root
         .file_name()
         .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let name_source: Utf16JsonProjection = name.clone().into();
+    let user_facing_name =
+        native_effective_user_facing_name(&name_source, file.frontmatter_name.as_ref());
     let has_user_specified_description = !file.frontmatter.description.is_empty();
     let description = if file.frontmatter.description.is_empty() {
         extract_description_from_markdown(&file.content, "Custom command")
@@ -1175,11 +1331,16 @@ pub fn build_skill_command(file: &SkillMarkdownCommandFile, source: CommandSourc
         name: name.into(),
         description: description.into(),
         source,
+        native_source: Some(native_skill_listing_source(&source)),
         kind: SlashCommandKind::Markdown {
             file_path: file.file_path.clone(),
             frontmatter: file.frontmatter.clone(),
             prompt_template: file.content.clone().into(),
         },
+        // Directory-format skills are Native prompt commands regardless of
+        // the dispatch kind chosen by the host. Mobile/visualization hosts
+        // replace Markdown with a bundled executor after construction.
+        native_type: Some(NativeCommandType::Prompt),
         has_user_specified_description,
         argument_hint: file
             .frontmatter
@@ -1203,8 +1364,26 @@ pub fn build_skill_command(file: &SkillMarkdownCommandFile, source: CommandSourc
         // `user-invocable: false` a no-op and left the skill in the `/` menu.
         user_invocable: Some(file.frontmatter.user_invocable.unwrap_or(true)),
         content_length: Some(file.content_length),
+        user_facing_name: Some(user_facing_name),
         ..SlashCommand::default()
     }
+}
+
+/// Project this command factory's authoritative source into Native m$o's
+/// `skillFrontmatter.source` value. Native collapses in-binary `builtin` and
+/// `bundled` prompt sources to `built-in`; settings tiers keep their exact
+/// source names.
+fn native_skill_listing_source(source: &CommandSource) -> Utf16JsonProjection {
+    let source = match source {
+        CommandSource::Builtin | CommandSource::Bundled => "built-in",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::User) => "userSettings",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Project) => "projectSettings",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Local) => "localSettings",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Managed) => "policySettings",
+        CommandSource::Plugin => "plugin",
+        CommandSource::Mcp => "mcp",
+    };
+    source.into()
 }
 
 /// Normalize a path for case/separator-insensitive comparison. Approximates TS
@@ -1225,6 +1404,37 @@ fn normalize_for_comparison(p: &Path) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn native_skill_listing_source_uses_exact_context_tags() {
+        use lingxi_core::types::SettingsScope;
+
+        for (source, expected) in [
+            (CommandSource::Builtin, "built-in"),
+            (CommandSource::Bundled, "built-in"),
+            (CommandSource::Settings(SettingsScope::User), "userSettings"),
+            (
+                CommandSource::Settings(SettingsScope::Project),
+                "projectSettings",
+            ),
+            (
+                CommandSource::Settings(SettingsScope::Local),
+                "localSettings",
+            ),
+            (
+                CommandSource::Settings(SettingsScope::Managed),
+                "policySettings",
+            ),
+            (CommandSource::Plugin, "plugin"),
+            (CommandSource::Mcp, "mcp"),
+        ] {
+            assert_eq!(
+                native_skill_listing_source(&source).string_at(""),
+                Some(expected),
+                "{source:?}"
+            );
+        }
+    }
 
     // ---------- extract_description_from_markdown ----------
 
@@ -1322,7 +1532,7 @@ mod tests {
             fm.argument_names,
             vec!["first".to_string(), "second".to_string()]
         );
-        // Body is `trim_start`-ed only (mirrors skill-api's splitter), so the
+        // Body is `trim_start`-ed only (mirrors skill's splitter), so the
         // trailing newline from the file is preserved.
         assert_eq!(body, "body here\n");
     }
@@ -1425,6 +1635,70 @@ mod tests {
         assert!(fm.argument_hints.is_empty());
         assert!(fm.argument_names.is_empty());
         assert_eq!(body, "just a body\nwith lines");
+    }
+
+    #[test]
+    fn skill_prompt_display_name_uses_frontmatter_name_then_native_fallback() {
+        let explicit = parse_skill_command_markdown(
+            "---\nname: Friendly\n---\nbody",
+            PathBuf::from("/skills/folder/SKILL.md"),
+            PathBuf::from("/skills/folder"),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        );
+        let explicit = build_skill_command(
+            &explicit,
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        );
+        assert_eq!(explicit.name.string_at(""), Some("folder"));
+        assert_eq!(
+            explicit
+                .user_facing_name
+                .as_ref()
+                .and_then(|n| n.string_at("")),
+            Some("Friendly")
+        );
+
+        let missing = parse_skill_command_markdown(
+            "---\ndescription: no name\n---\nbody",
+            PathBuf::from("/skills/folder/SKILL.md"),
+            PathBuf::from("/skills/folder"),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        );
+        let missing = build_skill_command(
+            &missing,
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        );
+        assert_eq!(
+            missing
+                .user_facing_name
+                .as_ref()
+                .and_then(|n| n.string_at("")),
+            Some("folder")
+        );
+
+        let too_long_name = "a".repeat(257);
+        let too_long = parse_skill_command_markdown(
+            &format!("---\nname: {too_long_name}\n---\nbody"),
+            PathBuf::from("/skills/folder/SKILL.md"),
+            PathBuf::from("/skills/folder"),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        );
+        assert!(too_long.frontmatter_name.is_none());
+    }
+
+    #[test]
+    fn plugin_prompt_display_name_is_namespaced_with_bare_alias_only_when_unqualified() {
+        let canonical: Utf16JsonProjection = "acme:folder".into();
+        let bare: Utf16JsonProjection = "Friendly".into();
+        let (display, aliases) = plugin_prompt_name_metadata(&canonical, Some(&bare));
+        assert_eq!(display.string_at(""), Some("acme:Friendly"));
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].string_at(""), Some("Friendly"));
+
+        let qualified: Utf16JsonProjection = "other:Friendly".into();
+        let (display, aliases) = plugin_prompt_name_metadata(&canonical, Some(&qualified));
+        assert_eq!(display.string_at(""), Some("acme:other:Friendly"));
+        assert!(aliases.is_empty());
     }
 
     #[test]
@@ -1550,6 +1824,7 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             file_path: PathBuf::from("/root/.lingxi/commands/foo.md"),
             base_dir: PathBuf::from("/root/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
+            frontmatter_name: None,
             content: "# Foo Title\n\nHello $1".to_string(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
@@ -1558,6 +1833,13 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(cmd.name.string_at(""), Some("foo"));
+        assert_eq!(
+            cmd.user_facing_name
+                .as_ref()
+                .and_then(|name| name.string_at("")),
+            Some("foo"),
+            "Native prompt factories return the canonical name when frontmatter name is absent"
+        );
         assert_eq!(cmd.description.string_at(""), Some("Foo Title"));
         match cmd.kind {
             SlashCommandKind::Markdown {
@@ -1571,6 +1853,28 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
     }
 
     #[test]
+    fn markdown_prompt_preserves_frontmatter_display_name_separately_from_path_name() {
+        let file = parse_command_markdown(
+            "---\nname: Friendly\n---\nbody",
+            PathBuf::from("/root/.lingxi/commands/folder/file.md"),
+            PathBuf::from("/root/.lingxi/commands"),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        );
+        let command = build_markdown_command(
+            &file,
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        );
+        assert_eq!(command.name.string_at(""), Some("folder:file"));
+        assert_eq!(
+            command
+                .user_facing_name
+                .as_ref()
+                .and_then(|name| name.string_at("")),
+            Some("Friendly")
+        );
+    }
+
+    #[test]
     fn build_markdown_command_prefers_frontmatter_description() {
         let fm = CommandFrontmatter {
             description: "explicit".to_string(),
@@ -1580,6 +1884,7 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
+            frontmatter_name: None,
             content: "# Ignored Title".to_string(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::User),
         };
@@ -1602,6 +1907,7 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
+            frontmatter_name: None,
             content: "# Body".to_string(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
@@ -1630,6 +1936,7 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
+            frontmatter_name: None,
             content: "# Body".to_string(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
@@ -1653,6 +1960,7 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
+            frontmatter_name: None,
             content: "# Body".to_string(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
@@ -1749,6 +2057,7 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
+            frontmatter_name: None,
             content: "# Body".to_string(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
@@ -1768,6 +2077,7 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             file_path: PathBuf::from("/r/.lingxi/commands/hidden.md"),
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
+            frontmatter_name: None,
             content: "# Body".to_string(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
@@ -1786,6 +2096,7 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             file_path: PathBuf::from("/r/.lingxi/commands/y.md"),
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
+            frontmatter_name: None,
             content: "# Body".to_string(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
@@ -2033,7 +2344,7 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
         let repo = root.join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
         let skill_dir = repo.join(".lingxi").join("skills").join("demo");
-        let skill_markdown = "---\ndescription: Demo skill\nwhen_to_use: when demo is useful\n---\nUse $ARGUMENTS well\n";
+        let skill_markdown = "---\nname: Demo display\ndescription: Demo skill\nwhen_to_use: when demo is useful\n---\nUse $ARGUMENTS well\n";
         write(&skill_dir.join("SKILL.md"), skill_markdown);
 
         write(
@@ -2050,6 +2361,12 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(cmd.name.string_at(""), Some("demo"));
+        assert_eq!(
+            cmd.user_facing_name
+                .as_ref()
+                .and_then(|name| name.string_at("")),
+            Some("Demo display")
+        );
         assert_eq!(cmd.description.string_at(""), Some("Demo skill"));
         assert_eq!(cmd.loaded_from.as_deref(), Some("skills"));
         assert_eq!(cmd.skill_root.as_deref(), Some(skill_dir.as_path()));
@@ -2079,6 +2396,71 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
         );
         assert!(legacy_cmd.skill_root.is_none());
         assert_eq!(legacy_cmd.content_length, None);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn native_skill_directory_sort_uses_basename_not_frontmatter_display_name() {
+        let root = temp_dir("skill-locale-sort");
+        let skills = root.join("skills");
+        let entries = [
+            ("file2", "display-z-file2"),
+            ("file10", "display-a-file10"),
+            ("foo-2", "display-y-hyphen"),
+            ("foo_2", "display-b-underscore"),
+            ("ä", "display-x-umlaut"),
+            ("ae", "display-c-ae"),
+            ("skill-🧪-probe", "display-w-emoji"),
+            ("skill.alpha+beta", "display-d-punctuation"),
+        ];
+        for (directory_name, display_name) in entries {
+            write(
+                &skills.join(directory_name).join("SKILL.md"),
+                &format!("---\nname: {display_name}\n---\nbody\n"),
+            );
+        }
+
+        let collator = crate::native_locale_collation::collator_for_locale("en-US");
+        let loaded = load_skill_dir(
+            &skills,
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            &collator,
+        );
+        let actual: Vec<(String, String)> = loaded
+            .iter()
+            .map(|file| {
+                (
+                    file.skill_root
+                        .file_name()
+                        .expect("skill directory name")
+                        .to_string_lossy()
+                        .into_owned(),
+                    file.frontmatter_name
+                        .as_ref()
+                        .and_then(|name| name.string_at(""))
+                        .expect("frontmatter display name")
+                        .to_owned(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            actual,
+            [
+                ("ä".to_owned(), "display-x-umlaut".to_owned()),
+                ("ae".to_owned(), "display-c-ae".to_owned()),
+                ("file10".to_owned(), "display-a-file10".to_owned()),
+                ("file2".to_owned(), "display-z-file2".to_owned()),
+                ("foo_2".to_owned(), "display-b-underscore".to_owned()),
+                ("foo-2".to_owned(), "display-y-hyphen".to_owned()),
+                ("skill-🧪-probe".to_owned(), "display-w-emoji".to_owned()),
+                (
+                    "skill.alpha+beta".to_owned(),
+                    "display-d-punctuation".to_owned()
+                ),
+            ]
+        );
 
         fs::remove_dir_all(&root).ok();
     }

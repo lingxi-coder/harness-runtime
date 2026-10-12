@@ -825,6 +825,19 @@ define_client_command! {
         request_id: String,
         operation_json: String,
     },
+    // Explicit Native initialize opt-in state for this session.
+    InitializeProactivity {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proactivity: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reinitialize: Option<bool>,
+    },
+    // Change the Native proactivity level for subsequent requests.
+    SetProactivityLevel {
+        level: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offer_bypass: Option<bool>,
+    },
 
 }
 
@@ -1123,6 +1136,20 @@ impl From<ClientCommandWire> for ClientCommand {
             } => Self::UiClientOperation {
                 request_id,
                 operation_json,
+            },
+            ClientCommandWire::InitializeProactivity {
+                proactivity,
+                reinitialize,
+            } => Self::InitializeProactivity {
+                proactivity,
+                reinitialize,
+            },
+            ClientCommandWire::SetProactivityLevel {
+                level,
+                offer_bypass,
+            } => Self::SetProactivityLevel {
+                level,
+                offer_bypass,
             },
         }
     }

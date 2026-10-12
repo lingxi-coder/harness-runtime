@@ -49,8 +49,9 @@ const HEADER: &str = "Skills loaded this session";
 const EMPTY_TABLE: &str = "  (no skills loaded)";
 const ALL_USED: &str = "All loaded skills have been used at least once.";
 
-/// Seconds per day, for turning a unix-timestamp delta into whole days.
-const SECONDS_PER_DAY: i64 = 86_400;
+/// Milliseconds per day, for native `lastUsedAt` and transcript timestamps.
+const MILLIS_PER_DAY: i64 = 86_400_000;
+const MILLIS_PER_WEEK: i64 = 7 * MILLIS_PER_DAY;
 
 /// Explicit filesystem roots this handler was constructed with. Mirrors
 /// [`crate::builtins::skills::SkillsHandler`]'s private `SkillsRoots`.
@@ -113,12 +114,12 @@ impl BuiltinCommandHandler for SkillDoctorHandler {
     // Upstream's `load:()=>Promise.resolve({call:async(e,t)=>{...Bcf(e,t)}})`
     // never reads its raw-args parameter `e`; `args` is ignored here too.
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        let now_unix = SystemTime::now()
+        let now_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
         let loaded = match self.registry.as_ref() {
-            Some(registry) => load_registry_entries(&self.roots, registry, now_unix).await,
-            None => load_entries(&self.roots, now_unix).await,
+            Some(registry) => load_registry_entries(&self.roots, registry, now_unix_ms).await,
+            None => load_entries(&self.roots, now_unix_ms).await,
         };
         match loaded {
             Ok(mut entries) => {
@@ -166,8 +167,7 @@ enum SkillOwner {
     Mcp(String),
 }
 
-/// Record one real dispatch of a Markdown/skill-kind command: increments its
-/// usage count and stamps `last_used_unix` to now.
+/// Record one invocation with the exact canonical command name.
 pub fn record_skill_usage(
     lingxi_home: &Path,
     name: &lingxi_core::types::utf16_json::Utf16JsonProjection,
@@ -202,19 +202,19 @@ fn source_label(source: CommandSource) -> &'static str {
 
 /// `lingxi_home` is `~/.lingxi`; its parent is the upward-walk stop boundary
 /// (`home`) the loaders need. Same convention as
-/// `skill_api::listing::project_skills_dirs`'s `lingxi_home.parent()`.
+/// `skill::listing::project_skills_dirs`'s `lingxi_home.parent()`.
 fn derive_home(lingxi_home: &Path) -> PathBuf {
     lingxi_home
         .parent()
         .map_or_else(|| lingxi_home.to_path_buf(), Path::to_path_buf)
 }
 
-fn days_between(last_used_unix: i64, now_unix: i64) -> u64 {
-    let delta = now_unix.saturating_sub(last_used_unix);
+fn days_between(last_used_at_ms: i64, now_unix_ms: i64) -> u64 {
+    let delta = now_unix_ms.saturating_sub(last_used_at_ms);
     if delta <= 0 {
         0
     } else {
-        u64::try_from(delta / SECONDS_PER_DAY).unwrap_or(0)
+        u64::try_from(delta / MILLIS_PER_DAY).unwrap_or(0)
     }
 }
 
@@ -226,15 +226,15 @@ fn make_entry(
     listing_tokens: Option<u64>,
     usage: &HashMap<Vec<u16>, SkillUsageRecord>,
     weekly_tokens: &HashMap<String, u64>,
-    now_unix: i64,
+    now_unix_ms: i64,
 ) -> SkillDoctorEntry {
     let name_units = name.string_units("").unwrap_or_default();
     let display_units = display_name.encode_utf16().collect::<Vec<_>>();
     let record = usage.get(&name_units).or_else(|| usage.get(&display_units));
     let usage_count = record.map_or(0, |r| r.count);
     let days_since_use = record
-        .and_then(|r| r.last_used_unix)
-        .map(|last| days_between(last, now_unix));
+        .and_then(|r| r.last_used_at_ms)
+        .map(|last| days_between(last, now_unix_ms));
     let source_name = name.string_at("").unwrap_or_default();
     SkillDoctorEntry {
         name: display_name.clone(),
@@ -262,11 +262,11 @@ fn make_entry(
 /// precedence without needing the live [`crate::CommandRegistry`].
 async fn load_entries(
     roots: &SkillDoctorRoots,
-    now_unix: i64,
+    now_unix_ms: i64,
 ) -> Result<Vec<SkillDoctorEntry>, String> {
     let home = derive_home(&roots.lingxi_home);
     let usage = read_skill_usage(&roots.lingxi_home)?;
-    let weekly_tokens = read_weekly_attribution_tokens(&roots.lingxi_home, now_unix);
+    let weekly_tokens = read_weekly_attribution_tokens(&roots.lingxi_home, now_unix_ms);
 
     // `load_command_markdown_files` takes `managed_dir: &Path` (not
     // `Option`); when no managed root is configured, point it at a directory
@@ -307,7 +307,7 @@ async fn load_entries(
                 listing_tokens,
                 &usage,
                 &weekly_tokens,
-                now_unix,
+                now_unix_ms,
             ));
         }
     }
@@ -329,7 +329,7 @@ async fn load_entries(
                 listing_tokens,
                 &usage,
                 &weekly_tokens,
-                now_unix,
+                now_unix_ms,
             ));
         }
     }
@@ -340,10 +340,10 @@ async fn load_entries(
 async fn load_registry_entries(
     roots: &SkillDoctorRoots,
     registry: &Arc<RwLock<CommandRegistry>>,
-    now_unix: i64,
+    now_unix_ms: i64,
 ) -> Result<Vec<SkillDoctorEntry>, String> {
     let usage = read_skill_usage(&roots.lingxi_home)?;
-    let weekly_tokens = read_weekly_attribution_tokens(&roots.lingxi_home, now_unix);
+    let weekly_tokens = read_weekly_attribution_tokens(&roots.lingxi_home, now_unix_ms);
     let commands: Vec<SlashCommand> = registry
         .read()
         .await
@@ -390,7 +390,7 @@ async fn load_registry_entries(
             listing_tokens,
             &usage,
             &weekly_tokens,
-            now_unix,
+            now_unix_ms,
         ));
     }
 
@@ -425,20 +425,19 @@ fn estimate_listing_tokens(command: &SlashCommand) -> u64 {
         .max(1)
 }
 
-const WEEK_SECONDS: i64 = 7 * SECONDS_PER_DAY;
 const MAX_TRANSCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Sum assistant-message token usage attributed to a skill during the last
 /// seven days. Transcript corruption is isolated to the affected line/file;
 /// `/skill-doctor` remains useful even after an interrupted JSONL write.
-fn read_weekly_attribution_tokens(config_home: &Path, now_unix: i64) -> HashMap<String, u64> {
+fn read_weekly_attribution_tokens(config_home: &Path, now_unix_ms: i64) -> HashMap<String, u64> {
     let mut totals = HashMap::new();
     let projects = config_home.join("projects");
-    scan_transcript_dir(&projects, now_unix, &mut totals);
+    scan_transcript_dir(&projects, now_unix_ms, &mut totals);
     totals
 }
 
-fn scan_transcript_dir(path: &Path, now_unix: i64, totals: &mut HashMap<String, u64>) {
+fn scan_transcript_dir(path: &Path, now_unix_ms: i64, totals: &mut HashMap<String, u64>) {
     let Ok(entries) = std::fs::read_dir(path) else {
         return;
     };
@@ -451,7 +450,7 @@ fn scan_transcript_dir(path: &Path, now_unix: i64, totals: &mut HashMap<String, 
             continue;
         }
         if file_type.is_dir() {
-            scan_transcript_dir(&path, now_unix, totals);
+            scan_transcript_dir(&path, now_unix_ms, totals);
             continue;
         }
         if !file_type.is_file() || path.extension().is_none_or(|ext| ext != "jsonl") {
@@ -470,23 +469,23 @@ fn scan_transcript_dir(path: &Path, now_unix: i64, totals: &mut HashMap<String, 
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            accumulate_attributed_usage(&value, now_unix, totals);
+            accumulate_attributed_usage(&value, now_unix_ms, totals);
         }
     }
 }
 
-fn accumulate_attributed_usage(value: &Value, now_unix: i64, totals: &mut HashMap<String, u64>) {
+fn accumulate_attributed_usage(value: &Value, now_unix_ms: i64, totals: &mut HashMap<String, u64>) {
     if value.get("type").and_then(Value::as_str) != Some("assistant") {
         return;
     }
     let Some(timestamp) = value
         .get("timestamp")
         .and_then(Value::as_str)
-        .and_then(parse_rfc3339_unix)
+        .and_then(parse_rfc3339_unix_ms)
     else {
         return;
     };
-    if now_unix.saturating_sub(timestamp) > WEEK_SECONDS || timestamp > now_unix {
+    if now_unix_ms.saturating_sub(timestamp) > MILLIS_PER_WEEK || timestamp > now_unix_ms {
         return;
     }
     let Some(skill) = find_string_field(value, "attributionSkill") else {
@@ -528,7 +527,7 @@ fn find_string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     }
 }
 
-fn parse_rfc3339_unix(value: &str) -> Option<i64> {
+fn parse_rfc3339_unix_ms(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     if bytes.len() < 20
         || bytes.get(4) != Some(&b'-')
@@ -556,16 +555,35 @@ fn parse_rfc3339_unix(value: &str) -> Option<i64> {
         return None;
     }
     let suffix = &value[19..];
-    let offset = if suffix.ends_with('Z') || suffix.ends_with('z') {
+    let (fraction, zone) = if let Some(rest) = suffix.strip_prefix('.') {
+        let zone_start = rest.find(['+', '-', 'Z', 'z']).unwrap_or(rest.len());
+        let fraction_text = &rest[..zone_start];
+        if fraction_text.is_empty() || !fraction_text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let millis = fraction_text
+            .bytes()
+            .take(3)
+            .fold(0_i64, |value, digit| value * 10 + i64::from(digit - b'0'));
+        let fraction_ms = match fraction_text.len().min(3) {
+            1 => millis * 100,
+            2 => millis * 10,
+            _ => millis,
+        };
+        (fraction_ms, &rest[zone_start..])
+    } else {
+        (0, suffix)
+    };
+    let offset = if zone.ends_with('Z') || zone.ends_with('z') {
         0
     } else {
-        let tz_start = suffix.rfind(['+', '-'])?;
-        let sign = if suffix.as_bytes().get(tz_start) == Some(&b'-') {
+        let tz_start = zone.rfind(['+', '-'])?;
+        let sign = if zone.as_bytes().get(tz_start) == Some(&b'-') {
             -1
         } else {
             1
         };
-        let tz = suffix.get(tz_start + 1..)?;
+        let tz = zone.get(tz_start + 1..)?;
         let (hours, minutes) = tz.split_once(':')?;
         sign * (hours.parse::<i64>().ok()? * 3600 + minutes.parse::<i64>().ok()? * 60)
     };
@@ -580,7 +598,9 @@ fn parse_rfc3339_unix(value: &str) -> Option<i64> {
     Some(
         days.saturating_mul(86_400)
             .saturating_add(hour * 3600 + minute * 60 + second)
-            .saturating_sub(offset),
+            .saturating_sub(offset)
+            .saturating_mul(1000)
+            .saturating_add(fraction),
     )
 }
 
@@ -994,7 +1014,7 @@ mod tests {
 
     #[test]
     fn weekly_attribution_uses_assistant_timestamp_and_all_token_classes() {
-        let now = parse_rfc3339_unix("2026-07-29T12:00:00Z").unwrap();
+        let now = parse_rfc3339_unix_ms("2026-07-29T12:00:00Z").unwrap();
         let recent = serde_json::json!({
             "type": "assistant",
             "timestamp": "2026-07-28T12:00:00Z",
@@ -1019,10 +1039,11 @@ mod tests {
         accumulate_attributed_usage(&stale, now, &mut totals);
         assert_eq!(totals.get("reviewer:scan"), Some(&100));
         assert_eq!(
-            parse_rfc3339_unix("1970-01-01T00:00:00Z"),
+            parse_rfc3339_unix_ms("1970-01-01T00:00:00Z"),
             Some(0),
-            "timestamp parser anchors the seven-day window correctly"
+            "timestamp parser anchors the seven-day millisecond window correctly"
         );
+        assert_eq!(parse_rfc3339_unix_ms("1970-01-01T00:00:00.123Z"), Some(123));
     }
 
     #[tokio::test]
@@ -1109,7 +1130,7 @@ mod tests {
         assert!(usage
             .get(&"foo".encode_utf16().collect::<Vec<_>>())
             .unwrap()
-            .last_used_unix
+            .last_used_at_ms
             .is_some());
         fs::remove_dir_all(root).ok();
     }

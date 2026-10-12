@@ -614,6 +614,8 @@ impl WebFetchTool {
             model: self.apply_model(),
             profile: None,
             system_prompt: None,
+            typed_attachment_ids: std::collections::HashSet::new(),
+            task_deliveries: std::collections::HashMap::new(),
             system_prompt_input: None,
             messages: vec![{
                 let mut message = ConversationMessage::user(MessageId::new(), String::new());

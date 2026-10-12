@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// [`crate::builtin_support::UnimplementedCommandHandler`] that return the locked
 /// stub literal `"{name}: not implemented in v0.6.0 (M5)"`.
 ///
-/// The 19 core names listed in [`crate::builtin_support::BUILTIN_CORE_NAMES`] are
+/// The 18 core names listed in [`crate::builtin_support::BUILTIN_CORE_NAMES`] are
 /// **also** registered here against the shared unimplemented handler
 /// **first**, then immediately overwritten by [`register_core_placeholders`]
 /// (called at the end of this function) with their per-name placeholder
@@ -31,10 +31,15 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
     // Each name needs its own handler **instance** because the handler
     // carries its own `name` field used to substitute the locked literal.
     for &name in BUILTIN_COMMAND_NAMES {
-        let h = Arc::new(UnimplementedCommandHandler::new(
-            name,
-            core_description(name),
-        ));
+        let (native_type, disable_non_interactive, supports_non_interactive) =
+            native_builtin_metadata(name);
+        let h = Arc::new(
+            UnimplementedCommandHandler::new(name, core_description(name)).with_native_metadata(
+                native_type,
+                disable_non_interactive,
+                supports_non_interactive,
+            ),
+        );
         reg.register_builtin_handler(h);
     }
 
@@ -91,6 +96,42 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
     reg.register_builtin_handler(Arc::new(crate::builtins::PowerupHandler::new()));
 }
 
+/// Native Headless factory facts for the corresponding 2.1.295 builtin. These
+/// rows are explicit source mappings keyed by command identity, never inferred
+/// from the Harness dispatcher. Native's missing optional properties retain
+/// their own false defaults. `None` records unresolved source facts and is
+/// preserved in the catalog rather than treated as a Native rejection.
+fn native_builtin_metadata(name: &str) -> (Option<crate::model::NativeCommandType>, bool, bool) {
+    use crate::model::NativeCommandType::{Local, LocalJsx, Prompt};
+
+    match name {
+        // Native local rows with `supportsNonInteractive` omitted or false.
+        "install-slack-app" | "keybindings" | "rewind" | "stickers" | "voice" => {
+            (Some(Local), false, false)
+        }
+        // Native local rows with `supportsNonInteractive: true`.
+        "add-dir" | "advisor" | "agents" | "auto-mode-setup" | "autocompact" | "clear"
+        | "color" | "compact" | "config" | "context" | "effort" | "exit" | "extra-usage"
+        | "fast" | "focus" | "goal" | "mcp" | "model" | "output-style" | "recap"
+        | "reload-plugins" | "reload-skills" | "rename" | "skill-doctor" | "stop" | "usage"
+        | "usage-credits" | "version" => (Some(Local), false, true),
+        // Native prompt rows. `statusline` is the only mapped row with
+        // `disableNonInteractive: true`; the other prompt properties omit it.
+        "statusline" => (Some(Prompt), true, false),
+        "init" | "insights" | "security-review" => (Some(Prompt), false, false),
+        // Native local-jsx objects are excluded by MPe regardless of their
+        // other UI-only flags.
+        "autofix-pr" | "background" | "branch" | "brief" | "btw" | "bug" | "cd" | "chrome"
+        | "copy" | "desktop" | "diff" | "export" | "feedback" | "fork" | "help" | "hooks"
+        | "ide" | "install" | "install-github-app" | "login" | "logout" | "memory" | "mobile"
+        | "passes" | "permissions" | "plan" | "plugin" | "powerup" | "privacy-settings"
+        | "rate-limit-options" | "release-notes" | "remote-env" | "resume" | "session"
+        | "skills" | "status" | "subtask" | "tasks" | "teleport" | "terminal-setup" | "theme"
+        | "tui" | "ultraplan" | "upgrade" | "workflows" => (Some(LocalJsx), false, false),
+        _ => (None, false, false),
+    }
+}
+
 /// Overwrite the 6 batch-1 entries (`clear`, `compact`, `exit`, `help`,
 /// `init`, `memory`) with their handle-bound real handlers from M5-10.
 ///
@@ -129,7 +170,7 @@ pub fn register_core_batch_1(
     reg.register_alias("quit".into(), "exit".into());
 }
 
-/// Overwrite the 12 batch-2 entries (`agents`, `config`, `doctor`, `hooks`,
+/// Overwrite the 11 batch-2 entries (`agents`, `config`, `hooks`,
 /// `ide`, `login`, `logout`, `mcp`, `model`, `permissions`, `status`, `version`) with
 /// their handle/auth-bound real handlers from M5-11.
 ///
@@ -150,14 +191,13 @@ pub fn register_core_batch_2(
     auth: Arc<dyn lingxi_core::host::AuthHandle>,
 ) {
     use crate::builtins::{
-        AgentsHandler, ConfigHandler, DoctorHandler, HooksHandler, IdeHandler, LoginHandler,
+        AgentsHandler, ConfigHandler, HooksHandler, IdeHandler, LoginHandler,
         LogoutHandler, McpHandler, ModelHandler, OutputStyleHandler, PermissionsHandler,
         StatusHandler, VersionHandler,
     };
 
     reg.register_builtin_handler(Arc::new(AgentsHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ConfigHandler::new(handle.clone())));
-    reg.register_builtin_handler(Arc::new(DoctorHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(HooksHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(IdeHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(LoginHandler::new(auth.clone())));
@@ -182,18 +222,16 @@ pub fn register_core_batch_2(
     reg.register_alias("allowed-tools".into(), "permissions".into());
 }
 
-/// Overwrite the 4 batch-4 (engine-data) entries (`context`, `export`,
-/// `files`, `resume`) with their handle-bound real handlers.
+/// Overwrite the 3 batch-4 (engine-data) entries (`context`, `export`,
+/// `resume`) with their handle-bound real handlers.
 ///
 /// Call **after** [`register_all_builtin_commands`] and (optionally) after
 /// [`register_core_batch_2`]. The function is idempotent — calling it twice
 /// with the same `handle` produces the same final state.
 ///
-/// All four handlers consume the orchestrator handle: `/context` reads the
-/// context-window usage + status snapshot, `/export` reads the conversation
-/// transcript, `/files` reads the read-file-state cache, and `/resume`
-/// enumerates the on-disk session store. Each call overwrites the matching
-/// pass-1 unimplemented stub entry in-place.
+/// All three registered handlers consume the orchestrator handle: `/context`
+/// reads the context-window usage + status snapshot, `/export` reads the
+/// conversation transcript, and `/resume` enumerates the on-disk session store.
 ///
 /// `/resume` additionally carries the `continue` alias (claude-code parity:
 /// `src/commands/resume/index.ts` declares `aliases: ['continue']`), registered
@@ -210,11 +248,10 @@ pub fn register_core_batch_4(
     reg: &mut CommandRegistry,
     handle: Arc<dyn lingxi_core::host::OrchestratorHandle>,
 ) {
-    use crate::builtins::{ContextHandler, ExportHandler, FilesHandler, ResumeHandler};
+    use crate::builtins::{ContextHandler, ExportHandler, ResumeHandler};
 
     reg.register_builtin_handler(Arc::new(ContextHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ExportHandler::new(handle.clone())));
-    reg.register_builtin_handler(Arc::new(FilesHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ResumeHandler::new(handle)));
 
     // claude-code parity: `/resume` carries the `continue` alias
@@ -222,14 +259,13 @@ pub fn register_core_batch_4(
     reg.register_alias("continue".into(), "resume".into());
 }
 
-/// Register the batch-3 (M-parity) handle-free slash commands.
+/// Register the remaining handle-free builtin slash commands.
 ///
-/// These 8 commands (`commit`, `commit-push-pr`, `init-verifiers`, `insights`,
-/// `release-notes`, `security-review`, `statusline`, `stickers`)
-/// carry no orchestrator or auth handle: each is a static prompt-injection
-/// (`InjectMessage`) or a static display message (`Done`). They are wired
-/// unconditionally at the end of [`register_all_builtin_commands`], overwriting
-/// the matching pass-1 unimplemented stub entries in-place.
+/// These 5 commands (`insights`, `release-notes`, `security-review`,
+/// `statusline`, `stickers`) carry no orchestrator or auth handle. The Native
+/// bundled prompts `/commit` and `/doctor` are registered by
+/// [`crate::builtins::register_bundled_skills`] instead; `/commit-push-pr` and
+/// `/init-verifiers` have no reachable 2.1.295 command-pool producer.
 ///
 /// `release-notes` (the changelog URL fallback) joins the batch-3 set here as a
 /// handle-free `Done` display.
@@ -248,13 +284,10 @@ pub fn register_core_batch_4(
 /// [`crate::builtin_support::UnimplementedCommandHandler`].
 pub fn register_core_batch_3(reg: &mut CommandRegistry) {
     use crate::builtins::{
-        CommitHandler, CommitPushPrHandler, InitVerifiersHandler, InsightsHandler,
-        ReleaseNotesHandler, SecurityReviewHandler, StatuslineHandler, StickersHandler,
+        InsightsHandler, ReleaseNotesHandler, SecurityReviewHandler, StatuslineHandler,
+        StickersHandler,
     };
 
-    reg.register_builtin_handler(Arc::new(CommitHandler::new()));
-    reg.register_builtin_handler(Arc::new(CommitPushPrHandler::new()));
-    reg.register_builtin_handler(Arc::new(InitVerifiersHandler::new()));
     reg.register_builtin_handler(Arc::new(InsightsHandler::new()));
     reg.register_builtin_handler(Arc::new(ReleaseNotesHandler::new()));
     reg.register_builtin_handler(Arc::new(SecurityReviewHandler::new()));
@@ -517,16 +550,47 @@ mod registry_tests {
     use crate::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_87_names() {
+    fn register_all_registers_exactly_82_native_builtin_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(&(*name).into()).is_some(),
                 "expected command /{name} registered"
             );
         }
+        for name in ["commit", "doctor", "commit-push-pr", "files", "init-verifiers"] {
+            assert!(
+                reg.resolve(&name.into()).is_none(),
+                "/{name} must not be registered as a Native builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_factories_carry_source_bound_headless_execution_facts() {
+        use crate::model::NativeCommandType::{Local, LocalJsx, Prompt};
+
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+
+        let native_type = |name: &str| reg.resolve(&name.into()).unwrap().native_type;
+        assert_eq!(native_type("clear"), Some(Local));
+        assert!(
+            reg.resolve(&"clear".into())
+                .unwrap()
+                .supports_non_interactive
+        );
+        assert_eq!(native_type("branch"), Some(LocalJsx));
+        assert_eq!(native_type("init"), Some(Prompt));
+        assert_eq!(native_type("statusline"), Some(Prompt));
+        assert!(
+            reg.resolve(&"statusline".into())
+                .unwrap()
+                .disable_non_interactive
+        );
+
     }
 
     /// H-BIN-11 (cc2.1.207): the five newly-registered commands resolve, and
@@ -769,16 +833,15 @@ mod batch_3_tests {
         }
     }
 
-    /// `register_all_builtin_commands` now wires batch-3 unconditionally (no
-    /// handle needed), so the batch-3 names must NOT return the locked M5 stub
-    /// literal after the standard registration call.
+    /// The remaining handle-free builtin inject commands must not return the
+    /// locked M5 stub literal after the standard registration call.
     #[tokio::test]
     async fn batch_3_inject_commands_return_inject_message_not_stub() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
 
-        // Sample of the InjectMessage (`inject`-kind) batch-3 commands.
-        for name in ["commit", "security-review", "init-verifiers"] {
+        // Sample of the InjectMessage commands still registered as Builtin.
+        for name in ["insights", "security-review"] {
             let h = reg
                 .get_handler(&name.into())
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
@@ -840,13 +903,10 @@ mod batch_3_tests {
     }
 
     #[test]
-    fn all_8_batch_3_names_resolve_after_register_all() {
+    fn all_5_remaining_batch_3_names_resolve_after_register_all() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
         for name in [
-            "commit",
-            "commit-push-pr",
-            "init-verifiers",
             "insights",
             "release-notes",
             "security-review",
@@ -1054,13 +1114,13 @@ mod batch_4_tests {
     }
 
     #[test]
-    fn all_4_batch_4_names_resolve_after_overwrite() {
+    fn all_3_batch_4_names_resolve_after_overwrite() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
         let handle = Arc::new(MockOrchestratorHandle::new());
         register_core_batch_4(&mut reg, handle);
 
-        for name in ["context", "export", "files", "resume"] {
+        for name in ["context", "export", "resume"] {
             assert!(reg.resolve(&name.into()).is_some(), "/{name} missing");
             assert!(
                 reg.get_handler(&name.into()).is_some(),
@@ -1080,7 +1140,7 @@ mod batch_4_tests {
         let handle = Arc::new(MockOrchestratorHandle::new());
         register_core_batch_4(&mut reg, handle);
 
-        for name in ["context", "files", "resume"] {
+        for name in ["context", "resume"] {
             let h = reg
                 .get_handler(&name.into())
                 .unwrap_or_else(|| panic!("/{name} handler missing"));

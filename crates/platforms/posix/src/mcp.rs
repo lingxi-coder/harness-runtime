@@ -246,6 +246,17 @@ impl PosixMcpTransport {
         Self::default()
     }
 
+    /// Share the Desktop session's process-local Native proxy-auth cache with
+    /// remote HTTP and SSE MCP clients.
+    #[must_use]
+    pub fn with_proxy_auth_helper(
+        mut self,
+        helper: Arc<dyn platform_common::ProxyAuthHelper>,
+    ) -> Self {
+        self.remote = Arc::new(RemoteMcpTransport::new().with_proxy_auth_helper(helper));
+        self
+    }
+
     fn insert(&self, id: McpConnectionId, conn: PosixMcpConnection) {
         // Recover from a poisoned std `Mutex` by silently dropping the
         // insert — the engine will surface the failure on the next call
@@ -688,9 +699,16 @@ struct ToolCallResult {
     content: Utf16JsonProjection,
     #[serde(rename = "isError", default)]
     is_error: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    error: Option<Utf16JsonProjection>,
     // Optional, arbitrary-JSON MCP `CallToolResult` members. Parsed as opaque
     // values and forwarded verbatim onto the DTO (no transformation), matching
-    // claude-code's `result._meta` / `result.structuredContent` passthrough.
+    // claude-code's `_meta` / `structuredContent` passthrough.
     #[serde(
         rename = "_meta",
         default,
@@ -707,6 +725,41 @@ struct ToolCallResult {
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
     structured_content: Option<Utf16JsonProjection>,
+}
+
+#[cfg(test)]
+mod tool_call_result_error_source_tests {
+    use super::ToolCallResult;
+
+    #[test]
+    fn tool_call_error_source_preserves_absent_null_and_utf16() {
+        let absent: ToolCallResult = serde_json::from_str(r#"{"content":[],"isError":true}"#)
+            .expect("decode absent top-level error");
+        assert!(absent.error.is_none());
+
+        let explicit_null: ToolCallResult =
+            serde_json::from_str(r#"{"content":[],"isError":true,"error":null}"#)
+                .expect("decode explicit null top-level error");
+        assert_eq!(
+            explicit_null
+                .error
+                .as_ref()
+                .and_then(|error| error.at_pointer(""))
+                .map(|value| value.is_null()),
+            Some(true)
+        );
+
+        let surrogate: ToolCallResult =
+            serde_json::from_str(r#"{"content":[],"isError":true,"error":"\ud800"}"#)
+                .expect("decode source-preserved top-level error");
+        assert_eq!(
+            surrogate
+                .error
+                .as_ref()
+                .and_then(|error| error.string_units("")),
+            Some(vec![0xd800])
+        );
+    }
 }
 
 #[derive(Deserialize)]
@@ -1353,6 +1406,7 @@ impl McpTransport for PosixMcpTransport {
         Ok(McpToolResultDto {
             content: parsed.content,
             is_error: parsed.is_error,
+            error: parsed.error,
             meta: parsed.meta,
             structured_content: parsed.structured_content,
         })

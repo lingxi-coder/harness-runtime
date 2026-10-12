@@ -1863,7 +1863,9 @@ impl ModHost {
                 Utf16JsonProjection::from_serde_value(&manifest)
                     .map_err(|error| ModError::Protocol(error.to_string()))
             }
-            None => Ok(host_generated_json(json!(null))),
+            None => Err(ModError::Hook(format!(
+                "ui_client_module: plugin {plugin} is not loaded or its hooks module names no surface module"
+            ))),
         }
     }
 
@@ -5731,6 +5733,35 @@ mod tests {
             unload_invalidations[1]["uuid"]
         );
         assert!(host.client_ui.data.lock().unwrap().instances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ui_client_module_errors_when_plugin_has_no_surface_modules() {
+        let host = ModHost::start(None).await.unwrap();
+        let session = UiLifecycleSession::default();
+        host.client_ui
+            .install_loaded_plugin("surface-less", "surface-less@user", None);
+
+        for plugin in ["unavailable-plugin", "surface-less"] {
+            let result = host
+                .dispatch_client_ui_control(
+                    host_generated_json(json!({
+                        "subtype": "ui_client_module",
+                        "plugin": plugin,
+                    })),
+                    &session,
+                )
+                .await;
+            match result {
+                Err(ModError::Hook(message)) => assert_eq!(
+                    message,
+                    format!(
+                        "ui_client_module: plugin {plugin} is not loaded or its hooks module names no surface module"
+                    )
+                ),
+                other => panic!("expected an unavailable surface-module error, got {other:?}"),
+            }
+        }
     }
 
     #[test]

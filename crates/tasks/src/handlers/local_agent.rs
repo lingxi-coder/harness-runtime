@@ -2571,7 +2571,12 @@ mod tests {
         .await
         .expect("parent parks while its child is in flight");
         assert!(
-            registry.take_pending_task_notifications().await.is_empty(),
+            registry
+                .take_pending_task_notifications(
+                    lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+                )
+                .await
+                .is_empty(),
             "main cannot steal the child's result or the deferred parent rest"
         );
         if let Some(old) = restored_id {
@@ -2629,7 +2634,11 @@ mod tests {
             api.parent_calls.load(std::sync::atomic::Ordering::SeqCst),
             2
         );
-        let notifications = registry.take_pending_task_notifications().await;
+        let notifications = registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+            )
+            .await;
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].task_id, parent);
         assert_eq!(
@@ -2820,7 +2829,12 @@ mod tests {
             streaming.delivered.lock().unwrap().as_slice(),
             &["second digest".into()]
         );
-        assert!(registry.take_pending_task_notifications().await.is_empty());
+        assert!(registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty());
         tx.send(completed_event("rest-two")).await.unwrap();
         for _ in 0..400 {
             if registry.get(&id).await.unwrap().is_parked() {
@@ -2829,7 +2843,12 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(registry.get(&id).await.unwrap().is_parked());
-        assert!(registry.take_pending_task_notifications().await.is_empty());
+        assert!(registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default()
+            )
+            .await
+            .is_empty());
         registry.kill_with_reason(&id, "user").await.unwrap();
         assert!(TaskRegistryHandle::observe_agent_activity(
             registry.as_ref(),

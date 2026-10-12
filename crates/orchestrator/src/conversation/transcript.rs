@@ -17,9 +17,10 @@ struct PreappendedRowMetadata<'a> {
     api_error: Option<&'a lingxi_core::host::ServerFallbackApiErrorRow>,
 }
 
-fn persisted_assistant_usage(usage: &llm_runtime::ExecutionUsage) -> JsonPayload {
+pub(crate) fn persisted_assistant_usage(usage: &llm_runtime::ExecutionUsage) -> JsonPayload {
     if usage.provider_metadata.is_root_object() {
-        let provider_usage = without_host_usage_metadata(&usage.provider_metadata);
+        let provider_usage = with_native_usage_iterations(&usage.provider_metadata);
+        let provider_usage = without_host_usage_metadata(&provider_usage);
         if provider_usage.object_len("").is_some_and(|len| len > 0) {
             return provider_usage;
         }
@@ -33,6 +34,18 @@ fn persisted_assistant_usage(usage: &llm_runtime::ExecutionUsage) -> JsonPayload
         "output_tokens": buckets.output_tokens,
     }))
     .expect("generated usage counters serialize")
+}
+
+fn with_native_usage_iterations(usage: &JsonPayload) -> JsonPayload {
+    if usage.array_len("/iterations").is_some() {
+        return usage.clone();
+    }
+    let Some(iterations) = crate::resume::native_usage_iterations_payload(usage) else {
+        return usage.clone();
+    };
+    usage
+        .with_object_field("iterations", &iterations)
+        .unwrap_or_else(|_| usage.clone())
 }
 
 fn without_host_usage_metadata(usage: &JsonPayload) -> JsonPayload {
@@ -221,6 +234,54 @@ fn source_object<const N: usize>(fields: [(&str, Source); N]) -> Source {
             .collect(),
     )
     .expect("generated field names form an object")
+}
+
+fn source_tool_error_payload(result: &Source, model_text: &Source) -> Option<Source> {
+    let error_prefix = "Error: ".encode_utf16().collect::<Vec<_>>();
+    let wrapper_prefix = "<tool_use_error>".encode_utf16().collect::<Vec<_>>();
+    let wrapper_suffix = "</tool_use_error>".encode_utf16().collect::<Vec<_>>();
+    let units = if let Some(units) = result.string_units("") {
+        units
+            .strip_prefix(error_prefix.as_slice())
+            .unwrap_or(&units)
+            .to_vec()
+    } else {
+        let units = model_text.string_units("")?;
+        units
+            .strip_prefix(wrapper_prefix.as_slice())
+            .and_then(|inner| inner.strip_suffix(wrapper_suffix.as_slice()))
+            .unwrap_or(&units)
+            .to_vec()
+    };
+    let message = Source::root_string(String::from_utf16_lossy(&units), units).ok()?;
+    Some(source_object([("error", message)]))
+}
+
+#[cfg(test)]
+#[test]
+fn source_tool_error_payload_unwraps_side_channel_without_losing_utf16() {
+    let error_units = vec![
+        b'i' as u16,
+        b's' as u16,
+        b's' as u16,
+        b'u' as u16,
+        b'e' as u16,
+        0xd800,
+    ];
+    let mut result_units = "Error: ".encode_utf16().collect::<Vec<_>>();
+    result_units.extend_from_slice(&error_units);
+    let result = Source::root_string(String::from_utf16_lossy(&result_units), result_units)
+        .expect("toolUseResult source is a string");
+
+    let mut model_units = "<tool_use_error>".encode_utf16().collect::<Vec<_>>();
+    model_units.extend_from_slice(&error_units);
+    model_units.extend("</tool_use_error>".encode_utf16());
+    let model_text = Source::root_string(String::from_utf16_lossy(&model_units), model_units)
+        .expect("model-facing source is a string");
+
+    let payload = source_tool_error_payload(&result, &model_text)
+        .expect("the side-channel error is a string");
+    assert_eq!(payload.string_units("/error"), Some(error_units));
 }
 
 fn source_array_items(source: &Source) -> Option<Vec<Source>> {
@@ -1671,11 +1732,29 @@ impl ConversationOrchestrator {
                 None => (tool.to_string(), None, None),
             },
         };
-        let result = result_from_side_table
-            .or(if substituted { None } else { pending_result })
-            .unwrap_or_else(|| source_object([("error", content.clone())]));
+        // `tool_use_results` stores the transcript's `toolUseResult` side
+        // channel (which is a scalar `Error: ...` string on failures), while
+        // a pending frame stores the structured host OutputEvent payload.
+        // When the model-facing content is unchanged, the explicit frame is
+        // authoritative; letting the transcript side channel shadow it
+        // would turn `{"error": bare_message}` into an error containing the
+        // `<tool_use_error>` presentation wrapper. A substituted row is the
+        // exception: its side channel belongs to the accepted synthetic, so
+        // it must continue to override the discarded frame.
+        let result = if substituted {
+            result_from_side_table
+        } else {
+            pending_result.or(result_from_side_table)
+        }
+        .unwrap_or_else(|| source_object([("error", content.clone())]));
         let result = if is_error && result.object_entries().is_none() {
-            source_object([("error", content.clone())])
+            // `toolUseResult` is a scalar `Error: ...` side channel, while the
+            // accepted model text may wrap the same message in
+            // `<tool_use_error>`. When a substitution makes that side channel
+            // authoritative, derive the host error payload from its bare
+            // source text instead of copying the presentation wrapper.
+            source_tool_error_payload(&result, content)
+                .unwrap_or_else(|| source_object([("error", content.clone())]))
         } else {
             result
         };
@@ -3105,6 +3184,135 @@ impl ConversationOrchestrator {
     /// other JSONL append; advances `last_jsonl_uuid` on success so the next
     /// line chains off it.
     pub async fn persist_hook_attachment_to_jsonl(&self, payload: Source) {
+        self.persist_attachment_to_jsonl(payload, source_object([]), "hook_attachment")
+            .await;
+    }
+
+    /// Persist a future-owned request-context sidecar with Native's rendered
+    /// transcript view. The attachment stays outside conversational history.
+    pub(crate) async fn persist_request_context_attachment_to_jsonl(
+        &self,
+        attachment: crate::RequestContextTranscriptAttachment,
+    ) {
+        let extra = source_object([
+            ("rendered", attachment.rendered),
+            ("renderedRole", Source::from(attachment.rendered_role)),
+        ]);
+        self.persist_attachment_to_jsonl_with_id(
+            attachment.message_id.as_uuid(),
+            attachment.payload,
+            extra,
+            "request_context_attachment",
+        )
+        .await;
+    }
+
+    /// Persist a model-facing prompt-ingress row with the exact Native rendered
+    /// cache. Unlike a request-only sidecar, its JSONL UUID is also the
+    /// `ConversationMessage` identity retained in history and outgoing request
+    /// projections.
+    pub(crate) async fn persist_prompt_ingress_attachment_to_jsonl(
+        &self,
+        id: lingxi_core::types::MessageId,
+        payload: Source,
+        rendered: Source,
+        rendered_role: &'static str,
+    ) {
+        if active_mod_result_stage_is_virtual().await {
+            return;
+        }
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            return;
+        };
+        let (session_id, parent_uuid) = {
+            let session = self.session.lock().await;
+            (
+                session.session_id.as_uuid().to_string(),
+                self.transcript.last_jsonl_uuid.lock().await.clone(),
+            )
+        };
+        let git_branch = self.resolve_git_branch().await;
+        let marked_before_closing_line = {
+            let session = self.session.lock().await;
+            session
+                .native_request_history
+                .before_closing_line_ids
+                .contains(&id)
+                && payload
+                    .string_at("/type")
+                    .is_some_and(crate::conversation::closing_placement::is_tee_attachment_type)
+        };
+        let mut extra = source_object([
+            ("rendered", rendered),
+            ("renderedRole", Source::from(rendered_role)),
+        ]);
+        if marked_before_closing_line {
+            extra
+                .set_field("placement", Source::from("before_closing_line"))
+                .expect("extra metadata is an object");
+        }
+        let row = session::JsonlMessage {
+            message_type: "attachment".into(),
+            uuid: id.as_uuid().to_string(),
+            parent_uuid,
+            session_id: session_id.clone(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: self.current_cwd().to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            message: Source::parse("null").expect("null is valid JSON"),
+            attachment_projection: Some(payload),
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
+            is_sidechain: false,
+            user_type: Some("external".into()),
+            git_branch,
+            entrypoint: Some(entrypoint_value()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+        match writer.append(&row).await {
+            Ok(()) => {
+                #[cfg(test)]
+                crate::request_context::pause_after_first_ingress_append_for_test().await;
+                *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
+                telemetry::emit_session_appended(&session_id, &row.uuid);
+            }
+            Err(error) => {
+                self.record_transcript_append_failure(
+                    &session_id,
+                    "prompt_ingress_attachment",
+                    &error,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn persist_attachment_to_jsonl(
+        &self,
+        payload: Source,
+        extra: Source,
+        operation: &'static str,
+    ) {
+        self.persist_attachment_to_jsonl_with_id(uuid::Uuid::new_v4(), payload, extra, operation)
+            .await;
+    }
+
+    async fn persist_attachment_to_jsonl_with_id(
+        &self,
+        uuid: uuid::Uuid,
+        payload: Source,
+        extra: Source,
+        operation: &'static str,
+    ) {
         if active_mod_result_stage_is_virtual().await {
             return;
         }
@@ -3114,11 +3322,9 @@ impl ConversationOrchestrator {
         let session_id_str = self.session.lock().await.session_id.as_uuid().to_string();
         let parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
         let git_branch = self.resolve_git_branch().await;
-        let extra = source_object([]);
-
         let jmsg = session::JsonlMessage {
             message_type: "attachment".to_string(),
-            uuid: uuid::Uuid::new_v4().to_string(),
+            uuid: uuid.to_string(),
             parent_uuid,
             session_id: session_id_str.clone(),
             timestamp: chrono::Utc::now()
@@ -3148,11 +3354,13 @@ impl ConversationOrchestrator {
         let line_uuid = jmsg.uuid.clone();
         match writer.append(&jmsg).await {
             Ok(()) => {
+                #[cfg(test)]
+                crate::request_context::pause_after_first_ingress_append_for_test().await;
                 *self.transcript.last_jsonl_uuid.lock().await = Some(line_uuid.clone());
                 telemetry::emit_session_appended(&session_id_str, &line_uuid);
             }
-            Err(e) => {
-                self.record_transcript_append_failure(&session_id_str, "hook_attachment", &e)
+            Err(error) => {
+                self.record_transcript_append_failure(&session_id_str, operation, &error)
                     .await;
             }
         }
@@ -3629,6 +3837,45 @@ impl ConversationOrchestrator {
             None,
             api_error.as_ref(),
         );
+        if let ConversationMessage::User { id, .. } = msg {
+            if jmsg.message_type == "user" {
+                let (task_delivery, envelope) = {
+                    let session = self.session.lock().await;
+                    (
+                        session
+                            .native_request_history
+                            .task_deliveries
+                            .get(id)
+                            .cloned(),
+                        session
+                            .native_request_history
+                            .task_delivery_envelopes
+                            .get(id)
+                            .cloned(),
+                    )
+                };
+                if let Some(envelope) = envelope {
+                    for (key, projection) in [
+                        ("verifiedSlackHumanTurn", envelope.verified_slack_human_turn),
+                        ("promptSource", envelope.prompt_source),
+                    ] {
+                        if let Some(projection) = projection {
+                            jmsg.extra
+                                .set_field(key, projection)
+                                .expect("user envelope metadata is an object");
+                        }
+                    }
+                    if let Some(tool_use_result) = envelope.tool_use_result {
+                        jmsg.tool_use_result_projection = Some(tool_use_result);
+                    }
+                }
+                if let Some(task_delivery) = task_delivery {
+                    jmsg.extra
+                        .set_field("taskDelivery", task_delivery)
+                        .expect("extra metadata is an object");
+                }
+            }
+        }
         if let Some(content) = compact_summary_content {
             jmsg.message
                 .set_field("content", content)
@@ -3740,7 +3987,16 @@ impl ConversationOrchestrator {
         // are emitted in `TOOL_RESULT_HEAD_EXTRA` order regardless of the
         // order they are inserted here.
         if let Some(result) = self.take_tool_use_result(msg).await {
-            jmsg.tool_use_result_projection = Some(result);
+            jmsg.tool_use_result_projection = Some(result.clone());
+            if let ConversationMessage::User { id, .. } = msg {
+                let mut session = self.session.lock().await;
+                session
+                    .native_request_history
+                    .task_delivery_envelopes
+                    .entry(*id)
+                    .or_default()
+                    .tool_use_result = Some(result);
+            }
         }
         if let Some(kind) = self.take_tool_denial_kind(msg).await {
             jmsg.extra
@@ -3795,6 +4051,14 @@ impl ConversationOrchestrator {
             Ok(()) => {
                 *self.transcript.last_jsonl_uuid.lock().await = Some(uuid_for_chain.clone());
                 telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
+                if let Some(id) = crate::resume::native_zce_message_id(&jmsg) {
+                    self.session
+                        .lock()
+                        .await
+                        .native_request_history
+                        .synthetic_closing_ids
+                        .insert(id);
+                }
                 if let Some(row_token) = queued_input
                     .and_then(|input| input.transcript_row_token.as_deref())
                     .filter(|_| matches!(msg, ConversationMessage::User { .. }))

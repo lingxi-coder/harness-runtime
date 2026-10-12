@@ -6,7 +6,7 @@
 //! ```text
 //! Commands:\n
 //!   /<name padded to longest+2>  <description>\n
-//!   ... (79 visible command lines, sorted ASCII-ascending) ...
+//!   ... visible command lines, sorted ASCII-ascending ...
 //! ```
 //!
 //! Where `<description>` is `core_description(name)` — the real per-command
@@ -15,8 +15,9 @@
 //! LingXi-specific / internal commands without one. The 8 hidden/disabled
 //! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 79
-//! visible commands = 79 lines.
+//! default total is 1 header + 75 visible commands = 76 lines: 74 visible
+//! builtin rows plus the Native bundled `/doctor` prompt. The `/commit` bundled
+//! prompt is omitted while `tengu_cinder_relay` is at its default-off value.
 
 use crate::builtin_support::names::{
     core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
@@ -33,23 +34,19 @@ use crate::builtin_support::names::{
 /// `parity_help_screen.txt`.
 #[must_use]
 pub fn render_help_screen() -> String {
-    // Column width is computed over the VISIBLE commands only (claude-code
-    // never pads to a hidden command's width since the hidden ones never
-    // reach the renderer). A command whose `DISABLE_*_COMMAND` env gate is
-    // tripped is also dropped (claude-code's `!$te(c)` isEnabled()===off arm).
-    let visible = || {
-        BUILTIN_COMMAND_NAMES
-            .iter()
-            .filter(|n| !is_palette_hidden(n) && !is_command_env_disabled(n))
-    };
-
-    let col1_width = visible().map(|n| n.len()).max().unwrap_or(0) + 2;
+    let visible = visible_commands();
+    let col1_width = visible
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0)
+        + 2;
 
     // Capacity hint: header + visible lines.
-    let mut out = String::with_capacity(10 + 79 * (col1_width + 40));
+    let mut out = String::with_capacity(10 + visible.len() * (col1_width + 40));
     out.push_str("Commands:\n");
 
-    for name in visible() {
+    for (name, description) in visible {
         // Column 1: `/<name>` left-padded to col1_width characters.
         out.push_str("  /");
         out.push_str(name);
@@ -66,11 +63,36 @@ pub fn render_help_screen() -> String {
         // returns the `(unimplemented in v0.6.0)` placeholder only for the few
         // LingXi-specific / internal commands without one — so `/help` and the
         // slash palette stay in lock-step.
-        out.push_str(core_description(name));
+        out.push_str(description);
         out.push('\n');
     }
 
     out
+}
+
+fn visible_commands() -> Vec<(&'static str, &'static str)> {
+    let mut commands = BUILTIN_COMMAND_NAMES
+        .iter()
+        .copied()
+        .filter(|name| !is_palette_hidden(name) && !is_command_env_disabled(name))
+        .map(|name| (name, core_description(name)))
+        .collect::<Vec<_>>();
+
+    // Native `Mo()` registers `/doctor` as an enabled bundled prompt unless
+    // its explicit environment gate is set. `/commit` is a separate bundled
+    // prompt whose `bvr()` gate defaults off.
+    if !is_command_env_disabled("doctor") {
+        commands.push((
+            "doctor",
+            "Health-check your setup and fix issues: unused extensions, duplicated or bloated memory files, slow hooks, permissions",
+        ));
+    }
+    if telemetry::flag_bool("tengu_cinder_relay", false) {
+        commands.push(("commit", "Create a git commit"));
+    }
+
+    commands.sort_by_key(|(name, _)| *name);
+    commands
 }
 
 #[cfg(test)]
@@ -84,19 +106,20 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_79_visible_lines() {
-        // 1 header + 79 visible commands = 80 lines (each terminated by '\n').
-        // The hidden/disabled commands (is_palette_hidden) are filtered out,
-        // matching claude-code's `!isHidden && !$te` help/palette filter.
-        // (87 builtins − 8 hidden = 79 visible, with no DISABLE_* env set.)
+    fn output_has_exactly_76_lines_at_default_native_factory_gates() {
+        // 1 header + 75 visible commands = 76 lines. This is 82 builtins minus
+        // 8 hidden/default-disabled rows, plus bundled `/doctor`; `/commit` is
+        // absent while its GrowthBook gate is at the Native default false.
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
+        telemetry::test_clear_flag("tengu_cinder_relay");
+        std::env::remove_var("DISABLE_DOCTOR_COMMAND");
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 80,
-            "expected 80 newlines (1 header + 79 visible commands), got {n}"
+            n, 76,
+            "expected 76 lines (1 header + 75 visible commands), got {n}"
         );
     }
 
@@ -173,17 +196,13 @@ mod tests {
 
     #[test]
     fn every_visible_command_appears_once() {
-        use crate::builtin_support::names::is_palette_hidden;
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_LOGIN_COMMAND` (etc.) mutation can't drop a command mid-render.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
+        telemetry::test_clear_flag("tengu_cinder_relay");
+        std::env::remove_var("DISABLE_DOCTOR_COMMAND");
         let s = render_help_screen();
-        for name in BUILTIN_COMMAND_NAMES {
-            // Hidden/disabled commands are filtered out (see is_palette_hidden);
-            // only the 79 visible commands appear.
-            if is_palette_hidden(name) {
-                continue;
-            }
+        for (name, _) in visible_commands() {
             // Match the exact line-start pattern `  /<name> ` (with trailing
             // space) to avoid prefix collisions like `/commit` matching
             // inside `/git-commit`.

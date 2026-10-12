@@ -21,6 +21,7 @@ use lingxi_core::host::mcp::McpError;
 use lingxi_core::host::mcp_result::CancellationToken;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
+use lingxi_llm_client::transport::http_backend as reqwest;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -196,8 +197,21 @@ where
     H: Clone + Send + 'static,
     for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
 {
-    let client = reqwest::Client::builder()
-        .build()
+    connect_http_with_proxy_auth_helper(url, auth_token, extra_headers, fetch_timeout, None).await
+}
+
+pub(crate) async fn connect_http_with_proxy_auth_helper<H>(
+    url: &str,
+    auth_token: Option<&str>,
+    extra_headers: &H,
+    fetch_timeout: Option<std::time::Duration>,
+    proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
+) -> Result<Connection, HttpConnectError>
+where
+    H: Clone + Send + 'static,
+    for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
+{
+    let client = crate::mcp_proxy::build_client_with_proxy_auth_helper(url, proxy_auth_helper)
         .map_err(|e| HttpConnectError::Transport(e.to_string()))?;
 
     // Validate header construction eagerly so configuration errors surface at

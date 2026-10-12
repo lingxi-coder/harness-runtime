@@ -2,8 +2,6 @@ use super::*;
 use super::{fusion::*, lifecycle::*};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
 #[test]
 fn stream_compact_recognition_preserves_focus_without_matching_other_commands() {
     assert_eq!(compact_command_instructions("/compact"), Some(""));
@@ -1055,6 +1053,7 @@ pub(super) async fn fixture_runtime(
 ) -> Runtime {
     let project = root.join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let services = Arc::new(FixtureHost);
     let mut config = crate::desktop::DesktopConfig {
         lingxi_home: root.join("home"),
         cwd: project,
@@ -1063,6 +1062,12 @@ pub(super) async fn fixture_runtime(
         composition: Some(crate::desktop::DesktopSessionComposition::HeadlessCli),
         ..Default::default()
     };
+    crate::headless::host::configure_desktop_request_state(
+        &mut config,
+        services.as_ref(),
+        &crate::headless::HeadlessOptions::default(),
+    );
+    let native_catalog_user_agent = config.user_agent_environment.clone();
     let prepared =
         crate::headless::session::prepare(&mut config, &crate::headless::SessionStart::New)
             .await
@@ -1075,9 +1080,16 @@ pub(super) async fn fixture_runtime(
     )
     .await
     .unwrap();
+    crate::headless::host::configure_native_command_catalog(
+        &inner,
+        native_catalog_user_agent.as_ref(),
+        services.as_ref(),
+    )
+    .await;
     Runtime {
         inner,
-        services: Arc::new(FixtureHost),
+        services,
+        native_catalog_user_agent,
         output: crate::headless::io::Output::new(tokio::io::sink()),
         stdout: crate::headless::io::Output::new(tokio::io::sink()),
         shutdown: tokio_util::sync::CancellationToken::new(),

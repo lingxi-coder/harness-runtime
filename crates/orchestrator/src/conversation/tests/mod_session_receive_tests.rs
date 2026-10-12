@@ -463,6 +463,8 @@ async fn external_prompts_are_received_before_prompt_submit_and_model_request() 
 
                 is_meta: true,
                 mod_origin: Some(serde_json::json!({"kind":"scheduled-trigger"})),
+                message_origin: None,
+                prompt_source: None,
                 ..QueuedPromptInput::default()
             },
             QueuedPromptInput {
@@ -470,6 +472,8 @@ async fn external_prompts_are_received_before_prompt_submit_and_model_request() 
 
                 is_meta: true,
                 mod_origin: Some(serde_json::json!({"kind":"scheduled-trigger"})),
+                message_origin: None,
+                prompt_source: None,
                 ..QueuedPromptInput::default()
             },
         ],

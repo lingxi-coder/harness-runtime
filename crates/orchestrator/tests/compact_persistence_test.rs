@@ -82,13 +82,17 @@ fn inner_text(line: &JsonlMessage) -> String {
     }
 }
 
-/// Actual native Or/Br fixture for empty eager files, followed by HZo's stock
-/// reanchored total-token attachment. Only the machine's local date is replaced;
-/// types, field presence and rendered bytes follow executed native helpers.
-fn assert_empty_context_and_budget_announcements<'a>(
+/// Native's empty-context announcements, with the total-token row included
+/// only when a new user turn collects its ingress batch. A pre-request auto
+/// compact reuses the already-collected turn and does not rerun NAr's regular
+/// user ingress producer; it therefore emits only the fresh context/date rows.
+/// Only the machine's local date is replaced; payloads and rendered bytes
+/// follow the pinned Native helpers.
+fn assert_native_context_announcements<'a>(
     rows: &'a [JsonlMessage],
     hot_history: &[ConversationMessage],
     parent_uuid: &str,
+    include_total_tokens: bool,
 ) -> &'a JsonlMessage {
     let oracle: Value = serde_json::from_str(include_str!(
         "../../core/tests/fixtures/instruction_announcements_2_1_286.json"
@@ -100,20 +104,25 @@ fn assert_empty_context_and_budget_announcements<'a>(
         .iter()
         .find(|case| case["name"] == "successful-empty-initial")
         .expect("native empty-file announcement case");
-    let mut expected = case["expected"].as_array().unwrap().clone();
-    assert_eq!(expected.len(), 2);
-    // 2.1.286 HZo reanchors a regular user prompt before computing remaining
-    // tokens. Actual wvt/HZo/ol execution with the stock settings yields this
-    // exact payload and body, even when a previous context rolled over.
-    expected.push(serde_json::json!({
-        "attachment": {
-            "type": "total_tokens_reminder",
-            "text": "<total_tokens>15000000 tokens left</total_tokens>"
-        },
-        "rendered": [
-            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
-        ]
-    }));
+    let context_expected = case["expected"].as_array().unwrap();
+    assert_eq!(context_expected.len(), 2);
+    // HZo reanchors a regular user prompt before computing remaining tokens.
+    // Actual wvt/HZo/ol execution with the stock settings yields this exact
+    // payload and body, even when a previous context rolled over.
+    let mut expected = if include_total_tokens {
+        vec![serde_json::json!({
+            "attachment": {
+                "type": "total_tokens_reminder",
+                "text": "<total_tokens>15000000 tokens left</total_tokens>"
+            },
+            "rendered": [
+                "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+            ]
+        })]
+    } else {
+        Vec::new()
+    };
+    expected.extend(context_expected.iter().cloned());
     assert_eq!(
         rows.len(),
         expected.len(),
@@ -298,9 +307,13 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
     let reader = JsonlReader::new(session_path.clone(), fs.clone());
     let lines: Vec<JsonlMessage> = reader.read_all().await.expect("read_all");
 
+    // The live model context retains only the newest compact boundary, while
+    // JSONL can preserve earlier boundaries from the same session. Compare the
+    // hot state with the latest durable boundary and keep its complete metadata
+    // and logical-parent checks intact.
     let boundary_idx = lines
         .iter()
-        .position(|l| {
+        .rposition(|l| {
             l.message_type == "system"
                 && source_value(&l.extra)
                     .get("subtype")
@@ -381,10 +394,10 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
     );
 
     // Native Br emits fresh session_context/date when the compacted model
-    // history has no announcement baseline. Native insertMessageChain updates
-    // its leaf for attachments too (`$ge` excludes only progress).
-    // The stock total-token producer follows these rows and also advances the
-    // chain, so the assistant must parent off that final attachment.
+    // history has no announcement baseline. A new user request also emits
+    // environment/model ingress and a total-token reminder. In the full-auto
+    // case compaction occurs after that turn's NAr ingress batch was collected,
+    // so only context/date are regenerated. Each row advances the JSONL chain.
     // Full auto replaces all pre-compact history. Manual compact preserves the
     // final API-round group, which here is the last assistant reply.
     let expected_post_types = if manual {
@@ -395,17 +408,12 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
             "attachment",
             "attachment",
             "attachment",
+            "attachment",
+            "attachment",
             "assistant",
         ]
     } else {
-        vec![
-            "system",
-            "user",
-            "attachment",
-            "attachment",
-            "attachment",
-            "assistant",
-        ]
+        vec!["system", "user", "attachment", "attachment", "assistant"]
     };
     assert_eq!(
         lines[boundary_idx..]
@@ -440,16 +448,41 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
             Some(tail.uuid.as_str()),
             "continued history chains off the original persisted tail"
         );
-        let budget = assert_empty_context_and_budget_announcements(
-            &lines[boundary_idx + 3..boundary_idx + 6],
-            &hot_history,
-            &continuation.uuid,
+        let ingress = &lines[boundary_idx + 3..boundary_idx + 5];
+        assert_eq!(
+            ingress
+                .iter()
+                .map(|row| row
+                    .attachment_projection
+                    .as_ref()
+                    .expect("prompt ingress attachment")
+                    .string_at("/type"))
+                .collect::<Vec<_>>(),
+            vec![Some("environment"), Some("model")],
+            "fresh prompt ingress rows precede turn and context reminders"
         );
-        let reply = &lines[boundary_idx + 6];
+        assert_eq!(
+            ingress[0].parent_uuid.as_deref(),
+            Some(continuation.uuid.as_str())
+        );
+        assert_eq!(
+            ingress[1].parent_uuid.as_deref(),
+            Some(ingress[0].uuid.as_str())
+        );
+        let last_announcement = assert_native_context_announcements(
+            &lines[boundary_idx + 5..boundary_idx + 8],
+            &hot_history,
+            &ingress[1].uuid,
+            true,
+        );
+        let reply = &lines[boundary_idx + 8];
         assert_eq!(reply.message_type, "assistant");
         assert_eq!(inner_text(reply), "continued reply");
-        assert_eq!(reply.parent_uuid.as_deref(), Some(budget.uuid.as_str()));
-        assert_eq!(hot_history.len(), 8);
+        assert_eq!(
+            reply.parent_uuid.as_deref(),
+            Some(last_announcement.uuid.as_str())
+        );
+        assert_eq!(hot_history.len(), 10);
         assert!(matches!(
             &hot_history[2],
             ConversationMessage::Assistant { .. }
@@ -457,34 +490,35 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         assert_eq!(hot_history[2].text_content(), "final reply");
         assert_eq!(hot_history[3].text_content(), "continue after compact");
         assert!(matches!(
-            &hot_history[7],
+            &hot_history[9],
             ConversationMessage::Assistant { .. }
         ));
-        assert_eq!(hot_history[7].text_content(), "continued reply");
+        assert_eq!(hot_history[9].text_content(), "continued reply");
     } else {
         assert!(
             cm.get("preservedMessages").is_none(),
             "full automatic compaction does not preserve a verbatim tail"
         );
-        let budget = assert_empty_context_and_budget_announcements(
-            &lines[boundary_idx + 2..boundary_idx + 5],
+        let last_announcement = assert_native_context_announcements(
+            &lines[boundary_idx + 2..boundary_idx + 4],
             &hot_history,
             &summary.uuid,
+            false,
         );
-        let reply = &lines[boundary_idx + 5];
+        let reply = &lines[boundary_idx + 4];
         assert_eq!(reply.message_type, "assistant");
         assert_eq!(inner_text(reply), "final reply");
         assert_eq!(
             reply.parent_uuid.as_deref(),
-            Some(budget.uuid.as_str()),
-            "full auto follows summary, session_context, date, budget and reply in order"
+            Some(last_announcement.uuid.as_str()),
+            "full auto follows summary, session_context, date, and reply in order"
         );
-        assert_eq!(hot_history.len(), 6);
+        assert_eq!(hot_history.len(), 5);
         assert!(matches!(
-            &hot_history[5],
+            &hot_history[4],
             ConversationMessage::Assistant { .. }
         ));
-        assert_eq!(hot_history[5].text_content(), "final reply");
+        assert_eq!(hot_history[4].text_content(), "final reply");
     }
     assert!(
         lines[..boundary_idx]
@@ -505,18 +539,22 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
     let session_uuid = uuid::Uuid::new_v4();
     let cold_state = state_from_messages(session_uuid, &chain);
 
-    let post_context_rows = &lines
-        [boundary_idx + if manual { 3 } else { 2 }..boundary_idx + if manual { 6 } else { 5 }];
-    let cold_context_rows = chain
+    let post_attachment_range = if manual {
+        boundary_idx + 3..boundary_idx + 8
+    } else {
+        boundary_idx + 2..boundary_idx + 4
+    };
+    let post_attachment_rows = &lines[post_attachment_range];
+    let cold_attachment_rows = chain
         .iter()
         .filter(|row| row.message_type == "attachment")
         .collect::<Vec<_>>();
     assert_eq!(
-        cold_context_rows.len(),
-        3,
-        "cold model chain retains exactly context, date and budget announcements"
+        cold_attachment_rows.len(),
+        post_attachment_rows.len(),
+        "cold model chain retains every post-compact typed attachment"
     );
-    for (cold, persisted) in cold_context_rows.iter().zip(post_context_rows) {
+    for (cold, persisted) in cold_attachment_rows.iter().zip(post_attachment_rows) {
         assert_eq!(cold.uuid, persisted.uuid);
         assert_eq!(cold.parent_uuid, persisted.parent_uuid);
         assert_eq!(

@@ -37,8 +37,9 @@
 use crate::cache_safe_params::CacheSafeParams;
 use crate::purposes::QuerySource;
 use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
-use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage, MessageId};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -49,6 +50,21 @@ const DEFAULT_FORK_MAX_TOKENS: u32 = 20_000;
 fn is_empty_instruction_projection(message: &ConversationMessage) -> bool {
     matches!(message, ConversationMessage::System { content, subtype, .. }
         if content.string_at("").is_some_and(str::is_empty) && subtype.as_deref() == Some("model_reminder_attachment"))
+}
+
+fn task_deliveries_for_messages(
+    messages: &[ConversationMessage],
+    task_deliveries: &HashMap<MessageId, lingxi_core::host::task_delivery::TaskDeliveryRequest>,
+) -> HashMap<MessageId, lingxi_core::host::task_delivery::TaskDeliveryRequest> {
+    let retained_ids = messages
+        .iter()
+        .map(ConversationMessage::id)
+        .collect::<HashSet<_>>();
+    task_deliveries
+        .iter()
+        .filter(|(id, _)| retained_ids.contains(id))
+        .map(|(id, delivery)| (id.clone(), delivery.clone()))
+        .collect()
 }
 
 /// Coarse purpose tag for a forked agent. Mirrors [`QuerySource`] for the
@@ -259,6 +275,7 @@ impl ForkedAgentRunner {
         // Empty announcement projections carry a raw durable cursor, but the
         // native renderer contributes no API message (or model tokens).
         messages.retain(|message| !is_empty_instruction_projection(message));
+        let task_deliveries = task_deliveries_for_messages(&messages, &cp.task_deliveries);
 
         // Inherit the live parent's model so /model switches affect later forks.
         let model = if cp.tool_use_options.main_loop_model.trim().is_empty() {
@@ -289,6 +306,8 @@ impl ForkedAgentRunner {
             // break the byte-identical layout the cache relies on).
             system_prompt: Some(cp.system_prompt.as_ref().clone()),
             system_prompt_input: cp.system_prompt_input.clone(),
+            typed_attachment_ids: cp.typed_attachment_ids.clone(),
+            task_deliveries,
             messages,
             // Claude Code's `runForkedAgent` invokes `query` with an isolated
             // copy of the parent ToolUseContext. That context retains the
@@ -465,6 +484,8 @@ mod tests {
                 effort: None,
                 fork_context_messages: prefix,
                 transcript_path: None,
+                typed_attachment_ids: std::collections::HashSet::new(),
+                task_deliveries: std::collections::HashMap::new(),
                 generation: 7,
             },
             fork_label: "test-fork".into(),
@@ -528,6 +549,97 @@ mod tests {
         assert!(!sent.messages.iter().any(is_empty_instruction_projection));
         assert_eq!(sent.messages[1], boundary);
         assert_eq!(prefix.len(), 3, "durable input history is not rewritten");
+    }
+
+    #[tokio::test]
+    async fn forked_call_replays_only_cold_task_deliveries_for_retained_history_rows() {
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "SUMMARY".into(),
+            canned_usage: Usage::default(),
+        });
+        let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "test".into());
+        let retained_id = MessageId::new();
+        let stale_id = MessageId::new();
+        let delivery = Utf16JsonProjection::parse(
+            r#"{"taskId":"task-42","status":"completed","summary":"done"}"#,
+        )
+        .unwrap();
+        let stale_delivery = Utf16JsonProjection::parse(r#"{"taskId":"old-task"}"#).unwrap();
+
+        // Exercise the persisted request-history carrier used after cold resume,
+        // then transfer its raw values to the cache-safe prefix snapshot.
+        let mut restored = lingxi_core::host::NativeRequestHistoryMetadata::default();
+        restored
+            .task_deliveries
+            .insert(retained_id.clone(), delivery.clone());
+        restored.task_deliveries.insert(stale_id, stale_delivery);
+        let restored: lingxi_core::host::NativeRequestHistoryMetadata =
+            serde_json::from_value(serde_json::to_value(restored).unwrap()).unwrap();
+
+        let placeholder = ConversationMessage::System {
+            api_system: None,
+            id: MessageId::new(),
+            content: String::new().into(),
+            subtype: Some("model_reminder_attachment".into()),
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        };
+        let prefix = vec![
+            ConversationMessage::user(retained_id.clone(), "delivered task row".into()),
+            placeholder,
+        ];
+        let mut request = request_with(prefix, vec![user_msg("summarize")], None);
+        let placement = lingxi_core::host::task_delivery::TaskDeliveryPlacement {
+            starts_turn: true,
+            in_drain_position: false,
+            behind_earlier_messages: false,
+            in_human_turn: false,
+        };
+        let stale_placement = lingxi_core::host::task_delivery::TaskDeliveryPlacement {
+            starts_turn: false,
+            in_drain_position: false,
+            behind_earlier_messages: true,
+            in_human_turn: false,
+        };
+        request.cache_safe_params.task_deliveries = restored
+            .task_deliveries
+            .into_iter()
+            .map(|(id, snapshot)| {
+                let placement = if id == retained_id {
+                    placement
+                } else {
+                    stale_placement
+                };
+                (
+                    id,
+                    lingxi_core::host::task_delivery::TaskDeliveryRequest {
+                        snapshot,
+                        placement,
+                    },
+                )
+            })
+            .collect();
+
+        runner.run(request).await.expect("fork query succeeds");
+        let sent = client.seen.lock().unwrap().clone().expect("client called");
+        assert_eq!(sent.messages.len(), 2);
+        assert_eq!(sent.task_deliveries.len(), 1);
+        let retained = sent
+            .task_deliveries
+            .get(&retained_id)
+            .expect("retained task-delivery metadata");
+        assert_eq!(retained.snapshot, delivery);
+        assert_eq!(retained.placement, placement);
+
+        let serialized = serde_json::to_string(&sent).unwrap();
+        assert!(
+            !serialized.contains("task_deliveries"),
+            "host task snapshots stay outside the serialized side-query request"
+        );
+        let decoded: SideQueryRequest = serde_json::from_str(&serialized).unwrap();
+        assert!(decoded.task_deliveries.is_empty());
     }
 
     #[tokio::test]

@@ -151,6 +151,12 @@ pub struct SubagentContext {
     pub instruction_context_is_override: bool,
     pub instruction_provider:
         Option<Arc<dyn lingxi_core::host::instructions::InstructionContextProvider>>,
+    /// Host source for live main-session settings deltas shared with this
+    /// independently driven query.
+    pub native_settings_prompt_provider:
+        Option<Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>>,
+    /// Exact Native `agentContext` and option facts for this runner.
+    pub native_settings_prompt_context: lingxi_core::host::NativeSettingsPromptContext,
     /// Shared content-replacement state (e.g. file mention expansion). Wrapped
     /// in a `Mutex` so the tool layer can mutate it across awaits.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,

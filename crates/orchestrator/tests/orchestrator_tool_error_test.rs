@@ -167,14 +167,29 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
         "result envelope: {tool_result:?}"
     );
 
-    // The session's third message must be the user message carrying the
-    // ToolResult block with is_error = true.
+    // Typed ingress rows persist between the prompt and the first response.
+    // The error result retains the original tool-call identity and source text.
     let session = orch.session();
     let session = session.lock().await;
-    // history: [user(prompt), assistant(tool_use), user(tool_result), assistant(text/end_turn)]
-    assert_eq!(session.history.len(), 4);
-    let third = &session.history[2];
-    match third {
+    assert_eq!(session.history.len(), 8);
+    assert_eq!(session.history[0].text_content(), "try the broken tool");
+    assert!(session.history[1]
+        .text_content()
+        .contains("# Environment\n"));
+    assert!(session.history[2]
+        .text_content()
+        .contains("The exact model ID is "));
+    assert!(session.history[3].text_content().contains("<total_tokens>"));
+    assert!(matches!(
+        &session.history[4],
+        ConversationMessage::Assistant { .. }
+    ));
+    assert!(session.history[6].text_content().contains("<total_tokens>"));
+    assert!(matches!(
+        &session.history[7],
+        ConversationMessage::Assistant { .. }
+    ));
+    match &session.history[5] {
         ConversationMessage::User { content, .. } => {
             assert_eq!(content.len(), 1);
             match &content[0] {
@@ -200,6 +215,6 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
                 _ => panic!("expected ToolResult content block"),
             }
         }
-        _ => panic!("expected User message at index 2"),
+        _ => panic!("expected User tool-result message after the assistant tool call"),
     }
 }

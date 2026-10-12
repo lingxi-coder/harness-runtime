@@ -41,6 +41,11 @@ fn flag_test_override() -> &'static StdRwLock<HashMap<String, bool>> {
     OVR.get_or_init(|| StdRwLock::new(HashMap::new()))
 }
 
+fn flag_number_test_override() -> &'static StdRwLock<HashMap<String, f64>> {
+    static OVR: OnceLock<StdRwLock<HashMap<String, f64>>> = OnceLock::new();
+    OVR.get_or_init(|| StdRwLock::new(HashMap::new()))
+}
+
 /// `nt(key, default)` (cc_all.txt:504507) — synchronous boolean flag read with
 /// default-on-miss. Checks the test-override layer first (binary `ROt()`/`Uvi`),
 /// then the cached snapshot (binary `cachedGrowthBookFeatures`), else returns
@@ -73,6 +78,20 @@ pub fn flag_bool(key: &str, default: bool) -> bool {
     }
 }
 
+/// Look up a numeric feature flag, returning `default` on miss or type
+/// mismatch. Checks the test-override layer before the cached GrowthBook
+/// snapshot, matching the synchronous `nt` reader's source order.
+#[must_use]
+pub fn flag_number(key: &str, default: f64) -> f64 {
+    if let Some(value) = flag_number_test_override().read().unwrap().get(key) {
+        return *value;
+    }
+    match flag_snapshot().read().unwrap().get(key) {
+        Some(FeatureValue::Number(value)) => *value,
+        _ => default,
+    }
+}
+
 /// Test-only: set a flag in the override layer (binary `ROt()`/`Uvi`). Lets tests
 /// exercise flag-gated paths without process-wide env vars.
 pub fn test_set_flag(key: &str, value: bool) {
@@ -85,6 +104,19 @@ pub fn test_set_flag(key: &str, value: bool) {
 /// Test-only: clear a flag from the override layer.
 pub fn test_clear_flag(key: &str) {
     flag_test_override().write().unwrap().remove(key);
+}
+
+/// Test-only: set a numeric flag in the override layer.
+pub fn test_set_flag_number(key: &str, value: f64) {
+    flag_number_test_override()
+        .write()
+        .unwrap()
+        .insert(key.to_string(), value);
+}
+
+/// Test-only: clear a numeric flag override.
+pub fn test_clear_flag_number(key: &str) {
+    flag_number_test_override().write().unwrap().remove(key);
 }
 
 // ── Array-valued flag reader (binary `Ot(e,t)` / `I(e,[])`) ─────────────────
@@ -149,6 +181,22 @@ pub enum FeatureValue {
     String(String),
     /// Arbitrary JSON for structured config flags.
     Json(serde_json::Value),
+}
+
+#[cfg(test)]
+mod numeric_flag_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_flag_uses_default_and_test_override() {
+        const KEY: &str = "tengu_numeric_flag_reader_test";
+        test_clear_flag_number(KEY);
+        assert_eq!(flag_number(KEY, 3.5), 3.5);
+        test_set_flag_number(KEY, 7.25);
+        assert_eq!(flag_number(KEY, 3.5), 7.25);
+        test_clear_flag_number(KEY);
+        assert_eq!(flag_number(KEY, -2.0), -2.0);
+    }
 }
 
 /// Fetcher abstraction backing [`FeatureFlagsClient`].

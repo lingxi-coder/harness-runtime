@@ -1,6 +1,8 @@
 //! In-memory registry of slash commands with alias and plugin-scoped lookup.
 
-use crate::model::{BuiltinCommandHandler, CommandSource, SlashCommand, SlashCommandKind};
+use crate::model::{
+    BuiltinCommandHandler, CommandSource, NativeCommandType, SlashCommand, SlashCommandKind,
+};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::PluginId;
 use std::collections::{HashMap, HashSet};
@@ -12,8 +14,8 @@ use serde_json::{json, Value};
 /// Owns all known slash commands and built-in handler implementations.
 pub struct CommandRegistry {
     commands: HashMap<Vec<u16>, SlashCommand>,
-    /// Registration order is the headless command source order. UI consumers
-    /// can continue to sort their own projection without changing it.
+    /// Physical registration order, retained for operations whose contract
+    /// depends on assembly history.
     registration_order: Vec<Vec<u16>>,
     aliases: HashMap<Vec<u16>, Vec<u16>>,
     builtin_handlers: HashMap<Vec<u16>, Arc<dyn BuiltinCommandHandler>>,
@@ -23,6 +25,32 @@ pub struct CommandRegistry {
     plugin_describe_providers: HashMap<Vec<u16>, (PluginId, String, Utf16JsonProjection)>,
     managed_mcp_servers: HashSet<Vec<u16>>,
     mod_commands: HashMap<Vec<u16>, (String, bool)>,
+    native_headless_context: Option<NativeHeadlessCatalogContext>,
+}
+
+/// Host facts used only for Native Headless command-availability predicates.
+/// `None` means the caller has not supplied that source fact; it is not
+/// interpreted as a rejection. Composition roots that know the launch state
+/// should set this before the registry is exposed to the Headless dispatcher.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeHeadlessCatalogContext {
+    /// Native CLI entrypoint from the host's current request/session context.
+    pub entrypoint: Option<Utf16JsonProjection>,
+    /// `true` when this is a child session, used by Native remote-only gates.
+    pub is_child_session: Option<bool>,
+    /// Whether Native's launch options identify a Claude Code session.
+    /// This is independent of the User-Agent `user_type` field.
+    pub is_claude_code: Option<bool>,
+    /// Current `CLAUDE_CODE_REMOTE` setting, if the host supplied it.
+    pub is_remote: Option<bool>,
+    /// Main-loop model selected for this session.
+    pub selected_model: Option<Utf16JsonProjection>,
+    /// Native `insights` policy verdict; absent host facts must stay `None`.
+    pub insights_policy_gate: Option<bool>,
+    /// Native `tP()` entitlement result for the Local `/usage-credits` twin.
+    pub usage_credits_enabled: Option<bool>,
+    /// Native `gv()` experimental gate for the Local `/advisor` twin.
+    pub advisor_enabled: Option<bool>,
 }
 
 impl CommandRegistry {
@@ -39,7 +67,14 @@ impl CommandRegistry {
             plugin_describe_providers: HashMap::new(),
             managed_mcp_servers: HashSet::new(),
             mod_commands: HashMap::new(),
+            native_headless_context: None,
         }
+    }
+
+    /// Set the request/session facts used by Native Headless factory gates.
+    /// This does not affect interactive palette behavior or command ordering.
+    pub fn set_native_headless_context(&mut self, context: NativeHeadlessCatalogContext) {
+        self.native_headless_context = Some(context);
     }
 
     /// Insert a fully-formed [`SlashCommand`] (used for markdown / plugin / MCP
@@ -72,8 +107,9 @@ impl CommandRegistry {
             SlashCommandKind::Markdown { .. }
                 | SlashCommandKind::Plugin { .. }
                 | SlashCommandKind::Mcp { .. }
+                | SlashCommandKind::Bundled { .. }
         ) {
-            cmd.is_prompt = true;
+            cmd.native_type = Some(NativeCommandType::Prompt);
         }
         self.index_aliases(&name_units, &cmd.aliases);
         self.insert_command(name_units, cmd);
@@ -116,6 +152,20 @@ impl CommandRegistry {
         if self.mod_commands.contains_key(&name_units) {
             return;
         }
+        let handler_native_type = h.native_type();
+        let existing_native = self.commands.get(&name_units);
+        let native_type =
+            handler_native_type.or_else(|| existing_native.and_then(|command| command.native_type));
+        let disable_non_interactive = if handler_native_type.is_some() {
+            h.disable_non_interactive()
+        } else {
+            existing_native.is_some_and(|command| command.disable_non_interactive)
+        };
+        let supports_non_interactive = if handler_native_type.is_some() {
+            h.supports_non_interactive()
+        } else {
+            existing_native.is_some_and(|command| command.supports_non_interactive)
+        };
         let cmd = SlashCommand {
             name: name.clone().into(),
             description: h.description().into(),
@@ -126,7 +176,11 @@ impl CommandRegistry {
             },
             is_hidden: h.is_hidden(),
             is_enabled: h.is_enabled(),
-            is_prompt: h.is_prompt_command(),
+            native_type,
+            disable_non_interactive,
+            supports_non_interactive,
+            native_source: (native_type == Some(NativeCommandType::Prompt))
+                .then(|| "built-in".into()),
             disable_model_invocation: h.disable_model_invocation(),
             ..SlashCommand::default()
         };
@@ -222,7 +276,7 @@ impl CommandRegistry {
                     | SlashCommandKind::Plugin { .. }
                     | SlashCommandKind::Mcp { .. }
             ) {
-                command.is_prompt = true;
+                command.native_type = Some(NativeCommandType::Prompt);
             }
             self.index_aliases(&name_units, &command.aliases);
             self.insert_command(name_units, command);
@@ -393,7 +447,7 @@ impl CommandRegistry {
         self.commands.values().collect()
     }
 
-    /// Registered commands in their source/assembly order.
+    /// Registered commands in physical source/assembly order.
     #[must_use]
     pub fn registration_ordered_commands(&self) -> Vec<&SlashCommand> {
         self.registration_order
@@ -402,30 +456,39 @@ impl CommandRegistry {
             .collect()
     }
 
-    /// Build the Native headless unknown-command catalog. The availability
-    /// count is measured after Native visibility/enabled gates but before the
-    /// prompt-type and `disableModelInvocation` gates used for the names list.
+    /// Project the live command pool in Native's source-category order while
+    /// preserving registration order inside each category. Native loads
+    /// policy, user, and project settings sources before plugin prompts,
+    /// bundled skills, and the built-in command table. Project and Local share
+    /// the project-stage rank because Native has no distinct local-settings
+    /// skill source. Plugin commands precede plugin prompt skills; both are
+    /// CommandSource::Plugin, so skill_root distinguishes the factory rows.
+    /// MCP prompts are appended as their own source group after that pool.
+    #[must_use]
+    pub fn native_source_ordered_commands(&self) -> Vec<&SlashCommand> {
+        let mut commands = self.registration_ordered_commands();
+        commands.sort_by_key(|command| native_command_source_rank(command));
+        commands
+    }
+
+    /// Build the Native headless unknown-command catalog. Native `bge` first
+    /// narrows the command pool by execution type and non-interactive flags;
+    /// then `kjs` measures availability before the prompt-type and
+    /// `disableModelInvocation` gates used for the names list.
     #[must_use]
     pub fn headless_command_catalog(&self) -> crate::model::HeadlessCommandCatalog {
         let available = self
-            .registration_ordered_commands()
+            .native_source_ordered_commands()
             .into_iter()
+            // Native `bge` applies MPe before the model-fallback `kjs` gates.
+            // Unresolved source metadata remains in the projection for now;
+            // absence of a fact is not evidence that Native excluded the row.
+            .filter(|command| command.native_non_interactive_admission() != Some(false))
             .filter(|command| self.native_headless_command_available(command))
             .collect::<Vec<_>>();
-        // Native assembles prompt skills before handler-backed prompt
-        // commands. Keep each group's registry order while placing prompt
-        // builtins after the skill/plugin producers that register later in
-        // LingXi's startup sequence.
         let prompt_command_names = available
             .iter()
-            .filter(|command| {
-                native_prompt_model_invocable(command)
-                    && !matches!(command.kind, SlashCommandKind::Builtin { .. })
-            })
-            .chain(available.iter().filter(|command| {
-                native_prompt_model_invocable(command)
-                    && matches!(command.kind, SlashCommandKind::Builtin { .. })
-            }))
+            .filter(|command| native_prompt_model_invocable(command))
             .map(|command| command.name.clone())
             .collect();
         crate::model::HeadlessCommandCatalog {
@@ -436,22 +499,46 @@ impl CommandRegistry {
 
     fn native_headless_command_available(&self, command: &SlashCommand) -> bool {
         if command.is_hidden
-            || !command.is_enabled
-            || command.user_invocable == Some(false)
+            || !native_factory_enabled(command)
             || !self.session_skill_allowed(command)
+            || !self.native_headless_factory_available(command)
         {
             return false;
         }
-        if matches!(command.kind, SlashCommandKind::Builtin { .. }) {
-            if let Some(name) = projection_text(&command.name) {
-                if crate::builtin_support::names::is_palette_hidden(name)
-                    || crate::builtin_support::names::is_command_env_disabled(name)
-                {
-                    return false;
-                }
-            }
-        }
         true
+    }
+
+    fn native_headless_factory_available(&self, command: &SlashCommand) -> bool {
+        // `kjs` counts rows in `pe` before applying the headless prompt-name
+        // filter. `userInvocable` controls the slash UI and is not a `pe`
+        // predicate.
+        let Some(name) = projection_text(&command.name) else {
+            return true;
+        };
+        // `version` is always disabled in the Native source, while
+        // `extra-usage` is always hidden; neither depends on the host context.
+        if matches!(name, "version" | "extra-usage") {
+            return false;
+        }
+        let Some(context) = self.native_headless_context.as_ref() else {
+            // Preserve unresolved host predicates. The concrete Headless
+            // composition root supplies these facts for its real request path.
+            return true;
+        };
+        match name {
+            // 2.1.295 `DNe`: Local + supportsNonInteractive, but hidden and
+            // disabled unless the entrypoint is one of Native's remote hosts.
+            "add-dir" => context.add_dir_is_enabled() != Some(false),
+            // `qFe` Local twin is enabled in ordinary local Headless mode only
+            // when a model is configured and the session is not remote.
+            "auto-mode-setup" => context.auto_mode_setup_is_enabled() != Some(false),
+            // Native `insights` has an explicit policyGate; preserve unknown
+            // facts but honor the current host's positive/negative verdict.
+            "insights" => context.insights_policy_gate != Some(false),
+            "usage-credits" => context.usage_credits_enabled != Some(false),
+            "advisor" => context.advisor_enabled != Some(false),
+            _ => true,
+        }
     }
 
     /// Commands the model is allowed to invoke — every entry whose
@@ -460,8 +547,10 @@ impl CommandRegistry {
     /// surface (`claude-code/src/commands.ts:571`).
     #[must_use]
     pub fn model_invocable_commands(&self) -> Vec<&SlashCommand> {
-        self.commands
-            .values()
+        self.native_source_ordered_commands()
+            .into_iter()
+            .filter(|c| native_factory_enabled(c))
+            .filter(|c| self.native_headless_factory_available(c))
             .filter(|c| !c.disable_model_invocation)
             .filter(|c| self.session_skill_allowed(c))
             .collect()
@@ -514,13 +603,8 @@ impl CommandRegistry {
     pub fn palette_commands(&self) -> Vec<SlashCommand> {
         self.commands
             .values()
+            .filter(|command| native_factory_enabled(command))
             .filter(|command| command.user_invocable != Some(false))
-            .filter(|command| {
-                !matches!(command.kind, SlashCommandKind::Builtin { .. })
-                    || projection_text(&command.name).is_none_or(|name| {
-                        !crate::builtin_support::names::is_command_env_disabled(name)
-                    })
-            })
             .map(|command| {
                 let mut command = command.clone();
                 command.aliases = self.aliases_for(&command.name);
@@ -679,7 +763,38 @@ impl CommandRegistry {
 }
 
 fn native_prompt_model_invocable(command: &&SlashCommand) -> bool {
-    command.is_prompt && !command.disable_model_invocation
+    command.is_prompt() && !command.disable_model_invocation
+}
+
+fn native_command_source_rank(command: &SlashCommand) -> (u8, u8) {
+    use lingxi_core::types::SettingsScope;
+
+    match command.source {
+        CommandSource::Settings(SettingsScope::Managed) => (0, 0),
+        CommandSource::Settings(SettingsScope::User) => (0, 1),
+        CommandSource::Settings(SettingsScope::Project | SettingsScope::Local) => (0, 2),
+        CommandSource::Plugin => (1, u8::from(command.skill_root.is_some())),
+        CommandSource::Bundled => (2, 0),
+        CommandSource::Builtin => (3, 0),
+        CommandSource::Mcp => (4, 0),
+    }
+}
+
+pub(crate) fn is_native_builtin_factory(command: &SlashCommand) -> bool {
+    matches!(command.kind, SlashCommandKind::Builtin { .. })
+        || (command.source == CommandSource::Bundled
+            && command
+                .native_source
+                .as_ref()
+                .and_then(|source| source.string_at(""))
+                == Some("built-in"))
+}
+
+pub(crate) fn native_factory_enabled(command: &SlashCommand) -> bool {
+    command.is_enabled
+        && (!is_native_builtin_factory(command)
+            || projection_text(&command.name)
+                .is_none_or(|name| !crate::builtin_support::names::is_command_env_disabled(name)))
 }
 
 fn string_units(value: &Utf16JsonProjection) -> Vec<u16> {
@@ -782,6 +897,38 @@ impl Default for CommandRegistry {
     }
 }
 
+impl NativeHeadlessCatalogContext {
+    fn add_dir_is_enabled(&self) -> Option<bool> {
+        const REMOTE_ENTRYPOINTS: &[&str] = &[
+            "remote",
+            "remote_projects",
+            "remote_desktop",
+            "remote_mobile",
+            "ssh-remote",
+        ];
+        let entrypoint = self.entrypoint.as_ref().and_then(projection_text)?;
+        if !REMOTE_ENTRYPOINTS.contains(&entrypoint) {
+            return Some(false);
+        }
+        let (Some(is_child_session), Some(is_claude_code)) =
+            (self.is_child_session, self.is_claude_code)
+        else {
+            return None;
+        };
+        Some(!is_child_session && !is_claude_code)
+    }
+
+    fn auto_mode_setup_is_enabled(&self) -> Option<bool> {
+        let (Some(is_remote), Some(model)) = (
+            self.is_remote,
+            self.selected_model.as_ref().and_then(projection_text),
+        ) else {
+            return None;
+        };
+        Some(!is_remote && !model.is_empty())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_catalog_preserves_registration_order_and_native_gates() {
+    fn headless_catalog_uses_native_source_order_and_native_gates() {
         let mut registry = CommandRegistry::new();
         let prompt = |name: &str| SlashCommand {
             name: name.into(),
@@ -830,8 +977,7 @@ mod tests {
             ..SlashCommand::default()
         };
 
-        let mut first = prompt("first-prompt");
-        first.is_prompt = true;
+        let first = prompt("first-prompt");
         registry.register_command(first);
         registry.register_command(SlashCommand {
             name: "local-command".into(),
@@ -842,25 +988,23 @@ mod tests {
             ..SlashCommand::default()
         });
         let mut manual = prompt("manual-prompt");
-        manual.is_prompt = true;
         manual.disable_model_invocation = true;
         registry.register_command(manual);
         let mut hidden = prompt("hidden-prompt");
-        hidden.is_prompt = true;
         hidden.is_hidden = true;
         registry.register_command(hidden);
         let mut unavailable = prompt("unavailable-prompt");
-        unavailable.is_prompt = true;
         unavailable.is_enabled = false;
         registry.register_command(unavailable);
+        // Native `kjs` counts this row in `pe`; `userInvocable` controls the
+        // slash UI but is not a headless availability predicate.
         let mut non_user_invocable = prompt("non-user-prompt");
-        non_user_invocable.is_prompt = true;
         non_user_invocable.user_invocable = Some(false);
         registry.register_command(non_user_invocable);
 
         // Replacing metadata does not move or duplicate the original entry.
         let mut replacement = prompt("first-prompt");
-        replacement.is_prompt = true;
+        replacement.native_type = Some(NativeCommandType::Prompt);
         replacement.description = "replacement".into();
         registry.register_command(replacement);
 
@@ -882,6 +1026,136 @@ mod tests {
         );
 
         let catalog = registry.headless_command_catalog();
+        assert_eq!(catalog.available_command_count, 4);
+        assert_eq!(
+            catalog
+                .prompt_command_names
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            ["first-prompt", "non-user-prompt"]
+        );
+    }
+
+    #[test]
+    fn native_builtin_enable_gates_apply_to_bundled_prompts_and_not_custom_skills() {
+        let _guard = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
+        let mut builtin_doctor = SlashCommand {
+            name: "doctor".into(),
+            source: CommandSource::Bundled,
+            native_source: Some("built-in".into()),
+            native_type: Some(NativeCommandType::Prompt),
+            aliases: vec!["checkup".into()],
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            ..SlashCommand::default()
+        };
+        builtin_doctor.is_enabled = true;
+        let mut registry = CommandRegistry::new();
+        registry.register_command(builtin_doctor);
+
+        let mut custom_doctor = SlashCommand {
+            name: "doctor".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
+            kind: SlashCommandKind::Markdown {
+                file_path: std::path::PathBuf::from("/tmp/doctor.md"),
+                frontmatter: Default::default(),
+                prompt_template: "custom doctor".into(),
+            },
+            ..SlashCommand::default()
+        };
+        custom_doctor.is_enabled = true;
+        let mut custom_registry = CommandRegistry::new();
+        custom_registry.register_command(custom_doctor);
+
+        std::env::set_var("DISABLE_DOCTOR_COMMAND", "1");
+        let builtin_catalog = registry.headless_command_catalog();
+        let builtin_palette = registry.palette_commands();
+        let custom_catalog = custom_registry.headless_command_catalog();
+        std::env::remove_var("DISABLE_DOCTOR_COMMAND");
+
+        assert_eq!(builtin_catalog.available_command_count, 0);
+        assert!(builtin_catalog.prompt_command_names.is_empty());
+        assert!(builtin_palette.is_empty());
+        assert_eq!(custom_catalog.available_command_count, 1);
+    }
+
+    #[test]
+    fn headless_pool_uses_native_execution_type_and_keeps_unresolved_rows() {
+        let mut registry = CommandRegistry::new();
+        let mut supported_local = SlashCommand {
+            name: "supported-local".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "supported-local".into(),
+            },
+            native_type: Some(NativeCommandType::Local),
+            supports_non_interactive: true,
+            ..SlashCommand::default()
+        };
+        registry.register_command(supported_local.clone());
+
+        let unsupported_local = SlashCommand {
+            name: "unsupported-local".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "unsupported-local".into(),
+            },
+            native_type: Some(NativeCommandType::Local),
+            ..SlashCommand::default()
+        };
+        registry.register_command(unsupported_local);
+
+        let interactive = SlashCommand {
+            name: "interactive-jsx".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "interactive-jsx".into(),
+            },
+            native_type: Some(NativeCommandType::LocalJsx),
+            supports_non_interactive: true,
+            ..SlashCommand::default()
+        };
+        registry.register_command(interactive);
+
+        let prompt = SlashCommand {
+            name: "headless-prompt".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "headless-prompt".into(),
+            },
+            native_type: Some(NativeCommandType::Prompt),
+            ..SlashCommand::default()
+        };
+        registry.register_command(prompt);
+
+        let disabled_prompt = SlashCommand {
+            name: "disabled-prompt".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "disabled-prompt".into(),
+            },
+            native_type: Some(NativeCommandType::Prompt),
+            disable_non_interactive: true,
+            ..SlashCommand::default()
+        };
+        registry.register_command(disabled_prompt);
+
+        // `None` remains an unresolved source fact. This projection must not
+        // turn it into a proven Native rejection.
+        registry.register_command(SlashCommand {
+            name: "unresolved".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "unresolved".into(),
+            },
+            ..SlashCommand::default()
+        });
+
+        let catalog = registry.headless_command_catalog();
         assert_eq!(catalog.available_command_count, 3);
         assert_eq!(
             catalog
@@ -889,7 +1163,411 @@ mod tests {
                 .iter()
                 .map(|name| name.string_at("").unwrap())
                 .collect::<Vec<_>>(),
-            ["first-prompt"]
+            ["headless-prompt"]
+        );
+
+        supported_local.supports_non_interactive = false;
+        assert_eq!(
+            supported_local.native_non_interactive_admission(),
+            Some(false)
+        );
+        assert_eq!(
+            SlashCommand::default().native_non_interactive_admission(),
+            None
+        );
+    }
+
+    #[test]
+    fn headless_factory_context_applies_add_dir_auto_mode_and_insights_gates() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "add-dir".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "add-dir".into(),
+            },
+            native_type: Some(NativeCommandType::Local),
+            supports_non_interactive: true,
+            ..SlashCommand::default()
+        });
+        registry.register_command(SlashCommand {
+            name: "auto-mode-setup".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "auto-mode-setup".into(),
+            },
+            native_type: Some(NativeCommandType::Local),
+            supports_non_interactive: true,
+            ..SlashCommand::default()
+        });
+        registry.register_command(SlashCommand {
+            name: "insights".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "insights".into(),
+            },
+            native_type: Some(NativeCommandType::Prompt),
+            ..SlashCommand::default()
+        });
+        for (name, native_type, supports_non_interactive) in [
+            ("extra-usage", NativeCommandType::Local, true),
+            ("usage-credits", NativeCommandType::Local, true),
+            ("advisor", NativeCommandType::Local, true),
+            ("version", NativeCommandType::Local, true),
+            ("rate-limit-options", NativeCommandType::LocalJsx, false),
+        ] {
+            registry.register_command(SlashCommand {
+                name: name.into(),
+                source: CommandSource::Builtin,
+                kind: SlashCommandKind::Builtin {
+                    handler_id: name.into(),
+                },
+                native_type: Some(native_type),
+                supports_non_interactive,
+                ..SlashCommand::default()
+            });
+        }
+        registry.set_native_headless_context(NativeHeadlessCatalogContext {
+            entrypoint: Some("sdk-cli".into()),
+            is_child_session: Some(false),
+            is_claude_code: Some(false),
+            is_remote: Some(false),
+            selected_model: Some("claude-sonnet-4-5".into()),
+            insights_policy_gate: Some(false),
+            usage_credits_enabled: Some(false),
+            advisor_enabled: Some(false),
+        });
+
+        let local = registry.headless_command_catalog();
+        assert_eq!(local.available_command_count, 1);
+        assert!(local.prompt_command_names.is_empty());
+        // The Headless fallback names are prompt-only, but the broader model
+        // invocable projection also retains enabled local rows whose
+        // disableModelInvocation flag is absent.
+        assert_eq!(
+            registry
+                .model_invocable_commands()
+                .iter()
+                .map(|command| command.name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            ["auto-mode-setup", "rate-limit-options"]
+        );
+
+        registry.set_native_headless_context(NativeHeadlessCatalogContext {
+            entrypoint: Some("remote".into()),
+            is_child_session: Some(false),
+            is_claude_code: Some(false),
+            is_remote: Some(true),
+            selected_model: Some("claude-sonnet-4-5".into()),
+            insights_policy_gate: Some(true),
+            usage_credits_enabled: Some(true),
+            advisor_enabled: Some(true),
+        });
+        let remote = registry.headless_command_catalog();
+        assert_eq!(remote.available_command_count, 4);
+        assert_eq!(
+            remote
+                .prompt_command_names
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            ["insights"]
+        );
+        assert_eq!(
+            registry
+                .model_invocable_commands()
+                .iter()
+                .map(|command| command.name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "add-dir",
+                "insights",
+                "usage-credits",
+                "advisor",
+                "rate-limit-options"
+            ]
+        );
+    }
+
+    #[test]
+    fn native_source_projection_places_user_skills_before_plugin_and_bundled_rows() {
+        use lingxi_core::types::SettingsScope;
+        use std::path::PathBuf;
+
+        let mut registry = CommandRegistry::new();
+        let register =
+            |registry: &mut CommandRegistry, name: &str, source: CommandSource, is_prompt: bool| {
+                registry.register_command(SlashCommand {
+                    name: name.into(),
+                    source,
+                    native_type: is_prompt.then_some(NativeCommandType::Prompt),
+                    ..SlashCommand::default()
+                });
+            };
+        register(&mut registry, "builtin", CommandSource::Builtin, false);
+        register(
+            &mut registry,
+            "plugin-authoring",
+            CommandSource::Bundled,
+            true,
+        );
+        register(
+            &mut registry,
+            "project-skill",
+            CommandSource::Settings(SettingsScope::Project),
+            false,
+        );
+        register(
+            &mut registry,
+            "local-skill",
+            CommandSource::Settings(SettingsScope::Local),
+            false,
+        );
+        register(
+            &mut registry,
+            "plugin-command",
+            CommandSource::Plugin,
+            false,
+        );
+        register(
+            &mut registry,
+            "graphify",
+            CommandSource::Settings(SettingsScope::User),
+            true,
+        );
+        register(
+            &mut registry,
+            "managed-skill",
+            CommandSource::Settings(SettingsScope::Managed),
+            false,
+        );
+        register(&mut registry, "mcp-prompt", CommandSource::Mcp, false);
+        let plugin_skill = SlashCommand {
+            name: "plugin-skill".into(),
+            source: CommandSource::Plugin,
+            native_type: Some(NativeCommandType::Prompt),
+            skill_root: Some(PathBuf::from("/plugins/example/skills/plugin-skill")),
+            ..SlashCommand::default()
+        };
+        registry.register_command(plugin_skill);
+        register(
+            &mut registry,
+            "second-bundled",
+            CommandSource::Bundled,
+            false,
+        );
+
+        let source_order = registry
+            .native_source_ordered_commands()
+            .into_iter()
+            .map(|command| command.name.string_at("").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_order,
+            [
+                "managed-skill",
+                "graphify",
+                "project-skill",
+                "local-skill",
+                "plugin-command",
+                "plugin-skill",
+                "plugin-authoring",
+                "second-bundled",
+                "builtin",
+                "mcp-prompt",
+            ]
+        );
+
+        let catalog = registry.headless_command_catalog();
+        let prompt_names = catalog
+            .prompt_command_names
+            .iter()
+            .map(|name| name.string_at("").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prompt_names,
+            ["graphify", "plugin-skill", "plugin-authoring"]
+        );
+    }
+
+    #[test]
+    fn native_source_projection_groups_plugin_commands_before_skills_for_alias_resolution() {
+        use std::path::PathBuf;
+
+        fn plugin_command(
+            plugin_name: &str,
+            local_name: &str,
+            plugin_id: PluginId,
+            display_name: Option<&str>,
+        ) -> SlashCommand {
+            let base_dir = PathBuf::from(format!("/plugins/{plugin_name}/commands"));
+            let file_path = base_dir.join(format!("{local_name}.md"));
+            let raw = display_name.map_or_else(
+                || "---\ndescription: plugin command\n---\n\nCommand body\n".to_owned(),
+                |name| {
+                    format!("---\nname: {name}\ndescription: plugin command\n---\n\nCommand body\n")
+                },
+            );
+            let file = crate::parse_command_markdown(
+                &raw,
+                file_path.clone(),
+                base_dir,
+                CommandSource::Plugin,
+            );
+            let base = crate::build_markdown_command(&file, CommandSource::Plugin);
+            let canonical_name: Utf16JsonProjection = format!("{plugin_name}:{local_name}").into();
+            let (user_facing_name, aliases) =
+                crate::plugin_prompt_name_metadata(&canonical_name, file.frontmatter_name.as_ref());
+            let (frontmatter, prompt_template) = match base.kind {
+                SlashCommandKind::Markdown {
+                    frontmatter,
+                    prompt_template,
+                    ..
+                } => (frontmatter, prompt_template),
+                _ => unreachable!("markdown factory returns a markdown command"),
+            };
+            SlashCommand {
+                name: canonical_name,
+                source: CommandSource::Plugin,
+                kind: SlashCommandKind::Plugin {
+                    plugin_id,
+                    file_path,
+                    frontmatter,
+                    prompt_template,
+                },
+                loaded_from: Some("plugin".to_owned()),
+                plugin_name: Some(plugin_name.into()),
+                native_source: Some("plugin".into()),
+                user_facing_name: Some(user_facing_name),
+                aliases,
+                ..base
+            }
+        }
+
+        fn plugin_skill(
+            plugin_name: &str,
+            local_name: &str,
+            plugin_id: PluginId,
+            display_name: Option<&str>,
+        ) -> SlashCommand {
+            let skill_root = PathBuf::from(format!("/plugins/{plugin_name}/skills/{local_name}"));
+            let file_path = skill_root.join("SKILL.md");
+            let raw = display_name.map_or_else(
+                || "---\ndescription: plugin skill\n---\n\nSkill body\n".to_owned(),
+                |name| format!("---\nname: {name}\ndescription: plugin skill\n---\n\nSkill body\n"),
+            );
+            let file = crate::parse_skill_command_markdown(
+                &raw,
+                file_path.clone(),
+                skill_root,
+                CommandSource::Plugin,
+            );
+            let base = crate::build_skill_command(&file, CommandSource::Plugin);
+            let canonical_name: Utf16JsonProjection = format!("{plugin_name}:{local_name}").into();
+            let (user_facing_name, aliases) =
+                crate::plugin_prompt_name_metadata(&canonical_name, file.frontmatter_name.as_ref());
+            let (frontmatter, prompt_template) = match base.kind {
+                SlashCommandKind::Markdown {
+                    frontmatter,
+                    prompt_template,
+                    ..
+                } => (frontmatter, prompt_template),
+                _ => unreachable!("skill factory returns a markdown command"),
+            };
+            SlashCommand {
+                name: canonical_name,
+                source: CommandSource::Plugin,
+                kind: SlashCommandKind::Plugin {
+                    plugin_id,
+                    file_path,
+                    frontmatter,
+                    prompt_template,
+                },
+                loaded_from: Some("plugin".to_owned()),
+                plugin_name: Some(plugin_name.into()),
+                native_source: Some("plugin".into()),
+                user_facing_name: Some(user_facing_name),
+                aliases,
+                ..base
+            }
+        }
+
+        let plugin_one = PluginId::new();
+        let plugin_two = PluginId::new();
+        let mut registry = CommandRegistry::new();
+
+        // PluginManager installs each plugin as one vector. Across plugins the
+        // physical sequence is command-1, skill-1, command-2, skill-2.
+        registry.register_plugin_commands(
+            plugin_one,
+            vec![
+                plugin_command("plugin-one", "command-one", plugin_one, None),
+                plugin_skill("plugin-one", "skill-one", plugin_one, Some("review")),
+            ],
+        );
+        registry.register_plugin_commands(
+            plugin_two,
+            vec![
+                plugin_command("plugin-two", "command-two", plugin_two, Some("review")),
+                plugin_skill("plugin-two", "skill-two", plugin_two, None),
+            ],
+        );
+
+        let registered_order = registry
+            .registration_ordered_commands()
+            .iter()
+            .map(|command| command.name.string_at("").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            registered_order,
+            [
+                "plugin-one:command-one",
+                "plugin-one:skill-one",
+                "plugin-two:command-two",
+                "plugin-two:skill-two",
+            ]
+        );
+
+        let native_order = registry.native_source_ordered_commands();
+        assert_eq!(
+            native_order
+                .iter()
+                .map(|command| command.name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "plugin-one:command-one",
+                "plugin-two:command-two",
+                "plugin-one:skill-one",
+                "plugin-two:skill-two",
+            ]
+        );
+        assert!(native_order[0].skill_root.is_none());
+        assert!(native_order[1].skill_root.is_none());
+        assert!(native_order[2].skill_root.is_some());
+        assert!(native_order[3].skill_root.is_some());
+
+        // Native Hs checks canonical names first, then returns the first
+        // display-name/name/alias match. No canonical name or display name is
+        // "review" here, so the earlier plugin command must own the alias
+        // before the earlier-registered plugin skill can match it.
+        let first_review_match = native_order
+            .iter()
+            .find(|command| {
+                command.name.string_at("") == Some("review")
+                    || command
+                        .user_facing_name
+                        .as_ref()
+                        .and_then(|name| name.string_at(""))
+                        == Some("review")
+                    || command
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.string_at("") == Some("review"))
+            })
+            .expect("the plugin command and skill share the Native review alias");
+        assert_eq!(
+            first_review_match.name.string_at(""),
+            Some("plugin-two:command-two")
         );
     }
 
@@ -1155,6 +1833,24 @@ mod tests {
             "alias `unpause` should resolve to `resume`"
         );
         assert!(reg.resolve(&"missing".into()).is_none());
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[test]
+    fn builtin_prompt_handler_projects_native_context_source() {
+        let mut reg = CommandRegistry::new();
+        reg.register_builtin_handler(Arc::new(crate::builtins::InitHandler::new()));
+        reg.register_builtin_handler(Arc::new(UnimplementedCommandHandler::new("login", "Login")));
+
+        assert_eq!(
+            reg.resolve(&"init".into())
+                .and_then(|command| command.native_source.as_ref())
+                .and_then(|source| source.string_at("")),
+            Some("built-in")
+        );
+        assert!(reg
+            .resolve(&"login".into())
+            .is_some_and(|command| command.native_source.is_none()));
     }
 
     #[test]

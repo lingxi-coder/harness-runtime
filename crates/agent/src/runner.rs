@@ -2818,6 +2818,62 @@ async fn flush_transcript(
     }
 }
 
+/// Add the live Native settings rows to an admitted child query before its
+/// outgoing provider snapshot. The raw payload companion is kept in the
+/// trusted instruction-context sidecar so later turns compare typed values,
+/// never rendered prose.
+async fn append_native_settings_prompt_attachments(
+    ctx: &mut SubagentContext,
+    history: &mut Vec<ConversationMessage>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    written: &mut usize,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) {
+    let Some(provider) = ctx.native_settings_prompt_provider.clone() else {
+        return;
+    };
+    if !ctx.native_settings_prompt_context.is_admitted() {
+        return;
+    }
+    let rows = provider
+        .native_settings_prompt_attachments(
+            ctx.native_settings_prompt_context,
+            &ctx.instruction_context.native_settings_attachments,
+        )
+        .await;
+    for row in rows {
+        let id = row.message.id();
+        if let Some(writer) = transcript {
+            writer.register_source_attachment(&row.message, row.payload.clone());
+        }
+        ctx.instruction_context
+            .native_settings_attachments
+            .push((id, row.payload.clone()));
+        history.push(row.message);
+        flush_transcript(transcript, history, written).await;
+
+        let event = lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+            (
+                "type".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from("attachment"),
+            ),
+            (
+                "uuid".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from(id.as_uuid().to_string()),
+            ),
+            ("attachment".into(), row.payload),
+        ])
+        .expect("Native settings attachment event is a valid object");
+        let _ = out_tx
+            .send(SubagentEvent::Message {
+                agent_id: ctx.agent_id,
+                message: event,
+                message_index: None,
+            })
+            .await;
+    }
+}
+
 fn publish_prompt_hook_transcript(
     ctx: &SubagentContext,
     history: &[lingxi_core::types::ConversationMessage],
@@ -3714,6 +3770,14 @@ async fn run_subagent_loop(
                     }
                 }
             }
+            append_native_settings_prompt_attachments(
+                &mut ctx,
+                history,
+                transcript.as_ref(),
+                &mut transcript_written,
+                &out_tx,
+            )
+            .await;
             fold_task_notifications(&ctx, history).await;
             announce_instruction_context(
                 &mut ctx,
@@ -6368,7 +6432,10 @@ async fn fold_task_notifications(
         return false;
     };
     let notifications = registry
-        .take_pending_task_notifications_for(Some(ctx.agent_id))
+        .take_pending_task_notifications_for(
+            Some(ctx.agent_id),
+            lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+        )
         .await
         .unwrap_or_default();
     reconcile_agent_child_keepalives(ctx, registry.as_ref()).await;

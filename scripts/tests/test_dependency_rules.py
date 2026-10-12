@@ -9,7 +9,7 @@ import unittest
 ENGINE = Path(__file__).resolve().parents[1] / "checks/check_deps.py"
 
 class DependencyRules(unittest.TestCase):
-    def run_gate(self, paths, edges):
+    def run_gate(self, paths, edges, arguments=()):
         # The production gate traverses these four required runtime roots.
         paths = {**{n: f"crates/{n}" for n in
                    ("llm-runtime", "harness-runtime", "tool-api", "permission")}, **paths}
@@ -19,7 +19,7 @@ class DependencyRules(unittest.TestCase):
                               for dep in edges.get(name, [])]}
             for name, path in paths.items()
         ]}
-        return subprocess.run([sys.executable, str(ENGINE)], input=json.dumps(metadata),
+        return subprocess.run([sys.executable, str(ENGINE), *arguments], input=json.dumps(metadata),
                               text=True, capture_output=True)
 
     def test_tool_sibling_is_rejected_under_crates(self):
@@ -38,6 +38,43 @@ class DependencyRules(unittest.TestCase):
                                {"core": ["mcp-wire", "rooted-fs", "device-api"]})
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_core_may_reexport_mcp_wire_but_not_depend_on_mcp_domain(self):
+        wire = self.run_gate({"core": "crates/core"}, {"core": ["mcp-wire"]})
+        self.assertEqual(wire.returncode, 0, wire.stderr)
+
+        domain = self.run_gate({"core": "crates/core", "mcp": "crates/mcp"},
+                               {"core": ["mcp"]})
+        self.assertEqual(domain.returncode, 1)
+        self.assertIn("core depends on mcp — shared contracts must stay below", domain.stderr)
+
+    def test_mcp_wire_is_classified_as_a_leaf_contract(self):
+        result = self.run_gate(
+            {"mcp-wire": "crates/mcp-wire", "json-projection": "crates/json-projection"},
+            {"mcp-wire": ["json-projection"]},
+            arguments=("--list",),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(line for line in result.stdout.splitlines() if line.startswith("mcp-wire"))
+        self.assertEqual(line.split(), ["mcp-wire", "contract", "json-projection"])
+
+    def test_mcp_wire_contract_rejects_domain_dependencies(self):
+        allowed = self.run_gate(
+            {"mcp-wire": "crates/mcp-wire", "json-projection": "crates/json-projection"},
+            {"mcp-wire": ["json-projection"]},
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+        domain = self.run_gate(
+            {"mcp-wire": "crates/mcp-wire", "json-projection": "crates/json-projection",
+             "mcp": "crates/mcp"},
+            {"mcp-wire": ["json-projection", "mcp"]},
+        )
+        self.assertEqual(domain.returncode, 1)
+        self.assertIn(
+            "mcp-wire (contract) depends on mcp — shared wire contracts may depend only on json-projection",
+            domain.stderr,
+        )
+
     def test_nothing_may_name_the_crates_that_implement_local_app(self):
         for consumer in ("core", "harness-runtime", "platform-android"):
             for crate in ("local-apps", "local-app-builder-service", "local-app-builder-plugin",
@@ -50,9 +87,13 @@ class DependencyRules(unittest.TestCase):
     def test_no_other_engine_crate_may_name_the_primitives(self):
         for engine in ("permission", "client", "lsp", "session", "tasks", "agent", "workflow"):
             with self.subTest(engine=engine):
-                result = self.run_gate({engine: f"crates/{engine}"}, {engine: ["rooted-fs"]})
-                self.assertEqual(result.returncode, 1)
-                self.assertIn(f"{engine} depends on rooted-fs — only", result.stderr)
+                for contract in ("rooted-fs", "mcp-wire"):
+                    with self.subTest(engine=engine, contract=contract):
+                        result = self.run_gate(
+                            {engine: f"crates/{engine}"}, {engine: [contract]}
+                        )
+                        self.assertEqual(result.returncode, 1)
+                        self.assertIn(f"{engine} depends on {contract} — only", result.stderr)
 
     def test_the_consumers_the_table_lists_are_let_through(self):
         for consumer, crate in (("mcp", "mcp-wire"), ("harness-runtime", "rooted-fs"), ("harness-runtime", "mcp-wire")):
@@ -83,6 +124,12 @@ class DependencyRules(unittest.TestCase):
     def test_tool_can_depend_on_abstract_api(self):
         result = self.run_gate({"tool-web": "crates/tools/web"}, {"tool-web": ["tool-api"]})
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_skill_is_classified_as_an_implementation_crate(self):
+        result = self.run_gate({"skill": "crates/skill"}, {}, arguments=("--list",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(line for line in result.stdout.splitlines() if line.startswith("skill"))
+        self.assertEqual(line.split()[:2], ["skill", "skill"])
 
 if __name__ == "__main__":
     unittest.main()

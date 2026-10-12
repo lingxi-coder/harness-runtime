@@ -68,16 +68,18 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     let reader = JsonlReader::new(session_path, fs);
     let msgs = reader.read_all().await.expect("read_all");
 
-    // The first Normal/Announced query records the empty session-context anchor
-    // and date before its token reminder, then persists the write-once static
-    // prompt snapshot. The second query correctly deduplicates the unchanged
-    // context/date and snapshot, while recording its own token reminder.
+    // The first query persists its environment and model ingress rows, then the
+    // token reminder, context/date announcements, and write-once prompt
+    // snapshot. The second query deduplicates unchanged ingress/context rows
+    // and snapshot while recording its own token reminder.
     assert_eq!(
         msgs.iter()
             .map(|m| m.message_type.as_str())
             .collect::<Vec<_>>(),
         vec![
             "user",
+            "attachment",
+            "attachment",
             "attachment",
             "attachment",
             "attachment",
@@ -104,16 +106,18 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     assert_eq!(
         attachment_types,
         vec![
+            "environment",
+            "model",
+            "total_tokens_reminder",
             "session_context",
             "date",
-            "total_tokens_reminder",
             "prompt_snapshot",
             "total_tokens_reminder"
         ],
-        "Normal context/date rows precede turn reminders, and unchanged announcements dedupe"
+        "prompt ingress, turn, and context attachments retain native JSONL order"
     );
     assert_eq!(
-        msgs[1]
+        msgs[4]
             .attachment_projection
             .as_ref()
             .expect("session context attachment")
@@ -124,14 +128,14 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
         "{}",
         "empty instruction sources still persist the typed session-context anchor"
     );
-    assert!(msgs[2]
+    assert!(msgs[5]
         .attachment_projection
         .as_ref()
         .expect("date attachment")
         .at_pointer("/date")
         .is_some_and(|date| date.as_str().is_some()));
     assert_eq!(
-        msgs[4]
+        msgs[6]
             .attachment_projection
             .as_ref()
             .expect("prompt snapshot attachment")
@@ -141,8 +145,8 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     );
     assert_eq!(
         msgs.len(),
-        9,
-        "expected 9 JSONL entries (2 user + 2 assistant + 5 typed attachments), got {} — entries: {:?}",
+        11,
+        "expected 11 JSONL entries (2 user + 2 assistant + 7 typed attachments), got {} — entries: {:?}",
         msgs.len(),
         msgs.iter().map(|m| &m.message_type).collect::<Vec<_>>(),
     );

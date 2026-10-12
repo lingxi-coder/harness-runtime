@@ -299,7 +299,8 @@ impl ToolRegistry {
             .available_tools(&ctx)
             .iter()
             .filter(|t| {
-                self.deferral.wants_defer(t.name(), t.should_defer()) && self.deferral.is_enabled()
+                self.deferral.wants_defer(t.name(), t.should_defer())
+                    && self.deferral.keeps_deferred_tools()
             })
             .map(|t| ToolSearchEntry {
                 name: t.name().to_string(),
@@ -326,7 +327,7 @@ impl ToolRegistry {
             .available_tools(&ctx)
             .iter()
             .filter(|tool| {
-                self.deferral.is_enabled()
+                self.deferral.keeps_deferred_tools()
                     && self.deferral.wants_defer(tool.name(), tool.should_defer())
             })
             .map(|tool| ToolSearchEntry {

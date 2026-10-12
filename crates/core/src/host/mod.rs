@@ -32,6 +32,12 @@
 pub mod remote_ui;
 pub use remote_ui::{ModRemoteUiAnswer, ModRemoteUiClient, ModRemoteUiHost};
 
+pub mod native_settings;
+pub use native_settings::{
+    NativeSettingsAgentContext, NativeSettingsPromptAttachment,
+    NativeSettingsPromptAttachmentProvider, NativeSettingsPromptContext,
+};
+
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
@@ -136,6 +142,13 @@ pub mod live_sessions;
 pub mod lsp;
 pub mod mailbox;
 pub mod mcp_result;
+pub mod native_proactivity;
+pub mod request_history;
+pub use native_proactivity::{
+    NativeProactivityControlResponse, NativeProactivitySessionMetadata,
+    NativeProactivityStatusSnapshot,
+};
+pub use request_history::{NativeRequestHistoryMetadata, TaskDeliveryHistoryEnvelope};
 // MCP's wire DTOs and the `McpTransport` interface live in `mcp-wire` so an out-of-tree
 // service can implement a transport without the engine; the old path stays.
 pub use mcp_wire::transport as mcp;
@@ -175,6 +188,7 @@ pub mod subscription;
 pub mod swarm;
 pub mod tag_escape;
 pub mod task_activity;
+pub mod task_delivery;
 pub mod task_registry;
 pub mod team_registry;
 pub mod team_spawn;
@@ -301,12 +315,13 @@ pub use orchestrator::{
     reasoning_control_spec_for_model, split_connection_profile,
     validated_reasoning_selection_for_model, ActiveGoalSnapshot, AgentInfo, AttachmentKind,
     CheckStatus, CompactionSummary, ConnectionRef, ContextPressureBanner, ContextPressureLevel,
-    ContextUsageCategory, ContextUsageCategoryKind, ContextUsageSnapshot, ConversationControls,
-    CostSnapshot, CurrentUsageSnapshot, DeferredToolReplay, DirectoryAddedHookSummary, DoctorCheck,
-    DoctorReport, DoctorSummary, ForkOutcome, GoalClearedReason, GoalStatusAttachment,
-    GoalStatusKind, HandleError, HookInfo, LoopUsageProvider, LoopUsageRow, McpActionState,
-    McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModUiSelection,
-    ModelBillingMode, ModelCapabilities, ModelListing, ModelMetadata, ModelPricing,
+    ContextSkillListingRow, ContextSkillListingSnapshot, ContextUsageCategory,
+    ContextUsageCategoryKind, ContextUsageSnapshot, ConversationControls, CostSnapshot,
+    CurrentUsageSnapshot, DeferredToolReplay, DirectoryAddedHookSummary, DoctorCheck, DoctorReport,
+    DoctorSummary, ForkOutcome, GoalClearedReason, GoalStatusAttachment, GoalStatusKind,
+    HandleError, HookInfo, LoopUsageProvider, LoopUsageRow, MainLoopAssistantUsageSnapshot,
+    McpActionState, McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome,
+    ModUiSelection, ModelBillingMode, ModelCapabilities, ModelListing, ModelMetadata, ModelPricing,
     ModelPricingTier, ModelProvenance, ModelUsageRow, OrchestratorHandle, OutputEvent,
     OutputStream, OutputStyleListing, PermissionControlState, PermissionModeAvailability,
     PlanSnapshot, PromptSnapshot, PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange,

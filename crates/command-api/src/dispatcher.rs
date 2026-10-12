@@ -187,9 +187,9 @@ pub struct RegistrySlashDispatcher {
     /// [`execute_shell_commands_in_prompt`], 1:1 with claude-code's
     /// `executeShellCommandsInPrompt` at the COMMAND layer.
     shell_expansion: Option<Arc<dyn ShellExpansionProvider>>,
-    /// Explicit config-home for persistent user/project skill usage counters.
-    /// `None` keeps embedders and tests side-effect free.
-    skill_usage_home: Option<PathBuf>,
+    /// Session-local throttler over the persistent skill usage map. `None`
+    /// keeps embedders and tests side-effect free.
+    skill_usage_session: Option<crate::skill_usage::SkillUsageSession>,
     /// Host-owned background launcher for bundled commands declaring
     /// `context: fork`. `None` fails closed instead of executing inline.
     background_prompt_launcher: Option<BackgroundPromptLauncher>,
@@ -244,7 +244,8 @@ impl RegistrySlashDispatcher {
         };
         match &command.kind {
             SlashCommandKind::Markdown { frontmatter, .. }
-            | SlashCommandKind::Plugin { frontmatter, .. } => frontmatter
+            | SlashCommandKind::Plugin { frontmatter, .. }
+            | SlashCommandKind::Bundled { frontmatter, .. } => frontmatter
                 .disallowed_tools
                 .clone()
                 .unwrap_or_default()
@@ -263,7 +264,7 @@ impl RegistrySlashDispatcher {
             mod_command_interceptor: None,
             expansion_hooks: None,
             shell_expansion: None,
-            skill_usage_home: None,
+            skill_usage_session: None,
             background_prompt_launcher: None,
             mcp_prompt_resolver: None,
             skill_invocation_observer: None,
@@ -312,8 +313,8 @@ impl RegistrySlashDispatcher {
     /// markdown / plugin slash command runs its embedded shell substitutions
     /// bodies through the real host runner + policy-backed gate (that command's
     /// frontmatter `allowed_tools` injected), and the builtin `InjectMessage`
-    /// commands (`/commit`, `/commit-push-pr`, `/security-review`) expand their
-    /// embedded bodies with their own `allowed_tools`. A strict no-op when
+    /// commands (`/commit`, `/security-review`) expand their embedded bodies
+    /// with their own `allowed_tools`. A strict no-op when
     /// unset (the default): the stubs deny, and `InjectMessage` content is
     /// verbatim. MCP-sourced commands are NEVER expanded (claude-code
     /// `loadedFrom === 'mcp'` carve-out), even when wired.
@@ -323,10 +324,13 @@ impl RegistrySlashDispatcher {
         self
     }
 
-    /// Wire the same config home `/skill-doctor` reads.
+    /// Wire the session-scoped usage recorder shared with the Skill tool.
     #[must_use]
-    pub fn with_skill_usage_home(mut self, config_home: PathBuf) -> Self {
-        self.skill_usage_home = Some(config_home);
+    pub fn with_skill_usage_session(
+        mut self,
+        session: crate::skill_usage::SkillUsageSession,
+    ) -> Self {
+        self.skill_usage_session = Some(session);
         self
     }
 
@@ -356,6 +360,14 @@ impl RegistrySlashDispatcher {
     async fn observe_skill_invocation(&self, name: &Utf16JsonProjection) {
         if let Some(observer) = self.skill_invocation_observer.as_ref() {
             observer(name.clone()).await;
+        }
+    }
+
+    fn record_skill_usage(&self, name: &Utf16JsonProjection) {
+        if let Some(session) = self.skill_usage_session.as_ref() {
+            if let Err(error) = session.record(name) {
+                tracing::warn!(command = %source_display(name), %error, "failed to record skill usage");
+            }
         }
     }
 
@@ -457,7 +469,7 @@ impl RegistrySlashDispatcher {
             // the shared dispatcher so every consumer expands `!`cmd`` bodies
             // identically.
             shell_expansion: self.shell_expansion.clone(),
-            skill_usage_home: self.skill_usage_home.clone(),
+            skill_usage_session: self.skill_usage_session.clone(),
             background_prompt_launcher: self.background_prompt_launcher.clone(),
             mcp_prompt_resolver: self.mcp_prompt_resolver.clone(),
             skill_invocation_observer: self.skill_invocation_observer.clone(),
@@ -562,19 +574,21 @@ impl RegistrySlashDispatcher {
             };
         };
 
-        // 4a. Honor the `DISABLE_*_COMMAND` env gates for the affected builtins
-        //     (claude-code `isEnabled:()=>!je.DISABLE_X`). A disabled command is
-        //     dropped from findCommand's search, so it must NOT resolve — fall
-        //     through to the Unknown branch. Keyed by the command's canonical
-        //     name so a disabled command is unreachable via an alias too.
-        if matches!(command.kind, SlashCommandKind::Builtin { .. })
-            && source_text(&command.name)
-                .is_some_and(crate::builtin_support::names::is_command_env_disabled)
-        {
+        // Native `Pp` filters disabled command factories before dispatch.
+        // Check the resolved canonical command so its aliases obey the same
+        // `isEnabled` and environment gates.
+        if !crate::registry::native_factory_enabled(&command) {
             return SlashDispatchResult::Unknown {
                 name: parsed.name.clone(),
                 display: Self::unknown_command_literal(&parsed.name),
             };
+        }
+
+        // Native EVt records prompt commands after resolution/eligibility and
+        // before expansion. The session handle applies its per-name 60-second
+        // persistence throttle while retaining the canonical registry name.
+        if command.is_prompt() && command.user_invocable != Some(false) {
+            self.record_skill_usage(&command.name);
         }
 
         // Programmatically-registered bundled skills (e.g. `/loop`) are
@@ -640,6 +654,43 @@ impl RegistrySlashDispatcher {
                                 ),
                             };
                         }
+                    };
+                    // Native `getPromptForCommand` expands source-authored
+                    // `!`command`` blocks for bundled prompts too. The
+                    // prompt's frontmatter supplies both the command allow
+                    // list and shell selector; user/config text is escaped by
+                    // its prompt factory before reaching this path.
+                    let content = if contains_embedded_shell_commands(&content) {
+                        match self.shell_expansion.as_ref() {
+                            Some(provider) => {
+                                let allowed_tools =
+                                    frontmatter.allowed_tools.clone().unwrap_or_default();
+                                let shell_ctx = provider.build(&allowed_tools, frontmatter.shell);
+                                match execute_shell_commands_in_prompt(
+                                    &content,
+                                    &shell_ctx,
+                                    &command.name,
+                                    frontmatter.shell,
+                                )
+                                .await
+                                {
+                                    Ok(expanded) => expanded,
+                                    Err(error) => {
+                                        return SlashDispatchResult::Handled {
+                                            display: command_source_message(
+                                                &command.name,
+                                                &format!(" expansion failed: {error}"),
+                                            ),
+                                        };
+                                    }
+                                }
+                            }
+                            // Preserve the established no-provider behavior
+                            // for hosts that cannot execute embedded commands.
+                            None => content,
+                        }
+                    } else {
+                        content
                     };
                     self.observe_skill_invocation(&command.name).await;
                     self.fire_user_prompt_expansion(
@@ -725,16 +776,7 @@ impl RegistrySlashDispatcher {
                 .await;
             return match resolver(connection_id, prompt_name, wire_arguments).await {
                 Ok(result) => match render_mcp_prompt_result(&result) {
-                    Ok(prompt) => {
-                        if let Some(config_home) = self.skill_usage_home.as_deref() {
-                            if let Err(error) =
-                                crate::skill_usage::record_skill_usage(config_home, &command.name)
-                            {
-                                tracing::warn!(command = %source_display(&command.name), %error, "failed to record MCP prompt usage");
-                            }
-                        }
-                        SlashDispatchResult::RunAsTurn { prompt }
-                    }
+                    Ok(prompt) => SlashDispatchResult::RunAsTurn { prompt },
                     Err(error) => SlashDispatchResult::Handled {
                         display: command_source_message(
                             &command.name,
@@ -788,21 +830,6 @@ impl RegistrySlashDispatcher {
             return match expand_markdown_command(&command, &parsed, &expand_ctx).await {
                 Ok(content) => {
                     self.observe_skill_invocation(&command.name).await;
-                    // `/skill-doctor` reads this persistent counter. Record
-                    // file-backed and plugin skills; bundled/managed commands
-                    // are not part of its diagnostic surface.
-                    if matches!(
-                        &command.kind,
-                        SlashCommandKind::Markdown { .. } | SlashCommandKind::Plugin { .. }
-                    ) {
-                        if let Some(config_home) = self.skill_usage_home.as_deref() {
-                            if let Err(error) =
-                                crate::skill_usage::record_skill_usage(config_home, &command.name)
-                            {
-                                tracing::warn!(command = %source_display(&command.name), %error, "failed to record skill usage");
-                            }
-                        }
-                    }
                     // hooks #39: a markdown / MCP-prompt slash command WAS
                     // expanded — fire `UserPromptExpansion` (claude-code `WFa`
                     // →`b$t`) with the command metadata, at the same point the
@@ -865,13 +892,7 @@ impl RegistrySlashDispatcher {
                 // the WHOLE expansion aborts (patterns are never left in place) —
                 // surface the error text instead of the unexpanded template. A
                 // strict no-op (verbatim content) when unset / MCP / no patterns.
-                let has_embedded = content.string_units("").is_some_and(|units| {
-                    units.windows(4).any(|window| {
-                        window == [b'`' as u16, b'`' as u16, b'`' as u16, b'!' as u16]
-                    }) || units
-                        .windows(2)
-                        .any(|window| window == [b'!' as u16, b'`' as u16])
-                });
+                let has_embedded = contains_embedded_shell_commands(&content);
                 match self.shell_expansion.as_ref() {
                     Some(provider)
                         if has_embedded && !matches!(command.source, CommandSource::Mcp) =>
@@ -927,10 +948,8 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             let resolved = {
                 let registry = self.registry.read().await;
                 resolve_command_invocation(&registry, parsed).and_then(|(command, parsed)| {
-                    let disabled = matches!(command.kind, SlashCommandKind::Builtin { .. })
-                        && source_text(&command.name)
-                            .is_some_and(crate::builtin_support::names::is_command_env_disabled);
-                    (!disabled && registry.mod_owner_of(&command.name).is_none())
+                    (crate::registry::native_factory_enabled(&command)
+                        && registry.mod_owner_of(&command.name).is_none())
                         .then_some((command.name.clone(), parsed.raw_args))
                 })
             };
@@ -953,6 +972,16 @@ fn starts_with_raw_slash(input: &Utf16JsonProjection) -> bool {
     input
         .string_units("")
         .is_some_and(|units| units.first().copied() == Some(b'/' as u16))
+}
+
+fn contains_embedded_shell_commands(content: &Utf16JsonProjection) -> bool {
+    content.string_units("").is_some_and(|units| {
+        units.windows(4).any(|window| {
+            window == [b'`' as u16, b'`' as u16, b'`' as u16, b'!' as u16]
+        }) || units
+            .windows(2)
+            .any(|window| window == [b'!' as u16, b'`' as u16])
+    })
 }
 
 fn has_native_command_name_syntax(name: &Utf16JsonProjection) -> bool {
@@ -1197,10 +1226,6 @@ fn projection_from_units(units: Vec<u16>) -> Ujp {
         .expect("display projection is derived from the same UTF-16 units")
 }
 
-fn source_text(value: &Ujp) -> Option<&str> {
-    value.string_at("")
-}
-
 /// Convert to the safe display form only for UI/log/error output.
 fn source_display(value: &Ujp) -> String {
     value.string_at("").unwrap_or_default().to_owned()
@@ -1230,6 +1255,14 @@ mod tests {
         display
             .string_at("")
             .expect("test display is a root string")
+    }
+
+    struct LiteralBundledPrompt;
+
+    impl crate::model::BundledPromptFn for LiteralBundledPrompt {
+        fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
+            "Native doctor prompt".into()
+        }
     }
 
     #[tokio::test]
@@ -1746,30 +1779,42 @@ mod tests {
         }
     }
 
-    /// #63: a builtin whose `DISABLE_*_COMMAND` env gate is tripped does NOT
-    /// resolve — it falls through to the Unknown branch, mirroring claude-code's
-    /// `isEnabled:()=>!je.DISABLE_X` dropping it from findCommand.
+    /// The Native `/doctor` bundled factory carries the `DISABLE_DOCTOR_COMMAND`
+    /// gate. Its `/checkup` alias must be hidden by the same canonical factory
+    /// predicate, while the enabled default resolves to the bundled prompt.
     #[tokio::test]
-    async fn env_disabled_builtin_does_not_resolve() {
+    async fn env_disabled_bundled_factory_does_not_resolve_through_alias() {
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let var = "DISABLE_DOCTOR_COMMAND";
-        let d = seeded_dispatcher();
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "doctor".into(),
+            description: "Native doctor prompt".into(),
+            source: CommandSource::Bundled,
+            native_source: Some("built-in".into()),
+            native_type: Some(crate::model::NativeCommandType::Prompt),
+            aliases: vec!["checkup".into()],
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter::default(),
+                prompt_fn: Some(Arc::new(LiteralBundledPrompt)),
+            },
+            ..SlashCommand::default()
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
 
-        // Default: /doctor resolves to its (stub) handler → Handled.
+        // Default: /doctor resolves to the native bundled prompt.
         std::env::remove_var(var);
-        assert!(matches!(
-            d.dispatch("/doctor".into()).await,
-            SlashDispatchResult::Handled { .. }
-        ));
+        assert!(matches!(d.dispatch("/doctor".into()).await,
+            SlashDispatchResult::RunAsTurn { prompt } if prompt_text(&prompt) == "Native doctor prompt"));
 
-        // Gate tripped: /doctor is Unknown.
+        // The gate applies after alias resolution to the canonical factory.
         std::env::set_var(var, "1");
-        match d.dispatch("/doctor".into()).await {
+        match d.dispatch("/checkup".into()).await {
             SlashDispatchResult::Unknown { name, display } => {
-                assert_eq!(name.string_at(""), Some("doctor"));
-                assert_eq!(display_text(&display), "Unknown command: /doctor");
+                assert_eq!(name.string_at(""), Some("checkup"));
+                assert_eq!(display_text(&display), "Unknown command: /checkup");
             }
-            other => panic!("expected Unknown for gated /doctor, got {other:?}"),
+            other => panic!("expected Unknown for gated /checkup, got {other:?}"),
         }
         std::env::remove_var(var);
     }
@@ -2117,7 +2162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_user_skill_expansion_records_usage() {
+    async fn prompt_dispatch_uses_session_throttle_and_persists_across_sessions() {
         let root = std::env::temp_dir().join(format!(
             "command-dispatch-skill-usage-{}-{}",
             std::process::id(),
@@ -2130,7 +2175,7 @@ mod tests {
         let dispatcher = RegistrySlashDispatcher::new(registry_with_demo_markdown(
             CommandSource::Settings(lingxi_core::types::SettingsScope::User),
         ))
-        .with_skill_usage_home(root.clone());
+        .with_skill_usage_session(crate::skill_usage::SkillUsageSession::new(root.clone()));
 
         assert!(matches!(
             dispatcher.dispatch("/demo one".into()).await,
@@ -2142,6 +2187,17 @@ mod tests {
         ));
         let usage = crate::skill_usage::read_skill_usage(&root).unwrap();
         let skill_key = "demo".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(usage.get(&skill_key).map(|entry| entry.count), Some(1));
+
+        let next_session = RegistrySlashDispatcher::new(registry_with_demo_markdown(
+            CommandSource::Settings(lingxi_core::types::SettingsScope::User),
+        ))
+        .with_skill_usage_session(crate::skill_usage::SkillUsageSession::new(root.clone()));
+        assert!(matches!(
+            next_session.dispatch("/demo three".into()).await,
+            SlashDispatchResult::RunAsTurn { .. }
+        ));
+        let usage = crate::skill_usage::read_skill_usage(&root).unwrap();
         assert_eq!(usage.get(&skill_key).map(|entry| entry.count), Some(2));
         std::fs::remove_dir_all(root).ok();
     }
@@ -2485,6 +2541,14 @@ mod tests {
         }
     }
 
+    struct EmbeddedBundledPrompt;
+
+    impl crate::model::BundledPromptFn for EmbeddedBundledPrompt {
+        fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
+            "before !`echo hi` after".into()
+        }
+    }
+
     fn markdown_with(
         source: CommandSource,
         body: &str,
@@ -2534,6 +2598,43 @@ mod tests {
             provider.seen_allowed.lock().unwrap().as_slice(),
             &[vec!["Bash(echo:*)".to_string()]],
             "the frontmatter allow-list must reach the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn wired_provider_expands_bundled_prompt_with_frontmatter_policy() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "prompt-shell".into(),
+            description: "Bundled shell test".into(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter {
+                    allowed_tools: Some(vec!["Bash(echo:*)".to_string()]),
+                    shell: Some(crate::FrontmatterShell::Bash),
+                    ..CommandFrontmatter::default()
+                },
+                prompt_fn: Some(Arc::new(EmbeddedBundledPrompt)),
+            },
+            ..SlashCommand::default()
+        });
+        let provider = Arc::new(FakeProvider {
+            deny: false,
+            seen_allowed: std::sync::Mutex::new(Vec::new()),
+        });
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_shell_expansion(provider.clone());
+
+        match dispatcher.dispatch("/prompt-shell".into()).await {
+            SlashDispatchResult::RunAsTurn { prompt } => {
+                assert_eq!(prompt_text(&prompt), "before OUT[echo hi] after");
+            }
+            other => panic!("expected expanded bundled prompt turn, got {other:?}"),
+        }
+        assert_eq!(
+            provider.seen_allowed.lock().unwrap().as_slice(),
+            &[vec!["Bash(echo:*)".to_string()]],
+            "bundled frontmatter must supply the shell allow-list"
         );
     }
 

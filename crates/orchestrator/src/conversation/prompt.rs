@@ -39,6 +39,17 @@ fn projection_array(values: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
     Utf16JsonProjection::array(values).expect("host-generated Mod array is valid")
 }
 
+fn typed_attachment_ids_in_snapshot(
+    typed_ids: &std::collections::HashSet<lingxi_core::types::MessageId>,
+    messages: &[ConversationMessage],
+) -> std::collections::HashSet<lingxi_core::types::MessageId> {
+    let snapshot_ids = messages
+        .iter()
+        .map(ConversationMessage::id)
+        .collect::<std::collections::HashSet<_>>();
+    typed_ids.intersection(&snapshot_ids).copied().collect()
+}
+
 fn exact_string_projection(display: &str, code_units: &[u16]) -> Utf16JsonProjection {
     Utf16JsonProjection::root_string(display.to_owned(), code_units.to_vec())
         .expect("display text matches exact UTF-16 source units")
@@ -1195,6 +1206,128 @@ impl ConversationOrchestrator {
         messages.insert(index, reminder);
     }
 
+    /// Native's provider projection reorders typed attachments throughout the
+    /// history, including earlier turns. Keep durable append order unchanged so
+    /// live and cold-resumed requests derive the same stable physical prefix.
+    pub(crate) async fn project_typed_attachment_order(
+        &self,
+        messages: &mut Vec<ConversationMessage>,
+        turn_reminders: &[ConversationMessage],
+        context_announcements: &[ConversationMessage],
+        model_supports_mid_conversation_system: bool,
+    ) {
+        let attachments = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut typed_ids = attachments
+            .keys()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        typed_ids.extend(
+            turn_reminders
+                .iter()
+                .chain(context_announcements)
+                .map(ConversationMessage::id),
+        );
+        let snapshot_ids = messages
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<std::collections::HashSet<_>>();
+        let (marked_ids, trusted_zce_ids) = {
+            let session = self.session.lock().await;
+            (
+                session
+                    .native_request_history
+                    .before_closing_line_ids
+                    .clone(),
+                session.native_request_history.synthetic_closing_ids.clone(),
+            )
+        };
+        let raw_attachment_types = attachments
+            .iter()
+            .filter_map(|(id, payload)| {
+                payload
+                    .string_at("/type")
+                    .map(|attachment_type| (*id, attachment_type.to_owned()))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let eligible_marked_ids = marked_ids
+            .into_iter()
+            .filter(|id| {
+                snapshot_ids.contains(id)
+                    && super::closing_placement::is_typed_tee_attachment(
+                        *id,
+                        &typed_ids,
+                        &raw_attachment_types,
+                    )
+            })
+            .collect::<std::collections::HashSet<_>>();
+        *self
+            .transcript
+            .request_history_before_attachment_projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = messages.clone();
+        let task_delivery_ids = self
+            .task_deliveries_for_snapshot(messages)
+            .await
+            .into_keys()
+            .collect::<std::collections::HashSet<_>>();
+        let closing_projection = model_supports_mid_conversation_system.then_some(
+            super::closing_placement::ClosingPlacementProjection {
+                eligible_marked_ids: &eligible_marked_ids,
+                trusted_zce_ids: &trusted_zce_ids,
+            },
+        );
+        super::attachment_order::repack_typed_attachments(
+            messages,
+            &typed_ids,
+            Some(&task_delivery_ids),
+            closing_projection,
+        );
+
+        // Typed identity comes from the attachment sidecar, regardless of the
+        // user row's `is_meta` flag. Replace the execution-only origin set on
+        // every projection so compacted or expired transient rows cannot leak
+        // into a later request.
+        let request_ids = typed_attachment_ids_in_snapshot(&typed_ids, messages);
+        *self
+            .transcript
+            .request_attachment_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = request_ids;
+    }
+
+    /// Return typed attachment ids present in this exact request snapshot.
+    /// `is_meta` does not determine attachment identity. Durable sidecars
+    /// reconstruct historical origins after cold resume; the execution-only
+    /// set covers current rendered origins whose payload remains staged or
+    /// otherwise transient.
+    pub(crate) fn typed_attachment_ids_for_snapshot(
+        &self,
+        messages: &[ConversationMessage],
+    ) -> std::collections::HashSet<lingxi_core::types::MessageId> {
+        let mut typed_ids = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        typed_ids.extend(
+            self.transcript
+                .request_attachment_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .copied(),
+        );
+        typed_attachment_ids_in_snapshot(&typed_ids, messages)
+    }
+
     /// Reattach all call-scoped context after rebuilding a request from raw
     /// session history (for example after a context-overflow retry).
     pub(crate) async fn reattach_outgoing_context(
@@ -1224,16 +1357,32 @@ impl ConversationOrchestrator {
             .map(ConversationMessage::id)
             .collect::<std::collections::HashSet<_>>();
         messages.retain(|message| !reminder_ids.contains(&message.id()));
-        if after_compaction {
-            messages.extend(
-                self.context_announcements_from_frozen_with_reason(
-                    context_announcements.refresh_reason,
-                )
-                .await,
-            );
+        messages.extend(turn_reminders.iter().cloned());
+        let current_context_announcements = if after_compaction {
+            let current = self
+                .context_announcements_from_frozen_with_reason(context_announcements.refresh_reason)
+                .await;
+            messages.extend(current.iter().cloned());
+            current
         } else {
             context_announcements.reattach(messages);
-        }
+            context_announcements.messages.clone()
+        };
+        crate::request_context::attach(messages);
+        let (model, profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        let model_supports_mid_conversation_system = self
+            .api
+            .supports_native_mid_conversation_system(&model, profile.as_deref());
+        self.project_typed_attachment_order(
+            messages,
+            turn_reminders,
+            &current_context_announcements,
+            model_supports_mid_conversation_system,
+        )
+        .await;
         self.prepend_leading_context(messages, context_announcements)
             .await;
         if let Some(reminder) = deferred_tools_reminder {
@@ -1242,8 +1391,6 @@ impl ConversationOrchestrator {
         if let Some(reminder) = date_change_reminder {
             self.prepend_transient_leading_context(messages, reminder.clone());
         }
-        messages.extend(turn_reminders.iter().cloned());
-        crate::request_context::attach(messages);
         self.screen_mod_persisted_attachments(messages).await;
     }
 
@@ -1390,7 +1537,7 @@ impl ConversationOrchestrator {
             // exists. Sourced from the attached skill-listing provider (same
             // source as the per-turn skill reminder); `None` provider ⇒ false.
             skills_available: match &self.prompt_runtime.skill_listing {
-                Some(provider) => !provider.skill_entries().await.is_empty(),
+                Some(provider) => !provider.skill_listing_snapshot().await.entries.is_empty(),
                 None => false,
             },
             // A scheduled mobile runtime shares a process with the foreground
@@ -1425,23 +1572,58 @@ impl ConversationOrchestrator {
     /// next prompt assembly reads it back. `Some("default")` is an explicit
     /// choice and must win over an inherited custom style — treating it as
     /// "unset" would make switching BACK to the default impossible.
-    pub(crate) async fn active_output_style_setting(&self) -> Option<String> {
-        if let Some(chosen) = self.prompt_runtime.live_output_style.lock().await.clone() {
-            return Some(chosen);
+    pub(crate) async fn active_output_style_setting(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        if let Some(refreshed) = self.prompt_runtime.live_output_style.lock().await.clone() {
+            return refreshed;
         }
         self.config.output_style.clone()
+    }
+
+    /// Current model-facing response-language setting, retained as the exact
+    /// source value used by `SettingsJson`.
+    pub(crate) async fn active_response_language(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        self.prompt_runtime
+            .live_response_language
+            .lock()
+            .await
+            .clone()
+    }
+
+    /// Refresh the effective response language after watched user, project,
+    /// local, or managed settings change.
+    pub async fn refresh_native_response_language(
+        &self,
+        language: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    ) {
+        *self.prompt_runtime.live_response_language.lock().await = language;
+    }
+
+    /// Refresh the effective output-style selection after settings change.
+    pub async fn refresh_native_output_style(
+        &self,
+        output_style: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    ) {
+        *self.prompt_runtime.live_output_style.lock().await = Some(output_style);
     }
 
     pub(super) async fn resolve_active_output_style(
         &self,
     ) -> Option<outputstyles::ResolvedOutputStyle> {
         let setting = self.active_output_style_setting().await;
+        let setting_name = setting.as_ref().and_then(|source| {
+            let units = source.string_units("")?;
+            String::from_utf16(&units).ok()
+        });
         if let Some(registry) = &self.prompt_runtime.output_style_registry {
-            if let Some(style) = registry.read().await.resolve(setting.as_deref()) {
+            if let Some(style) = registry.read().await.resolve(setting_name.as_deref()) {
                 return Some(style);
             }
         }
-        outputstyles::resolve_output_style(setting.as_deref(), &self.config.output_style_dirs)
+        outputstyles::resolve_output_style(setting_name.as_deref(), &self.config.output_style_dirs)
     }
 
     /// Assemble the full system-prompt STRING from the static prompt members
@@ -2589,6 +2771,33 @@ pub(super) fn plans_dir_passes_hardening(
         (Some(project), Some(candidate)) => project == candidate,
         (None, None) => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod typed_attachment_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_typed_identity_includes_meta_user_and_excludes_other_rows() {
+        let typed_meta = ConversationMessage::user_meta(
+            lingxi_core::types::MessageId::new(),
+            "typed attachment".into(),
+        );
+        let generic_meta = ConversationMessage::user_meta(
+            lingxi_core::types::MessageId::new(),
+            "generic meta".into(),
+        );
+        let ordinary_user =
+            ConversationMessage::user(lingxi_core::types::MessageId::new(), "ordinary user".into());
+        let typed_id = typed_meta.id();
+        let messages = vec![typed_meta, generic_meta, ordinary_user];
+        let typed_ids = std::collections::HashSet::from([typed_id]);
+
+        assert_eq!(
+            typed_attachment_ids_in_snapshot(&typed_ids, &messages),
+            typed_ids
+        );
     }
 }
 

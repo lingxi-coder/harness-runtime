@@ -163,6 +163,7 @@ pub use mcp_policy::{
 };
 pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;
+pub use model_path::{FileSystemPathTranslator, ModelPathOutcome, ModelPathTranslator};
 pub use path_constraints::{check_path_constraints, PathConstraintAsk};
 pub use persist::{
     persist_auto_mode_save, persist_permission_mode, persist_permission_rule_set,
@@ -197,7 +198,6 @@ pub use working_dirs::{
     is_network_working_directory, is_network_working_directory_against,
     network_working_directory_message, AdditionalWorkingDirs, WorkingDirectory,
 };
-pub use model_path::{FileSystemPathTranslator, ModelPathOutcome, ModelPathTranslator};
 
 mod monitor_url;
 pub use monitor_url::monitor_websocket_url_host;

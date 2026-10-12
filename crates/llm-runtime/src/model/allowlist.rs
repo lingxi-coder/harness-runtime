@@ -55,6 +55,7 @@
 //! three documented entry kinds (family alias, version prefix, full id) plus
 //! `modelOverrides`.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::BTreeMap;
 
 /// Family-alias tokens (binary `vxr`): a bare family name matches any version.
@@ -65,43 +66,174 @@ const FAMILY_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 /// by the family/alias branches, not the version-prefix branch.
 const ALL_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable", "best", "opusplan"];
 
-/// Normalize a model id or allowlist entry for comparison — binary `Ps` composed
-/// with `trim().toLowerCase()`: lowercase, trim, then strip a trailing `[1m]`
-/// long-context suffix (binary `Ps(e)=e.replace(/\[1m\]$/i,"")`).
+/// Normalize a scalar Rust model id with Native's UTF-16 `trim().toLowerCase()`
+/// and trailing `[1m]` removal. Raw policy entries use the same transform over
+/// their exact UTF-16 units, preserving lone surrogates.
 #[must_use]
 pub fn normalize(s: &str) -> String {
-    let lowered = s.trim().to_lowercase();
-    lowered.strip_suffix("[1m]").unwrap_or(&lowered).to_string()
+    String::from_utf16_lossy(&normalize_units(&s.encode_utf16().collect::<Vec<_>>()))
+}
+
+/// ECMAScript `String.prototype.trim` whitespace, including FEFF (which Rust's
+/// `char::is_whitespace` intentionally does not classify as whitespace).
+fn is_js_trim_whitespace(value: u32) -> bool {
+    matches!(
+        value,
+        0x0009..=0x000d
+            | 0x0020
+            | 0x00a0
+            | 0x1680
+            | 0x2000..=0x200a
+            | 0x2028..=0x2029
+            | 0x202f
+            | 0x205f
+            | 0x3000
+            | 0xfeff
+    )
+}
+
+fn scalar_at(units: &[u16], index: usize) -> (u32, usize) {
+    let unit = units[index];
+    if (0xd800..=0xdbff).contains(&unit)
+        && units
+            .get(index + 1)
+            .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+    {
+        let high = u32::from(unit) - 0xd800;
+        let low = u32::from(units[index + 1]) - 0xdc00;
+        (0x10000 + (high << 10) + low, 2)
+    } else {
+        (u32::from(unit), 1)
+    }
+}
+
+fn trim_js_units(units: &[u16]) -> &[u16] {
+    let mut start = 0;
+    while start < units.len() {
+        let (scalar, width) = scalar_at(units, start);
+        if !is_js_trim_whitespace(scalar) {
+            break;
+        }
+        start += width;
+    }
+
+    let mut end = units.len();
+    while end > start {
+        let (scalar, width) = if (0xdc00..=0xdfff).contains(&units[end - 1])
+            && end >= 2
+            && (0xd800..=0xdbff).contains(&units[end - 2])
+        {
+            let high = u32::from(units[end - 2]) - 0xd800;
+            let low = u32::from(units[end - 1]) - 0xdc00;
+            (0x10000 + (high << 10) + low, 2)
+        } else {
+            (u32::from(units[end - 1]), 1)
+        };
+        if !is_js_trim_whitespace(scalar) {
+            break;
+        }
+        end -= width;
+    }
+    &units[start..end]
+}
+
+/// Lowercase each valid Unicode run as a whole so contextual Unicode mappings
+/// such as Greek final sigma match JavaScript. An unpaired surrogate is copied
+/// as its original unit and separates scalar runs.
+fn lowercase_utf16(units: &[u16]) -> Vec<u16> {
+    let mut result = Vec::with_capacity(units.len());
+    let mut run = String::new();
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let (scalar, width) = scalar_at(units, index);
+            run.push(char::from_u32(scalar).expect("valid UTF-16 surrogate pair"));
+            index += width;
+            continue;
+        }
+        if (0xd800..=0xdfff).contains(&unit) {
+            result.extend(run.to_lowercase().encode_utf16());
+            run.clear();
+            result.push(unit);
+            index += 1;
+            continue;
+        }
+        run.push(char::from_u32(u32::from(unit)).expect("non-surrogate BMP code unit"));
+        index += 1;
+    }
+    result.extend(run.to_lowercase().encode_utf16());
+    result
+}
+
+fn normalize_units(units: &[u16]) -> Vec<u16> {
+    let mut normalized = lowercase_utf16(trim_js_units(units));
+    const ONE_M_SUFFIX: &[u16] = &[b'[' as u16, b'1' as u16, b'm' as u16, b']' as u16];
+    if normalized.ends_with(ONE_M_SUFFIX) {
+        normalized.truncate(normalized.len() - ONE_M_SUFFIX.len());
+    }
+    normalized
+}
+
+fn normalized_allowlist(allowlist: &Utf16JsonProjection) -> Option<Vec<Vec<u16>>> {
+    let length = allowlist.array_len("")?;
+    Some(
+        (0..length)
+            .filter_map(|index| allowlist.string_units(&format!("/{index}")))
+            .map(|entry| normalize_units(&entry))
+            .collect(),
+    )
 }
 
 /// Whether a normalized token is a bare family alias (binary `XB`→`vxr`).
 #[must_use]
-fn is_family_alias(s: &str) -> bool {
-    FAMILY_ALIASES.contains(&s)
+fn is_family_alias(s: &[u16]) -> bool {
+    FAMILY_ALIASES
+        .iter()
+        .any(|alias| s == alias.encode_utf16().collect::<Vec<_>>())
 }
 
 /// Whether a normalized token is any model alias (binary `Fx`→`wpe`, post-`Ps`).
-#[must_use]
-fn is_alias(s: &str) -> bool {
-    ALL_ALIASES.contains(&s)
+fn is_alias(s: &[u16]) -> bool {
+    ALL_ALIASES
+        .iter()
+        .any(|alias| s == alias.encode_utf16().collect::<Vec<_>>())
 }
 
-/// Binary `shi(e,t)`: does token `family` appear inside `model` at word
-/// boundaries (each side is start/end or a non-`[a-z0-9]` char)? This is the
-/// family-membership test — `shi("claude-opus-4-5","opus")` is true.
-#[must_use]
-fn family_segment_match(model: &str, family: &str) -> bool {
+/// ASCII `[a-z0-9]` boundary classification in Native's family matcher.
+fn is_ascii_alphanumeric(unit: u16) -> bool {
+    (b'a' as u16..=b'z' as u16).contains(&unit) || (b'0' as u16..=b'9' as u16).contains(&unit)
+}
+
+fn contains_units(haystack: &[u16], needle: &[u16]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Binary `shi(e,t)`: family token match at start/end or non-ASCII-alphanumeric
+/// boundaries, without converting a raw UTF-16 model string.
+fn family_segment_match(model: &[u16], family: &[u16]) -> bool {
     if family.is_empty() {
         return false;
     }
-    let bytes = model.as_bytes();
     let flen = family.len();
     let mut start = 0;
-    while let Some(pos) = model[start..].find(family) {
-        let at = start + pos;
-        let left_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+    while start <= model.len().saturating_sub(flen) {
+        let Some(relative) = contains_units(&model[start..], family) else {
+            break;
+        };
+        let at = start + relative;
+        let left_ok = at == 0 || !is_ascii_alphanumeric(model[at - 1]);
         let end = at + flen;
-        let right_ok = end == model.len() || !bytes[end].is_ascii_alphanumeric();
+        let right_ok = end == model.len() || !is_ascii_alphanumeric(model[end]);
         if left_ok && right_ok {
             return true;
         }
@@ -112,41 +244,52 @@ fn family_segment_match(model: &str, family: &str) -> bool {
 
 /// Binary `V5l(e,t)`: `e` starts with `t` at a `-`/end boundary.
 #[must_use]
-fn starts_with_segment(model: &str, prefix: &str) -> bool {
+fn starts_with_segment(model: &[u16], prefix: &[u16]) -> bool {
     if !model.starts_with(prefix) {
         return false;
     }
-    model.len() == prefix.len() || model.as_bytes()[prefix.len()] == b'-'
+    model.len() == prefix.len() || model[prefix.len()] == b'-' as u16
 }
 
 /// Binary `DYm(e,t)` (env-free arm, `e` already a concrete id): match the
 /// version-prefix entry against the bare form and a `claude-`-prefixed form.
 #[must_use]
-fn version_prefix_match(model: &str, entry: &str) -> bool {
+fn version_prefix_match(model: &[u16], entry: &[u16]) -> bool {
     if starts_with_segment(model, entry) {
         return true;
     }
-    if !entry.starts_with("claude-") && starts_with_segment(model, &format!("claude-{entry}")) {
-        return true;
+    const CLAUDE_PREFIX: &[u16] = &[
+        b'c' as u16,
+        b'l' as u16,
+        b'a' as u16,
+        b'u' as u16,
+        b'd' as u16,
+        b'e' as u16,
+        b'-' as u16,
+    ];
+    if !entry.starts_with(CLAUDE_PREFIX) {
+        let mut prefixed = CLAUDE_PREFIX.to_vec();
+        prefixed.extend_from_slice(entry);
+        if starts_with_segment(model, &prefixed) {
+            return true;
+        }
     }
     false
 }
 
-/// Binary `z5l(e,t)`: is `token` a version-prefix segment of some NON-family
-/// entry in the normalized allowlist `o`? Guards the family-alias branch so a
-/// narrower version entry (e.g. `opus-4-5`) suppresses the broad family entry
-/// (`opus`).
-#[must_use]
-fn is_prefix_segment_of_any(token: &str, allowlist: &[String]) -> bool {
+fn is_prefix_segment_of_any(token: &[u16], allowlist: &[Vec<u16>]) -> bool {
     for entry in allowlist {
         if is_family_alias(entry) {
             continue;
         }
         let mut start = 0;
-        while let Some(pos) = entry[start..].find(token) {
-            let at = start + pos;
+        while start <= entry.len().saturating_sub(token.len()) {
+            let Some(relative) = contains_units(&entry[start..], token) else {
+                break;
+            };
+            let at = start + relative;
             let end = at + token.len();
-            if end == entry.len() || entry.as_bytes()[end] == b'-' {
+            if end == entry.len() || entry[end] == b'-' as u16 {
                 return true;
             }
             start = at + 1;
@@ -155,19 +298,57 @@ fn is_prefix_segment_of_any(token: &str, allowlist: &[String]) -> bool {
     false
 }
 
-/// Binary `K5l(e,t)`: reverse-map a provider-specific model id back to its
-/// Anthropic id via `modelOverrides` (key = Anthropic id, value = provider id).
-/// If `model` normalizes-equal to some override VALUE, return that entry's KEY;
-/// otherwise return `model` unchanged.
-#[must_use]
-fn apply_overrides(model: &str, overrides: &BTreeMap<String, String>) -> String {
-    let target = normalize(model);
+fn apply_overrides(model: &[u16], overrides: &BTreeMap<String, String>) -> Vec<u16> {
+    let target = normalize_units(model);
     for (anthropic_id, provider_id) in overrides {
-        if normalize(provider_id) == target {
-            return anthropic_id.clone();
+        if normalize_units(&provider_id.encode_utf16().collect::<Vec<_>>()) == target {
+            return anthropic_id.encode_utf16().collect();
         }
     }
-    model.to_string()
+    model.to_vec()
+}
+
+fn is_model_allowed_normalized(
+    model: &[u16],
+    allowlist: &[Vec<u16>],
+    overrides: Option<&BTreeMap<String, String>>,
+) -> bool {
+    if allowlist.is_empty() {
+        return false;
+    }
+    let i = normalize_units(model);
+
+    if allowlist.iter().any(|entry| entry == &i) && !is_family_alias(&i) {
+        return true;
+    }
+
+    let mapped = match overrides {
+        Some(overrides) if !overrides.is_empty() => apply_overrides(model, overrides),
+        _ => model.to_vec(),
+    };
+    let a = normalize_units(&mapped);
+
+    if allowlist.iter().any(|entry| entry == &a)
+        && (!is_family_alias(&a) || !is_prefix_segment_of_any(&a, allowlist))
+    {
+        return true;
+    }
+
+    for entry in allowlist {
+        if is_family_alias(entry)
+            && !is_prefix_segment_of_any(entry, allowlist)
+            && family_segment_match(&a, entry)
+        {
+            return true;
+        }
+    }
+
+    for entry in allowlist {
+        if !is_family_alias(entry) && !is_alias(entry) && version_prefix_match(&a, entry) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether `model` is permitted by the allowlist (env-free-resolution arm of the
@@ -176,54 +357,73 @@ fn apply_overrides(model: &str, overrides: &BTreeMap<String, String>) -> String 
 #[must_use]
 pub fn is_model_allowed(
     model: &str,
-    allowlist: Option<&[String]>,
+    allowlist: Option<&Utf16JsonProjection>,
     overrides: Option<&BTreeMap<String, String>>,
 ) -> bool {
     let entries = match allowlist {
-        None => return true,                     // `if(!n)return!0`
-        Some(a) if a.is_empty() => return false, // `if(n.length===0)return!1`
-        Some(a) => a,
+        None => return true, // `if(!n)return!0`
+        Some(allowlist) => match normalized_allowlist(allowlist) {
+            Some(entries) => entries,
+            None => return false,
+        },
     };
-    let o: Vec<String> = entries.iter().map(|l| normalize(l)).collect();
-    let i = normalize(model);
+    is_model_allowed_normalized(
+        &model.encode_utf16().collect::<Vec<_>>(),
+        &entries,
+        overrides,
+    )
+}
 
-    // (A) exact match, input not a bare family alias.
-    if o.iter().any(|e| e == &i) && !is_family_alias(&i) {
-        return true;
-    }
+/// Effective admission state for model-picker and explicit model-selection
+/// consumers. This is separate from [`ModelEnforcement`], whose `Active`
+/// variant represents only Native's managed `enforceAvailableModels` Default
+/// remapping gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CatalogRestriction {
+    /// The selected settings snapshot has no `availableModels` restriction.
+    #[default]
+    Unrestricted,
+    /// The selected settings snapshot contains `availableModels`; an empty
+    /// array denies every concrete model while callers may preserve Default as
+    /// a separate picker row.
+    Restricted(Utf16JsonProjection),
+    /// The settings source is unavailable/invalid and Native's admission gate
+    /// is fail-closed for concrete model candidates.
+    Refused,
+}
 
-    // Reverse-map through modelOverrides, then re-normalize.
-    let mapped = match overrides {
-        Some(m) if !m.is_empty() => apply_overrides(model, m),
-        _ => model.to_string(),
-    };
-    let a = normalize(&mapped);
-
-    // (B) exact match after override reverse-map.
-    if o.iter().any(|e| e == &a) && (!is_family_alias(&a) || !is_prefix_segment_of_any(&a, &o)) {
-        return true;
-    }
-
-    // (C) family-alias allowlist entries — skipped when a narrower version entry
-    // for the same family is also present.
-    for entry in &o {
-        if is_family_alias(entry)
-            && !is_prefix_segment_of_any(entry, &o)
-            && family_segment_match(&a, entry)
-        {
-            return true;
+/// Check one concrete model against a settings-source admission state.
+#[must_use]
+pub fn model_allowed_under_catalog(
+    model: &str,
+    restriction: &CatalogRestriction,
+    overrides: Option<&BTreeMap<String, String>>,
+) -> bool {
+    match restriction {
+        CatalogRestriction::Unrestricted => true,
+        CatalogRestriction::Restricted(allowlist) => {
+            is_model_allowed(model, Some(allowlist), overrides)
         }
+        CatalogRestriction::Refused => false,
     }
+}
 
-    // (F) version-prefix / full-id allowlist entries (aliases handled above /
-    // in the deferred catalog-resolution branches).
-    for entry in &o {
-        if !is_family_alias(entry) && !is_alias(entry) && version_prefix_match(&a, entry) {
-            return true;
-        }
+/// Build the picker/request admission state from the merged settings source.
+/// A failed read takes precedence over any stale list; a readable snapshot with
+/// no `availableModels` key is unrestricted, while an explicit empty array is
+/// a restriction that denies every concrete model candidate.
+#[must_use]
+pub fn catalog_restriction_from_settings(
+    settings_readable: bool,
+    available_models: Option<Utf16JsonProjection>,
+) -> CatalogRestriction {
+    if !settings_readable {
+        CatalogRestriction::Refused
+    } else if let Some(available_models) = available_models {
+        CatalogRestriction::Restricted(available_models)
+    } else {
+        CatalogRestriction::Unrestricted
     }
-
-    false
 }
 
 /// Resolve the default model under an active allowlist to the "first allowed
@@ -236,14 +436,19 @@ pub fn is_model_allowed(
 /// catalog to resolve family/prefix entries against.
 #[must_use]
 pub fn first_allowed_model(
-    allowlist: &[String],
+    allowlist: &Utf16JsonProjection,
     candidates: &[String],
     overrides: Option<&BTreeMap<String, String>>,
 ) -> Option<String> {
-    for entry in allowlist {
+    let allowlist = normalized_allowlist(allowlist)?;
+    for entry in &allowlist {
         let single = [entry.clone()];
         for cand in candidates {
-            if is_model_allowed(cand, Some(&single), overrides) {
+            if is_model_allowed_normalized(
+                &cand.encode_utf16().collect::<Vec<_>>(),
+                &single,
+                overrides,
+            ) {
                 return Some(cand.clone());
             }
         }
@@ -262,25 +467,39 @@ pub fn first_allowed_model(
 /// The tuple compares lexicographically, so `[4, 8] > [4, 6]` and a dated
 /// variant `[4, 5, 20250929]` outranks the bare `[4, 5]`.
 #[must_use]
-fn family_version_key(model: &str, family: &str) -> Option<Vec<u64>> {
-    let m = normalize(model);
+fn family_version_key(model: &str, family: &[u16]) -> Option<Vec<u64>> {
+    let m = normalize_units(&model.encode_utf16().collect::<Vec<_>>());
     if family.is_empty() {
         return None;
     }
-    let bytes = m.as_bytes();
     let flen = family.len();
     let mut start = 0;
-    while let Some(pos) = m[start..].find(family) {
-        let at = start + pos;
-        let left_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+    while start <= m.len().saturating_sub(flen) {
+        let Some(relative) = contains_units(&m[start..], family) else {
+            break;
+        };
+        let at = start + relative;
+        let left_ok = at == 0 || !is_ascii_alphanumeric(m[at - 1]);
         let end = at + flen;
-        let right_ok = end == m.len() || !bytes[end].is_ascii_alphanumeric();
+        let right_ok = end == m.len() || !is_ascii_alphanumeric(m[end]);
         if left_ok && right_ok {
-            let nums: Vec<u64> = m[end..]
-                .split(|c: char| !c.is_ascii_digit())
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| s.parse().ok())
-                .collect();
+            let mut nums = Vec::new();
+            let mut digits = Vec::new();
+            for unit in &m[end..] {
+                if (b'0' as u16..=b'9' as u16).contains(unit) {
+                    digits.push(*unit as u8);
+                } else if !digits.is_empty() {
+                    if let Ok(number) = std::str::from_utf8(&digits).ok()?.parse::<u64>() {
+                        nums.push(number);
+                    }
+                    digits.clear();
+                }
+            }
+            if !digits.is_empty() {
+                if let Ok(number) = std::str::from_utf8(&digits).ok()?.parse::<u64>() {
+                    nums.push(number);
+                }
+            }
             return Some(nums);
         }
         start = at + 1;
@@ -306,19 +525,29 @@ fn family_version_key(model: &str, family: &str) -> Option<Vec<u64>> {
 pub fn newest_permitted_in_family(
     family: &str,
     candidates: &[String],
-    allowlist: Option<&[String]>,
+    allowlist: Option<&Utf16JsonProjection>,
     overrides: Option<&BTreeMap<String, String>>,
 ) -> Option<String> {
-    let fam = normalize(family);
+    let fam = normalize_units(&family.encode_utf16().collect::<Vec<_>>());
     if !is_family_alias(&fam) {
         return None;
     }
+    let allowlist = match allowlist {
+        None => None,
+        Some(projection) => Some(normalized_allowlist(projection)?),
+    };
     let mut best: Option<(Vec<u64>, &String)> = None;
     for cand in candidates {
         let Some(key) = family_version_key(cand, &fam) else {
             continue;
         };
-        if !is_model_allowed(cand, allowlist, overrides) {
+        if !allowlist.as_deref().is_none_or(|entries| {
+            is_model_allowed_normalized(
+                &cand.encode_utf16().collect::<Vec<_>>(),
+                entries,
+                overrides,
+            )
+        }) {
             continue;
         }
         match &best {
@@ -376,7 +605,7 @@ pub mod warnings {
 #[derive(Debug, Clone, Default)]
 pub struct PolicyModelView {
     /// Policy-tier `availableModels` (`None` ⇒ key absent in the policy view).
-    pub available_models: Option<Vec<String>>,
+    pub available_models: Option<Utf16JsonProjection>,
     /// Policy-tier `enforceAvailableModels`.
     pub enforce: Option<bool>,
     /// Policy-tier `modelOverrides`.
@@ -403,7 +632,7 @@ pub enum ModelEnforcement {
     /// Enforcement is active with a policy-owned allowlist.
     Active {
         /// The policy-owned allowlist.
-        allowlist: Vec<String>,
+        allowlist: Utf16JsonProjection,
         /// The policy-owned `modelOverrides` (empty when unset).
         overrides: BTreeMap<String, String>,
     },
@@ -435,10 +664,15 @@ pub fn resolve_enforcement(source: &PolicySource, warn: &mut dyn FnMut(&str)) ->
     }
 
     match &view.available_models {
-        Some(list) if view.enforce == Some(true) && !list.is_empty() => ModelEnforcement::Active {
-            allowlist: list.clone(),
-            overrides: view.model_overrides.clone().unwrap_or_default(),
-        },
+        Some(list)
+            if view.enforce == Some(true)
+                && list.array_len("").is_some_and(|length| length > 0) =>
+        {
+            ModelEnforcement::Active {
+                allowlist: list.clone(),
+                overrides: view.model_overrides.clone().unwrap_or_default(),
+            }
+        }
         // enforce not true, or allowlist absent/empty ⇒ no restriction.
         _ => ModelEnforcement::Inactive,
     }
@@ -462,9 +696,12 @@ pub fn model_allowed_under(enforcement: &ModelEnforcement, model: &str) -> Optio
 mod tests {
     use super::*;
 
+    fn model_list(items: &[&str]) -> Utf16JsonProjection {
+        Utf16JsonProjection::array(items.iter().map(|item| (*item).into()).collect()).unwrap()
+    }
+
     fn sl(model: &str, allow: &[&str]) -> bool {
-        let a: Vec<String> = allow.iter().map(|s| (*s).to_string()).collect();
-        is_model_allowed(model, Some(&a), None)
+        is_model_allowed(model, Some(&model_list(allow)), None)
     }
 
     #[test]
@@ -533,6 +770,53 @@ mod tests {
     fn case_and_whitespace_normalized() {
         assert!(sl("  Claude-OPUS-4-5-20990101  ", &["  OPUS  "]));
         assert!(sl("CLAUDE-OPUS-4-5", &["Claude-Opus-4-5"]));
+        assert!(sl("\u{feff}CLAUDE-OPUS-4-5\u{feff}", &["opus"]));
+        assert!(sl("\u{00a0}CLAUDE-OPUS-4-5\u{00a0}", &["opus"]));
+        assert_eq!(normalize("ΟΣ"), "ος");
+    }
+
+    #[test]
+    fn raw_utf16_surrogate_pattern_is_preserved_and_does_not_hide_siblings() {
+        let allowlist = Utf16JsonProjection::parse(r#"["\ud800"," OPUS "]"#).unwrap();
+        assert_eq!(allowlist.string_units("/0"), Some(vec![0xd800]));
+        assert_eq!(normalized_allowlist(&allowlist).unwrap()[0], vec![0xd800]);
+        assert!(is_model_allowed("claude-opus-4-8", Some(&allowlist), None));
+
+        let only_unpaired = Utf16JsonProjection::parse(r#"["\ud800"]"#).unwrap();
+        assert!(!is_model_allowed(
+            "claude-opus-4-8",
+            Some(&only_unpaired),
+            None
+        ));
+    }
+
+    #[test]
+    fn non_string_projection_entries_do_not_discard_valid_patterns() {
+        let allowlist = Utf16JsonProjection::parse(r#"[17,"sonnet",null]"#).unwrap();
+        assert!(is_model_allowed(
+            "claude-sonnet-4-8",
+            Some(&allowlist),
+            None
+        ));
+        assert!(!is_model_allowed("claude-opus-4-8", Some(&allowlist), None));
+    }
+
+    #[test]
+    fn catalog_restriction_preserves_absent_empty_and_failed_source_states() {
+        let model = "claude-opus-4-8";
+        let unrestricted = catalog_restriction_from_settings(true, None);
+        assert_eq!(unrestricted, CatalogRestriction::Unrestricted);
+        assert!(model_allowed_under_catalog(model, &unrestricted, None));
+
+        let empty = catalog_restriction_from_settings(true, Some(model_list(&[])));
+        assert_eq!(empty, CatalogRestriction::Restricted(model_list(&[])));
+        assert!(!model_allowed_under_catalog(model, &empty, None));
+
+        // A stale list cannot turn a failed settings read into an admitted
+        // candidate; Native's VQ() check is evaluated before the fallback list.
+        let refused = catalog_restriction_from_settings(false, Some(model_list(&["opus"])));
+        assert_eq!(refused, CatalogRestriction::Refused);
+        assert!(!model_allowed_under_catalog(model, &refused, None));
     }
 
     #[test]
@@ -552,7 +836,7 @@ mod tests {
             "claude-opus-4-5".to_string(),
             "arn:aws:bedrock:us-east-1::inference-profile/opus".to_string(),
         );
-        let allow = vec!["claude-opus-4-5".to_string()];
+        let allow = model_list(&["claude-opus-4-5"]);
         assert!(is_model_allowed(
             "arn:aws:bedrock:us-east-1::inference-profile/opus",
             Some(&allow),
@@ -568,7 +852,7 @@ mod tests {
 
     #[test]
     fn first_allowed_model_picks_first_entry_in_order() {
-        let allow = vec!["haiku".to_string(), "opus".to_string()];
+        let allow = model_list(&["haiku", "opus"]);
         let catalog = vec![
             "claude-opus-4-5-20990101".to_string(),
             "claude-haiku-4-5-20990101".to_string(),
@@ -583,7 +867,7 @@ mod tests {
 
     #[test]
     fn first_allowed_model_none_when_nothing_matches() {
-        let allow = vec!["opus".to_string()];
+        let allow = model_list(&["opus"]);
         let catalog = vec!["gpt-5.5".to_string(), "gemini-2.0".to_string()];
         assert_eq!(first_allowed_model(&allow, &catalog, None), None);
     }
@@ -603,7 +887,7 @@ mod tests {
             "claude-sonnet-4-5-20250929",
         ]);
         // The whole opus family is allowed → the newest opus (4-8) wins.
-        let allow = cat(&["opus"]);
+        let allow = model_list(&["opus"]);
         assert_eq!(
             newest_permitted_in_family("opus", &catalog, Some(&allow), None).as_deref(),
             Some("claude-opus-4-8")
@@ -618,7 +902,7 @@ mod tests {
             "claude-opus-4-8",
         ]);
         // Only 4-6 is permitted → newest permitted opus is 4-6 (NOT the newer 4-8).
-        let allow = cat(&["opus-4-6"]);
+        let allow = model_list(&["opus-4-6"]);
         assert_eq!(
             newest_permitted_in_family("opus", &catalog, Some(&allow), None).as_deref(),
             Some("claude-opus-4-6")
@@ -629,7 +913,7 @@ mod tests {
     fn newest_permitted_none_when_family_absent_from_allowlist() {
         let catalog = cat(&["claude-opus-4-8", "claude-sonnet-4-5-20250929"]);
         // Allowlist permits only sonnet → no permitted opus.
-        let allow = cat(&["sonnet"]);
+        let allow = model_list(&["sonnet"]);
         assert_eq!(
             newest_permitted_in_family("opus", &catalog, Some(&allow), None),
             None
@@ -639,7 +923,7 @@ mod tests {
     #[test]
     fn newest_permitted_rejects_non_family_alias_input() {
         let catalog = cat(&["claude-opus-4-8"]);
-        let allow = cat(&["opus"]);
+        let allow = model_list(&["opus"]);
         // "opusplan" / "best" / a full id are not bare family aliases → None.
         assert_eq!(
             newest_permitted_in_family("opusplan", &catalog, Some(&allow), None),
@@ -655,7 +939,7 @@ mod tests {
     fn newest_permitted_dated_variant_outranks_bare() {
         // A dated build sorts newer than the bare version of the same tuple prefix.
         let catalog = cat(&["claude-sonnet-4-5", "claude-sonnet-4-5-20250929"]);
-        let allow = cat(&["sonnet"]);
+        let allow = model_list(&["sonnet"]);
         assert_eq!(
             newest_permitted_in_family("sonnet", &catalog, Some(&allow), None).as_deref(),
             Some("claude-sonnet-4-5-20250929")
@@ -666,7 +950,7 @@ mod tests {
     fn newest_permitted_reverse_maps_overrides() {
         // The catalog carries a Bedrock ARN; the allowlist permits the Anthropic id.
         let catalog = cat(&["arn:aws:bedrock:us-east-1::inference-profile/opus-4-8"]);
-        let allow = cat(&["claude-opus-4-8"]);
+        let allow = model_list(&["claude-opus-4-8"]);
         let mut ov = BTreeMap::new();
         ov.insert(
             "claude-opus-4-8".to_string(),
@@ -704,14 +988,14 @@ mod tests {
     #[test]
     fn enforce_active_with_policy_allowlist() {
         let (state, msgs) = resolve(PolicyModelView {
-            available_models: Some(vec!["opus".to_string()]),
+            available_models: Some(model_list(&["opus"])),
             enforce: Some(true),
             model_overrides: None,
         });
         assert_eq!(
             state,
             ModelEnforcement::Active {
-                allowlist: vec!["opus".to_string()],
+                allowlist: model_list(&["opus"]),
                 overrides: BTreeMap::new(),
             }
         );
@@ -719,10 +1003,25 @@ mod tests {
     }
 
     #[test]
+    fn enforced_policy_retains_lone_surrogate_allowlist_entries() {
+        let allowlist = Utf16JsonProjection::parse(r#"["\ud800","opus"]"#).unwrap();
+        let (state, _) = resolve(PolicyModelView {
+            available_models: Some(allowlist),
+            enforce: Some(true),
+            model_overrides: None,
+        });
+        let ModelEnforcement::Active { allowlist, .. } = state else {
+            panic!("a scalar-unrepresentable string entry must not refuse the policy layer")
+        };
+        assert_eq!(allowlist.string_units("/0"), Some(vec![0xd800]));
+        assert!(is_model_allowed("claude-opus-4-8", Some(&allowlist), None));
+    }
+
+    #[test]
     fn enforce_inactive_when_flag_absent() {
         // Allowlist present but enforce not true ⇒ inactive (no restriction).
         let (state, _) = resolve(PolicyModelView {
-            available_models: Some(vec!["opus".to_string()]),
+            available_models: Some(model_list(&["opus"])),
             enforce: None,
             model_overrides: None,
         });
@@ -733,7 +1032,7 @@ mod tests {
     fn enforce_inactive_when_allowlist_empty() {
         // "Has no effect when availableModels is unset or an empty array."
         let (state, _) = resolve(PolicyModelView {
-            available_models: Some(vec![]),
+            available_models: Some(model_list(&[])),
             enforce: Some(true),
             model_overrides: None,
         });
@@ -751,7 +1050,7 @@ mod tests {
     #[test]
     fn model_allowed_under_gate() {
         let active = ModelEnforcement::Active {
-            allowlist: vec!["opus".to_string()],
+            allowlist: model_list(&["opus"]),
             overrides: BTreeMap::new(),
         };
         assert_eq!(

@@ -163,6 +163,9 @@ pub struct PoolSubagentSpawner {
     /// general-purpose child no longer inherits `Agent`; it narrows
     /// further once the spawn path loads real per-agent definitions.
     tool_registry: Arc<RuntimeLink<Arc<ToolRegistry>>>,
+    /// Shared main-session source for current output-style and language rows.
+    native_settings_prompt_provider:
+        Arc<RuntimeLink<Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>>>,
     task_registry: std::sync::OnceLock<
         std::sync::Weak<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     >,
@@ -491,6 +494,7 @@ impl PoolSubagentSpawner {
             structured_output_validator: None,
             instruction_provider: None,
             tool_registry: Arc::new(RuntimeLink::new()),
+            native_settings_prompt_provider: Arc::new(RuntimeLink::new()),
             refusal_fallback_chain: Vec::new(),
             task_registry: std::sync::OnceLock::new(),
             new_diagnostics_source_factory: None,
@@ -1002,13 +1006,35 @@ impl PoolSubagentSpawner {
         self.tool_registry.clone()
     }
 
-    /// Release the four composition-root runtime links after the host has
+    /// Return a set-once provider cell for the host's live Native settings
+    /// producer. The composition root fills it after constructing the main
+    /// orchestrator.
+    #[must_use]
+    pub fn native_settings_prompt_provider_handle(
+        &self,
+    ) -> Arc<RuntimeLink<Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>>> {
+        self.native_settings_prompt_provider.clone()
+    }
+
+    /// Attach the settings producer directly when it is available before the
+    /// spawner is constructed (tests and minimal hosts).
+    #[must_use]
+    pub fn with_native_settings_prompt_provider(
+        self,
+        provider: Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>,
+    ) -> Self {
+        let _ = self.native_settings_prompt_provider.set(provider);
+        self
+    }
+
+    /// Release the five composition-root runtime links after the host has
     /// drained producers and child runners. The links remain permanently
     /// initialized, so a late completion cannot repopulate a released value.
     /// Repeated calls are safe and intentionally do nothing after the first
     /// clear.
     pub fn release_runtime_links(&self) {
         self.tool_registry.clear();
+        self.native_settings_prompt_provider.clear();
         self.hook_executor.clear();
         self.skill_loader.clear();
         self.mcp_tool_builder.clear();

@@ -142,10 +142,11 @@ async fn cold_valid_session_context_freezes_missing_git_but_invalid_latest_uses_
             .await
             .history
             .push(ConversationMessage::user(MessageId::new(), "hello".into()));
-        let prepared = orch
+        let mut prepared = orch
             .prepare_turn_step(ModelCallPath::Batched, None, true, true, None)
             .await
             .unwrap();
+        orch.persist_prepared_turn_attachments(&mut prepared).await;
         let new_rows = orch.context_attachment_history(&prepared.context_announcements.messages);
         if expects_git {
             assert_eq!(
@@ -244,24 +245,19 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
         let orch = orchestrator(fixture_files(case), dir.path());
         let user = ConversationMessage::user(MessageId::new(), "hello".into());
         orch.session.lock().await.history.push(user.clone());
-        let prepared = orch
+        let mut prepared = orch
             .prepare_turn_step(path, None, true, true, None)
             .await
             .unwrap();
+        orch.persist_prepared_turn_attachments(&mut prepared).await;
         let messages = &prepared.context_announcements.messages;
         assert_eq!(messages.len(), 3);
-        assert_eq!(prepared.snapshot[0], user);
+        assert_eq!(prepared.turn_reminders.len(), 1);
+        assert_eq!(prepared.snapshot[0], prepared.turn_reminders[0]);
         assert_eq!(&prepared.snapshot[1..4], messages);
+        assert_eq!(prepared.snapshot[4], user);
         assert!(prepared.date_change_reminder.is_none());
         let today = crate::prompt::env_meta::current_date_string();
-        let mut rows = vec![orch.to_jsonl_message(
-            &user,
-            &uuid::Uuid::nil().to_string(),
-            None,
-            None,
-            None,
-            None,
-        )];
         for (message, expected) in messages.iter().zip(case["expected"].as_array().unwrap()) {
             let row = orch.to_jsonl_message(
                 message,
@@ -306,7 +302,6 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
                     .replace("2026-09-30", &today);
                 assert_eq!(body(message).as_deref(), Some(expected_body.as_str()));
             }
-            rows.push(row);
         }
         // Retry uses original bytes/IDs even after the host's eager snapshot
         // changes; no second producer invocation is needed.
@@ -323,10 +318,16 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
             false,
         )
         .await;
+        assert_eq!(retry[0], prepared.turn_reminders[0]);
+        assert_eq!(
+            &retry[1..4],
+            prepared.context_announcements.messages.as_slice(),
+            "retry preserves context-before-user ordering"
+        );
+        assert_eq!(retry[4], user);
         assert_eq!(retry, prepared.snapshot);
         // The ordinary producer also persisted the stock total-token suffix.
         // Replay the whole durable step, including that attachment.
-        assert_eq!(prepared.turn_reminders.len(), 1);
         let total_tokens = &prepared.turn_reminders[0];
         let total_row = orch.to_jsonl_message(
             total_tokens,
@@ -344,7 +345,32 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
                 .string_at("/type"),
             Some("total_tokens_reminder")
         );
-        rows.push(total_row);
+        let durable_history = orch.session.lock().await.history.clone();
+        let durable_order = orch
+            .context_attachment_history(&durable_history)
+            .iter()
+            .filter_map(|attachment| attachment.string_at("/type").map(str::to_owned))
+            .collect::<Vec<_>>();
+        let mut expected_durable_order = vec!["total_tokens_reminder".to_owned()];
+        expected_durable_order.extend(
+            orch.context_attachment_history(messages)
+                .iter()
+                .filter_map(|attachment| attachment.string_at("/type").map(str::to_owned)),
+        );
+        assert_eq!(durable_order, expected_durable_order);
+        let rows = durable_history
+            .iter()
+            .map(|message| {
+                orch.to_jsonl_message(
+                    message,
+                    &uuid::Uuid::nil().to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
         let cold = orchestrator(fixture_files(case), dir.path());
         let decoded: Vec<session::JsonlMessage> =
             serde_json::from_str(&serde_json::to_string(&rows).unwrap()).unwrap();
@@ -362,7 +388,7 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
         let captured = cold.instruction_context_snapshot().await;
         assert_eq!(captured.announcement_history.len(), 4);
         assert_eq!(
-            captured.announcement_history[3].string_at("/type"),
+            captured.announcement_history[0].string_at("/type"),
             Some("total_tokens_reminder")
         );
     }
@@ -409,10 +435,11 @@ async fn ptl_history_replacement_reannounces_frozen_files_without_resurrecting_o
         .await
         .history
         .push(ConversationMessage::user(MessageId::new(), "hello".into()));
-    let prepared = orch
+    let mut prepared = orch
         .prepare_turn_step(ModelCallPath::Batched, None, true, true, None)
         .await
         .unwrap();
+    orch.persist_prepared_turn_attachments(&mut prepared).await;
     let old_ids = prepared
         .context_announcements
         .messages
@@ -510,17 +537,19 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
         );
         let original = ConversationMessage::user(MessageId::new(), "hello".into());
         orch.session.lock().await.history.push(original.clone());
-        let prepared = orch
+        let mut prepared = orch
             .prepare_turn_step(ModelCallPath::Batched, None, true, true, None)
             .await
             .unwrap();
+        orch.persist_prepared_turn_attachments(&mut prepared).await;
         if expected_inline {
             assert!(prepared.context_announcements.messages.is_empty());
             assert!(body(&prepared.snapshot[0])
                 .unwrap()
                 .contains("# currentDate\n"));
-            assert_eq!(prepared.snapshot[1], original);
             assert_eq!(prepared.turn_reminders.len(), 1);
+            assert_eq!(prepared.snapshot[1], prepared.turn_reminders[0]);
+            assert_eq!(prepared.snapshot[2], original);
             assert_eq!(
                 orch.context_attachment_history(&prepared.turn_reminders)[0].string_at("/type"),
                 Some("total_tokens_reminder")
@@ -532,8 +561,40 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
             );
             assert_ne!(prepared.snapshot[0].id(), original.id());
         } else {
-            assert_eq!(prepared.snapshot[0], original);
+            assert_eq!(prepared.turn_reminders.len(), 1);
             assert_eq!(prepared.context_announcements.messages.len(), 2);
+            assert_eq!(
+                orch.context_attachment_history(&prepared.turn_reminders)[0].string_at("/type"),
+                Some("total_tokens_reminder")
+            );
+            let context_payloads =
+                orch.context_attachment_history(&prepared.context_announcements.messages);
+            assert_eq!(
+                context_payloads
+                    .iter()
+                    .filter_map(|payload| payload.string_at("/type"))
+                    .collect::<Vec<_>>(),
+                vec!["session_context", "date"],
+                "the empty context baseline is followed by the current date"
+            );
+            assert_eq!(prepared.snapshot.len(), 4);
+            assert_eq!(prepared.snapshot[0], prepared.turn_reminders[0]);
+            assert_eq!(
+                &prepared.snapshot[1..3],
+                prepared.context_announcements.messages.as_slice(),
+                "Native full-history projection puts turn reminders and context rows before the user"
+            );
+            assert_eq!(prepared.snapshot[3], original);
+            let durable = orch.session.lock().await.history.clone();
+            assert_eq!(durable[0], original);
+            assert_eq!(
+                orch.context_attachment_history(&durable)
+                    .iter()
+                    .filter_map(|payload| payload.string_at("/type"))
+                    .collect::<Vec<_>>(),
+                vec!["total_tokens_reminder", "session_context", "date"],
+                "durable rows keep the user first and append typed reminders in source order"
+            );
         }
         if name == "invalid-latest-does-not-fall-back-to-older-inline" {
             assert_eq!(

@@ -44,7 +44,8 @@ struct BlockingSideQuery {
 
 #[async_trait]
 impl SideQueryClient for BlockingSideQuery {
-    async fn query(&self, _request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+    async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        assert!(request.typed_attachment_ids.is_empty());
         self.started.notify_waiters();
         self.release.notified().await;
         Ok(SideQueryResponse {
@@ -79,6 +80,8 @@ fn cache_safe_params() -> sidequery::CacheSafeParams {
             append_system_prompt: None,
         },
         fork_context_messages: Vec::new(),
+        typed_attachment_ids: std::collections::HashSet::new(),
+        task_deliveries: std::collections::HashMap::new(),
         transcript_path: None,
         generation: 0,
     }

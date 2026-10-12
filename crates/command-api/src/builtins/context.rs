@@ -78,6 +78,27 @@ fn render_context(model: &str, usage: &lingxi_core::host::ContextUsageSnapshot) 
             ));
         }
     }
+    if let Some(skill_listing) = usage.skill_listing.as_ref() {
+        if !skill_listing.rows.is_empty() {
+            out.push_str("\n### Skills\n\n| Name | Source | Plugin | Tokens |\n");
+            out.push_str("|---|---|---|---:|\n");
+            for row in &skill_listing.rows {
+                out.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    row.name.string_at("").unwrap_or_default(),
+                    row.source
+                        .as_ref()
+                        .and_then(|source| source.string_at(""))
+                        .unwrap_or("—"),
+                    row.plugin_name
+                        .as_ref()
+                        .and_then(|name| name.string_at(""))
+                        .unwrap_or("—"),
+                    format_tokens(row.tokens),
+                ));
+            }
+        }
+    }
     if let Some(warning) = usage.overflow_warning(
         std::env::var_os("DISABLE_COMPACT").is_some_and(|value| !value.is_empty()),
     ) {
@@ -207,6 +228,32 @@ mod tests {
         assert!(s.contains("| System prompt | 25k | 3% |"));
         assert!(s.contains("| Autocompact buffer | 13k | 1% |"));
         assert!(s.contains("| Free space | 887k | 89% |"));
+    }
+
+    #[test]
+    fn renders_native_skill_frontmatter_diagnostics() {
+        use lingxi_core::host::{ContextSkillListingRow, ContextSkillListingSnapshot};
+
+        let snapshot = lingxi_core::host::ContextUsageSnapshot {
+            skill_listing: Some(ContextSkillListingSnapshot {
+                rows: vec![ContextSkillListingRow {
+                    canonical_name: "plugin:deploy".into(),
+                    name: "Deploy".into(),
+                    display_name: "plugin:deploy (Deploy)".into(),
+                    source: Some("plugin".into()),
+                    plugin_name: Some("release-tools".into()),
+                    rendered_line: "- plugin:deploy: deploy release targets".into(),
+                    tokens: 42,
+                }],
+                total_tokens: 42,
+                budget_truncated: true,
+            }),
+            ..Default::default()
+        };
+
+        let rendered = render_context("claude-opus-5", &snapshot);
+        assert!(rendered.contains("### Skills"));
+        assert!(rendered.contains("| Deploy | plugin | release-tools | 42 |"));
     }
 
     #[test]

@@ -312,6 +312,8 @@ pub fn normalize_messages_for_api_with_tool_search(
 ) -> Vec<ConversationMessage> {
     normalize_messages_for_api_with_tool_search_and_sources(
         ConversationMessagesWithSources::new(messages),
+        &HashSet::new(),
+        &std::collections::HashMap::new(),
         tool_search_enabled,
         available_tool_names,
     )
@@ -320,6 +322,11 @@ pub fn normalize_messages_for_api_with_tool_search(
 
 pub(crate) fn normalize_messages_for_api_with_tool_search_and_sources(
     messages: ConversationMessagesWithSources,
+    typed_attachment_ids: &HashSet<lingxi_core::types::MessageId>,
+    task_deliveries: &std::collections::HashMap<
+        lingxi_core::types::MessageId,
+        lingxi_core::host::task_delivery::TaskDeliveryRequest,
+    >,
     tool_search_enabled: bool,
     available_tool_names: Option<&std::collections::HashSet<String>>,
 ) -> ConversationMessagesWithSources {
@@ -342,12 +349,37 @@ pub(crate) fn normalize_messages_for_api_with_tool_search_and_sources(
         messages: Vec::with_capacity(messages.messages.len() - start),
         block_sources: Vec::with_capacity(messages.messages.len() - start),
     };
+    // Native Mo consumes a delivery UUID at most once within this request.
+    // The durable source map remains untouched and is reconsidered next time.
+    let mut consumed_deliveries = HashSet::new();
     for (mut msg, mut block_sources) in messages
         .messages
         .into_iter()
         .zip(messages.block_sources)
         .skip(start)
     {
+        let carrier_id = msg.id();
+        if consumed_deliveries.contains(&carrier_id) {
+            continue;
+        }
+        if let Some(plan) = task_deliveries.get(&carrier_id).and_then(|delivery| {
+            crate::task_delivery::plan_task_delivery(&out, carrier_id, delivery)
+                .ok()
+                .flatten()
+        }) {
+            // This converter materializes attachment/API-system rows
+            // as it iterates, so the prefix has no deferred tail to
+            // flush. Apply at this exact position after those rows.
+            let tail_flushed = plan.requires_tail_flush();
+            if plan.apply(&mut out, tail_flushed).is_ok() {
+                consumed_deliveries.insert(carrier_id);
+                continue;
+            }
+        }
+        let is_typed_attachment = match &msg {
+            ConversationMessage::User { id, .. } => typed_attachment_ids.contains(id),
+            _ => false,
+        };
         if let ConversationMessage::User {
             id,
             api_message_override: Some(message),
@@ -426,7 +458,16 @@ pub(crate) fn normalize_messages_for_api_with_tool_search_and_sources(
                 },
                 new_sources,
             ) => {
-                join_text_at_seam(prev_content, prev_sources, new_content, new_sources);
+                if is_typed_attachment {
+                    join_typed_attachment_content(
+                        prev_content,
+                        prev_sources,
+                        new_content,
+                        new_sources,
+                    );
+                } else {
+                    join_text_at_seam(prev_content, prev_sources, new_content, new_sources);
+                }
                 hoist_tool_results(prev_content, prev_sources);
             }
             (
@@ -606,21 +647,254 @@ fn is_tool_reference(value: JsonValueView<'_>) -> bool {
 /// Append `b` onto `a`, first joining a text|text seam with a `'\n'`.
 ///
 /// Faithful port of claude-code `joinTextAtSeam` (`utils/messages.ts:2505`):
-/// when `a`'s last block and `b`'s first block are both `Text`, the `'\n'` is
-/// appended to `a`'s last text so no block's leading bytes change.
+/// when `a`'s last block and `b`'s first block are both JavaScript text, the
+/// `'\n'` is appended to `a`'s last text so no block's leading code units
+/// change. `TextJsUtf16` is the source-preserving representation of that same
+/// JavaScript string and follows the identical seam rule.
 fn join_text_at_seam(
     a: &mut Vec<ProtoBlock>,
     a_sources: &mut Vec<HashSet<lingxi_core::types::MessageId>>,
     mut b: Vec<ProtoBlock>,
     mut b_sources: Vec<HashSet<lingxi_core::types::MessageId>>,
 ) {
-    if let (Some(ProtoBlock::Text { text: last, .. }), Some(ProtoBlock::Text { .. })) =
-        (a.last_mut(), b.first())
-    {
-        last.push('\n');
+    if b.first().is_some_and(is_text_block) {
+        if let Some(last) = a.last_mut().filter(|block| is_text_block(block)) {
+            append_newline_to_text_block(last);
+        }
     }
     a.append(&mut b);
     a_sources.append(&mut b_sources);
+}
+
+fn is_text_block(block: &ProtoBlock) -> bool {
+    matches!(
+        block,
+        ProtoBlock::Text { .. } | ProtoBlock::TextJsUtf16 { .. }
+    )
+}
+
+fn append_newline_to_text_block(block: &mut ProtoBlock) {
+    match block {
+        ProtoBlock::Text { text, .. } => text.push('\n'),
+        ProtoBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => {
+            text.push('\n');
+            utf16_code_units.push(b'\n' as u16);
+        }
+        _ => unreachable!("only JavaScript text blocks receive a seam newline"),
+    }
+}
+
+/// Append a Host row identified as a typed transcript attachment. Native's
+/// `lPn`/`tMn` attachment path concatenates ordinary content blocks without
+/// `zO`'s user-message newline seam. When the prior row ends in a tool result,
+/// `tMn` folds text into the result using its special string/array rules.
+fn join_typed_attachment_content(
+    previous: &mut Vec<ProtoBlock>,
+    previous_sources: &mut Vec<HashSet<lingxi_core::types::MessageId>>,
+    mut incoming: Vec<ProtoBlock>,
+    mut incoming_sources: Vec<HashSet<lingxi_core::types::MessageId>>,
+) {
+    let incoming_ids = incoming_sources
+        .iter()
+        .flat_map(|sources| sources.iter().copied())
+        .collect::<HashSet<_>>();
+    let incoming_text = incoming
+        .iter()
+        .map(text_block_projection)
+        .collect::<Option<Vec<_>>>();
+
+    let Some(ProtoBlock::ToolResult {
+        content: result_text,
+        content_blocks,
+        provider_tool_use_id,
+        ..
+    }) = previous.last_mut()
+    else {
+        previous.append(&mut incoming);
+        previous_sources.append(&mut incoming_sources);
+        return;
+    };
+
+    // Native keeps task polling and get-task result content out of the generic
+    // reminder-fold path. LingXi has the exact provider tool-use identity for
+    // these protocol-owned result families.
+    if provider_tool_use_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("gettask_") || id.starts_with("poll_"))
+        || incoming_text
+            .as_ref()
+            .is_none_or(|blocks| blocks.iter().any(is_protected_tool_result_text))
+    {
+        previous.append(&mut incoming);
+        previous_sources.append(&mut incoming_sources);
+        return;
+    }
+
+    let Some(incoming_text) = incoming_text else {
+        previous.append(&mut incoming);
+        previous_sources.append(&mut incoming_sources);
+        return;
+    };
+
+    let merged = if let Some(blocks) = content_blocks {
+        append_native_tool_result_text_blocks(blocks, &incoming_text)
+    } else {
+        append_native_tool_result_text(result_text, &incoming_text)
+    };
+    if merged {
+        if let Some(sources) = previous_sources.last_mut() {
+            sources.extend(incoming_ids);
+        }
+    } else {
+        previous.append(&mut incoming);
+        previous_sources.append(&mut incoming_sources);
+    }
+}
+
+fn text_block_projection(block: &ProtoBlock) -> Option<Utf16JsonProjection> {
+    let (units, citations) = match block {
+        ProtoBlock::Text { text, citations } => (text.encode_utf16().collect(), citations),
+        ProtoBlock::TextJsUtf16 {
+            utf16_code_units,
+            citations,
+            ..
+        } => (utf16_code_units.clone(), citations),
+        _ => return None,
+    };
+    let text = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).ok()?;
+    let mut fields = vec![
+        ("type".to_owned(), Utf16JsonProjection::from("text")),
+        ("text".to_owned(), text),
+    ];
+    if let Some(citations) = citations {
+        fields.push((
+            "citations".to_owned(),
+            citations
+                .clone()
+                .unwrap_or_else(|| Utf16JsonProjection::parse("null").expect("null is valid")),
+        ));
+    }
+    Utf16JsonProjection::object(fields).ok()
+}
+
+fn is_protected_tool_result_text(block: &Utf16JsonProjection) -> bool {
+    block
+        .string_at("/text")
+        .is_some_and(|text| text.starts_with("<system-reminder>\n"))
+}
+
+/// Native `DQe` path for tool results with string content: trim the result and
+/// each incoming text block, then join nonempty pieces with two line feeds.
+fn append_native_tool_result_text(
+    result: &mut Utf16JsonProjection,
+    incoming: &[Utf16JsonProjection],
+) -> bool {
+    let Some(mut units) = result.string_units("") else {
+        return false;
+    };
+    let mut pieces = Vec::with_capacity(incoming.len() + 1);
+    let trimmed = trim_native_text_units(&units);
+    if !trimmed.is_empty() {
+        pieces.push(trimmed.to_vec());
+    }
+    for block in incoming {
+        let Some(text) = block.string_units("/text") else {
+            return false;
+        };
+        let text = trim_native_text_units(&text);
+        if !text.is_empty() {
+            pieces.push(text.to_vec());
+        }
+    }
+    units.clear();
+    for (index, piece) in pieces.into_iter().enumerate() {
+        if index > 0 {
+            units.extend([b'\n' as u16, b'\n' as u16]);
+        }
+        units.extend(piece);
+    }
+    let Ok(updated) = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+    else {
+        return false;
+    };
+    *result = updated;
+    true
+}
+
+/// Native `tMn` array-content path: if the tool result already ends in a text
+/// block, append one LF to that block, then append incoming text blocks as
+/// distinct array items. Protected media/search results keep the attachment
+/// as a separate user block instead.
+fn append_native_tool_result_text_blocks(
+    result: &mut Utf16JsonProjection,
+    incoming: &[Utf16JsonProjection],
+) -> bool {
+    let Some(len) = result.array_len("") else {
+        return false;
+    };
+    let mut blocks = Vec::with_capacity(len + incoming.len());
+    for index in 0..len {
+        let pointer = format!("/{index}");
+        let Ok(mut block) = result.subprojection(&pointer) else {
+            return false;
+        };
+        if index + 1 == len && result.string_at(&format!("{pointer}/type")) == Some("text") {
+            let Some(mut units) = result.string_units(&format!("{pointer}/text")) else {
+                return false;
+            };
+            units.push(b'\n' as u16);
+            let Ok(text) =
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            else {
+                return false;
+            };
+            if block.set_field("text", text).is_err() {
+                return false;
+            }
+        }
+        let kind = result.string_at(&format!("{pointer}/type"));
+        if matches!(kind, Some("image" | "document" | "search_result")) {
+            return false;
+        }
+        blocks.push(block);
+    }
+    blocks.extend(incoming.iter().cloned());
+    let Ok(updated) = Utf16JsonProjection::array(blocks) else {
+        return false;
+    };
+    *result = updated;
+    true
+}
+
+fn trim_native_text_units(units: &[u16]) -> &[u16] {
+    fn is_native_whitespace(unit: u16) -> bool {
+        matches!(
+            unit,
+            0x0009..=0x000d
+                | 0x0020
+                | 0x00a0
+                | 0x1680
+                | 0x2000..=0x200a
+                | 0x2028..=0x2029
+                | 0x202f
+                | 0x205f
+                | 0x3000
+                | 0xfeff
+        )
+    }
+    let start = units
+        .iter()
+        .position(|unit| !is_native_whitespace(*unit))
+        .unwrap_or(units.len());
+    let end = units
+        .iter()
+        .rposition(|unit| !is_native_whitespace(*unit))
+        .map_or(start, |index| index + 1);
+    &units[start..end]
 }
 
 /// Native adjacent API-system rows coalesce their text with two LF while

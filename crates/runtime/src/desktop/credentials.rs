@@ -218,6 +218,10 @@ pub struct LlmStack {
     /// See [`build`] for the resolution rules behind `session_model_restriction`.
     pub session_model_restriction:
         Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+    /// Raw configured model setting that drives main-loop Plan selection.
+    pub main_model_setting: String,
+    /// Provenance of the raw setting before any connected-provider fallback.
+    pub main_model_setting_provenance: lingxi_core::host::ModelProvenance,
     /// See [`build`] for the resolution rules behind `model_setting_for_spawns`.
     pub model_setting_for_spawns: String,
     /// Resolved provider tag for the session's boot auto-mode gate.
@@ -412,25 +416,32 @@ pub(super) fn current_credential_user() -> String {
 /// session, no transcript and no hooks.
 pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildError> {
     let shared = build_shared_credential_stack_for_config(cfg).await?;
-    resolve_llm_stack_with_credentials(cfg, shared).await
+    resolve_llm_stack_with_credentials(cfg, shared, None).await
 }
 
 pub(super) async fn resolve_llm_stack_with_credentials(
     cfg: &DesktopConfig,
     shared: SharedCredentialStack,
+    proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
 ) -> Result<LlmStack, BuildError> {
     // Resolve the winning model setting from the canonical tier stack before
     // assembling provider profiles. Managed `settings.model` is the only
     // administrator-owned default; explicit CLI/env pins remain user-owned.
     let managed_settings_for_model =
-        crate::desktop::settings_watch::managed_settings_raw_tiers().await;
+        crate::desktop::settings_watch::managed_settings_snapshot_for_config(cfg).await;
+    let managed_policy_layer = managed_settings_for_model
+        .effective_json()
+        .into_iter()
+        .collect::<Vec<_>>();
     let effective_settings_for_model =
-        load_effective_settings_for_config(cfg, &managed_settings_for_model);
+        load_effective_settings_for_config(cfg, &managed_policy_layer);
     let mut model_provenance =
         model_provenance_for_config(cfg, effective_settings_for_model.as_ref());
     let configured_model =
         managed_model_setting_for_config(cfg, effective_settings_for_model.as_ref())
             .unwrap_or_else(|| cfg.default_model.clone());
+    let main_model_setting = configured_model.clone();
+    let main_model_setting_provenance = model_provenance;
     // (1) Platform-minimal façade shared byte-for-byte with CLI/TUI auth.
     let SharedCredentialStack {
         catalog_registry,
@@ -454,9 +465,12 @@ pub(super) async fn resolve_llm_stack_with_credentials(
 
     // The shared SDK transport owns provider networking. The original `http`
     // handle continues to serve MCP and hooks.
-    let llm_transport: Arc<dyn Transport> = Arc::new(
-        platform_common::provider_transport().map_err(|e| BuildError::ApiBase(e.to_string()))?,
-    );
+    let provider_transport = match proxy_auth_helper {
+        Some(helper) => platform_common::provider_transport_with_proxy_auth_helper(helper),
+        None => platform_common::provider_transport(),
+    }
+    .map_err(|e| BuildError::ApiBase(e.to_string()))?;
+    let llm_transport: Arc<dyn Transport> = Arc::new(provider_transport);
     // Defer client construction to step 3.1 where we know whether OAuth is
     // active (determines auth strategy + credential config). Placeholder: the
     // resolved OAuth `AuthState` that step (2) bridges into the credential seam
@@ -1219,9 +1233,10 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     )> = None;
     {
         use llm_runtime::model::allowlist;
-        let managed_model_tiers =
-            crate::desktop::settings_watch::managed_settings_raw_tiers().await;
-        let policy_source = managed_model_policy_source(&managed_model_tiers);
+        // Use the same managed-settings snapshot that resolved the raw model
+        // setting/provenance above. A settings-file race must not pair a raw
+        // model from one policy revision with a restriction from another.
+        let policy_source = managed_model_policy_source(&managed_settings_for_model);
         // Deduplicate the byte-exact warnings (binary module-level `SN` set).
         let mut seen: Vec<String> = Vec::new();
         let enforcement = allowlist::resolve_enforcement(&policy_source, &mut |m| {
@@ -1445,6 +1460,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         mutation_epoch: fusion_catalog_mutation_epoch.clone(),
         session_model_restriction: session_model_restriction.clone(),
         reload_managed_model_restriction: true,
+        managed_policy_snapshot_cache: cfg.managed_policy_snapshot_cache.clone(),
     });
     let fusion_catalog_refresher = FusionCatalogRefresher {
         availability: fusion_catalog_availability,
@@ -1515,6 +1531,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         default_model_fallback,
         model_provenance,
         session_model_restriction,
+        main_model_setting,
+        main_model_setting_provenance,
         model_setting_for_spawns,
         session_auto_mode_provider,
         llm_runtime,
@@ -1605,12 +1623,14 @@ pub fn api_service_from_stack(
     .with_effort_settings_source({
         let effort_cfg = cfg.clone();
         Arc::new(move || {
-            super::load_effective_settings_for_config(
-                &effort_cfg,
-                &managed_settings_raw_tiers_sync(),
-            )
-            .map(|settings| settings.effort_layers)
-            .unwrap_or_default()
+            let Ok(managed) =
+                crate::desktop::settings_watch::managed_policy_layers_sync(&effort_cfg)
+            else {
+                return Default::default();
+            };
+            super::load_effective_settings_for_config(&effort_cfg, &managed)
+                .map(|settings| settings.effort_layers)
+                .unwrap_or_default()
         })
     })
     .with_prompt_cache_ttl_settings_source({
@@ -1633,36 +1653,6 @@ pub fn api_service_from_stack(
     }
 }
 
-/// Read managed settings synchronously for the already-resolved LLM stack.
-/// Restricted sessions use this narrow mirror so user/project/local settings
-/// remain excluded while managed AWS refresh policy still applies.
-pub(super) fn managed_settings_raw_tiers_sync() -> Vec<String> {
-    let managed = crate::desktop::settings_watch::managed_settings_dir();
-    let mut out = Vec::new();
-    if let Ok(raw) = std::fs::read_to_string(managed.join("managed-settings.json")) {
-        out.push(raw);
-    }
-    let drop_in = managed.join("managed-settings.d");
-    let Ok(entries) = std::fs::read_dir(&drop_in) else {
-        return out;
-    };
-    let mut names = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_string = name.to_string_lossy();
-        if name_string.ends_with(".json") && !name_string.starts_with('.') {
-            names.push(name);
-        }
-    }
-    names.sort();
-    for name in names {
-        if let Ok(raw) = std::fs::read_to_string(drop_in.join(name)) {
-            out.push(raw);
-        }
-    }
-    out
-}
-
 /// Resolve the `awsAuthRefresh` / `awsCredentialExport` settings and build the
 /// refresher when either is configured.
 ///
@@ -1676,8 +1666,16 @@ pub(super) fn aws_auth_refresher(
     analytics_bus: Arc<telemetry::AnalyticsBus>,
 ) -> Option<Arc<llm_runtime::AwsAuthRefresher>> {
     let aws_settings = if cfg.restricted {
-        let managed = managed_settings_raw_tiers_sync();
-        load_effective_settings_for_config(cfg, &managed)
+        match crate::desktop::settings_watch::managed_policy_layers_sync(cfg) {
+            Ok(managed) => load_effective_settings_for_config(cfg, &managed),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "managed settings unavailable for restricted AWS auth"
+                );
+                None
+            }
+        }
     } else {
         let env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
         lingxi_core::settings::Settings::load(lingxi_core::settings::LoadInputs {

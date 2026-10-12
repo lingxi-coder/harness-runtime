@@ -19,6 +19,22 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use sidequery::CacheSafeParamsSlot;
 use std::sync::Arc;
 
+fn request_prefix_without_separately_cached_context(
+    saved: &sidequery::CacheSafeParams,
+    request: &[ConversationMessage],
+) -> Vec<ConversationMessage> {
+    request
+        .iter()
+        .filter(|message| {
+            saved
+                .user_context_message
+                .as_ref()
+                .is_none_or(|context| context.id() != message.id())
+        })
+        .cloned()
+        .collect()
+}
+
 /// Build an orchestrator with a single `end_turn` mock response and an OPTIONAL
 /// cache-safe slot. Returns orch + api mock + the slot handle (so the test can
 /// inspect `get_last()`).
@@ -83,22 +99,15 @@ async fn turn_populates_slot_with_exact_sent_prefix() {
         "two pre-call saves plus the success save"
     );
 
-    // `fork_context_messages` is the cache-safe fork prefix — claude-code's
-    // `cacheSafeParams.forkContextMessages = re` (`session.history`), captured
-    // BEFORE the leading `additionalContext` meta message is prepended by `A6n`
-    // at `callModel` time. The sent messages carry that leading context plus
-    // the transient total-tokens reminder after the saved fork prefix.
+    // The request-scoped cache capture follows the finalized physical request
+    // history. Inline user context is kept in its separate cache field; all
+    // other typed and rendered request rows remain in the fork prefix.
     let calls = api.captured_msgs().await;
     assert_eq!(calls.len(), 1, "exactly one batched API call");
     assert_eq!(
-        saved.fork_context_messages.len() + 2,
-        calls[0].len(),
-        "sent messages = additionalContext + saved fork prefix + total_tokens"
-    );
-    assert_eq!(
         saved.fork_context_messages,
-        calls[0][1..calls[0].len() - 1],
-        "saved fork_context_messages must exclude transient reminders"
+        request_prefix_without_separately_cached_context(&saved, &calls[0]),
+        "the cache prefix matches the sent physical history except separately cached inline context"
     );
 
     // The model id propagates into the snapshot's tool-use options.
@@ -134,8 +143,8 @@ async fn failed_first_call_keeps_the_pre_call_snapshot_without_a_success_save() 
     assert_eq!(calls.len(), 1);
     assert_eq!(
         saved.fork_context_messages,
-        calls[0][1..calls[0].len() - 1],
-        "pre-call snapshot excludes the same transient reminders as the success snapshot"
+        request_prefix_without_separately_cached_context(&saved, &calls[0]),
+        "failed calls retain the same physical request prefix as successful calls"
     );
     let captured = api.captured_tools().await;
     let wire = &captured[0];

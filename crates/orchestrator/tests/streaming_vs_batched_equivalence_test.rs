@@ -318,13 +318,28 @@ impl Tool for NamedStubTool {
 struct StaticSkills;
 #[async_trait::async_trait]
 impl orchestrator::prompt::skill_listing::SkillListingProvider for StaticSkills {
-    async fn skill_entries(&self) -> Vec<orchestrator::prompt::skill_listing::SkillListingEntry> {
-        vec![orchestrator::prompt::skill_listing::SkillListingEntry {
-            name: "debug".into(),
-            description: "Debug a failing test".into(),
-            when_to_use: None,
-            is_bundled: false,
-        }]
+    async fn skill_listing_snapshot(
+        &self,
+    ) -> orchestrator::prompt::skill_listing::SkillListingSnapshot {
+        orchestrator::prompt::skill_listing::SkillListingSnapshot {
+            entries: vec![orchestrator::prompt::skill_listing::SkillListingEntry {
+                name: "debug".into(),
+                display_name: "debug".into(),
+                user_facing_name: None,
+                source: None,
+                plugin_name: None,
+                unqualified_name: None,
+                is_synced_skill: false,
+                bare_name_reserved: false,
+                aliases: Vec::new(),
+                description: "Debug a failing test".into(),
+                when_to_use: None,
+                is_bundled_prompt: false,
+                is_name_only: false,
+                priority: 0.0,
+            }],
+            budget_settings: Default::default(),
+        }
     }
 }
 
@@ -424,9 +439,9 @@ async fn model_input_texts(
 /// The model-facing order the shared collector must produce, as
 /// (label, distinctive substring) in the order they are expected to appear.
 ///
-/// Sourced from `conversation/drivers/prepare.rs`: after Normal context/date
-/// announcements, the durable task notification precedes the transient rows;
-/// those then follow collector order: skill listing → plan → task/todo →
+/// Native's typed reminder batch precedes the query's context/date
+/// announcements. The durable task notification precedes the remaining rows;
+/// those follow collector order: environment → model → skill listing → plan → task/todo →
 /// memory update → output style → total tokens. MCP instructions, when present,
 /// are inserted at the captured position after skill listing and before plan.
 /// The substrings come from each renderer, not a previous run's output.
@@ -447,6 +462,8 @@ async fn model_input_texts(
 /// is not pinned by anything yet.
 const EXPECTED_REMINDER_ORDER: &[(&str, &str)] = &[
     ("task_notification (durable)", "<task-notification>"),
+    ("environment", "# Environment\n"),
+    ("model", "The exact model ID is "),
     (
         "skill_listing",
         "The following skills are available for use with the Skill tool:",
@@ -461,26 +478,32 @@ const EXPECTED_REMINDER_ORDER: &[(&str, &str)] = &[
     ("total_tokens", "<total_tokens>"),
 ];
 
-/// Keep the Normal empty-context anchor and date announcement in the compared
-/// model input. These project to distinct rows: the empty session-context row
-/// has no rendered text, while the date row renders a system reminder.
-fn assert_normal_context_prefix(messages: &[String]) {
+/// The full-history projection places typed context after the collected
+/// reminders and before both ordinary user rows. Keep the empty context anchor
+/// and date as distinct rows rather than filtering them from the comparison.
+fn assert_normal_context_announcements(messages: &[String]) {
     assert!(
         messages.len() >= 4,
-        "missing Normal context prefix: {messages:#?}"
+        "missing Normal context announcements: {messages:#?}"
     );
-    assert_eq!(messages[0], "seed", "fixture history starts with its seed");
+    let context = messages.len() - 4;
     assert_eq!(
-        messages[1], "ping",
+        messages[context + 2],
+        "seed",
+        "the seed keeps its user order"
+    );
+    assert_eq!(
+        messages[context + 3],
+        "ping",
         "the current user prompt follows the seed"
     );
     assert!(
-        messages[2].is_empty(),
+        messages[context].is_empty(),
         "retain the empty typed session-context anchor at its model-input position: {messages:#?}"
     );
     assert!(
-        messages[3].starts_with("<system-reminder>\nToday's date is ")
-            && messages[3].ends_with("\n</system-reminder>"),
+        messages[context + 1].starts_with("<system-reminder>\nToday's date is ")
+            && messages[context + 1].ends_with("\n</system-reminder>"),
         "date announcement follows the empty context anchor: {messages:#?}"
     );
     assert_eq!(
@@ -535,7 +558,10 @@ fn batched_and_streaming_share_complete_reminder_order() {
         let batched_memdir = tempfile::TempDir::new().expect("batched memory directory");
         let streaming_memdir = tempfile::TempDir::new().expect("streaming memory directory");
         let config = OrchestratorConfig {
-            output_style: Some("Explanatory".into()),
+            output_style: Some(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""Explanatory""#)
+                    .unwrap(),
+            ),
             // `OrchestratorConfig::DEFAULT_MODEL` ("claude-opus-4-8") is an
             // Anthropic id that is NOT on the `todo_tools_gate` allowlist, so the
             // task reminder is correctly suppressed under it. The orchestrator
@@ -600,10 +626,10 @@ fn batched_and_streaming_share_complete_reminder_order() {
         let streaming_calls = streaming_mock.captured_calls().await;
         let streaming_messages = model_input_texts(&orch_s, &streaming_calls[0].messages).await;
 
-        // Preserve and check the Normal context/date rows before reminders; the
+        // Preserve and check the Normal context/date rows after reminders; the
         // reminder needles alone intentionally do not filter the input vector.
-        assert_normal_context_prefix(&batched_messages);
-        assert_normal_context_prefix(&streaming_messages);
+        assert_normal_context_announcements(&batched_messages);
+        assert_normal_context_announcements(&streaming_messages);
         // Order first: it is the only check that can see a reorder inside the
         // collector, and it gives the clearer message when one happens.
         assert_shared_reminder_order(&batched_messages);

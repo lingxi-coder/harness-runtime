@@ -11,6 +11,88 @@
 
 use serde::{Deserialize, Serialize};
 
+fn deserialize_optional_response_language<'de, D>(
+    deserializer: D,
+) -> Result<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    let root = projection
+        .at_pointer("")
+        .expect("a parsed projection always has a root");
+    if root.is_null() {
+        Ok(None)
+    } else if root.code_units().is_some() {
+        Ok(Some(projection))
+    } else {
+        Err(serde::de::Error::custom("expected a string or null"))
+    }
+}
+
+fn deserialize_optional_output_style<'de, D>(
+    deserializer: D,
+) -> Result<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    if projection
+        .at_pointer("")
+        .and_then(|root| root.code_units())
+        .is_some()
+    {
+        Ok(Some(projection))
+    } else {
+        Err(serde::de::Error::custom("expected a string"))
+    }
+}
+
+fn serialize_optional_output_style<S>(
+    value: &Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if let Some(projection) = value {
+        if projection
+            .at_pointer("")
+            .and_then(|root| root.code_units())
+            .is_none()
+        {
+            return Err(serde::ser::Error::custom(
+                "output style must be a root-string projection",
+            ));
+        }
+    }
+    lingxi_core::types::utf16_json::raw_json_serde::serialize_option(value, serializer)
+}
+
+fn serialize_optional_response_language<S>(
+    value: &Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if let Some(projection) = value {
+        let root = projection.at_pointer("").ok_or_else(|| {
+            serde::ser::Error::custom("response language must be a root-string projection")
+        })?;
+        if root.code_units().is_none() {
+            return Err(serde::ser::Error::custom(
+                "response language must be a root-string projection",
+            ));
+        }
+    }
+    lingxi_core::types::utf16_json::raw_json_serde::serialize_option(value, serializer)
+}
+
 /// Default value for [`OrchestratorConfig::max_turns`]. **`0` = UNBOUNDED**
 /// (parity with claude-code's optional, default-unset `maxTurns`). A previous
 /// LingXi build locked this at 30; the parity audit flagged that as a divergence
@@ -294,14 +376,27 @@ pub struct OrchestratorConfig {
     #[serde(default)]
     pub has_oauth_token: bool,
 
-    /// OUTSTYLE.2: the active output-style name from `settings.outputStyle`
-    /// (TS types it `z.string()`). `None` / `"default"` → no style section;
-    /// a builtin name (`Explanatory` / `Learning`) injects its
-    /// `# Output Style: <name>` section into the assembled system prompt via
-    /// [`outputstyles::resolve_builtin_output_style`]. Populated at the
-    /// composition root from merged settings.
-    #[serde(default)]
-    pub output_style: Option<String>,
+    /// The active output-style name from `settings.outputStyle`, retained as
+    /// exact JavaScript UTF-16 until strict lookup against the style inventory.
+    /// `None` / `"default"` emits no style section; a matching registered name
+    /// injects its style instructions into the system prompt.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_output_style",
+        serialize_with = "serialize_optional_output_style"
+    )]
+    pub output_style: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+
+    /// User's response-language preference from effective settings. This is
+    /// deliberately separate from the process or UI locale.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_response_language",
+        serialize_with = "serialize_optional_response_language"
+    )]
+    pub language: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
 
     /// OUTSTYLE.3: directories searched for CUSTOM output styles (`*.md` files
     /// with `name`/`description`/`keepCodingInstructions` frontmatter + a body),
@@ -360,10 +455,16 @@ pub struct OrchestratorConfig {
     /// provider model catalog.
     #[serde(skip)]
     pub server_fallback_model_enforcement: Option<llm_runtime::model::allowlist::ModelEnforcement>,
+    /// Effective settings admission for model-picker and explicit model
+    /// selection. This is independent from the managed Default-remapping gate
+    /// above; hosts with live settings readers should prefer that reader.
+    #[serde(skip)]
+    pub model_catalog_restriction: llm_runtime::model::allowlist::CatalogRestriction,
     /// Regular settings `availableModels`, used only when managed enforcement
     /// is inactive. `None` means the host has no regular allowlist restriction.
     #[serde(skip)]
-    pub server_fallback_regular_available_models: Option<Vec<String>>,
+    pub server_fallback_regular_available_models:
+        Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Regular settings `modelOverrides`, for reverse-matching provider model
     /// IDs against their canonical allowlist IDs.
     #[serde(skip)]
@@ -512,12 +613,15 @@ impl Default for OrchestratorConfig {
             credential_origin: crate::api_error_copy::CredentialOrigin::Other,
             has_oauth_token: false,
             output_style: None,
+            language: None,
             output_style_dirs: Vec::new(),
             max_budget_nano_usd: None,
             transcript_classifier_enabled: false,
             refusal_fallback_model: None,
             server_refusal_fallback: None,
             server_fallback_model_enforcement: None,
+            model_catalog_restriction:
+                llm_runtime::model::allowlist::CatalogRestriction::Unrestricted,
             server_fallback_regular_available_models: None,
             server_fallback_regular_model_overrides: std::collections::BTreeMap::new(),
             server_fallback_default_model: None,
@@ -573,9 +677,11 @@ mod tests {
 
     #[test]
     fn default_system_prompt_override_is_none() {
-        assert!(OrchestratorConfig::default()
-            .system_prompt_override
-            .is_none());
+        assert!(
+            OrchestratorConfig::default()
+                .system_prompt_override
+                .is_none()
+        );
     }
 
     #[test]
@@ -631,13 +737,21 @@ mod tests {
             error_route: None,
             credential_origin: crate::api_error_copy::CredentialOrigin::Other,
             has_oauth_token: false,
-            output_style: Some("Explanatory".into()),
+            output_style: Some(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""Explanatory""#)
+                    .unwrap(),
+            ),
+            language: Some(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""English""#).unwrap(),
+            ),
             output_style_dirs: vec![std::path::PathBuf::from("/home/u/.lingxi/output-styles")],
             max_budget_nano_usd: Some(5_000_000_000),
             transcript_classifier_enabled: true,
             refusal_fallback_model: Some("claude-sonnet-4-6".into()),
             server_refusal_fallback: None,
             server_fallback_model_enforcement: None,
+            model_catalog_restriction:
+                llm_runtime::model::allowlist::CatalogRestriction::Unrestricted,
             server_fallback_regular_available_models: None,
             server_fallback_regular_model_overrides: std::collections::BTreeMap::new(),
             server_fallback_default_model: None,
@@ -675,10 +789,33 @@ mod tests {
         assert_eq!(back.token_budget, Some(500_000));
         assert!(back.is_subscriber);
         assert!(back.is_enterprise);
-        assert_eq!(back.output_style.as_deref(), Some("Explanatory"));
+        assert_eq!(
+            back.output_style
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("Explanatory")
+        );
+        assert_eq!(
+            back.language.as_ref().and_then(|value| value.string_at("")),
+            Some("English")
+        );
         assert_eq!(
             back.output_style_dirs,
             vec![std::path::PathBuf::from("/home/u/.lingxi/output-styles")]
+        );
+        let mut lone_surrogate = back.clone();
+        lone_surrogate.output_style = Some(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""\ud800""#).unwrap(),
+        );
+        let encoded = serde_json::to_string(&lone_surrogate).unwrap();
+        assert!(encoded.contains(r#""output_style":"\ud800""#));
+        let decoded: OrchestratorConfig = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded
+                .output_style
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(vec![0xd800])
         );
         assert_eq!(back.max_budget_nano_usd, Some(5_000_000_000));
         assert!(back.transcript_classifier_enabled);
@@ -703,9 +840,11 @@ mod tests {
 
     #[test]
     fn default_plan_mode_instructions_is_none() {
-        assert!(OrchestratorConfig::default()
-            .plan_mode_instructions
-            .is_none());
+        assert!(
+            OrchestratorConfig::default()
+                .plan_mode_instructions
+                .is_none()
+        );
     }
 
     #[test]
@@ -717,9 +856,11 @@ mod tests {
     fn default_refusal_fallback_model_is_none() {
         // Finding #80: the parity default is a strict no-op — a `refusal`
         // response keeps today's terminal/Continue behavior.
-        assert!(OrchestratorConfig::default()
-            .refusal_fallback_model
-            .is_none());
+        assert!(
+            OrchestratorConfig::default()
+                .refusal_fallback_model
+                .is_none()
+        );
     }
 
     #[test]

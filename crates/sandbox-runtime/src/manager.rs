@@ -45,6 +45,8 @@ use crate::linux::{
     wrap_command_with_sandbox_linux, LinuxBridge, LinuxDependencyCheck, LinuxDependencyOpts,
     WrapParams,
 };
+#[cfg(target_os = "macos")]
+use crate::macos::{start_macos_sandbox_log_monitor, MacosLogMonitor};
 use crate::macos::{wrap_command_with_sandbox_macos, WrapParams as MacosWrapParams};
 use crate::matcher::AskFn;
 use crate::mitm_ca::{create_mitm_ca, dispose_mitm_ca, MitmCa, MitmCaOptions};
@@ -137,6 +139,10 @@ struct RunningState {
     shared_network: SharedNetworkConfig,
     /// Per-session token that validates per-command proxy credentials.
     proxy_auth_token: Option<String>,
+    /// macOS `log stream` monitor started by Native when an ask callback is
+    /// present and monitor logging is enabled.
+    #[cfg(target_os = "macos")]
+    macos_log_monitor: Option<MacosLogMonitor>,
 }
 
 /// Errors from [`SandboxManager`] operations.
@@ -318,8 +324,9 @@ impl SandboxManager {
     /// [`crate::matcher::filter_network_request_with_ask`] with this config +
     /// `ask_callback` (threaded via [`ProxyOptions::ask`]/[`SocksOptions::ask`]).
     ///
-    /// `enable_log_monitor` is accepted for signature parity; the macOS log
-    /// monitor it gates is a P9 seam (no-op on Linux, the only wired platform).
+    /// `enable_log_monitor` starts the macOS `log stream` observer when true;
+    /// Native passes true when it initializes with an ask callback. It has no
+    /// effect on Linux or Windows.
     ///
     /// # Errors
     /// [`ManagerError`] on invalid config, the tls-terminate/mitm-proxy mutual
@@ -330,7 +337,6 @@ impl SandboxManager {
         ask_callback: Option<AskFn>,
         enable_log_monitor: bool,
     ) -> Result<(), ManagerError> {
-        let _ = enable_log_monitor; // macOS log monitor is a P9 seam.
         config
             .validate()
             .map_err(|e| ManagerError::InvalidConfig(e.0))?;
@@ -367,7 +373,7 @@ impl SandboxManager {
         }
 
         // From here, any failure must tear down what we started.
-        match self.start_infrastructure(mitm_ca).await {
+        match self.start_infrastructure(mitm_ca, enable_log_monitor).await {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.reset();
@@ -381,12 +387,40 @@ impl SandboxManager {
     async fn start_infrastructure(
         &mut self,
         mitm_ca: Option<Arc<MitmCa>>,
+        enable_log_monitor: bool,
     ) -> Result<(), ManagerError> {
         // Safe: `initialize` set `self.config` before calling us.
         let config = self
             .config
             .as_ref()
             .expect("config set before start_infrastructure");
+
+        #[cfg(target_os = "macos")]
+        let macos_log_monitor = if enable_log_monitor && host_os() == HostOs::Macos {
+            let store = Arc::clone(&self.violation_store);
+            let on_violation = move |violation: crate::macos::LogViolation| {
+                store.add_violation(crate::violation_store::Violation {
+                    encoded_command: violation.encoded_command.unwrap_or_default(),
+                    line: Some(violation.line),
+                    ..Default::default()
+                });
+            };
+            match start_macos_sandbox_log_monitor(
+                on_violation,
+                config.ignore_violations.clone(),
+                config.ignore_violations_utf16.clone(),
+            ) {
+                Ok(monitor) => Some(monitor),
+                Err(error) => {
+                    eprintln!("sandbox: failed to start macOS violation monitor: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let _ = enable_log_monitor;
 
         let net = &config.network;
         let parent_proxy =
@@ -480,6 +514,8 @@ impl SandboxManager {
             socks_socket_path,
             shared_network,
             proxy_auth_token,
+            #[cfg(target_os = "macos")]
+            macos_log_monitor,
         });
         Ok(())
     }
@@ -820,6 +856,8 @@ impl SandboxManager {
         cleanup_bwrap_mount_points(&[]);
 
         if let Some(mut running) = self.running.take() {
+            #[cfg(target_os = "macos")]
+            drop(running.macos_log_monitor.take());
             if let Some(task) = running.http_task.take() {
                 task.abort();
             }

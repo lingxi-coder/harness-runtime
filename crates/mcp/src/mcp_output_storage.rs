@@ -481,7 +481,9 @@ mod tests {
         );
         assert_eq!(
             msg.string_at(""),
-            Some("[Resource from fs at file:///doc] Binary content (application/pdf, 1.5KB) saved to /tmp/out/mcp-resource-x.pdf")
+            Some(
+                "[Resource from fs at file:///doc] Binary content (application/pdf, 1.5KB) saved to /tmp/out/mcp-resource-x.pdf"
+            )
         );
         // Absent mime → "unknown type".
         let msg2 = binary_blob_saved_message("/p.bin", None, 10, &"".into());

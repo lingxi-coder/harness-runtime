@@ -12,7 +12,7 @@ use orchestrator::{
     realtime_history, ConversationOrchestrator, RealtimeAgentEnd, RealtimeAgentInput,
     RealtimeAgentLimits,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;

@@ -128,6 +128,7 @@ fn bounded_probe_timeout_ms(requested: Option<u64>) -> u64 {
 /// Shared remote HTTP/SSE MCP transport.
 #[derive(Default)]
 pub struct RemoteMcpTransport {
+    proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
     connections: Arc<Mutex<HashMap<lingxi_core::types::McpConnectionId, Arc<Connection>>>>,
     negotiated: Arc<Mutex<HashMap<lingxi_core::types::McpConnectionId, McpNegotiatedProtocol>>>,
     metadata: Arc<Mutex<HashMap<lingxi_core::types::McpConnectionId, McpServerMetadataDto>>>,
@@ -169,6 +170,18 @@ impl RemoteMcpTransport {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Share the host's process-local proxy-auth helper with HTTP and SSE
+    /// MCP clients. The route builder applies its header only to Native's
+    /// primary process proxy, never the registered-agent fallback.
+    #[must_use]
+    pub fn with_proxy_auth_helper(
+        mut self,
+        helper: Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>,
+    ) -> Self {
+        self.proxy_auth_helper = Some(helper);
+        self
     }
 
     /// Return the live JSON-RPC connection owned by this transport.
@@ -643,13 +656,14 @@ impl RemoteMcpTransport {
         };
         let connection = tokio::time::timeout(
             remaining,
-            crate::connect_sse(
+            crate::mcp_sse::connect_sse_with_proxy_auth_helper(
                 url,
                 None,
                 headers,
                 crate::mcp_sse::SseEndpointMode::LegacyRescue {
                     post_method_not_allowed,
                 },
+                self.proxy_auth_helper.clone(),
             ),
         )
         .await
@@ -666,25 +680,29 @@ impl McpTransport for RemoteMcpTransport {
         let connection = match spec {
             // A configured `type: "sse"` server speaks the legacy HTTP+SSE
             // contract: it names its POST url in an `endpoint` event.
-            McpTransportSpec::Sse { url, headers, .. } => crate::connect_sse(
-                url,
-                None,
-                headers,
-                crate::mcp_sse::SseEndpointMode::EndpointEvent,
-            )
-            .await
-            .map_err(McpError::from)?,
+            McpTransportSpec::Sse { url, headers, .. } => {
+                crate::mcp_sse::connect_sse_with_proxy_auth_helper(
+                    url,
+                    None,
+                    headers,
+                    crate::mcp_sse::SseEndpointMode::EndpointEvent,
+                    self.proxy_auth_helper.clone(),
+                )
+                .await
+                .map_err(McpError::from)?
+            }
             McpTransportSpec::SseIde {
                 url, auth_token, ..
             } => {
                 let headers = lingxi_core::host::McpHeaders::default();
                 // The IDE serves both directions on one url and sends no
                 // `endpoint` event.
-                crate::connect_sse(
+                crate::mcp_sse::connect_sse_with_proxy_auth_helper(
                     url,
                     auth_token.as_deref(),
                     &headers,
                     crate::mcp_sse::SseEndpointMode::SameUrl,
+                    self.proxy_auth_helper.clone(),
                 )
                 .await
                 .map_err(McpError::from)?
@@ -700,9 +718,15 @@ impl McpTransport for RemoteMcpTransport {
                     .map_err(|error| McpError::Connection(error.to_string().into()))?
             }
             McpTransportSpec::Http { url, headers, .. } => {
-                crate::connect_http(url, None, headers, Some(Duration::from_secs(60)))
-                    .await
-                    .map_err(McpError::from)?
+                crate::mcp_http::connect_http_with_proxy_auth_helper(
+                    url,
+                    None,
+                    headers,
+                    Some(Duration::from_secs(60)),
+                    self.proxy_auth_helper.clone(),
+                )
+                .await
+                .map_err(McpError::from)?
             }
             other => return Err(McpError::UnsupportedTransport(other.transport_kind())),
         };
@@ -975,6 +999,7 @@ impl McpTransport for RemoteMcpTransport {
         Ok(McpToolResultDto {
             content: parsed.content,
             is_error: parsed.is_error,
+            error: parsed.error,
             meta: parsed.meta,
             structured_content: parsed.structured_content,
         })
@@ -1790,10 +1815,17 @@ mod tests {
     #[test]
     fn tool_result_source_members_keep_unpaired_surrogate_units() {
         let result: super::ToolCallResult = serde_json::from_str(
-            r#"{"content":[{"type":"text","text":"\ud800"}],"_meta":{"vendor":"\udfff"},"structuredContent":{"value":"\ud800"}}"#,
+            r#"{"content":[{"type":"text","text":"\ud800"}],"error":"\udfff","_meta":{"vendor":"\udfff"},"structuredContent":{"value":"\ud800"}}"#,
         )
         .expect("JSON raw-value adapters preserve escaped UTF-16 source");
         assert_eq!(result.content.string_units("/0/text"), Some(vec![0xd800]));
+        assert_eq!(
+            result
+                .error
+                .as_ref()
+                .and_then(|error| error.string_units("")),
+            Some(vec![0xdfff])
+        );
         assert_eq!(
             result.meta.unwrap().string_units("/vendor"),
             Some(vec![0xdfff])
@@ -2125,6 +2157,13 @@ struct ToolCallResult {
     content: Utf16JsonProjection,
     #[serde(rename = "isError", default)]
     is_error: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    error: Option<Utf16JsonProjection>,
     #[serde(
         rename = "_meta",
         default,

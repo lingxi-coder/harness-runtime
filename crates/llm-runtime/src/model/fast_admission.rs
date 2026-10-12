@@ -2,6 +2,7 @@
 use crate::{Credential, Transport};
 use lingxi_core::host::auth::AccountChangeObserver;
 use lingxi_core::host::fast_mode::{Decline, Inputs, OrgStatus, StatusSource};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -14,7 +15,7 @@ pub struct Policy {
     pub flag_fast: bool,
     pub policy_fast: Option<bool>,
     pub policy_session_opt_in: Option<bool>,
-    pub allowed_models: Option<Vec<String>>,
+    pub allowed_models: Option<Utf16JsonProjection>,
     pub model_overrides: std::collections::BTreeMap<String, String>,
     pub cached_org_enabled: bool,
     pub remote: bool,
@@ -397,14 +398,14 @@ impl Policy {
             kill_switch: self.kill_switch.clone(),
             default_model_allowed: super::allowlist::is_model_allowed(
                 &account.default_model,
-                self.allowed_models.as_deref(),
+                self.allowed_models.as_ref(),
                 Some(&self.model_overrides),
             ),
             remote: self.remote,
             model_fast: super::fast::model_allowed(&account.model),
             model_allowed: super::allowlist::is_model_allowed(
                 &account.model,
-                self.allowed_models.as_deref(),
+                self.allowed_models.as_ref(),
                 Some(&self.model_overrides),
             ),
             flag_fast: self.flag_fast,

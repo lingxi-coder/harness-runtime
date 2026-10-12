@@ -3829,7 +3829,7 @@ async fn background_api_loop(
 /// The later load evaluates these exact source bytes after `plugin.register`.
 pub struct ModPreparedModule {
     token: String,
-    pub uses: Value,
+    pub uses: Utf16JsonProjection,
     client_modules: Option<PreparedClientModules>,
     requested_module: PathBuf,
     source_entry: String,
@@ -5193,17 +5193,8 @@ impl ModHost {
             Some("prepared") => {
                 let token = projection_string(&reply, "/token")
                     .ok_or_else(|| ModError::Protocol("prepared module has no token".into()))?;
-                let source_count = reply.array_len("/sources").ok_or_else(|| {
-                    ModError::Protocol("prepared module has no source scan".into())
-                })?;
-                let sources = (0..source_count)
-                    .map(|index| {
-                        projection_string(&reply, &format!("/sources/{index}")).ok_or_else(|| {
-                            ModError::Protocol("prepared module source scan is malformed".into())
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let uses = tokio::task::spawn_blocking(move || scan::scan_uses(&sources))
+                let hook_graph = prepared_sources.hooks.clone();
+                let uses = tokio::task::spawn_blocking(move || scan::scan_uses_graph(&hook_graph))
                     .await
                     .map_err(|error| ModError::Unavailable(error.to_string()))?
                     .map_err(ModError::Hook)?;
@@ -5558,10 +5549,11 @@ impl ModHost {
                 "provenance".into(),
                 Value::String(module.provenance.clone()),
             );
-            registration.insert("uses".into(), prepared.uses.clone());
-            let decision = self
-                .dispatch_plugin_register(generated_projection(&Value::Object(registration))?)
-                .await;
+            let mut registration = generated_projection(&Value::Object(registration))?;
+            registration
+                .set_field("uses", prepared.uses.clone())
+                .map_err(|error| ModError::Protocol(error.to_string()))?;
+            let decision = self.dispatch_plugin_register(registration).await;
             let refusal = match decision {
                 Ok(value) => value.string_at("/refuse").map(str::to_owned),
                 Err(error) => Some(error.to_string()),
@@ -10196,16 +10188,16 @@ mod tests {
             .prepare_module(root.path(), &module_path)
             .await
             .unwrap();
-        let registration = host
-            .dispatch_plugin_register(test_projection(json!({
-                "name":"replay",
-                "tier":"user",
-                "root":root.path().to_string_lossy(),
-                "uses":prepared.uses.clone(),
-                "provenance":"local",
-            })))
-            .await
+        let mut registration = test_projection(json!({
+            "name":"replay",
+            "tier":"user",
+            "root":root.path().to_string_lossy(),
+            "provenance":"local",
+        }));
+        registration
+            .set_field("uses", prepared.uses.clone())
             .unwrap();
+        let registration = host.dispatch_plugin_register(registration).await.unwrap();
         assert_eq!(mod_test_value(&registration)["allow"], true);
         host.load_with_tier_order_storage_prepared(
             "replay",
@@ -13853,7 +13845,7 @@ mod tests {
         .unwrap();
         let host = ModHost::start(None).await.unwrap();
         let prepared = host.prepare_module(dir.path(), &module).await.unwrap();
-        assert_eq!(prepared.uses["events"], json!(["tool.call"]));
+        assert_eq!(prepared.uses.string_at("/events/0"), Some("tool.call"));
         std::fs::write(
             &module,
             r#"export function register(on) {
@@ -14206,8 +14198,10 @@ mod tests {
         let module = root.join("hooks/register.ts");
         let host = ModHost::start(None).await.unwrap();
         let prepared = host.prepare_module(&root, &module).await.unwrap();
-        let events = prepared.uses["events"].as_array().unwrap();
-        assert!(events.contains(&json!("agent.spawn")));
+        let event_count = prepared.uses.array_len("/events").unwrap();
+        assert!((0..event_count).any(|index| {
+            prepared.uses.string_at(&format!("/events/{index}")) == Some("agent.spawn")
+        }));
         host.load_with_tier_order_storage_prepared(
             "agents-md",
             "agents-md@builtin",
@@ -21874,6 +21868,158 @@ mod tests {
         })
         .await
         .expect("cancel signal must reach the Mod");
+    }
+
+    #[tokio::test]
+    async fn cancelled_mod_dispatch_does_not_run_hook_catch_handler() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("cancel-catch.js");
+        std::fs::write(
+            &module,
+            r#"
+          let caught = false;
+          export function register(on) {
+            on('tool.call', async ($, event, next) => {
+              if (event.tool === 'Check') return { result: caught };
+              $.ui.log('entered');
+              await new Promise((_, reject) => {
+                next.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+              });
+              return { result: 'unexpected' };
+            }).catch(() => {
+              caught = true;
+              return { deny: 'a cancelled hook must not run its catch handler' };
+            });
+          }
+        "#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "cancel-catch",
+            dir.path(),
+            &module,
+            test_mod_options(json!({})),
+        )
+        .await
+        .unwrap();
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let entered_for_log = entered.clone();
+        let blocked_host = host.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_host
+                .dispatch_with_log(
+                    "tool.call",
+                    test_projection(json!({"tool":"Block"})),
+                    |_| async { panic!("cancelled hook must not reach the core") },
+                    move |_, _| {
+                        let entered = entered_for_log.clone();
+                        async move { entered.notify_one() }
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .expect("the hook must enter before cancellation");
+        blocked.abort();
+        let _ = blocked.await;
+
+        let check = host
+            .dispatch(
+                "tool.call",
+                test_projection(json!({"tool":"Check"})),
+                |_| async { panic!("the Check hook answers directly") },
+            )
+            .await
+            .unwrap();
+        assert_eq!(mod_test_value(&check), json!({"result":false}));
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_step_stream_does_not_run_hook_catch_handler() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("cancel-stream-catch.js");
+        std::fs::write(
+            &module,
+            r#"
+          let caught = false;
+          export function register(on) {
+            on('turn.step', async function* ($, event, next) {
+              if (event.turnId === 'check') {
+                return {
+                  turnId: event.turnId, index: event.index,
+                  answer: caught ? 'caught' : 'clean', toolUses: [],
+                  stopReason: 'end_turn', usage: null,
+                };
+              }
+              yield { kind: 'text', index: 0, text: 'started', ref: 1 };
+              await new Promise((_, reject) => {
+                next.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+              });
+              return {
+                turnId: event.turnId, index: event.index,
+                answer: 'unexpected', toolUses: [], stopReason: 'end_turn', usage: null,
+              };
+            }).catch(async function* () {
+              caught = true;
+              return {
+                turnId: 'block', index: 0, answer: 'caught',
+                toolUses: [], stopReason: 'end_turn', usage: null,
+              };
+            });
+          }
+        "#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "cancel-stream-catch",
+            dir.path(),
+            &module,
+            test_mod_options(json!({})),
+        )
+        .await
+        .unwrap();
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let entered_for_chunk = entered.clone();
+        let blocked_host = host.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_host
+                .dispatch_turn_step_stream(
+                    test_projection(
+                        json!({"turnId":"block","index":0,"model":"model","messageCount":1}),
+                    ),
+                    |_| async { panic!("cancelled stream must not open the core source") },
+                    move |_| {
+                        let entered = entered_for_chunk.clone();
+                        async move {
+                            entered.notify_one();
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .expect("the streaming hook must enter before cancellation");
+        blocked.abort();
+        let _ = blocked.await;
+
+        let check = host
+            .dispatch_turn_step_stream(
+                test_projection(
+                    json!({"turnId":"check","index":0,"model":"model","messageCount":1}),
+                ),
+                |_| async { panic!("the Check hook answers directly") },
+                |_| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(check.string_at("/answer"), Some("clean"));
     }
 
     #[tokio::test]

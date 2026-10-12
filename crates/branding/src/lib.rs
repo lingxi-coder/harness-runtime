@@ -104,6 +104,9 @@ pub const SKIP_FAST_MODE_NETWORK_ERRORS_ENV: &str = "LINGXI_SKIP_FAST_MODE_NETWO
 /// per-project config dir name (`<repo>/.lingxi/`).
 pub const DOT_DIR: &str = ".lingxi";
 
+/// macOS managed-preferences domain for the LingXi Desktop bundle.
+pub const MANAGED_PREFERENCES_DOMAIN: &str = "com.lingxi.code";
+
 /// Global config file, a sibling of [`DOT_DIR`] in `$HOME` (e.g. `~/.lingxi.json`).
 pub const GLOBAL_CONFIG_FILE: &str = ".lingxi.json";
 

@@ -158,6 +158,11 @@ impl ProviderApiAdapter {
         tools: Vec<llm_runtime::ToolDeclaration>,
         max_tokens: Option<u32>,
         tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
+        typed_attachment_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
+        task_deliveries: std::collections::HashMap<
+            lingxi_core::types::MessageId,
+            lingxi_core::host::task_delivery::TaskDeliveryRequest,
+        >,
     ) -> Result<llm_runtime::LlmRequest, LlmError> {
         let route = crate::query_model::current();
         if let Some(route) = route.as_ref() {
@@ -177,6 +182,8 @@ impl ProviderApiAdapter {
         );
         request.opts.max_output_tokens = max_tokens;
         request.opts.tool_result_reminder_suffixes = tool_result_reminder_suffixes;
+        request.opts.typed_attachment_ids = typed_attachment_ids;
+        request.opts.task_deliveries = task_deliveries;
         request.opts.skip_global_cache_for_system_prompt = skip_global_cache_for_system_prompt;
         request.opts.query_source = Some("scheduled_task".into());
         self.service
@@ -353,6 +360,20 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
 
 #[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
+    fn supports_native_mid_conversation_system(&self, model: &str, profile: Option<&str>) -> bool {
+        self.service
+            .supports_native_mid_conversation_system(model, profile)
+    }
+
+    fn native_mid_conversation_tool_change_supported(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<bool> {
+        self.service
+            .native_mid_conversation_tool_change_supported(model, profile)
+    }
+
     fn is_first_party_route(&self, model: &str, profile: Option<&str>) -> bool {
         self.service
             .is_first_party_route(model, profile)
@@ -472,6 +493,8 @@ impl OrchestratorApiClient for ProviderApiAdapter {
                         tools,
                         opts.max_output_tokens,
                         opts.tool_result_reminder_suffixes,
+                        opts.typed_attachment_ids,
+                        opts.task_deliveries,
                     )?;
                     canonical.input.controls.anthropic.context_hint =
                         opts.context_hint.map(|value| {
@@ -1124,6 +1147,8 @@ impl StreamingApiClient for ProviderApiAdapter {
             request_dispatch_admission,
             None,
             None,
+            Default::default(),
+            Default::default(),
         )
         .await
     }
@@ -1142,6 +1167,11 @@ impl StreamingApiClient for ProviderApiAdapter {
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
         request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
         native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+        typed_attachment_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
+        task_deliveries: std::collections::HashMap<
+            lingxi_core::types::MessageId,
+            lingxi_core::host::task_delivery::TaskDeliveryRequest,
+        >,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.build_scheduled_request(
@@ -1152,6 +1182,8 @@ impl StreamingApiClient for ProviderApiAdapter {
                 tools,
                 None,
                 tool_result_reminder_suffixes,
+                typed_attachment_ids,
+                task_deliveries,
             )?;
             let mut request = request;
             request
@@ -1195,6 +1227,8 @@ impl StreamingApiClient for ProviderApiAdapter {
                 tool_result_reminder_suffixes,
                 request_dispatch_observer,
                 native_anthropic_request_context,
+                typed_attachment_ids,
+                task_deliveries,
             )
             .await
     }

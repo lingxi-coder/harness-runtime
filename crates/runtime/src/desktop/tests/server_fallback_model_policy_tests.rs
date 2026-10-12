@@ -22,7 +22,7 @@ fn failed_managed_policy_survives_composition_and_regular_defaults() {
     );
     assert_eq!(
         config.server_fallback_regular_available_models,
-        Some(vec!["sonnet".into()])
+        Some(lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"["sonnet"]"#).unwrap())
     );
     assert_eq!(
         config.server_fallback_regular_model_overrides["claude-sonnet-5"],
@@ -46,7 +46,7 @@ fn inactive_and_empty_regular_policy_remain_distinct_from_missing_policy() {
     );
     assert_eq!(
         config.server_fallback_regular_available_models,
-        Some(vec![])
+        Some(lingxi_core::types::utf16_json::Utf16JsonProjection::parse("[]").unwrap())
     );
     apply_server_fallback_model_policy(&mut config, &source, None, "claude-sonnet-5");
     assert_eq!(config.server_fallback_regular_available_models, None);
@@ -61,24 +61,33 @@ async fn managed_read_failure_does_not_become_an_absent_policy() {
     std::fs::create_dir(&drops).unwrap();
     std::fs::write(drops.join("valid.json"), "{\"availableModels\":[\"opus\"]}").unwrap();
     let snapshot = super::settings_watch::read_managed_settings_snapshot(dir.path()).await;
-    assert!(snapshot.read_failed);
+    assert!(snapshot.read_failed());
     assert_eq!(
-        snapshot.raw_tiers.len(),
-        1,
-        "best-effort readers still retain readable tiers"
+        snapshot.file_reads.len(),
+        2,
+        "the reader retains both the failing base file and readable drop-in"
     );
+    assert!(snapshot.file_reads.iter().any(|read| {
+        read.projection
+            .as_ref()
+            .and_then(|projection| projection.string_at("/availableModels/0"))
+            == Some("opus")
+    }));
 }
 
 #[tokio::test]
 async fn missing_managed_files_and_drop_in_directory_are_not_read_failures() {
     let dir = tempfile::tempdir().unwrap();
     let snapshot = super::settings_watch::read_managed_settings_snapshot(dir.path()).await;
-    assert!(!snapshot.read_failed);
-    assert!(snapshot.raw_tiers.is_empty());
+    assert!(!snapshot.read_failed());
+    assert!(snapshot
+        .file_reads
+        .iter()
+        .all(|read| read.projection.is_none()));
     std::fs::write(dir.path().join("managed-settings.d"), "not a directory").unwrap();
     let snapshot = super::settings_watch::read_managed_settings_snapshot(dir.path()).await;
     assert!(
-        !snapshot.read_failed,
+        !snapshot.read_failed(),
         "native ENOTDIR denotes an absent tier"
     );
 }

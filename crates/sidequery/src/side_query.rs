@@ -11,10 +11,12 @@
 
 use crate::purposes::QuerySource;
 use async_trait::async_trait;
-use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage};
+use lingxi_core::host::task_delivery::TaskDeliveryRequest;
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage, MessageId};
 use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::time::Duration;
 use thiserror::Error;
@@ -61,6 +63,16 @@ pub struct SideQueryRequest {
         deserialize_with = "deserialize_optional_string_source"
     )]
     pub system_prompt: Option<Utf16JsonProjection>,
+    /// Host-local identities of typed attachments whose exact text boundaries
+    /// must survive provider normalization. This sidecar is not serialized
+    /// into the model-facing request or canonical size estimate.
+    #[serde(skip)]
+    pub typed_attachment_ids: HashSet<MessageId>,
+    /// Host-local Native task-delivery snapshots plus the placement facts for
+    /// this request, keyed by their source user-row identity. This sidecar is
+    /// not serialized into side-query JSON.
+    #[serde(skip)]
+    pub task_deliveries: HashMap<MessageId, TaskDeliveryRequest>,
     /// Host-captured provider system structure for forked requests; not part of
     /// the serialized model-facing side-query payload.
     #[serde(skip)]
@@ -275,6 +287,8 @@ mod source_system_prompt_tests {
             model: "model".into(),
             profile: None,
             system_prompt,
+            typed_attachment_ids: HashSet::new(),
+            task_deliveries: HashMap::new(),
             system_prompt_input: None,
             messages: Vec::new(),
             tools: Vec::new(),
@@ -291,15 +305,41 @@ mod source_system_prompt_tests {
         }
     }
 
+    fn task_delivery_request(snapshot: &str) -> TaskDeliveryRequest {
+        TaskDeliveryRequest {
+            snapshot: Utf16JsonProjection::parse(snapshot).unwrap(),
+            placement: lingxi_core::host::task_delivery::TaskDeliveryPlacement {
+                starts_turn: true,
+                in_drain_position: false,
+                behind_earlier_messages: false,
+                in_human_turn: false,
+            },
+        }
+    }
+
     #[test]
     fn system_prompt_serializes_as_a_json_string_and_keeps_lone_units() {
         let units = "before".encode_utf16().chain([0xD800]).collect::<Vec<_>>();
         let source =
             Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
                 .unwrap();
-        let serialized = serde_json::to_string(&request(Some(source))).unwrap();
+        let mut side_query = request(Some(source));
+        side_query.typed_attachment_ids.insert(MessageId::new());
+        side_query.task_deliveries.insert(
+            MessageId::new(),
+            task_delivery_request(r#"{"taskId":"task-a"}"#),
+        );
+        let serialized = serde_json::to_string(&side_query).unwrap();
         assert!(serialized.contains(r#""system_prompt":"before\ud800""#));
         assert!(!serialized.contains("\"nodes\""));
+        assert!(
+            !serialized.contains("typed_attachment_ids"),
+            "host-local message identities are not part of the serialized side-query payload"
+        );
+        assert!(
+            !serialized.contains("task_deliveries"),
+            "task-delivery snapshots and placement facts stay out of side-query JSON"
+        );
 
         let decoded: SideQueryRequest = serde_json::from_str(&serialized).unwrap();
         assert_eq!(
@@ -309,6 +349,8 @@ mod source_system_prompt_tests {
                 .and_then(|source| source.string_units("")),
             Some(units)
         );
+        assert!(decoded.typed_attachment_ids.is_empty());
+        assert!(decoded.task_deliveries.is_empty());
 
         let absent_serialized = serde_json::to_string(&request(None)).unwrap();
         assert!(absent_serialized.contains(r#""system_prompt":null"#));

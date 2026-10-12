@@ -1,7 +1,7 @@
 //! MCP (Model Context Protocol) transport abstraction.
 //!
-//! The `McpTransport` trait is the boundary between the engine's MCP layer
-//! (`lingxi-mcp`) and platform-specific transport implementations. Engine
+//! The `McpTransport` trait is the boundary between the MCP client layer and
+//! platform-specific transport implementations. Engine
 //! code receives an `Arc<dyn McpTransport>` and never speaks the wire
 //! protocol directly.
 //!
@@ -992,7 +992,7 @@ pub struct McpToolExecutionDto {
     pub task_support: Option<McpToolTaskSupportDto>,
 }
 
-/// Standard MCP 2025-11-25 `Tool` wire definition used by Local App catalogs.
+/// Standard MCP 2025-11-25 `Tool` wire definition with opaque metadata retained.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolDefinitionDto {
@@ -1359,12 +1359,11 @@ pub struct McpPromptArgumentDto {
 
 /// Result of a tool invocation.
 ///
-/// The MCP `CallToolResult` wire shape also carries two optional, arbitrary
-/// JSON members alongside `content`/`isError`: `_meta` and `structuredContent`
-/// (MCP spec; claude-code reads both off the raw result in
-/// `services/mcp/client.ts` and forwards them onto the surfaced `ToolResult`).
-/// Both are carried here verbatim (no transformation) and default to `None`
-/// when the server omits them, so non-claude-code servers decode cleanly.
+/// The MCP `CallToolResult` wire shape can carry optional arbitrary JSON
+/// members alongside `content`/`isError`. Native reads `error` when an error
+/// result has no usable content, and forwards `_meta` / `structuredContent`.
+/// These members stay as source projections so explicit null and exact UTF-16
+/// string units survive decoding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolResultDto {
     /// JSON content returned by the tool, kept as raw source JSON.
@@ -1372,6 +1371,14 @@ pub struct McpToolResultDto {
     pub content: json_projection::Utf16JsonProjection,
     /// True when the server flagged the result as an error.
     pub is_error: bool,
+    /// Server-supplied `error` value used by Native's error-detail fallback.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "json_projection::raw_json_serde::serialize_option",
+        deserialize_with = "json_projection::raw_json_serde::deserialize_option"
+    )]
+    pub error: Option<json_projection::Utf16JsonProjection>,
     /// Server-supplied `_meta` block retained as raw source JSON.
     #[serde(
         rename = "_meta",
@@ -1398,6 +1405,7 @@ impl Default for McpToolResultDto {
             content: json_projection::Utf16JsonProjection::parse("null")
                 .expect("null is valid JSON"),
             is_error: false,
+            error: None,
             meta: None,
             structured_content: None,
         }
@@ -1720,9 +1728,9 @@ mod tests {
     #[test]
     fn mcp_tool_dto_preserves_optional_metadata_fields() {
         let value = serde_json::to_value(McpToolDto {
-            server_name: "local_app_habits".to_string(),
-            tool_name: "save_habit".to_string(),
-            description: project(r#""Save one habit entry.""#),
+            server_name: "fixture".to_string(),
+            tool_name: "save_item".to_string(),
+            description: project(r#""Save one fixture entry.""#),
             input_schema: project(r#"{"type":"object"}"#),
             output_schema: Some(project(
                 r#"{"type":"object","properties":{"ok":{"type":"boolean"}}}"#,
@@ -1743,10 +1751,10 @@ mod tests {
                 extra: project(r#"{"vendor/accent":"blue"}"#),
             }],
             meta: Some(project(
-                r#"{"openai/outputTemplate":"ui://local-app/habits/widget.html"}"#,
+                r#"{"openai/outputTemplate":"ui://fixture/widget.html"}"#,
             )),
-            full_name: "mcp__local_app_habits__save_habit".to_string(),
-            search_hint: Some(project(r#""habit tracker""#)),
+            full_name: "mcp__fixture__save_item".to_string(),
+            search_hint: Some(project(r#""fixture items""#)),
             always_load: Some(true),
             requires_user_interaction: false,
         })
@@ -1759,7 +1767,7 @@ mod tests {
         assert_eq!(value["icons"][0]["vendor/accent"], "blue");
         assert_eq!(
             value["_meta"]["openai/outputTemplate"],
-            "ui://local-app/habits/widget.html"
+            "ui://fixture/widget.html"
         );
     }
 
@@ -1841,10 +1849,17 @@ mod tests {
         assert_eq!(definition_round_trip.title, definition.title);
 
         let result: McpToolResultDto = serde_json::from_str(
-            r#"{"content":{"text":"\ud800"},"is_error":true,"_meta":null,"structuredContent":{"value":"\udfff"}}"#,
+            r#"{"content":{"text":"\ud800"},"is_error":true,"error":"\udfff","_meta":null,"structuredContent":{"value":"\udfff"}}"#,
         )
         .expect("raw source tool result");
         assert_eq!(result.content.string_units("/text"), Some(vec![0xd800]));
+        assert_eq!(
+            result
+                .error
+                .as_ref()
+                .and_then(|error| error.string_units("")),
+            Some(vec![0xdfff])
+        );
         assert_eq!(
             result
                 .meta
@@ -1867,11 +1882,43 @@ mod tests {
         assert_eq!(round_trip.content.string_units("/text"), Some(vec![0xd800]));
         assert_eq!(
             round_trip
+                .error
+                .as_ref()
+                .and_then(|error| error.string_units("")),
+            Some(vec![0xdfff])
+        );
+        assert_eq!(
+            round_trip
                 .structured_content
                 .as_ref()
                 .and_then(|content| content.string_units("/value")),
             Some(vec![0xdfff])
         );
+    }
+
+    #[test]
+    fn mcp_tool_result_error_preserves_absent_vs_explicit_null() {
+        let absent: McpToolResultDto =
+            serde_json::from_str(r#"{"content":[],"is_error":true}"#).expect("absent error field");
+        assert!(absent.error.is_none());
+        assert!(!serde_json::to_string(&absent)
+            .expect("serialize absent error")
+            .contains("\"error\""));
+
+        let explicit_null: McpToolResultDto =
+            serde_json::from_str(r#"{"content":[],"is_error":true,"error":null}"#)
+                .expect("explicit null error field");
+        assert_eq!(
+            explicit_null
+                .error
+                .as_ref()
+                .and_then(|error| error.at_pointer(""))
+                .map(|value| value.is_null()),
+            Some(true)
+        );
+        assert!(serde_json::to_string(&explicit_null)
+            .expect("serialize explicit null error")
+            .contains(r#""error":null"#));
     }
 
     #[test]
@@ -2174,8 +2221,8 @@ mod tests {
     #[test]
     fn mcp_resource_dtos_preserve_description_mime_and_meta() {
         let resource = serde_json::to_value(McpResourceDto {
-            uri: "ui://local-app/habits/widget.html".into(),
-            name: "Habits widget".into(),
+            uri: "ui://fixture/widget.html".into(),
+            name: "Fixture widget".into(),
             description: Some("Interactive MCP App widget".into()),
             mime_type: Some("text/html;profile=mcp-app".to_string()),
             meta: Some(project(r#"{"openai/widgetPrefersBorder":true}"#)),
@@ -2198,20 +2245,20 @@ mod tests {
         assert_eq!(template["_meta"]["vendor/template"], "opaque");
 
         let content = serde_json::to_value(McpResourceContentDto {
-            uri: "ui://local-app/habits/widget.html".into(),
+            uri: "ui://fixture/widget.html".into(),
             content: "<!doctype html>".into(),
             mime_type: Some("text/html;profile=mcp-app".to_string()),
-            meta: Some(project(r#"{"openai/widgetDescription":"Habits widget"}"#)),
+            meta: Some(project(r#"{"openai/widgetDescription":"Fixture widget"}"#)),
         })
         .expect("serialize resource content dto");
         assert_eq!(content["mime_type"], "text/html;profile=mcp-app");
         assert_eq!(
             content["_meta"]["openai/widgetDescription"],
-            "Habits widget"
+            "Fixture widget"
         );
 
         let rich = serde_json::to_value(McpResourceContentsRich {
-            uri: "ui://local-app/habits/widget.html".into(),
+            uri: "ui://fixture/widget.html".into(),
             mime_type: Some("text/html;profile=mcp-app".to_string()),
             meta: Some(project(r#"{"openai/widgetCSP":{"connect_domains":[]}}"#)),
             text: Some("<!doctype html>".into()),

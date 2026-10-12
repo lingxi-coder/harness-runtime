@@ -49,7 +49,7 @@
 
 pub use crate::config::{
     FilesystemConfig, IgnoreViolationsConfig, NetworkConfig, RipgrepConfig, SandboxRuntimeConfig,
-    WindowsConfig,
+    Utf16IgnoreViolationsConfig, WindowsConfig,
 };
 pub use crate::manager::SandboxManager;
 pub use crate::path_utils::get_default_write_paths;

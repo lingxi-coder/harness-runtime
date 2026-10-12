@@ -127,8 +127,8 @@ fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProject
 }
 
 fn mobile_bundled_entries() -> Vec<Utf16JsonProjection> {
-    let mut registry = skill_api::SkillRegistry::new();
-    skill_api::builtin::register_mobile(&mut registry);
+    let mut registry = skill::SkillRegistry::new();
+    skill::builtin::register_mobile(&mut registry);
     let mut names = registry.names();
     names.sort_unstable();
     names
@@ -184,8 +184,8 @@ fn mobile_bundled_document(target: &ClientTextDto) -> Result<String, String> {
         .and_then(|units| units.strip_suffix(&[b'>' as u16]))
         .ok_or("invalid bundled skill identifier")?;
     let name = String::from_utf16(name_units).map_err(|_| "invalid bundled skill identifier")?;
-    let mut registry = skill_api::SkillRegistry::new();
-    skill_api::builtin::register_mobile(&mut registry);
+    let mut registry = skill::SkillRegistry::new();
+    skill::builtin::register_mobile(&mut registry);
     let skill = registry
         .get(&name)
         .ok_or_else(|| "This bundled skill is not available on mobile.".to_string())?;

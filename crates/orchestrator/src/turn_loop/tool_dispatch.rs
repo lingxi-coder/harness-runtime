@@ -4277,14 +4277,19 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                 None
                             }
                             Err(error) => {
+                                let typed_output_validation = matches!(
+                                    &error,
+                                    tool_api::tool_trait::ToolError::InvalidInput(_)
+                                );
                                 let detail = error.model_facing_message();
-                                Some(source_text_with(
+                                let message = source_text_with(
                                     Some(&detail),
                                     &format!(
                                         "tool.call step resolved {name} with a result that does not match its output shape: "
                                     ),
                                     "",
-                                ))
+                                );
+                                Some((message, typed_output_validation))
                             }
                         }
                     } else {
@@ -4294,13 +4299,15 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             } else {
                 None
             };
-            if let Some(message) = schema_error {
-                // A Mod-rewritten output that fails the tool's output schema
-                // is surfaced as the parser's validation message. The
-                // `<tool_use_error>` wrapper belongs to pre-execution input
-                // validation/unknown-tool paths, not this post-execution hook
-                // result path.
-                let content = message.clone();
+            if let Some((message, typed_output_validation)) = schema_error {
+                // Native wraps typed output-validation failures for the model.
+                // The persisted error payload and toolUseResult keep the
+                // unwrapped message; other parser failures remain bare.
+                let content = if typed_output_validation {
+                    source_text_with(Some(&message), "<tool_use_error>", "</tool_use_error>")
+                } else {
+                    message.clone()
+                };
                 if completed.lock().await.is_empty() {
                     orch.output.emit_tool_call(id, name, input).await;
                 }

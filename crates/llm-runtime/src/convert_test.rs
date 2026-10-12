@@ -650,6 +650,98 @@ mod tests {
     }
 
     #[test]
+    fn task_delivery_normalization_is_request_local_and_keeps_source_task_id() {
+        use lingxi_core::host::task_delivery::{TaskDeliveryPlacement, TaskDeliveryRequest};
+        let carrier_id = MessageId::new();
+        let previous = assistant("The command is running.");
+        let previous_id = previous.id();
+        let carrier = user(carrier_id, "finished task notification");
+        let history = vec![previous, carrier.clone(), carrier];
+        let original = history.clone();
+        let source = raw_projection(
+            r#"{"taskId":"task\ud800","status":"completed","statusMessage":"done","createdAt":"now","lastUpdatedAt":"now","result":{"content":[{"type":"text","text":"result\udfff"}],"isError":false},"retainedInHistory":true}"#,
+        );
+        let deliveries = std::collections::HashMap::from([(
+            carrier_id,
+            TaskDeliveryRequest {
+                snapshot: source.clone(),
+                placement: TaskDeliveryPlacement {
+                    starts_turn: true,
+                    in_drain_position: false,
+                    behind_earlier_messages: false,
+                    in_human_turn: false,
+                },
+            },
+        )]);
+        let normalize = || {
+            normalize_messages_for_api_with_tool_search_and_sources(
+                ConversationMessagesWithSources::new(history.clone()),
+                &HashSet::new(),
+                &deliveries,
+                false,
+                None,
+            )
+        };
+        let first = normalize();
+        let second = normalize();
+        assert_eq!(history, original);
+        assert_eq!(deliveries[&carrier_id].snapshot, source);
+        assert_eq!(
+            first.messages, second.messages,
+            "a fresh request replays the source carrier"
+        );
+        assert_eq!(
+            first.contributing_message_ids(),
+            HashSet::from([previous_id, carrier_id]),
+        );
+        let wire = to_llm_messages(first.messages).unwrap();
+        let calls: Vec<_> = wire
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                LlmBlock::ToolCall { name, input, .. } if name == "TaskOutput" => Some(input),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "duplicate carrier IDs are consumed only once per request"
+        );
+        assert_eq!(calls[0].as_json_source(), r#"{"taskId":"task\ud800"}"#);
+    }
+
+    #[test]
+    fn invalid_task_delivery_keeps_the_ordinary_user_projection() {
+        use lingxi_core::host::task_delivery::{TaskDeliveryPlacement, TaskDeliveryRequest};
+        let carrier_id = MessageId::new();
+        let history = vec![
+            user(MessageId::new(), "first"),
+            user(carrier_id, "ordinary"),
+        ];
+        let deliveries = std::collections::HashMap::from([(
+            carrier_id,
+            TaskDeliveryRequest {
+                snapshot: raw_projection("null"),
+                placement: TaskDeliveryPlacement {
+                    starts_turn: true,
+                    in_drain_position: false,
+                    behind_earlier_messages: false,
+                    in_human_turn: false,
+                },
+            },
+        )]);
+        let actual = normalize_messages_for_api_with_tool_search_and_sources(
+            ConversationMessagesWithSources::new(history.clone()),
+            &HashSet::new(),
+            &deliveries,
+            false,
+            None,
+        );
+        assert_eq!(actual.messages, normalize_messages_for_api(history));
+    }
+
+    #[test]
     fn two_consecutive_users_merge_into_one_keeping_first_id_and_order() {
         let first_id = MessageId::new();
         let out =
@@ -663,6 +755,164 @@ mod tests {
             }
             other => panic!("expected User, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn typed_text_attachment_appends_without_user_seam_and_keeps_both_sources() {
+        let previous_id = MessageId::new();
+        let attachment_id = MessageId::new();
+        let mut attachment = user(attachment_id, "attachment text");
+        if let ConversationMessage::User { is_meta, .. } = &mut attachment {
+            *is_meta = true;
+        }
+        let normalized = normalize_messages_for_api_with_tool_search_and_sources(
+            ConversationMessagesWithSources::new(vec![user(previous_id, "body text"), attachment]),
+            &HashSet::from([attachment_id]),
+            &std::collections::HashMap::new(),
+            false,
+            None,
+        );
+
+        assert_eq!(normalized.messages.len(), 1);
+        assert_eq!(
+            normalized.contributing_message_ids(),
+            HashSet::from([previous_id, attachment_id])
+        );
+        assert!(matches!(
+            &normalized.messages[0],
+            ConversationMessage::User { content, .. }
+                if text_of(content) == vec!["body text", "attachment text"]
+        ));
+    }
+
+    #[test]
+    fn ordinary_meta_user_without_typed_identity_keeps_the_user_seam() {
+        let attachment_id = MessageId::new();
+        let mut meta_user = user(attachment_id, "ordinary meta row");
+        if let ConversationMessage::User { is_meta, .. } = &mut meta_user {
+            *is_meta = true;
+        }
+        let normalized = normalize_messages_for_api_with_tool_search_and_sources(
+            ConversationMessagesWithSources::new(vec![user(MessageId::new(), "body"), meta_user]),
+            &HashSet::new(),
+            &std::collections::HashMap::new(),
+            false,
+            None,
+        );
+
+        assert!(matches!(
+            &normalized.messages[0],
+            ConversationMessage::User { content, .. }
+                if text_of(content) == vec!["body\n", "ordinary meta row"]
+        ));
+    }
+
+    #[test]
+    fn typed_utf16_attachment_keeps_exact_units_and_source_identity_without_seam() {
+        let previous_id = MessageId::new();
+        let attachment_id = MessageId::new();
+        let attachment = user_blocks(
+            attachment_id,
+            vec![ProtoBlock::TextJsUtf16 {
+                text: "tail �".into(),
+                utf16_code_units: vec![
+                    b't' as u16,
+                    b'a' as u16,
+                    b'i' as u16,
+                    b'l' as u16,
+                    b' ' as u16,
+                    0xd800,
+                ],
+                citations: None,
+            }],
+        );
+        let normalized = normalize_messages_for_api_with_tool_search_and_sources(
+            ConversationMessagesWithSources::new(vec![user(previous_id, "head"), attachment]),
+            &HashSet::from([attachment_id]),
+            &std::collections::HashMap::new(),
+            false,
+            None,
+        );
+
+        assert_eq!(
+            normalized.contributing_message_ids(),
+            HashSet::from([previous_id, attachment_id])
+        );
+        let converted = to_llm_messages(normalized.messages).unwrap();
+        assert!(matches!(
+            &converted[0].content[1],
+            LlmBlock::TextJsUtf16 { utf16_code_units, .. }
+                if utf16_code_units == &[b't' as u16, b'a' as u16, b'i' as u16, b'l' as u16, b' ' as u16, 0xd800]
+        ));
+    }
+
+    #[test]
+    fn typed_text_after_tool_result_uses_native_result_string_fold_and_sources() {
+        let result_row_id = MessageId::new();
+        let attachment_id = MessageId::new();
+        let normalized = normalize_messages_for_api_with_tool_search_and_sources(
+            ConversationMessagesWithSources::new(vec![
+                user_blocks(result_row_id, vec![tool_result("  result  ")]),
+                user(attachment_id, "  attachment text  "),
+            ]),
+            &HashSet::from([attachment_id]),
+            &std::collections::HashMap::new(),
+            false,
+            None,
+        );
+
+        assert_eq!(
+            normalized.contributing_message_ids(),
+            HashSet::from([result_row_id, attachment_id])
+        );
+        assert!(matches!(
+            &normalized.messages[0],
+            ConversationMessage::User { content, .. }
+                if matches!(&content[..], [ProtoBlock::ToolResult { content, .. }]
+                    if content.string_at("") == Some("result\n\nattachment text"))
+        ));
+    }
+
+    #[test]
+    fn typed_text_after_tool_result_array_uses_native_trailing_text_rule() {
+        let result_row_id = MessageId::new();
+        let attachment_id = MessageId::new();
+        let result = ProtoBlock::ToolResult {
+            tool_use_id: ToolUseId::new(),
+            content: "display result".into(),
+            is_error: Some(false),
+            provider_tool_use_id: None,
+            content_blocks: Some(raw_projection(r#"[{"type":"text","text":"result"}]"#)),
+        };
+        let normalized = normalize_messages_for_api_with_tool_search_and_sources(
+            ConversationMessagesWithSources::new(vec![
+                user_blocks(result_row_id, vec![result]),
+                user(attachment_id, "attachment text"),
+            ]),
+            &HashSet::from([attachment_id]),
+            &std::collections::HashMap::new(),
+            false,
+            None,
+        );
+
+        assert_eq!(
+            normalized.contributing_message_ids(),
+            HashSet::from([result_row_id, attachment_id])
+        );
+        let ConversationMessage::User { content, .. } = &normalized.messages[0] else {
+            panic!("expected merged user result");
+        };
+        let ProtoBlock::ToolResult {
+            content_blocks: Some(content_blocks),
+            ..
+        } = &content[0]
+        else {
+            panic!("expected tool result content array");
+        };
+        assert_eq!(
+            content_blocks.to_json_string().unwrap(),
+            r#"[{"type":"text","text":"result\n"},{"type":"text","text":"attachment text"}]"#
+        );
     }
 
     #[test]
@@ -1419,8 +1669,13 @@ mod tests {
             },
             user(current_id, "current summary"),
         ]);
-        let normalized =
-            normalize_messages_for_api_with_tool_search_and_sources(messages, true, None);
+        let normalized = normalize_messages_for_api_with_tool_search_and_sources(
+            messages,
+            &HashSet::new(),
+            &std::collections::HashMap::new(),
+            true,
+            None,
+        );
         let paired = ensure_tool_result_pairing_with_sources(normalized);
         let sources = paired.contributing_message_ids();
         assert!(!sources.contains(&discarded_id));
@@ -1447,6 +1702,8 @@ mod tests {
                 },
                 user(retained_id, "ordinary user content"),
             ]),
+            &HashSet::new(),
+            &std::collections::HashMap::new(),
             true,
             None,
         );
@@ -1484,6 +1741,8 @@ fn queued_api_system_rows_merge_exact_text_and_admission_sources() {
             row(first, vec![0xD800]),
             row(second, vec![0xD801]),
         ]),
+        &HashSet::new(),
+        &std::collections::HashMap::new(),
         false,
         None,
     );
@@ -1497,4 +1756,100 @@ fn queued_api_system_rows_merge_exact_text_and_admission_sources() {
     assert!(
         matches!(&messages[0].content[0],LlmBlock::TextJsUtf16 {utf16_code_units,..} if utf16_code_units==&vec![0xD800,10,10,0xD801])
     );
+}
+
+#[test]
+fn ordinary_user_text_seam_preserves_utf16_for_all_text_block_pairs() {
+    let make_user = |id, content| ConversationMessage::User {
+        api_message_override: None,
+        id,
+        content: vec![content],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
+    };
+    let text_block = |js_utf16: bool, prefix: &str, unpaired: u16| {
+        let citations = Some(Some(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"{"source":"preserved"}"#)
+                .unwrap(),
+        ));
+        if js_utf16 {
+            ProtoBlock::TextJsUtf16 {
+                text: String::from_utf16_lossy(&[unpaired]),
+                utf16_code_units: vec![unpaired],
+                citations,
+            }
+        } else {
+            ProtoBlock::Text {
+                text: prefix.to_owned(),
+                citations,
+            }
+        }
+    };
+
+    for (left_is_utf16, right_is_utf16) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let left_id = MessageId::new();
+        let right_id = MessageId::new();
+        let normalized = normalize_messages_for_api_with_tool_search_and_sources(
+            ConversationMessagesWithSources::new(vec![
+                make_user(left_id, text_block(left_is_utf16, "left", 0xD800)),
+                make_user(right_id, text_block(right_is_utf16, "right", 0xD801)),
+            ]),
+            &HashSet::new(),
+            &std::collections::HashMap::new(),
+            false,
+            None,
+        );
+
+        assert_eq!(normalized.messages.len(), 1);
+        assert_eq!(
+            normalized.contributing_message_ids(),
+            HashSet::from([left_id, right_id])
+        );
+        assert_eq!(normalized.block_sources[0].len(), 2);
+        assert_eq!(normalized.block_sources[0][0], HashSet::from([left_id]));
+        assert_eq!(normalized.block_sources[0][1], HashSet::from([right_id]));
+
+        let llm_messages = to_llm_messages(normalized.messages).unwrap();
+        let content = &llm_messages[0].content;
+        assert_eq!(content.len(), 2);
+        if left_is_utf16 {
+            assert!(matches!(
+                &content[0],
+                LlmBlock::TextJsUtf16 { text, utf16_code_units, citations: Some(Some(citations)), .. }
+                    if text == "\u{FFFD}\n"
+                        && utf16_code_units == &[0xD800, b'\n' as u16]
+                        && citations.as_json_source() == r#"{"source":"preserved"}"#
+            ));
+        } else {
+            assert!(matches!(
+                &content[0],
+                LlmBlock::Text { text, citations: Some(Some(citations)), .. }
+                    if text == "left\n"
+                        && citations.as_json_source() == r#"{"source":"preserved"}"#
+            ));
+        }
+        if right_is_utf16 {
+            assert!(matches!(
+                &content[1],
+                LlmBlock::TextJsUtf16 { text, utf16_code_units, citations: Some(Some(citations)), .. }
+                    if text == "\u{FFFD}"
+                        && utf16_code_units == &[0xD801]
+                        && citations.as_json_source() == r#"{"source":"preserved"}"#
+            ));
+        } else {
+            assert!(matches!(
+                &content[1],
+                LlmBlock::Text { text, citations: Some(Some(citations)), .. }
+                    if text == "right"
+                        && citations.as_json_source() == r#"{"source":"preserved"}"#
+            ));
+        }
+    }
 }

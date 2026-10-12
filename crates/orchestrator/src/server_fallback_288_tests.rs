@@ -1,16 +1,17 @@
 //! Main-query integration checks for admitted server-fallback events.
 
 use crate::test_support::{
-    mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-    StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, noop_hook_executor,
 };
 use crate::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_core::host::{refusal_server::Policy, OrchestratorHandle, ResumeRuntimeSnapshot};
+use lingxi_core::host::{OrchestratorHandle, ResumeRuntimeSnapshot, refusal_server::Policy};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId};
 use llm_runtime::history::HistoryServerFallback;
 use llm_runtime::model::allowlist::ModelEnforcement;
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +47,11 @@ fn fallback_info(
         }
     }))
     .expect("valid SDK server fallback observation")
+}
+
+fn model_allowlist(entries: &[&str]) -> Utf16JsonProjection {
+    Utf16JsonProjection::array(entries.iter().map(|entry| (*entry).into()).collect())
+        .expect("test model allowlist is an array of strings")
 }
 
 fn attach_fallback(response: &mut HistoryResponse, info: &HistoryServerFallback) {
@@ -287,10 +293,12 @@ async fn batched_cost_handoff_keeps_complete_and_incomplete_native_quotes_distin
         let state = tracker.snapshot().await;
         assert_eq!(state.total_nano_usd, expected_nano);
         assert_eq!(!state.unpriced_models.is_empty(), unpriced);
-        assert!(state
-            .per_model_usage
-            .keys()
-            .all(|model| model.model == "served-model"));
+        assert!(
+            state
+                .per_model_usage
+                .keys()
+                .all(|model| model.model == "served-model")
+        );
         assert_eq!(state.total_web_search_requests, 2);
     }
 }
@@ -469,11 +477,13 @@ fn persisted_profile_extensions_keep_absent_distinct_from_explicit_null() {
     }))
     .unwrap();
     assert_eq!(absent.previous_profile, None);
-    assert!(!serde_json::to_value(absent)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .contains_key("previousProfile"));
+    assert!(
+        !serde_json::to_value(absent)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("previousProfile")
+    );
 }
 
 #[tokio::test]
@@ -554,7 +564,7 @@ async fn hot_resume_with_empty_snapshot_keeps_live_server_route_and_rehydrates_l
             model: source.into(),
             server_refusal_fallback: Some(server_lane_policy(fallback)),
             server_fallback_model_enforcement: Some(ModelEnforcement::Active {
-                allowlist: vec![fallback.into()],
+                allowlist: model_allowlist(&[fallback]),
                 overrides: BTreeMap::new(),
             }),
             ..Default::default()
@@ -939,7 +949,7 @@ async fn accepted_event_routes_next_request_and_clear_restores_model_and_profile
             max_turns: 4,
             server_refusal_fallback: Some(server_lane_policy(declared)),
             server_fallback_model_enforcement: Some(ModelEnforcement::Active {
-                allowlist: vec!["sonnet".into()],
+                allowlist: model_allowlist(&["sonnet"]),
                 overrides: BTreeMap::new(),
             }),
             ..Default::default()
@@ -1056,7 +1066,7 @@ async fn same_physical_request_can_retarget_owned_latch_and_clear_restores_first
         OrchestratorConfig {
             model: source.into(),
             server_fallback_model_enforcement: Some(ModelEnforcement::Active {
-                allowlist: vec!["sonnet".into(), "haiku".into()],
+                allowlist: model_allowlist(&["sonnet", "haiku"]),
                 overrides: BTreeMap::new(),
             }),
             ..Default::default()
@@ -1201,11 +1211,13 @@ async fn same_model_server_hop_keeps_session_effects_but_suppresses_the_notice()
     // observations arm the refusal request header (native 2.1.288 oracle).
     assert!(!selection.header_armed);
     drop(selection);
-    assert!(!output
-        .snapshot()
-        .await
-        .iter()
-        .any(|event| matches!(event, lingxi_core::host::OutputEvent::SystemNotice { .. })));
+    assert!(
+        !output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, lingxi_core::host::OutputEvent::SystemNotice { .. }))
+    );
 }
 
 #[tokio::test]
@@ -1255,9 +1267,11 @@ async fn local_server_notice_is_visible_and_persisted_without_mutating_session_r
                         .unwrap(),
                     crate::server_fallback::ServerFallbackAdmission::Applied
                 );
-                assert!(crate::server_fallback::flush_pending_notice(&orch)
-                    .await
-                    .is_some());
+                assert!(
+                    crate::server_fallback::flush_pending_notice(&orch)
+                        .await
+                        .is_some()
+                );
             }),
         )
         .await;
@@ -1323,14 +1337,18 @@ async fn local_server_notice_is_visible_and_persisted_without_mutating_session_r
         })
         .collect();
     assert_eq!(notices.len(), 1);
-    assert!(notices[0]
-        .string_at("")
-        .unwrap()
-        .contains("This response was completed by"));
-    assert!(notices[0]
-        .string_at("")
-        .unwrap()
-        .contains("Your session model is unchanged."));
+    assert!(
+        notices[0]
+            .string_at("")
+            .unwrap()
+            .contains("This response was completed by")
+    );
+    assert!(
+        notices[0]
+            .string_at("")
+            .unwrap()
+            .contains("Your session model is unchanged.")
+    );
 }
 
 #[tokio::test]
@@ -1350,7 +1368,7 @@ async fn query_scope_flushes_pending_notice_on_error_return() {
         OrchestratorConfig {
             model: source.into(),
             server_fallback_model_enforcement: Some(ModelEnforcement::Active {
-                allowlist: vec![target.into()],
+                allowlist: model_allowlist(&[target]),
                 overrides: BTreeMap::new(),
             }),
             ..Default::default()
@@ -1399,7 +1417,7 @@ async fn server_multihops_in_later_query_preserve_first_restore_route() {
         OrchestratorConfig {
             model: original.into(),
             server_fallback_model_enforcement: Some(ModelEnforcement::Active {
-                allowlist: vec![first_route.into(), second_route.into(), final_route.into()],
+                allowlist: model_allowlist(&[first_route, second_route, final_route]),
                 overrides: BTreeMap::new(),
             }),
             ..Default::default()
@@ -1513,7 +1531,7 @@ async fn admitted_server_hop_snapshots_an_intervening_user_model_pick() {
         OrchestratorConfig {
             model: source.into(),
             server_fallback_model_enforcement: Some(ModelEnforcement::Active {
-                allowlist: vec!["sonnet".into(), "haiku".into()],
+                allowlist: model_allowlist(&["sonnet", "haiku"]),
                 overrides: BTreeMap::new(),
             }),
             ..Default::default()
@@ -1566,7 +1584,7 @@ async fn admitted_server_hop_snapshots_an_intervening_provider_pick() {
         OrchestratorConfig {
             model: source.into(),
             server_fallback_model_enforcement: Some(ModelEnforcement::Active {
-                allowlist: vec!["sonnet".into()],
+                allowlist: model_allowlist(&["sonnet"]),
                 overrides: BTreeMap::new(),
             }),
             ..Default::default()
@@ -1628,7 +1646,7 @@ async fn implicit_request_profile_accepts_resolved_server_profile() {
         OrchestratorConfig {
             model: source.into(),
             server_fallback_model_enforcement: Some(ModelEnforcement::Active {
-                allowlist: vec!["sonnet".into()],
+                allowlist: model_allowlist(&["sonnet"]),
                 overrides: BTreeMap::new(),
             }),
             ..Default::default()
@@ -1697,7 +1715,7 @@ async fn declined_received_model_discards_text_and_tool_use() {
             max_turns: 4,
             server_refusal_fallback: Some(server_lane_policy(declared)),
             server_fallback_model_enforcement: Some(ModelEnforcement::Active {
-                allowlist: vec!["opus".into()],
+                allowlist: model_allowlist(&["opus"]),
                 overrides: BTreeMap::new(),
             }),
             ..Default::default()
@@ -1729,7 +1747,7 @@ async fn declined_received_model_discards_text_and_tool_use() {
 fn allowlist_default_exception_uses_received_canonical_identity() {
     let (orch, _, _) = orchestrator(
         OrchestratorConfig {
-            server_fallback_regular_available_models: Some(Vec::new()),
+            server_fallback_regular_available_models: Some(model_allowlist(&[])),
             server_fallback_default_model: Some(" Claude-Sonnet-4-8[2m] ".into()),
             server_fallback_model_enforcement: Some(ModelEnforcement::Inactive),
             ..Default::default()
@@ -1817,8 +1835,10 @@ async fn ordinary_response_without_an_admitted_event_keeps_the_selected_route() 
     let session = orch.session.lock().await;
     assert_eq!(session.model, source);
     assert!(session.model_profile.is_none());
-    assert!(session
-        .history
-        .iter()
-        .any(|message| { message_contains_text(message, "ordinary answer") }));
+    assert!(
+        session
+            .history
+            .iter()
+            .any(|message| { message_contains_text(message, "ordinary answer") })
+    );
 }

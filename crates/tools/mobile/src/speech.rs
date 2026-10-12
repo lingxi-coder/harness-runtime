@@ -429,6 +429,11 @@ mod tests {
                     status: Default::default(),
                 }),
                 AudioOperation::EndOwner => Ok(AudioOperationSuccess::OwnerEnded),
+                AudioOperation::Capture { .. }
+                | AudioOperation::Play { .. }
+                | AudioOperation::Transcribe { .. } => {
+                    panic!("Speech tool mock received low-level audio operation: {operation:?}")
+                }
             }
         }
 
@@ -623,7 +628,10 @@ mod tests {
 
     #[tokio::test]
     async fn post_handshake_runtime_validation_uses_live_support_without_advertising_early() {
-        let (context, audio) = fake_context(Vec::new(), AudioReadinessState::Unavailable);
+        // The initial handshake has no advertised operations. Once Speak is
+        // reported as supported below, model the ready backend that can
+        // actually execute it; readiness is a separate runtime gate.
+        let (context, audio) = fake_context(Vec::new(), AudioReadinessState::Ready);
         let tool = SpeechTool::new(context);
         let input = json!({ "action": "speak", "text": "hello after handshake" });
         let input_source = generated_projection(&input);

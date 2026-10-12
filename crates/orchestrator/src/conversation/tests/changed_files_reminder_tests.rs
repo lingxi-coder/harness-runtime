@@ -4,7 +4,10 @@ use crate::test_support::{
 };
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
+use lingxi_core::host::FileSystem;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use platform_posix::fs::PosixFileSystem;
+use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -116,7 +119,22 @@ async fn a_file_changed_on_disk_emits_one_wrapped_reminder_and_does_not_repeat()
 
     let msgs = orch.changed_files_reminder_messages(None).await;
     assert_eq!(msgs.len(), 1, "exactly one changed file");
-    let text = msgs[0].text_content();
+    assert_eq!(
+        msgs[0].payload.string_at("/type"),
+        Some("edited_text_file"),
+        "changed-file reminders retain Native's typed attachment"
+    );
+    assert_eq!(
+        msgs[0].payload.string_at("/filename"),
+        Some(path.to_str().unwrap()),
+        "the typed filename is the exact selected read route"
+    );
+    let text = msgs[0].message.text_content();
+    assert_eq!(
+        msgs[0].rendered.string_at("/0/content"),
+        Some(text.as_str()),
+        "the ingress row carries the exact original rendered cache"
+    );
     assert!(text.starts_with("<system-reminder>\n"), "got: {text}");
     assert!(text.ends_with("\n</system-reminder>"), "got: {text}");
     assert!(
@@ -660,7 +678,7 @@ async fn changed_file_reminder_uses_first_permitted_alias_in_observation_order()
 
     let reminders = orch.changed_files_reminder_messages(None).await;
     assert_eq!(reminders.len(), 1);
-    let text = reminders[0].text_content();
+    let text = reminders[0].message.text_content();
     assert!(
         text.contains(&permitted_path.to_string_lossy().to_string()),
         "{text}"
@@ -807,7 +825,7 @@ async fn native_sy_gate_uses_restricted_and_outside_block_and_checks_allowed_roo
 
         let reminders = orch.changed_files_reminder_messages(None).await;
         assert_eq!(reminders.len(), 1, "only the in-root route is admitted");
-        let text = reminders[0].text_content();
+        let text = reminders[0].message.text_content();
         assert!(text.contains("alias.rs"), "{text}");
         assert!(!text.contains("outside.rs"), "{text}");
         assert_eq!(
@@ -881,7 +899,7 @@ async fn native_reminder_route_set_accepts_31_leaf_links_and_rejects_32() {
 
     let reminders = orch.changed_files_reminder_messages(None).await;
     assert_eq!(reminders.len(), 1);
-    let text = reminders[0].text_content();
+    let text = reminders[0].message.text_content();
     assert!(
         text.contains(
             &paths
@@ -1073,6 +1091,7 @@ async fn rendered_memory_seed_retains_prompt_route_and_can_emit_changed_file_not
         "rendered memory was in Native readFileState"
     );
     assert!(reminders[0]
+        .message
         .text_content()
         .contains("changed on disk since you last read it."));
 }
@@ -1157,7 +1176,10 @@ async fn unrendered_memory_seed_retains_native_route_for_changed_file_checks() {
         "the live non-rendered seed is a Native candidate"
     );
 
-    assert!(reminders[0].text_content().contains("changed after seed"));
+    assert!(reminders[0]
+        .message
+        .text_content()
+        .contains("changed after seed"));
 }
 
 #[tokio::test]
@@ -1222,7 +1244,7 @@ async fn partial_reads_skip_but_frontmatter_memory_uses_raw_disk_content() {
         "the partial Read entry stays filtered, but full raw memory remains eligible"
     );
 
-    assert!(reminders[0].text_content().contains("new body"));
+    assert!(reminders[0].message.text_content().contains("new body"));
 }
 
 #[tokio::test]
@@ -1289,7 +1311,10 @@ async fn host_seed_records_its_current_route_and_can_emit_changed_file_notice() 
         1,
         "Native NTr scans host-seeded read-state keys"
     );
-    assert!(reminders[0].text_content().contains("new host snapshot"));
+    assert!(reminders[0]
+        .message
+        .text_content()
+        .contains("new host snapshot"));
 }
 
 #[tokio::test]
@@ -1335,7 +1360,7 @@ async fn the_snippet_budget_blanks_later_files() {
 
     let msgs = orch.changed_files_reminder_messages(None).await;
     assert_eq!(msgs.len(), 3, "three changed files");
-    let last = msgs[2].text_content();
+    let last = msgs[2].message.text_content();
     assert!(
         last.contains(&small.to_string_lossy().to_string()),
         "the LRU-oldest entry is rendered last; got: {last}"
@@ -1349,8 +1374,226 @@ the snippet budget; use Read if you need the current content."
     );
     assert!(
         msgs[0]
+            .message
             .text_content()
             .contains("Here are the relevant changes (shown with line numbers):"),
         "the first file keeps its snippet"
+    );
+}
+
+#[tokio::test]
+async fn changed_file_attachment_persists_original_and_screens_warm_and_resumed_requests() {
+    let root = TempDir::new().unwrap();
+    let cwd = root.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let path = cwd.join("watched.rs");
+    std::fs::write(&path, "new bytes\n").unwrap();
+    let cwd_string = cwd.to_string_lossy().into_owned();
+    let session_id = lingxi_core::types::SessionId::new();
+    let transcript =
+        session::jsonl::session_path(root.path(), &cwd_string, &session_id.as_uuid().to_string());
+    let session_uuid = session_id.as_uuid();
+    let filesystem: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(root.path().to_owned()));
+    let module = root.path().join("changed-file-mod.js");
+    std::fs::write(
+        &module,
+        r#"let calls = 0;
+        export function register(on) {
+          on('prompt.attachment', { type: 'edited_text_file' }, ($, e, next) => {
+            if (e.origin.kind !== 'engine') throw new Error('edited file origin is not engine');
+            return next({ ...e, text: `changed-file rewrite ${++calls}: ${e.text}` });
+          });
+        }"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "changed-file-mod",
+        root.path(),
+        &module,
+        tool_api::tool_trait::generated_builtin_result(&serde_json::json!({})),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let hook_registry = Arc::new(tokio::sync::RwLock::new(registry));
+
+    let response = || {
+        crate::test_support::mock_message_response(
+            vec![llm_runtime::ContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+                citations: None,
+            }],
+            Some("end_turn"),
+        )
+    };
+    let api = Arc::new(MockApiClient::new(vec![response(), response()]));
+    let mut orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        policy_gate(&cwd),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        cwd.clone(),
+    );
+    let mut read_context = tool_api::test_support::ctx_for_file_tools(
+        tool_api::test_support::make_dummy_fs(),
+        Arc::new(telemetry::AnalyticsBus::new()),
+        vec![cwd.clone()],
+    );
+    read_context.read_file_state = orch.prompt_runtime.read_state_map.clone();
+    Arc::get_mut(&mut orch.tools)
+        .expect("test fixture exclusively owns its tool registry")
+        .register_builtin(Arc::new(tool_file::FileReadTool::new(read_context)));
+    let orch = orch
+        .with_session_id(session_id)
+        .with_jsonl_writer(Arc::new(JsonlWriter::new(
+            transcript.clone(),
+            filesystem.clone(),
+        )))
+        .with_hook_registry(hook_registry);
+    seed(&orch, &path, "old bytes\n", 0, full_read("old bytes\n"));
+
+    orch.run_turn("inspect the file").await.unwrap();
+    let first_requests = api.captured_msgs().await;
+    assert_eq!(first_requests.len(), 1);
+    let first_changed: Vec<_> = first_requests[0]
+        .iter()
+        .filter_map(|message| {
+            let text = message.text_content();
+            text.contains("changed on disk since you last read it.")
+                .then_some(text)
+        })
+        .collect();
+    assert_eq!(
+        first_changed.len(),
+        1,
+        "one changed-file row reaches the API"
+    );
+    assert!(first_changed[0].contains("changed-file rewrite 1:"));
+    let outgoing_attachment_id = first_requests[0]
+        .iter()
+        .find(|message| {
+            message
+                .text_content()
+                .contains("changed on disk since you last read it.")
+        })
+        .expect("the changed-file request copy has a transcript identity")
+        .id()
+        .as_uuid()
+        .to_string();
+
+    let first_rows = JsonlReader::new(transcript.clone(), filesystem.clone())
+        .read_all()
+        .await
+        .unwrap();
+    let changed_rows: Vec<_> = first_rows
+        .iter()
+        .filter(|row| {
+            row.message_type == "attachment"
+                && row
+                    .attachment_projection
+                    .as_ref()
+                    .and_then(|payload| payload.string_at("/type"))
+                    == Some("edited_text_file")
+        })
+        .collect();
+    assert_eq!(changed_rows.len(), 1, "the typed row is persisted once");
+    let persisted = changed_rows[0];
+    assert_eq!(
+        persisted.uuid, outgoing_attachment_id,
+        "the outgoing copy and persisted typed attachment share one identity"
+    );
+    assert_eq!(
+        persisted
+            .attachment_projection
+            .as_ref()
+            .and_then(|payload| payload.string_at("/filename")),
+        Some(path.to_str().unwrap())
+    );
+    assert!(persisted
+        .attachment_projection
+        .as_ref()
+        .unwrap()
+        .string_at("/snippet")
+        .is_some_and(|snippet| snippet.contains("new bytes")));
+    assert_eq!(persisted.extra.string_at("/renderedRole"), Some("system"));
+    let original_rendered = persisted
+        .extra
+        .string_at("/rendered/0/content")
+        .expect("the original rendering is cached beside the typed attachment");
+    assert!(original_rendered.contains("changed on disk since you last read it."));
+    assert!(!original_rendered.contains("changed-file rewrite"));
+
+    // The same transcript identity reuses the first Mod answer on a later
+    // request, even though the actual Read refreshed its cache after the edit.
+    orch.run_turn("continue").await.unwrap();
+    let warm_requests = api.captured_msgs().await;
+    assert_eq!(warm_requests.len(), 2);
+    assert!(warm_requests[1]
+        .iter()
+        .any(|message| message.text_content().contains("changed-file rewrite 1:")));
+    assert!(!warm_requests[1]
+        .iter()
+        .any(|message| message.text_content().contains("changed-file rewrite 2:")));
+
+    // Cold resume reconstructs the descriptor from the typed row and runs the
+    // resolver again, while keeping the original JSONL payload and cache.
+    let cold_api = Arc::new(MockApiClient::new(vec![response()]));
+    let cold = ConversationOrchestrator::with_resume(
+        OrchestratorConfig::default(),
+        session_uuid,
+        root.path().to_owned(),
+        cwd_string,
+        filesystem.clone(),
+        cold_api.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        policy_gate(&cwd),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        cwd,
+        Some(Arc::new(JsonlWriter::new(
+            transcript.clone(),
+            filesystem.clone(),
+        ))),
+    )
+    .await
+    .expect("resume the changed-file attachment transcript")
+    .with_hook_registry({
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        Arc::new(tokio::sync::RwLock::new(registry))
+    });
+    cold.run_turn("cold resume").await.unwrap();
+    let cold_requests = cold_api.captured_msgs().await;
+    assert_eq!(cold_requests.len(), 1);
+    assert!(cold_requests[0]
+        .iter()
+        .any(|message| message.text_content().contains("changed-file rewrite 2:")));
+
+    let final_rows = JsonlReader::new(transcript, filesystem)
+        .read_all()
+        .await
+        .unwrap();
+    let final_changed_rows: Vec<_> = final_rows
+        .iter()
+        .filter(|row| {
+            row.message_type == "attachment"
+                && row
+                    .attachment_projection
+                    .as_ref()
+                    .and_then(|payload| payload.string_at("/type"))
+                    == Some("edited_text_file")
+        })
+        .collect();
+    assert_eq!(final_changed_rows.len(), 1);
+    assert_eq!(
+        final_changed_rows[0].extra.string_at("/rendered/0/content"),
+        Some(original_rendered)
     );
 }

@@ -120,7 +120,10 @@ for line in sys.stdin:
     let orch = ConversationOrchestrator::into_shared(
         ConversationOrchestrator::new_with_streaming(
             OrchestratorConfig {
-                output_style: Some("Explanatory".into()),
+                output_style: Some(
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""Explanatory""#)
+                        .unwrap(),
+                ),
                 fallback_model: Some("fallback-first, fallback-second".into()),
                 ..OrchestratorConfig::default()
             },

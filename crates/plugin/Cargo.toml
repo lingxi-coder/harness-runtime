@@ -12,7 +12,7 @@ tool-api = { path = "../tool-api" }
 hooks = { path = "../hooks" }
 mcp = { path = "../mcp" }
 agent = { path = "../agent" }
-skill-api = { path = "../skill-api" }
+skill = { path = "../skill" }
 command-api = { path = "../command-api" }
 outputstyles = { path = "../outputstyles" }
 lsp = { path = "../lsp" }

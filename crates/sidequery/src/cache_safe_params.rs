@@ -11,9 +11,9 @@
 //! (see spec §B10 anti-stale rule).
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use lingxi_core::types::ConversationMessage;
+use lingxi_core::types::{ConversationMessage, MessageId};
 use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -50,6 +50,15 @@ pub struct CacheSafeParams {
     pub effort: Option<serde_json::Value>,
     /// Conversation prefix forks must replay verbatim.
     pub fork_context_messages: Vec<ConversationMessage>,
+    /// Identities of typed attachments already merged into the parent's
+    /// prompt. Forks replay these source messages verbatim and must carry the
+    /// exact identity set into provider request normalization; inferring this
+    /// from `ConversationMessage::is_meta` loses ordinary typed messages.
+    pub typed_attachment_ids: HashSet<MessageId>,
+    /// Native task-delivery snapshots and the placement facts captured for
+    /// these cached history rows. Forks preserve the identity-keyed map and
+    /// filter it against the exact replayed prefix.
+    pub task_deliveries: HashMap<MessageId, lingxi_core::host::task_delivery::TaskDeliveryRequest>,
     /// Main-session transcript used by compact continuation messages to point
     /// the resumed model at the complete pre-compact record.
     pub transcript_path: Option<PathBuf>,

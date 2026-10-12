@@ -618,10 +618,14 @@ fn source_note(schema: &Utf16JsonProjection, combinators: &[&str]) -> String {
         "Provide parameters for at least one of"
     };
     let Some(branches) = source_subtree(schema, combinator) else {
-        return format!("Input constraint: {verb} the documented parameter groups (flattened from a JSON Schema {combinator}).");
+        return format!(
+            "Input constraint: {verb} the documented parameter groups (flattened from a JSON Schema {combinator})."
+        );
     };
     let Some(length) = branches.array_len("") else {
-        return format!("Input constraint: {verb} the documented parameter groups (flattened from a JSON Schema {combinator}).");
+        return format!(
+            "Input constraint: {verb} the documented parameter groups (flattened from a JSON Schema {combinator})."
+        );
     };
     let mut groups = Vec::<String>::new();
     for index in 0..length {
@@ -636,7 +640,9 @@ fn source_note(schema: &Utf16JsonProjection, combinators: &[&str]) -> String {
         }
     }
     if groups.is_empty() {
-        return format!("Input constraint: {verb} the documented parameter groups (flattened from a JSON Schema {combinator}).");
+        return format!(
+            "Input constraint: {verb} the documented parameter groups (flattened from a JSON Schema {combinator})."
+        );
     }
     let joined = groups
         .iter()

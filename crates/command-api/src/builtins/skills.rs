@@ -24,7 +24,7 @@ trait SkillRowExt {
     fn estimated_tokens(&self) -> usize;
 }
 
-impl SkillRowExt for skill_api::FileSkillRow {
+impl SkillRowExt for skill::FileSkillRow {
     fn estimated_tokens(&self) -> usize {
         let mut parts: Vec<&str> = Vec::with_capacity(3);
         if !self.name.is_empty() {
@@ -144,7 +144,7 @@ fn lingxi_home_dir() -> PathBuf {
 
 #[cfg(test)]
 fn render_available_skills(cwd: &Path, lingxi_home: &Path) -> String {
-    render_sections(&skill_api::load_file_skill_sections(cwd, lingxi_home))
+    render_sections(&skill::load_file_skill_sections(cwd, lingxi_home))
 }
 
 fn render_available_skills_with_roots(
@@ -153,7 +153,7 @@ fn render_available_skills_with_roots(
     managed_dir: Option<&Path>,
     additional_skill_dirs: &[PathBuf],
 ) -> String {
-    render_sections(&skill_api::load_file_skill_sections_with_roots(
+    render_sections(&skill::load_file_skill_sections_with_roots(
         cwd,
         lingxi_home,
         managed_dir,
@@ -161,7 +161,7 @@ fn render_available_skills_with_roots(
     ))
 }
 
-fn render_sections(sections: &[skill_api::FileSkillSection]) -> String {
+fn render_sections(sections: &[skill::FileSkillSection]) -> String {
     let total: usize = sections.iter().map(|s| s.rows.len()).sum();
     if total == 0 {
         return format!("{TITLE}\n{EMPTY_SUBTITLE}\n{EMPTY_BODY}\nEsc to close");
@@ -183,7 +183,7 @@ fn render_sections(sections: &[skill_api::FileSkillSection]) -> String {
     out
 }
 
-fn render_skill_row(row: &skill_api::FileSkillRow) -> String {
+fn render_skill_row(row: &skill::FileSkillRow) -> String {
     format!(
         "{} \u{00B7} ~{} description tokens",
         row.name,
@@ -311,7 +311,7 @@ mod tests {
         fs::create_dir_all(&home).expect("create home");
         fs::write(skills.join("loose.md"), "---\ndescription: x\n---\n").expect("write loose");
 
-        assert!(skill_api::load_file_skill_sections(&cwd, &home).is_empty());
+        assert!(skill::load_file_skill_sections(&cwd, &home).is_empty());
         fs::remove_dir_all(root).ok();
     }
 

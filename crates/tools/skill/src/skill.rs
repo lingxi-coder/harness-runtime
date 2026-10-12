@@ -42,7 +42,7 @@
 //! locked "is a built-in CLI command, not a skill" rejection applies: an MCP
 //! prompt's body comes from a remote server and is never shell-expanded here.
 //!
-//! (`EXPERIMENTAL_SKILL_SEARCH` is ported in `skill_api::prefetch`, gated off
+//! (`EXPERIMENTAL_SKILL_SEARCH` is ported in `skill::prefetch`, gated off
 //! by default — an earlier revision of this comment claimed otherwise.)
 //!
 //! Hermetic by default: the `EmptySkillLoader` always returns "skill not
@@ -222,9 +222,16 @@ pub trait SkillLoader: Send + Sync {
     /// Returns `None` if no such skill is registered → `Unknown skill:`.
     async fn load(&self, name: &Utf16JsonProjection) -> Result<Option<SkillDescriptor>, ToolError>;
 
-    /// Notify the host that a validated prompt skill is about to run. Default
+    /// Notify the host that a validated prompt skill is about to run. The
+    /// canonical name is the persistent usage identity; input name preserves
+    /// the actual alias/qualified text for invocation observers. Default
     /// loaders have no lifecycle side effects.
-    async fn skill_invoked(&self, _name: &Utf16JsonProjection) {}
+    async fn skill_invoked(
+        &self,
+        _canonical_name: &Utf16JsonProjection,
+        _input_name: &Utf16JsonProjection,
+    ) {
+    }
 
     /// Every registered skill name, used only to suggest a full name after a
     /// lookup miss. Defaulted to EMPTY so no implementor breaks and, more
@@ -1428,7 +1435,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
             ])));
         }
 
-        self.loader.skill_invoked(&command_name).await;
+        self.loader.skill_invoked(&desc.name, &command_name).await;
 
         // SKILLEXEC.5: fire the registered `SKILL_INVOKED` event on the success
         // path — after validateInput passes (descriptor loaded, prompt-type, not

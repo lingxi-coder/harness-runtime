@@ -7,14 +7,16 @@ license.workspace = true
 
 # M8-P9: the slash-command runtime abstraction — registry, dispatcher, parser,
 # argument substitution, data model, and the shared builtin scaffolding (99-name
-# table + /help/list renderers + unimplemented stub). Mirrors tool-api /
-# skill-api. Command handlers live in the optional builtins module (plus platform handlers
+# table + /help/list renderers + unimplemented stub). Mirrors tool-api.
+# Command handlers live in the optional builtins module (plus platform handlers
 # registered directly in the engine-desktop / engine-mobile composition roots).
 
 [dependencies]
 core = { path = "../core" }
 schemars = { version = "0.8", optional = true }
-skill-api = { path = "../skill-api", optional = true }
+skill = { path = "../skill", optional = true }
+icu_collator = { version = "=2.3.1", default-features = false, features = ["compiled_data"] }
+icu_locale = "=2.3.1"
 workflow = { path = "../workflow", optional = true }
 cron = { path = "../cron", optional = true }
 permission = { path = "../permission", optional = true }
@@ -37,6 +39,9 @@ async-trait.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
+[target.'cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android"))'.dependencies]
+sys-locale = "=0.3.2"
+
 [lints]
 workspace = true
 
@@ -44,7 +49,7 @@ workspace = true
 default = []
 builtin-handlers = [
     "dep:schemars",
-    "dep:skill-api",
+    "dep:skill",
     "dep:workflow",
     "dep:cron",
     "dep:permission",

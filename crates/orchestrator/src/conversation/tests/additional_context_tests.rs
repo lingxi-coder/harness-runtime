@@ -86,6 +86,26 @@ async fn mod_ui_control_without_mods_preserves_the_canonical_empty_render() {
 }
 
 #[tokio::test]
+async fn mod_ui_client_module_without_modhost_returns_native_missing_plugin_error() {
+    let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+    let result = lingxi_core::host::OrchestratorHandle::mod_ui_control(
+        &orch,
+        source_projection(serde_json::json!({
+            "subtype": "ui_client_module",
+            "plugin": "unavailable-plugin",
+        })),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(lingxi_core::host::HandleError::ActionFailed(message))
+            if message == "ui_client_module: plugin unavailable-plugin is not loaded or its hooks module names no surface module"
+    ));
+    assert!(orch.session.lock().await.history.is_empty());
+}
+
+#[tokio::test]
 async fn mod_ui_control_validates_requests_even_without_a_mod_worker() {
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
     for request in [
@@ -3220,7 +3240,11 @@ async fn runtime_message_stays_first_when_transient_context_is_reattached() {
     assert_eq!(text(&prepared.snapshot[0]), runtime);
     assert!(text(&prepared.snapshot[1]).contains("Guest workspace: /workspace/a"));
     assert_eq!(&prepared.snapshot[2], captured);
-    assert_eq!(prepared.snapshot[3], original);
+    assert_eq!(
+        &prepared.snapshot[3..prepared.snapshot.len() - 1],
+        prepared.turn_reminders.as_slice()
+    );
+    assert_eq!(prepared.snapshot.last(), Some(&original));
     assert!(text(captured).contains("# currentDate\nToday's date is "));
 
     // The actual query captured its inline frame before retry/compaction.
@@ -3253,8 +3277,8 @@ async fn runtime_message_stays_first_when_transient_context_is_reattached() {
         assert_eq!(&messages[4], captured);
         assert_eq!(serde_json::to_vec(&messages[4]).unwrap(), captured_bytes);
         assert!(!text(&messages[4]).contains("unrelated-later-context@example.test"));
-        assert_eq!(messages[5], original);
-        assert_eq!(&messages[6..], turn_reminders.as_slice());
+        assert_eq!(&messages[5..messages.len() - 1], turn_reminders.as_slice());
+        assert_eq!(messages.last(), Some(&original));
     }
 }
 

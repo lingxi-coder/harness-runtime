@@ -53,6 +53,12 @@ mod tests {
 
     #[tokio::test]
     async fn returns_done_with_render_help_screen_output() {
+        let _env_guard = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
+        for (_, variable) in crate::builtin_support::names::ENV_DISABLE_GATED_COMMANDS {
+            std::env::remove_var(*variable);
+        }
+        telemetry::test_clear_flag("tengu_cinder_relay");
+
         let h = HelpHandler::new();
         let args = ParsedSlashCommand {
             name: "help".into(),
@@ -71,14 +77,10 @@ mod tests {
                 // policy-only `/heapdump` object is absent from recognition.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 80 newlines total (1 header + 79 visible commands).
-                // SLASH-06 gave `bug` its own visible row and dropped `share`
-                // (that command's alias, not a command); SLASH-14 then removed
-                // `/version`, whose two oracle objects @2.1.238 296268759 both
-                // carry `isEnabled:()=>!1`; SLASH-13 added the ungated
-                // `/powerup` object (2.1.238 @296124285); cc2.1.269 brought
-                // `/output-style` back as a visible `type:"local"` command.
-                assert_eq!(s.string_at("").unwrap().matches('\n').count(), 80);
+                // 76 newlines total (1 header + 75 visible commands) at the
+                // Native 2.1.295 default gates: `/doctor` is one bundled row;
+                // `/commit` is omitted while `tengu_cinder_relay` defaults off.
+                assert_eq!(s.string_at("").unwrap().matches('\n').count(), 76);
                 assert!(s.contains("  /bug "));
                 assert!(s.contains("  /powerup "));
                 assert!(s.contains("  /output-style "));

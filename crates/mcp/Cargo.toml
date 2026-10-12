@@ -29,6 +29,7 @@ sha2 = "0.10"
 urlencoding = "2"
 url = "2"
 regex = "1"
+fancy-regex = "0.18.0"
 # §20a — the tool-schema meta-validator (`boon::Compiler`/`Schemas`), the
 # same JSON-Schema-2020-12 validator already used by
 # `orchestrator/src/schema_validation.rs` for tool-input/output validation.

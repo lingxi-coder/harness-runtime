@@ -7,10 +7,22 @@
 
 use crate::settings::schema::SettingsJson;
 use crate::settings::SettingsError;
+use crate::types::utf16_json::Utf16JsonProjection;
 use std::path::{Path, PathBuf};
 
 /// Claude Code rejects settings files above 2 MiB before reading/parsing them.
 pub const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// One settings-file byte snapshot with the source-preserving view and the
+/// current typed-layer admission result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsLayerSnapshot {
+    /// Exact parsed JSON source, even when typed settings validation fails.
+    pub projection: Utf16JsonProjection,
+    /// Present only when the current typed settings parser and validation
+    /// accept the complete layer.
+    pub admitted: Option<SettingsJson>,
+}
 
 /// Read one settings file from disk.
 ///
@@ -25,6 +37,17 @@ pub const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// - [`SettingsError::SchemaViolation`] when [`SettingsJson::validate`] rejects
 ///   the parsed file.
 pub fn read_settings_file(path: &Path) -> Result<Option<SettingsJson>, SettingsError> {
+    Ok(read_settings_file_with_projection(path)?.map(|(settings, _)| settings))
+}
+
+/// Read and validate one file-backed settings layer, returning both its typed
+/// view and the exact UTF-16 JSON value parsed from the same byte snapshot.
+/// The raw projection retains string units that typed `serde_json::Value`
+/// fields cannot represent, while typed validation still decides whether the
+/// source tier is admitted.
+pub fn read_settings_file_with_projection(
+    path: &Path,
+) -> Result<Option<(SettingsJson, Utf16JsonProjection)>, SettingsError> {
     let metadata = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -71,7 +94,129 @@ pub fn read_settings_file(path: &Path) -> Result<Option<SettingsJson>, SettingsE
             source: e,
         })?;
     parsed.validate()?;
-    Ok(Some(parsed))
+    let source = std::str::from_utf8(&bytes).expect("serde_json accepted the source as UTF-8");
+    let projection = Utf16JsonProjection::parse(source)
+        .map_err(|error| SettingsError::SchemaViolation(error.to_string()))?;
+    Ok(Some((parsed, projection)))
+}
+
+/// Read a raw source layer and its typed admission result from one file-byte
+/// snapshot. Schema-invalid object layers retain their exact projection so a
+/// caller can keep source evidence while excluding them from effective values.
+pub fn read_settings_layer_snapshot(
+    path: &Path,
+) -> Result<Option<SettingsLayerSnapshot>, SettingsError> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(SettingsError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if !metadata.is_file() {
+        return Err(SettingsError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "settings file must be a regular file",
+            ),
+        });
+    }
+    if metadata.len() > MAX_SETTINGS_FILE_BYTES {
+        return Err(SettingsError::Io {
+            path: path.to_path_buf(),
+            source: settings_size_limit_error(),
+        });
+    }
+    let bytes = std::fs::read(path).map_err(|source| SettingsError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_SETTINGS_FILE_BYTES {
+        return Err(SettingsError::Io {
+            path: path.to_path_buf(),
+            source: settings_size_limit_error(),
+        });
+    }
+
+    let source = std::str::from_utf8(&bytes).map_err(|error| {
+        SettingsError::SchemaViolation(format!("settings source is not UTF-8: {error}"))
+    })?;
+    let projection = Utf16JsonProjection::parse(source)
+        .map_err(|error| SettingsError::SchemaViolation(error.to_string()))?;
+    if projection.object_entries().is_none() {
+        return Err(SettingsError::SchemaViolation(
+            "settings source must be a JSON object".into(),
+        ));
+    }
+    let admitted = serde_json::from_slice::<SettingsJson>(&bytes)
+        .ok()
+        .filter(|settings| settings.validate().is_ok());
+    Ok(Some(SettingsLayerSnapshot {
+        projection,
+        admitted,
+    }))
+}
+
+/// Read one exact source projection without requiring the typed Rust settings
+/// model to represent every JSON string. This is a model-facing source view;
+/// executable settings consumers must still use [`read_settings_file`].
+///
+/// The file type and 2 MiB bounds match the typed settings reader. Only valid
+/// UTF-8 JSON objects are returned; lone UTF-16 surrogate escapes are retained
+/// by [`Utf16JsonProjection`] rather than rejected by `serde_json::Value`.
+pub fn read_raw_settings_projection(
+    path: &Path,
+) -> Result<Option<Utf16JsonProjection>, SettingsError> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(SettingsError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if !metadata.is_file() {
+        return Err(SettingsError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "settings file must be a regular file",
+            ),
+        });
+    }
+    if metadata.len() > MAX_SETTINGS_FILE_BYTES {
+        return Err(SettingsError::Io {
+            path: path.to_path_buf(),
+            source: settings_size_limit_error(),
+        });
+    }
+    let bytes = std::fs::read(path).map_err(|source| SettingsError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_SETTINGS_FILE_BYTES {
+        return Err(SettingsError::Io {
+            path: path.to_path_buf(),
+            source: settings_size_limit_error(),
+        });
+    }
+    let source = std::str::from_utf8(&bytes).map_err(|error| {
+        SettingsError::SchemaViolation(format!("settings source is not UTF-8: {error}"))
+    })?;
+    let projection = Utf16JsonProjection::parse(source)
+        .map_err(|error| SettingsError::SchemaViolation(error.to_string()))?;
+    if projection.object_entries().is_none() {
+        return Err(SettingsError::SchemaViolation(
+            "settings source must be a JSON object".into(),
+        ));
+    }
+    Ok(Some(projection))
 }
 
 /// Path to the user settings file: `~/.lingxi/settings.json`.

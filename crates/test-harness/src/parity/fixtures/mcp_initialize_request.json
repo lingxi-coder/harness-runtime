@@ -1,6 +1,6 @@
 {
-  "_source": "claude-code/src/services/mcp/client.ts: createMcpClient (lines 985-1002) — clientInfo + capabilities literals",
-  "_note": "Wire identity: clientInfo.name='lingxi', title='LingXi', websiteUrl='https://claude.com/claude-code'. Version is CARGO_PKG_VERSION of the lingxi-mcp crate at compile time (the runtime check verifies this rather than baking a number into the fixture). capabilities.roots is {listChanged:true} (parity 2.1.207 J7n(): the client advertises it will send notifications/roots/list_changed when its working-dir set changes); capabilities.elicitation is a LITERAL empty object (Java MCP SDK rejects {form:{},url:{}}).",
+  "_source": "Claude Code 2.1.295 initialize captures in docs/parity/current-alignment/fixtures/mcp-mime-295/native-baseline/2.1.295/mcp-stdio-in.raw.jsonl and mcp-pagination-295/native-baseline/2.1.295/initialize-request-01.raw.jsonrpc; capability projection in acceptance/rea-evaluation-20261011/native-chunks/src_194447854.js",
+  "_note": "Wire identity: LingXi-specific clientInfo.name='lingxi', title='LingXi', and websiteUrl='https://claude.com/claude-code'. Version is CARGO_PKG_VERSION of the lingxi-mcp crate at compile time (the runtime check verifies this rather than baking a number into the fixture). The pinned 2.1.295 initialize captures advertise roots={listChanged:true} and elicitation={form:{},url:{}}; Native source has the same roots base capability and conditionally adds URL elicitation.",
   "expected_protocol_version": "2025-11-25",
   "expected_client_info": {
     "name": "lingxi",
@@ -9,6 +9,6 @@
   },
   "expected_capabilities_shape": {
     "roots": { "listChanged": true },
-    "elicitation": {}
+    "elicitation": { "form": {}, "url": {} }
   }
 }

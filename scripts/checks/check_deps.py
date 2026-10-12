@@ -18,7 +18,7 @@ LEAVES = {"app", "example"}
 # (tool/skill/command/platform/app) NOR on each other NOR on the monolith.
 # This is the sharpest engine-tier invariant — a `tool-api` that learned about a
 # concrete `tool-shell` would defeat the whole composition-root design.
-API_CRATES = {"tool-api", "skill-api", "command-api"}
+API_CRATES = {"tool-api", "command-api"}
 
 # Who may name the crates published from the local-app-builder repository, by NAME. Rules written for workspace
 # members cannot see an edge onto a crate that lives in another repository; this table does not care where a crate
@@ -38,6 +38,16 @@ LOCAL_APP_CONSUMERS = {
 # The SDK assembles existing components; components must never reach back into
 # its product profiles or depend on a concrete UI to describe an interaction.
 HARNESS_COMPONENT_CRATES = {"llm-runtime", "harness-runtime", "tool-api", "permission"}
+
+# Source-preserving transport contracts are leaves of the runtime graph, not
+# domain engines. `core` re-exports mcp-wire's DTOs/transport trait, so that one
+# foundation edge is intentional. Keep the contract's own workspace edges
+# pinned to the JSON projection layer; it must not gain an MCP client or other
+# domain dependency.
+SHARED_WIRE_CONTRACTS = {"mcp-wire": {"json-projection"}}
+CORE_FOUNDATION_DEPS = {"branding", "jsonrpc", "json-projection"} | set(
+    SHARED_WIRE_CONTRACTS
+)
 
 # class -> forbidden dependee classes.
 #
@@ -62,7 +72,7 @@ def classify(rel_manifest):
         return "app"
     if parts[0] == "tools":
         return "tool" if len(parts) > 2 else "monolith"
-    if parts[0] == "skills":
+    if parts[0] in {"skill", "skills"}:
         return "skill"
     if parts[0] == "commands":
         return "command"
@@ -80,7 +90,12 @@ def main():
     names = {p["name"] for p in m["packages"]}
     pkgs = {p["name"]: p for p in m["packages"]}
     classes = {
-        n: classify(os.path.relpath(p["manifest_path"], root)) for n, p in pkgs.items()
+        n: (
+            "contract"
+            if n in SHARED_WIRE_CONTRACTS
+            else classify(os.path.relpath(p["manifest_path"], root))
+        )
+        for n, p in pkgs.items()
     }
 
     def ws_deps(p):
@@ -100,6 +115,16 @@ def main():
         return 0
 
     violations = []
+    for contract, allowed in sorted(SHARED_WIRE_CONTRACTS.items()):
+        if contract not in pkgs:
+            continue
+        for dep in ws_deps(pkgs[contract]):
+            if dep not in allowed:
+                violations.append(
+                    "%s (contract) depends on %s — shared wire contracts may depend only on %s"
+                    % (contract, dep, ", ".join(sorted(allowed)))
+                )
+
     for n in sorted(pkgs):
         if n in EXEMPT:
             continue
@@ -116,16 +141,17 @@ def main():
             # carrier re-exported by core's public source-preserving types.
             # Keep this as a narrow foundation exception; other core edges
             # remain forbidden here.
-            if n == "core" and d not in {"branding", "jsonrpc", "json-projection"}:
+            if n == "core" and d not in CORE_FOUNDATION_DEPS:
                 violations.append(
                     "core depends on %s — shared contracts must stay below domain and telemetry crates" % d
                 )
                 continue
-            # API-crate purity: tool-api / skill-api / command-api stay abstract.
+            # API-crate purity: tool-api / command-api stay abstract; `skill`
+            # contains the shared skill implementation and is classified above.
             optional_builtin_skill = (
                 n == "command-api"
-                and d == "skill-api"
-                and "dep:skill-api" in pkgs[n].get("features", {}).get("builtin-handlers", [])
+                and d == "skill"
+                and "dep:skill" in pkgs[n].get("features", {}).get("builtin-handlers", [])
                 and any(
                     dep["name"] == d and dep.get("optional", False)
                     for dep in pkgs[n]["dependencies"]

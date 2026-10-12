@@ -441,6 +441,16 @@ pub struct MessagesCreateOptions {
     /// Request-local Native token reminder target. Applied only to an
     /// Anthropic API-bound clone; it is never written into conversation history.
     pub tool_result_reminder_suffixes: Vec<crate::convert::AnthropicToolResultReminderSuffix>,
+    /// Exact transcript identities of typed prompt attachments. These rows
+    /// append using Native attachment merge semantics instead of ordinary
+    /// adjacent-user text joining.
+    pub typed_attachment_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
+    /// Captured Native task deliveries indexed by transcript message identity.
+    /// These snapshots are request-only and never rewritten into durable history.
+    pub task_deliveries: std::collections::HashMap<
+        lingxi_core::types::MessageId,
+        lingxi_core::host::task_delivery::TaskDeliveryRequest,
+    >,
     /// Trusted Native request facts, outside provider input and persisted history.
     pub native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
 }
@@ -968,6 +978,14 @@ pub struct ApiService {
     available_model_ids: Vec<String>,
     /// Full provider-specific model listings for rich picker surfaces.
     model_listings: Vec<crate::ModelListing>,
+    /// Native `hQ` (`Ta(midConversationSystem, model, TF(model))`) memoized
+    /// decisions. The service is host-scoped; each entry keeps the raw model
+    /// key, partitioned by resolved provider/profile because one Harness
+    /// service may route the same model string through multiple providers.
+    /// Unsupported non-Anthropic routes are rejected before they reach this
+    /// cache.
+    native_mid_conversation_system_cache:
+        Mutex<std::collections::HashMap<(crate::ProviderId, String, String), bool>>,
     /// Optional cost estimator for populating `HistoryResponse.cost`.
     ///
     /// When `Some`, a successful `decode_response` triggers a cost estimate using
@@ -1623,6 +1641,108 @@ impl ApiService {
         self.client.protocol_for_model(model, profile)
     }
 
+    /// Native `hQ` decision for placing a model-facing system attachment
+    /// before the closing line on this model/profile route. `Ta` lazily
+    /// memoizes the `TF` result per host and raw model string. This service
+    /// keeps the same raw-key behavior within each resolved Anthropic-family
+    /// profile so one provider's route cannot poison another provider's result.
+    pub fn supports_native_mid_conversation_system(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> bool {
+        let Ok(protocol) = self.protocol_for_model(model, profile) else {
+            return false;
+        };
+        if !Self::is_anthropic_family_protocol(&protocol) {
+            return false;
+        }
+        let Ok(route) = self.client.resolve_media_route(model, profile) else {
+            return false;
+        };
+        let cache_key = (
+            route.main.provider_id.clone(),
+            route.main.profile_name.clone(),
+            model.to_owned(),
+        );
+        let mut cache = self
+            .native_mid_conversation_system_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(supported) = cache.get(&cache_key) {
+            return *supported;
+        }
+        let supported = crate::model::betas::native_mid_conversation_system_supported(
+            model,
+            &route.main.request_model,
+            Self::native_model_option_overrides_allowed(&route.main.provider_id),
+        );
+        cache.insert(cache_key, supported);
+        supported
+    }
+
+    /// Native `mSe(model)` decision after the provider-family and `hQ(model)`
+    /// gates. A resolved but ineligible route returns `Some(false)`; `None`
+    /// means this service cannot resolve the requested model/profile.
+    pub fn native_mid_conversation_tool_change_supported(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<bool> {
+        let protocol = self.protocol_for_model(model, profile).ok()?;
+        let route = self.client.resolve_media_route(model, profile).ok()?.main;
+        let route_admitted = match protocol {
+            crate::ProtocolFamily::AnthropicMessages => {
+                route.provider_id == crate::ProviderId::AnthropicFirstParty
+            }
+            crate::ProtocolFamily::FoundryClaude => true,
+            _ => false,
+        };
+        if !route_admitted || !self.supports_native_mid_conversation_system(model, profile) {
+            return Some(false);
+        }
+
+        let provider_route =
+            serde_json::to_string(&(protocol, &route.provider_id, &route.profile_name))
+                .expect("resolved protocol route identity is serializable");
+        let unsupported_identity =
+            lingxi_llm_client::providers::anthropic::beta_repair::ModelUnsupportedIdentity::new(
+                provider_route,
+                self.fast_rejection_identity(&route.request_model),
+            );
+        let model_unsupported =
+            lingxi_llm_client::providers::anthropic::beta_repair::ModelUnsupportedBetaRejections::for_process()
+                .rejected(
+                    &unsupported_identity,
+                    lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges,
+                );
+        Some(
+            crate::model::betas::native_mid_conversation_tool_change_supported(
+                &self.fast_rejection_identity(&route.request_model),
+                model_unsupported,
+            ),
+        )
+    }
+
+    fn native_model_option_overrides_allowed(provider_id: &crate::ProviderId) -> bool {
+        match provider_id {
+            crate::ProviderId::AnthropicFirstParty => false,
+            crate::ProviderId::OpenAICompatible { name } | crate::ProviderId::Custom { name } => {
+                !matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "gateway" | "anthropicaws" | "anthropicgooglecloud"
+                )
+            }
+            crate::ProviderId::OpenAI
+            | crate::ProviderId::Gemini
+            | crate::ProviderId::VertexGemini
+            | crate::ProviderId::VertexClaude
+            | crate::ProviderId::BedrockClaude
+            | crate::ProviderId::FoundryClaude
+            | crate::ProviderId::AzureOpenAI => true,
+        }
+    }
+
     pub fn resolve_media_route(
         &self,
         model: &str,
@@ -1839,6 +1959,7 @@ impl ApiService {
             settings_backoff_ms,
             available_model_ids,
             model_listings: models,
+            native_mid_conversation_system_cache: Mutex::new(Default::default()),
             estimator,
             last_rate_limit: Mutex::new(None),
             prompt_cache_overage,
@@ -1974,6 +2095,29 @@ impl ApiService {
     ) {
         self.report_retry(error, delay, state, ctl);
         tokio::time::sleep(delay).await;
+    }
+
+    /// Consume an SDK-proven proxy-helper 407 through the ordinary request
+    /// retry budget. Returning `Some(false)` means the budget is exhausted;
+    /// callers must surface the original wrapped error without failover.
+    async fn retry_proxy_auth_helper(
+        &self,
+        error: &LlmError,
+        retry_scope: &ModelCallRetryScope,
+        state: &mut RetryState,
+        ctl: &RetryControl,
+        thinking_budget: u32,
+    ) -> Option<bool> {
+        if !error.is_proxy_auth_helper_retry() {
+            return None;
+        }
+        let DriveStep::RetryAfter(delay) =
+            retry_scope.next_step(state, ctl, error, thinking_budget, self.settings_backoff_ms)
+        else {
+            return Some(false);
+        };
+        self.report_and_sleep_retry(error, delay, state, ctl).await;
+        Some(true)
     }
 
     pub fn with_forced_tool_choice(mut self, choice: crate::ToolChoice) -> Self {
@@ -2416,6 +2560,39 @@ impl ApiService {
         skip_global_cache_for_system_prompt: bool,
         query_source: PromptCacheQuerySource<'_>,
     ) -> Result<LlmRequest, LlmError> {
+        self.build_request_with_typed_attachment_ids(
+            model,
+            profile,
+            system,
+            msgs,
+            tools,
+            stream,
+            max_tokens,
+            skip_global_cache_for_system_prompt,
+            query_source,
+            &std::collections::HashSet::new(),
+            &std::collections::HashMap::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_request_with_typed_attachment_ids(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<crate::ToolDeclaration>,
+        stream: bool,
+        max_tokens: Option<u32>,
+        skip_global_cache_for_system_prompt: bool,
+        query_source: PromptCacheQuerySource<'_>,
+        typed_attachment_ids: &std::collections::HashSet<lingxi_core::types::MessageId>,
+        task_deliveries: &std::collections::HashMap<
+            lingxi_core::types::MessageId,
+            lingxi_core::host::task_delivery::TaskDeliveryRequest,
+        >,
+    ) -> Result<LlmRequest, LlmError> {
         // Auxiliary builders share normal policy, but the main turn alone
         // owns its computer continuation and durable receipt submission.
         crate::computer::without_computer_request(|| {
@@ -2430,6 +2607,8 @@ impl ApiService {
                 skip_global_cache_for_system_prompt,
                 query_source,
                 &[],
+                typed_attachment_ids,
+                task_deliveries,
             )
         })
     }
@@ -2551,13 +2730,33 @@ impl ApiService {
                         })
                 })
             });
+        let first_party_anthropic_route = prepared.route.protocol
+            == crate::ProtocolFamily::AnthropicMessages
+            && prepared.route.resolved_route.provider_id == crate::ProviderId::AnthropicFirstParty;
         let native_request_facts = (prepared.anthropic_request_kind
             == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-            && (self.native_anthropic_request_selected(prepared)
+            && (first_party_anthropic_route
                 || prepared.route.protocol == crate::ProtocolFamily::FoundryClaude))
             .then_some(prepared.native_anthropic_request_context.as_ref())
             .flatten();
-        let native_per_turn_control = (self.native_anthropic_request_selected(prepared)
+        let native_afk_route = match prepared.route.protocol {
+            crate::ProtocolFamily::AnthropicMessages => first_party_anthropic_route,
+            crate::ProtocolFamily::FoundryClaude
+            | crate::ProtocolFamily::VertexClaude
+            | crate::ProtocolFamily::BedrockClaude => true,
+            _ => false,
+        };
+        let native_afk_mode = native_afk_route
+            && prepared.anthropic_request_kind
+                == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            && !prepared.beta_rejection_state.rejected(
+                lingxi_llm_client::providers::anthropic::beta_repair::Beta::AfkMode,
+            )
+            && prepared
+                .native_anthropic_request_context
+                .as_ref()
+                .is_some_and(|context| context.afk_mode);
+        let native_per_turn_control = (first_party_anthropic_route
             || prepared.route.protocol == crate::ProtocolFamily::FoundryClaude)
             && prepared.anthropic_request_kind
                 == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
@@ -2592,6 +2791,7 @@ impl ApiService {
             }
         };
         let automatic_effort = supported && !explicit_effort && selected_is_string;
+        let beta_model_identity = self.model_unsupported_identity(prepared);
         BetaContext::for_model(&model)
             .with_interactive(interactive)
             .with_show_thinking_summaries(
@@ -2601,8 +2801,23 @@ impl ApiService {
             .with_effort(automatic_effort)
             .with_per_turn_control(native_per_turn_control)
             .with_mid_conversation_tool_changes(
-                native_request_facts.is_some_and(|facts| facts.mid_conversation_tool_changes),
+                native_request_facts.is_some_and(|facts| facts.mid_conversation_tool_changes)
+                    && self
+                        .native_mid_conversation_tool_change_supported(
+                            &prepared.route.resolved_route.request_model,
+                            Some(&prepared.route.resolved_route.profile_name),
+                        )
+                        == Some(true)
+                    && !prepared.beta_rejection_state.rejected(
+                        lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges,
+                    )
+                    && !lingxi_llm_client::providers::anthropic::beta_repair::ModelUnsupportedBetaRejections::for_process()
+                        .rejected(
+                            &beta_model_identity,
+                            lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges,
+                        ),
             )
+            .with_afk_mode(native_afk_mode)
             .with_dangerous_tool_use(
                 native_request_facts.is_some_and(|facts| facts.server_classifier.is_some()),
             )
@@ -2624,16 +2839,11 @@ impl ApiService {
         {
             return;
         }
-        let route_admitted = self.native_anthropic_request_selected(prepared)
-            || prepared.route.protocol == crate::ProtocolFamily::FoundryClaude;
-        let admitted = route_admitted
-            && prepared
-                .native_anthropic_request_context
-                .as_ref()
-                .is_some_and(|context| context.afk_mode);
+        let admitted = self.beta_context(prepared).afk_mode;
         let provider = match prepared.route.protocol {
             crate::ProtocolFamily::FoundryClaude => Provider::Foundry,
             crate::ProtocolFamily::AnthropicMessages => Provider::Anthropic,
+            crate::ProtocolFamily::VertexClaude => Provider::Vertex,
             _ => return,
         };
         crate::model::betas::append_afk_mode_after_thinking_display(
@@ -2928,6 +3138,82 @@ impl ApiService {
             && prepared.route.resolved_route.provider_id == crate::ProviderId::AnthropicFirstParty
     }
 
+    fn is_main_thinking_display_updates_call(prepared: &crate::PreparedLlmCall) -> bool {
+        Self::is_main_thinking_display_call(prepared)
+            || (prepared.anthropic_request_kind
+                == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+                && prepared.route.protocol == crate::ProtocolFamily::FoundryClaude)
+    }
+
+    fn is_main_anthropic_beta_request(prepared: &crate::PreparedLlmCall) -> bool {
+        prepared.anthropic_request_kind
+            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            && Self::is_anthropic_family_protocol(&prepared.route.protocol)
+    }
+
+    fn request_beta_tokens(prepared: &crate::PreparedLlmCall) -> Vec<String> {
+        let mut betas = prepared.computed_beta_headers.clone();
+        if prepared.route.protocol == crate::ProtocolFamily::BedrockClaude {
+            if let Some(length) = prepared
+                .provider_request
+                .body_json
+                .array_len("/anthropic_beta")
+            {
+                for index in 0..length {
+                    if let Some(beta) = prepared
+                        .provider_request
+                        .body_json
+                        .array_item_at("/anthropic_beta", index)
+                        .and_then(|item| item.string_at(""))
+                    {
+                        betas.push(beta);
+                    }
+                }
+            }
+        }
+        betas
+    }
+
+    fn request_has_native_tool_change(prepared: &crate::PreparedLlmCall) -> bool {
+        let body = &prepared.provider_request.body_json;
+        let Some(messages) = body.array_len("/messages") else {
+            return false;
+        };
+        (0..messages).any(|message_index| {
+            let message_pointer = format!("/messages/{message_index}");
+            if body
+                .string_at(&format!("{message_pointer}/role"))
+                .as_deref()
+                != Some("system")
+            {
+                return false;
+            }
+            let content_pointer = format!("{message_pointer}/content");
+            body.array_len(&content_pointer).is_some_and(|blocks| {
+                (0..blocks).any(|block_index| {
+                    matches!(
+                        body.string_at(&format!("{content_pointer}/{block_index}/type"))
+                            .as_deref(),
+                        Some("tool_addition" | "tool_removal")
+                    )
+                })
+            })
+        })
+    }
+
+    fn native_tool_change_block_type_unknown(
+        status: u16,
+        body: &lingxi_llm_client::protocol::JsonPayload,
+    ) -> bool {
+        if !matches!(status, 400 | 422) {
+            return false;
+        }
+        let message = body.string_at("/error/message").unwrap_or_default();
+        ["Input tag 'tool_addition'", "Input tag 'tool_removal'"]
+            .iter()
+            .any(|tag| message.contains(tag))
+    }
+
     fn settle_thinking_display_probe(
         prepared: &crate::PreparedLlmCall,
         scope: &ModelCallRetryScope,
@@ -2944,23 +3230,76 @@ impl ApiService {
         scope: &ModelCallRetryScope,
         status: u16,
         body: &lingxi_llm_client::protocol::JsonPayload,
+        native_streaming_error_path: bool,
     ) -> bool {
         use lingxi_llm_client::providers::anthropic::thinking_display;
-        if !Self::is_main_thinking_display_call(prepared) {
+        if !Self::is_main_anthropic_beta_request(prepared) {
             return false;
         }
-        let named = lingxi_llm_client::providers::anthropic::beta_repair::request_rejections(
-            status,
-            body,
-            &prepared.computed_beta_headers,
-        );
+        let sent = Self::request_beta_tokens(prepared);
+        use lingxi_llm_client::providers::anthropic::beta_repair;
+        let model_key = self.fast_rejection_identity(&prepared.route.resolved_route.request_model);
+        let named = beta_repair::request_rejections(status, body, &sent);
+        let model_unsupported = beta_repair::model_unsupported_rejection(status, body, &sent);
+        let mctc_header_refused = named
+            .iter()
+            .any(|rejection| rejection.beta == beta_repair::Beta::MidConversationToolChanges);
+        let mctc_header_was_sent = sent
+            .iter()
+            .any(|header| header == beta_repair::Beta::MidConversationToolChanges.header());
+        let mctc_block_refused = mctc_header_was_sent
+            && model_unsupported.is_none()
+            && Self::request_has_native_tool_change(prepared)
+            && Self::native_tool_change_block_type_unknown(status, body);
+        if mctc_header_refused || mctc_block_refused {
+            if let Some(scope) = prepared.thinking_recovery_scope.as_ref() {
+                scope.refuse_mid_conversation_tool_changes();
+            }
+        }
+
+        // Native's primary streaming Lsn callback handles AFK before the
+        // generic beta/model repairs. Its nested non-stream fallback has a
+        // separate onApiError callback with no Kie/AFK branch.
+        let afk = named
+            .iter()
+            .find(|rejection| rejection.beta == beta_repair::Beta::AfkMode);
+        if native_streaming_error_path {
+            if let Some(afk) = afk {
+                // Kie removes AFK alone and retries this physical request;
+                // later beta refusals are classified from the retry response.
+                beta_repair::reject_named(
+                    std::slice::from_ref(afk),
+                    &prepared.beta_rejection_state,
+                    Some(&model_key),
+                    &beta_repair::ModelBetaRejections::for_process(),
+                );
+                return true;
+            }
+        }
+        if let Some(rejection) = model_unsupported {
+            beta_repair::reject_model_unsupported(
+                rejection,
+                &self.model_unsupported_identity(prepared),
+                &beta_repair::ModelUnsupportedBetaRejections::for_process(),
+            );
+            return true;
+        }
+        let named = named
+            .into_iter()
+            .filter(|rejection| {
+                native_streaming_error_path || rejection.beta != beta_repair::Beta::AfkMode
+            })
+            .collect::<Vec<_>>();
         if !named.is_empty() {
             lingxi_llm_client::providers::anthropic::beta_repair::reject_named(
                 &named, &prepared.beta_rejection_state,
-                Some(&prepared.route.resolved_route.request_model),
+                Some(&model_key),
                 &lingxi_llm_client::providers::anthropic::beta_repair::ModelBetaRejections::for_process(),
             );
             return true;
+        }
+        if !Self::is_main_thinking_display_call(prepared) {
+            return false;
         }
         let identity = self.fast_rejection_identity(&prepared.route.resolved_route.request_model);
         let admission = thinking_display::probe_admission(
@@ -3032,6 +3371,23 @@ impl ApiService {
             .strip_suffix("[1m]")
             .unwrap_or(&canonical)
             .to_string()
+    }
+
+    fn model_unsupported_identity(
+        &self,
+        prepared: &crate::PreparedLlmCall,
+    ) -> lingxi_llm_client::providers::anthropic::beta_repair::ModelUnsupportedIdentity {
+        let route = &prepared.route.resolved_route;
+        let provider_route = serde_json::to_string(&(
+            prepared.route.protocol,
+            &route.provider_id,
+            &route.profile_name,
+        ))
+        .expect("resolved protocol route identity is serializable");
+        lingxi_llm_client::providers::anthropic::beta_repair::ModelUnsupportedIdentity::new(
+            provider_route,
+            self.fast_rejection_identity(&route.request_model),
+        )
     }
 
     fn repair_fast_model_rejection(
@@ -3205,14 +3561,20 @@ impl ApiService {
         prepared: &mut crate::PreparedLlmCall,
     ) -> Result<(), LlmError> {
         use lingxi_llm_client::providers::anthropic::thinking_display::{self, UpdatesAdmission};
-        if !Self::is_main_thinking_display_call(prepared) {
+        // Native's rVe gate admits Foundry for automatic updates even though
+        // its separate display-error probe remains limited to first-party API.
+        if !Self::is_main_thinking_display_updates_call(prepared) {
             return Ok(());
         }
+        let fast_identity =
+            self.fast_rejection_identity(&prepared.route.resolved_route.request_model);
+        let model_unsupported_identity = self.model_unsupported_identity(prepared);
         lingxi_llm_client::providers::anthropic::beta_repair::apply_rejections(
             &mut prepared.provider_request.headers,
             &mut prepared.provider_request.body_json,
             &prepared.beta_rejection_state,
-            Some(&prepared.route.resolved_route.request_model),
+            Some(&fast_identity),
+            Some(&model_unsupported_identity),
             &lingxi_llm_client::providers::anthropic::beta_repair::ModelBetaRejections::for_process(
             ),
         )
@@ -3225,15 +3587,12 @@ impl ApiService {
         let interactive = self.interactive_session.unwrap_or_else(|| {
             !lingxi_core::host::session_flags::effective_non_interactive_session()
         });
+        let native_thinking_display_route = Self::is_main_thinking_display_updates_call(prepared);
         let updates_setting = std::env::var(branding::THINKING_DISPLAY_UPDATES_ENV).ok();
         let updates = updates_setting
             .as_deref()
             .map(crate::structured_output::bool_value)
-            .unwrap_or_else(|| {
-                // The headless Native print path omits display updates. Preserve
-                // the previous default for interactive and other Anthropic routes.
-                !(self.native_anthropic_request_selected(prepared) && !interactive)
-            });
+            .unwrap_or(!(native_thinking_display_route && !interactive));
         let show_summaries = lingxi_core::host::session_flags::show_thinking_summaries();
         let extra_has_thinking = prepared.extra_body.as_ref().is_some_and(|extra| {
             lingxi_llm_client::providers::anthropic::request_policy::has_field(extra, "thinking")
@@ -3241,7 +3600,7 @@ impl ApiService {
         let simulated_proxy =
             crate::structured_output::bool_environment("CLAUDE_CODE_SIMULATE_PROXY_USAGE");
         let native_headless_default_omits_display = updates_setting.is_none()
-            && self.native_anthropic_request_selected(prepared)
+            && native_thinking_display_route
             && !interactive
             && !show_summaries
             && !extra_has_thinking
@@ -3701,7 +4060,9 @@ impl ApiService {
             LlmError::ProviderInternal | LlmError::ProviderTimeout { .. } => "server",
             // "http" — api-client `Http(_) => "http"` (:1146)
             // A timeout is still an HTTP-layer failure for telemetry.
-            LlmError::Transport { .. } | LlmError::TransportTimeout { .. } => "http",
+            LlmError::Transport { .. }
+            | LlmError::TransportTimeout { .. }
+            | LlmError::ProxyTunnelResponse { .. } => "http",
             // "ssl_cert_error" — 2.1.201 classifier distinguishes SSL/cert
             // transport failures (`if(JF(e)?.isSSLError)return"ssl_cert_error"`).
             LlmError::TlsCert { .. } => "ssl_cert_error",
@@ -3728,8 +4089,8 @@ impl ApiService {
             LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. } => "media_delegation_unavailable",
             LlmError::UnsupportedCapability { .. } => "unsupported_capability",
-            LlmError::ProviderErrorText { .. } => {
-                unreachable!("classification_source removes provider text wrappers")
+            LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+                unreachable!("classification_source removes carrier wrappers")
             }
         }
     }
@@ -4447,7 +4808,9 @@ impl ApiService {
     /// variants that carry an HTTP status are non-None).
     fn status_of(err: &LlmError) -> Option<u16> {
         match err.classification_source() {
-            LlmError::Authentication { .. } | LlmError::PermissionDenied { .. } => Some(401),
+            LlmError::Authentication { .. } | LlmError::PermissionDenied { .. } => {
+                err.http_status().or(Some(401))
+            }
             LlmError::InvalidRequest { .. } | LlmError::ContextOverflow { .. } => Some(400),
             LlmError::RequestTooLarge => Some(413),
             LlmError::RateLimited { .. } | LlmError::QuotaExceeded => Some(429),
@@ -4455,6 +4818,7 @@ impl ApiService {
             LlmError::ProviderInternal => Some(500),
             LlmError::ProviderTimeout { .. } => err.http_status(),
             LlmError::Overloaded { .. } => Some(529),
+            LlmError::ProxyTunnelResponse { status, .. } => Some(*status),
             // No HTTP status: the request never reached the model API. The
             // refresh call to the IdP failed locally, so inventing a 401 here
             // would put a status in the transcript that no server ever sent.
@@ -4470,8 +4834,8 @@ impl ApiService {
             | LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. }
             | LlmError::RequestDispatchRejected { .. } => None,
-            LlmError::ProviderErrorText { .. } => {
-                unreachable!("classification_source removes provider text wrappers")
+            LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+                unreachable!("classification_source removes carrier wrappers")
             }
         }
     }
@@ -4675,6 +5039,10 @@ impl ApiService {
             let mut admission_rejected = false;
             let mut dispatch_callback_rejected = false;
             let cache_snapshot = crate::prompt_cache::snapshot_prepared(&prepared);
+            let mctc_header_sent = Self::request_beta_tokens(&prepared).iter().any(|beta| {
+                beta == lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges.header()
+            });
+            let thinking_recovery_scope = prepared.thinking_recovery_scope.clone();
             let call = prepared.wire_call.take().expect("sealed call");
             let pricing =
                 (self.estimator.is_some() || req.execution.model_attempt.is_some()).then(|| {
@@ -4716,6 +5084,11 @@ impl ApiService {
                         if let Err(error) = attempt.mark_dispatched() {
                             dispatch_callback_rejected = true;
                             return Err(crate::execution::wire_error(error));
+                        }
+                        if mctc_header_sent {
+                            if let Some(scope) = thinking_recovery_scope.as_ref() {
+                                scope.mark_mid_conversation_tool_changes_sent();
+                            }
                         }
                         if let Some(observer) = dispatch_observer.as_ref() {
                             observer.mark_dispatched();
@@ -4760,6 +5133,40 @@ impl ApiService {
                             &request_id,
                             Self::error_kind(&transport_err),
                             None,
+                        )
+                        .await;
+                        return Err(transport_err);
+                    }
+                    if let Some(retried) = self
+                        .retry_proxy_auth_helper(
+                            &transport_err,
+                            &retry_scope,
+                            &mut state,
+                            &retry_control,
+                            thinking_budget,
+                        )
+                        .await
+                    {
+                        if retried {
+                            continue;
+                        }
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.input.model,
+                            &request_id,
+                            Self::error_kind(&transport_err),
+                            Self::status_of(&transport_err),
+                        )
+                        .await;
+                        return Err(transport_err);
+                    }
+                    if transport_err.is_proxy_tunnel_auth_rejection() {
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.input.model,
+                            &request_id,
+                            Self::error_kind(&transport_err),
+                            Self::status_of(&transport_err),
                         )
                         .await;
                         return Err(transport_err);
@@ -4994,6 +5401,40 @@ impl ApiService {
                         Err(mut decode_err) => {
                             Self::classify_native_invalid_request_413(&mut decode_err);
                             safety.error(&decode_err);
+                            if let Some(retried) = self
+                                .retry_proxy_auth_helper(
+                                    &decode_err,
+                                    &retry_scope,
+                                    &mut state,
+                                    &retry_control,
+                                    thinking_budget,
+                                )
+                                .await
+                            {
+                                if retried {
+                                    continue;
+                                }
+                                telemetry::emit_failed(
+                                    &self.analytics,
+                                    &req.input.model,
+                                    &request_id,
+                                    Self::error_kind(&decode_err),
+                                    Self::status_of(&decode_err),
+                                )
+                                .await;
+                                return Err(decode_err);
+                            }
+                            if decode_err.is_proxy_tunnel_auth_rejection() {
+                                telemetry::emit_failed(
+                                    &self.analytics,
+                                    &req.input.model,
+                                    &request_id,
+                                    Self::error_kind(&decode_err),
+                                    Self::status_of(&decode_err),
+                                )
+                                .await;
+                                return Err(decode_err);
+                            }
                             if Self::repair_server_fallback_beta_rejection(
                                 &prepared,
                                 provider_resp.status,
@@ -5010,6 +5451,7 @@ impl ApiService {
                                     &retry_scope,
                                     provider_resp.status,
                                     &provider_resp.body_json,
+                                    false,
                                 )
                             {
                                 continue;
@@ -5391,10 +5833,15 @@ impl ApiService {
         effort: Option<serde_json::Value>,
         temperature: Option<f32>,
         query_source: Option<&str>,
+        typed_attachment_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
+        task_deliveries: std::collections::HashMap<
+            lingxi_core::types::MessageId,
+            lingxi_core::host::task_delivery::TaskDeliveryRequest,
+        >,
     ) -> Result<LlmRequest, LlmError> {
         let system = side_query_system_prompt(system, system_input)?;
         let mut req = crate::thinking_scope::isolated(|| {
-            self.build_request(
+            self.build_request_with_typed_attachment_ids(
                 model,
                 profile,
                 system.as_ref(),
@@ -5404,6 +5851,8 @@ impl ApiService {
                 max_tokens,
                 skip_global_cache_for_system_prompt,
                 prompt_cache_query_source(query_source),
+                &typed_attachment_ids,
+                &task_deliveries,
             )
         })?;
         // A main turn's Mod effort is task-local. Side queries assembled in
@@ -5579,6 +6028,8 @@ impl ApiService {
             effort,
             temperature,
             query_source,
+            std::collections::HashSet::new(),
+            std::collections::HashMap::new(),
         )?;
 
         let ctl = resolve_retry_control_with_settings(
@@ -6003,14 +6454,12 @@ impl ApiService {
                 } else {
                     None
                 };
-                let responses_ws_session = match (
-                    shared_session.as_deref_mut(),
-                    side_ws_lease.as_mut(),
-                ) {
-                    (Some(session), _) => session,
-                    (None, Some(lease)) => lease.session(),
-                    (None, None) => &mut http_session,
-                };
+                let responses_ws_session =
+                    match (shared_session.as_deref_mut(), side_ws_lease.as_mut()) {
+                        (Some(session), _) => session,
+                        (None, Some(lease)) => lease.session(),
+                        (None, None) => &mut http_session,
+                    };
                 let preparing = tokio::time::Instant::now();
                 let prepared = crate::execution::first_byte_bound(
                     first_byte_timeout,
@@ -6025,6 +6474,10 @@ impl ApiService {
                 attempt = self.begin_model_attempt(&req, &prepared).await?;
                 safety.inherit_if_missing(attempt.model_safety_observer());
                 let cache_snapshot = crate::prompt_cache::snapshot_prepared(&prepared);
+                let mctc_header_sent = Self::request_beta_tokens(&prepared).iter().any(|beta| {
+                    beta == lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges.header()
+                });
+                let thinking_recovery_scope = prepared.thinking_recovery_scope.clone();
                 crate::execution::first_byte_bound(remaining, async {
                     if req.execution.computer_submission.is_some()
                         && admission
@@ -6048,6 +6501,11 @@ impl ApiService {
                                 });
                             }
                             attempt.mark_dispatched()?;
+                            if mctc_header_sent {
+                                if let Some(scope) = thinking_recovery_scope.as_ref() {
+                                    scope.mark_mid_conversation_tool_changes_sent();
+                                }
+                            }
                             if let Some(observer) = dispatch_observer.as_ref() {
                                 observer.mark_dispatched();
                             }
@@ -6071,6 +6529,40 @@ impl ApiService {
                         });
                     }
                     attempt.finish().await?;
+                    if let Some(retried) = self
+                        .retry_proxy_auth_helper(
+                            &transport_err,
+                            &retry_scope,
+                            &mut state,
+                            &ctl,
+                            thinking_budget,
+                        )
+                        .await
+                    {
+                        if retried {
+                            continue;
+                        }
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.input.model,
+                            &request_id,
+                            Self::error_kind(&transport_err),
+                            Self::status_of(&transport_err),
+                        )
+                        .await;
+                        return Err(transport_err);
+                    }
+                    if transport_err.is_proxy_tunnel_auth_rejection() {
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.input.model,
+                            &request_id,
+                            Self::error_kind(&transport_err),
+                            Self::status_of(&transport_err),
+                        )
+                        .await;
+                        return Err(transport_err);
+                    }
                     if !allow_replay {
                         telemetry::emit_failed(
                             &self.analytics,
@@ -6198,6 +6690,40 @@ impl ApiService {
                         safety.error(&decode_err);
                         collected.finish().await;
                         attempt.finish().await?;
+                        if let Some(retried) = self
+                            .retry_proxy_auth_helper(
+                                &decode_err,
+                                &retry_scope,
+                                &mut state,
+                                &ctl,
+                                thinking_budget,
+                            )
+                            .await
+                        {
+                            if retried {
+                                continue;
+                            }
+                            telemetry::emit_failed(
+                                &self.analytics,
+                                &req.input.model,
+                                &request_id,
+                                Self::error_kind(&decode_err),
+                                Self::status_of(&decode_err),
+                            )
+                            .await;
+                            return Err(decode_err);
+                        }
+                        if decode_err.is_proxy_tunnel_auth_rejection() {
+                            telemetry::emit_failed(
+                                &self.analytics,
+                                &req.input.model,
+                                &request_id,
+                                Self::error_kind(&decode_err),
+                                Self::status_of(&decode_err),
+                            )
+                            .await;
+                            return Err(decode_err);
+                        }
 
                         // Mirror the non-stream path: for 429s, resolve the
                         // actual retry delay from the real response headers
@@ -6257,6 +6783,7 @@ impl ApiService {
                                 &retry_scope,
                                 response_status,
                                 &body_json,
+                                true,
                             )
                         {
                             continue;
@@ -7161,6 +7688,8 @@ impl ApiService {
             false,
             PromptCacheQuerySource::Unspecified,
             &[],
+            &std::collections::HashSet::new(),
+            &std::collections::HashMap::new(),
         )?;
         req.set_effort(effort)?;
         // (fast mode) `Some("fast")` from the main loop lights the fast-mode
@@ -7394,6 +7923,11 @@ impl ApiService {
         skip_global_cache_for_system_prompt: bool,
         query_source: PromptCacheQuerySource<'_>,
         tool_result_reminder_suffixes: &[crate::convert::AnthropicToolResultReminderSuffix],
+        typed_attachment_ids: &std::collections::HashSet<lingxi_core::types::MessageId>,
+        task_deliveries: &std::collections::HashMap<
+            lingxi_core::types::MessageId,
+            lingxi_core::host::task_delivery::TaskDeliveryRequest,
+        >,
     ) -> Result<LlmRequest, LlmError> {
         // Pre-wire pipeline (claude-code order): strip_excess_media →
         // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
@@ -7582,6 +8116,8 @@ impl ApiService {
                     ConversationMessagesWithSources::new(msgs),
                     MAX_MEDIA_PER_REQUEST,
                 ),
+                typed_attachment_ids,
+                task_deliveries,
                 tool_search_enabled,
                 Some(&available_tool_names),
             ),
@@ -7810,6 +8346,8 @@ impl ApiService {
             opts.skip_global_cache_for_system_prompt,
             prompt_cache_query_source(opts.query_source.as_deref()),
             &opts.tool_result_reminder_suffixes,
+            &opts.typed_attachment_ids,
+            &opts.task_deliveries,
         )?;
         req.input.controls.anthropic.context_hint = opts
             .context_hint
@@ -7880,6 +8418,11 @@ impl ApiService {
         tool_result_reminder_suffixes: Vec<crate::convert::AnthropicToolResultReminderSuffix>,
         request_dispatch_observer: Option<crate::RequestDispatchObserver>,
         native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+        typed_attachment_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
+        task_deliveries: std::collections::HashMap<
+            lingxi_core::types::MessageId,
+            lingxi_core::host::task_delivery::TaskDeliveryRequest,
+        >,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req = self.build_main_request(
             model,
@@ -7892,6 +8435,8 @@ impl ApiService {
             skip_global_cache_for_system_prompt,
             prompt_cache_query_source(query_source),
             &tool_result_reminder_suffixes,
+            &typed_attachment_ids,
+            &task_deliveries,
         )?;
         req.set_effort(effort)?;
         req.set_speed(speed)?;

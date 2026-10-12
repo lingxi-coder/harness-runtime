@@ -57,9 +57,9 @@ use client::protocol::computer_access::{
     TccStateDto,
 };
 use client::protocol::controls::{
-    ControlDisabledReasonDto, ConversationControlsDto, PermissionControlStateDto,
-    PermissionModeOptionDto, ReasoningBudgetRangeDto, ReasoningControlSpecDto,
-    ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
+    ControlDisabledReasonDto, ConversationControlsDto, NativeProactivityControlStateDto,
+    PermissionControlStateDto, PermissionModeOptionDto, ReasoningBudgetRangeDto,
+    ReasoningControlSpecDto, ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
 };
 use client::protocol::error::ClientError;
 use client::protocol::events::{
@@ -1311,6 +1311,20 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
+            "command/initialize_proactivity.json",
+            ClientCommand::InitializeProactivity {
+                proactivity: Some(true),
+                reinitialize: None,
+            },
+        ),
+        (
+            "command/set_proactivity_level.json",
+            ClientCommand::SetProactivityLevel {
+                level: "proactive".to_string(),
+                offer_bypass: Some(false),
+            },
+        ),
+        (
             "command/list_provider_credentials.json",
             ClientCommand::ListProviderCredentials {
                 operation_id: 17,
@@ -2124,6 +2138,14 @@ fn canonical_conversation_controls() -> ConversationControlsDto {
                 disabled_reason: None,
             },
         },
+        proactivity: Some(NativeProactivityControlStateDto {
+            opted_in: false,
+            selector_gate: false,
+            selector_gate_ever_on: false,
+            attachments_enabled: true,
+            opt_in_available: true,
+            level: "default".to_string(),
+        }),
     }
 }
 

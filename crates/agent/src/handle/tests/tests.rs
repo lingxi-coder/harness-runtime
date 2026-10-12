@@ -8,13 +8,13 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::task::JoinHandle;
-use tool_api::tool_trait::PromptOptions;
 use tool_api::Tool;
+use tool_api::tool_trait::PromptOptions;
 
 struct PendingModel;
 
@@ -499,10 +499,12 @@ async fn restored_identity_is_reserved_before_mcp_build_and_cleanup_runs_once() 
         [old_id],
         "MCP must be constructed using the same persisted identity as the runner"
     );
-    assert!(spawner
-        .restore_persistent_with_observer(old_id, request, dummy_inherit(), Arc::new(Observer))
-        .await
-        .is_err());
+    assert!(
+        spawner
+            .restore_persistent_with_observer(old_id, request, dummy_inherit(), Arc::new(Observer))
+            .await
+            .is_err()
+    );
     assert_eq!(
         *ids.lock().unwrap(),
         [old_id],
@@ -1661,10 +1663,11 @@ async fn handback_spawn_keeps_registered_sender_separate_from_anonymous_type_dis
             runtime.sender_id,
             name.unwrap_or_else(|| ctx.agent_id.to_string())
         );
-        assert!(ctx
-            .tool_schemas
-            .iter()
-            .any(|tool| tool.name == lingxi_core::host::handback::HANDBACK_TOOL_NAME));
+        assert!(
+            ctx.tool_schemas
+                .iter()
+                .any(|tool| tool.name == lingxi_core::host::handback::HANDBACK_TOOL_NAME)
+        );
     }
     // A definition fallback is not an immediate-parent permission carrier.
     let spawner = spawner
@@ -2464,12 +2467,13 @@ fn runtime_link_clear_drops_outside_the_lock() {
     let link = Arc::new(RuntimeLink::new());
     let dropped_after_clear = Arc::new(AtomicBool::new(false));
 
-    assert!(link
-        .set(ReentrantDrop {
+    assert!(
+        link.set(ReentrantDrop {
             link: Arc::downgrade(&link),
             dropped_after_clear: dropped_after_clear.clone(),
         })
-        .is_ok());
+        .is_ok()
+    );
     link.clear();
 
     assert!(
@@ -2528,17 +2532,21 @@ async fn a_released_hook_link_refuses_the_spawn_rather_than_running_it_unhooked(
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime.clone(), 4));
     let spawner = test_spawner(pool);
-    assert!(spawner
-        .hook_executor_handle()
-        .set(hook_executor_for(runtime))
-        .is_ok());
+    assert!(
+        spawner
+            .hook_executor_handle()
+            .set(hook_executor_for(runtime))
+            .is_ok()
+    );
 
     // Wired: the hook runs, and this registry has nothing to say about it.
-    assert!(spawner
-        .apply_agent_spawn_hook(&minimal_spawn_request("before drain"), None, None)
-        .await
-        .expect("a wired executor with no matching hook allows the spawn")
-        .is_none());
+    assert!(
+        spawner
+            .apply_agent_spawn_hook(&minimal_spawn_request("before drain"), None, None)
+            .await
+            .expect("a wired executor with no matching hook allows the spawn")
+            .is_none()
+    );
 
     spawner.release_runtime_links();
     assert!(spawner.hook_executor_handle().is_sealed());
@@ -2568,16 +2576,20 @@ fn release_runtime_links_clears_all_four_links_idempotently() {
     let mcp_tool_builder = spawner.mcp_tool_builder_handle();
 
     assert!(tool_registry.set(registry_with(&["Read"])).is_ok());
-    assert!(hook_executor
-        .set(Arc::new(hooks::HookExecutorImpl::new(
-            Arc::new(RwLock::new(hooks::HookRegistry::new())),
-            Arc::new(test_harness::mocks::MockHttpTransport::new()),
-            runtime as Arc<dyn RuntimeSpawner>,
-        )))
-        .is_ok());
-    assert!(skill_loader
-        .set(Arc::new(NoopSkillLoader) as Arc<dyn lingxi_core::host::skill_loader::SkillLoader>)
-        .is_ok());
+    assert!(
+        hook_executor
+            .set(Arc::new(hooks::HookExecutorImpl::new(
+                Arc::new(RwLock::new(hooks::HookRegistry::new())),
+                Arc::new(test_harness::mocks::MockHttpTransport::new()),
+                runtime as Arc<dyn RuntimeSpawner>,
+            )))
+            .is_ok()
+    );
+    assert!(
+        skill_loader
+            .set(Arc::new(NoopSkillLoader) as Arc<dyn lingxi_core::host::skill_loader::SkillLoader>)
+            .is_ok()
+    );
     let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
         Arc::new(|_, _, _| Box::pin(async { crate::agent_mcp_tools::AgentMcpToolSet::default() }));
     assert!(mcp_tool_builder.set(builder).is_ok());
@@ -2595,16 +2607,20 @@ fn release_runtime_links_clears_all_four_links_idempotently() {
     assert!(skill_loader.get().is_none());
     assert!(mcp_tool_builder.get().is_none());
     assert!(tool_registry.set(registry_with(&[])).is_err());
-    assert!(hook_executor
-        .set(Arc::new(hooks::HookExecutorImpl::new(
-            Arc::new(RwLock::new(hooks::HookRegistry::new())),
-            Arc::new(test_harness::mocks::MockHttpTransport::new()),
-            Arc::new(MockRuntimeSpawner::default()) as Arc<dyn RuntimeSpawner>,
-        )))
-        .is_err());
-    assert!(skill_loader
-        .set(Arc::new(NoopSkillLoader) as Arc<dyn lingxi_core::host::skill_loader::SkillLoader>)
-        .is_err());
+    assert!(
+        hook_executor
+            .set(Arc::new(hooks::HookExecutorImpl::new(
+                Arc::new(RwLock::new(hooks::HookRegistry::new())),
+                Arc::new(test_harness::mocks::MockHttpTransport::new()),
+                Arc::new(MockRuntimeSpawner::default()) as Arc<dyn RuntimeSpawner>,
+            )))
+            .is_err()
+    );
+    assert!(
+        skill_loader
+            .set(Arc::new(NoopSkillLoader) as Arc<dyn lingxi_core::host::skill_loader::SkillLoader>)
+            .is_err()
+    );
     let replacement_builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
         Arc::new(|_, _, _| Box::pin(async { crate::agent_mcp_tools::AgentMcpToolSet::default() }));
     assert!(mcp_tool_builder.set(replacement_builder).is_err());
@@ -3157,7 +3173,7 @@ async fn resolve_tools_except_policy() {
         .expect("except policy should resolve");
     let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, vec!["Edit", "Read"]); // sorted by name
-                                             // resolved/allow-list order = available_tools() locale sort (Edit < Read)
+    // resolved/allow-list order = available_tools() locale sort (Edit < Read)
     assert_eq!(allowed, vec!["Edit".to_string(), "Read".to_string()]);
 }
 
@@ -3882,7 +3898,7 @@ async fn barred_qualified_child_model_falls_back_to_parent_route() {
         4,
     ));
     let enforcement = llm_runtime::model::allowlist::ModelEnforcement::Active {
-        allowlist: vec!["parent-a".into()],
+        allowlist: Utf16JsonProjection::array(vec!["parent-a".into()]).unwrap(),
         overrides: Default::default(),
     };
     let spawner = multi_profile_spawner(pool, "parent-a", "a").with_model_restriction_opt(Some((
@@ -3902,7 +3918,7 @@ async fn managed_allowlist_accepts_qualified_model_after_wire_model_resolution()
         4,
     ));
     let enforcement = llm_runtime::model::allowlist::ModelEnforcement::Active {
-        allowlist: vec!["parent-a".into(), "only-b".into()],
+        allowlist: Utf16JsonProjection::array(vec!["parent-a".into(), "only-b".into()]).unwrap(),
         overrides: Default::default(),
     };
     let spawner = multi_profile_spawner(pool, "parent-a", "a").with_model_restriction_opt(Some((
@@ -3965,12 +3981,14 @@ async fn explicit_child_route_can_run_when_unrelated_live_root_route_is_unavaila
         serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect" }),
     )
     .unwrap();
-    assert!(build_test_spawn(&spawner, &inherited)
-        .await
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("route removed"));
+    assert!(
+        build_test_spawn(&spawner, &inherited)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("route removed")
+    );
 }
 
 #[tokio::test]
@@ -4052,9 +4070,11 @@ async fn unavailable_live_selection_does_not_fall_back_to_boot_provider() {
         Ok(_) => panic!("missing live selection must fail closed"),
         Err(error) => error,
     };
-    assert!(error
-        .to_string()
-        .contains("model/provider selection is unavailable"));
+    assert!(
+        error
+            .to_string()
+            .contains("model/provider selection is unavailable")
+    );
 }
 
 #[tokio::test]
@@ -4094,7 +4114,7 @@ async fn provider_qualified_spawn_still_obeys_managed_model_restriction() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     let enforcement = llm_runtime::model::allowlist::ModelEnforcement::Active {
-        allowlist: vec!["claude-opus-4-7".to_string()],
+        allowlist: Utf16JsonProjection::array(vec!["claude-opus-4-7".into()]).unwrap(),
         overrides: std::collections::BTreeMap::new(),
     };
     let spawner = test_spawner(pool)
@@ -4480,8 +4500,11 @@ fn make_subagent_context_seeds_task_prompt_as_user_msg_and_def_body_as_system() 
         .string_at("")
         .unwrap();
     assert!(sys.starts_with("AGENT SYSTEM PROMPT\n\n"));
-    assert!(sys
-        .contains("Notes:\n- Agent threads always have their cwd reset between shell tool calls"));
+    assert!(
+        sys.contains(
+            "Notes:\n- Agent threads always have their cwd reset between shell tool calls"
+        )
+    );
     // Task prompt -> first (and only) user message (NOT the system slot).
     assert_eq!(ctx.prompt_messages.len(), 1);
     assert!(matches!(
@@ -4510,9 +4533,11 @@ fn make_subagent_context_keeps_lone_utf16_units_in_agent_system_prompt() {
         .string_units("")
         .unwrap();
     let prompt_units = prompt.string_units("").unwrap();
-    assert!(rendered
-        .windows(prompt_units.len())
-        .any(|units| units == prompt_units));
+    assert!(
+        rendered
+            .windows(prompt_units.len())
+            .any(|units| units == prompt_units)
+    );
 }
 
 #[test]
@@ -4845,14 +4870,18 @@ async fn agent_listing_surfaces_builtins_with_tools_description() {
         by["Explore"].when_to_use_lean.as_deref(),
         Some(crate::builtins::EXPLORE_WHEN_TO_USE_LEAN)
     );
-    assert!(by["Explore"]
-        .when_to_use
-        .starts_with("Fast read-only search agent for locating code."));
-    assert!(by["Explore"]
-        .when_to_use_lean
-        .as_deref()
-        .unwrap()
-        .contains("broad fan-out searches"));
+    assert!(
+        by["Explore"]
+            .when_to_use
+            .starts_with("Fast read-only search agent for locating code.")
+    );
+    assert!(
+        by["Explore"]
+            .when_to_use_lean
+            .as_deref()
+            .unwrap()
+            .contains("broad fan-out searches")
+    );
     // Every other built-in declares no lean variant.
     for ty in ["general-purpose", "statusline-setup", "Plan"] {
         assert!(
@@ -5322,15 +5351,19 @@ async fn resolve_required_mcp_servers_builtins_are_empty() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     let spawner = test_spawner(pool);
-    assert!(spawner
-        .resolve_required_mcp_servers("general-purpose")
-        .await
-        .is_empty());
+    assert!(
+        spawner
+            .resolve_required_mcp_servers("general-purpose")
+            .await
+            .is_empty()
+    );
     // Unknown → general-purpose fallback → also empty.
-    assert!(spawner
-        .resolve_required_mcp_servers("no-such-agent")
-        .await
-        .is_empty());
+    assert!(
+        spawner
+            .resolve_required_mcp_servers("no-such-agent")
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -6111,9 +6144,11 @@ async fn session_retarget_pins_real_child_transcripts_and_allocation_ownership()
         };
         let path = session_dir(owner).join(format!("agent-{agent_id}.jsonl"));
         assert!(std::fs::read_to_string(&path).unwrap().contains(prompt));
-        assert!(!session_dir(if owner == a { b } else { a })
-            .join(format!("agent-{agent_id}.jsonl"))
-            .exists());
+        assert!(
+            !session_dir(if owner == a { b } else { a })
+                .join(format!("agent-{agent_id}.jsonl"))
+                .exists()
+        );
         spawned.push((agent_id, owner, path));
     }
     let workflow_dir = session_dir(a).join("workflows/run-a");
@@ -6137,9 +6172,11 @@ async fn session_retarget_pins_real_child_transcripts_and_allocation_ownership()
     })
     .await;
     let workflow_path = workflow_dir.join(format!("agent-{agent_id}.jsonl"));
-    assert!(std::fs::read_to_string(&workflow_path)
-        .unwrap()
-        .contains("workflow stays in A"));
+    assert!(
+        std::fs::read_to_string(&workflow_path)
+            .unwrap()
+            .contains("workflow stays in A")
+    );
     spawned.push((agent_id, a, workflow_path.clone()));
     // Restore outside the workflow task-local scope while B is active.
     let mut restore = minimal_spawn_request("");
@@ -6164,9 +6201,11 @@ async fn session_retarget_pins_real_child_transcripts_and_allocation_ownership()
     .await
     .unwrap();
     spawner.stop(&agent_id).await.unwrap();
-    assert!(std::fs::read_to_string(&workflow_path)
-        .unwrap()
-        .contains("restored workflow completed"));
+    assert!(
+        std::fs::read_to_string(&workflow_path)
+            .unwrap()
+            .contains("restored workflow completed")
+    );
     for (agent_id, _, path) in &spawned {
         assert_eq!(
             StreamingSubagentSpawner::transcript_path(&spawner, *agent_id).as_ref(),
@@ -7412,10 +7451,12 @@ async fn persistent_forwarder_owns_completed_failed_and_resumed_turns_but_never_
             assert!(history.iter().any(|text| text == "first child instruction"));
         }
         if mode == "completed" {
-            assert!(seen[1]
-                .3
-                .iter()
-                .any(|text| text == "second child instruction"));
+            assert!(
+                seen[1]
+                    .3
+                    .iter()
+                    .any(|text| text == "second child instruction")
+            );
         }
         drop(seen);
         assert!(executor.take_agent_prompt_transcript(session, id).is_none());

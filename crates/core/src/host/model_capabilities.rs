@@ -22,6 +22,8 @@ pub enum ModelCapability {
     LeanPrompt,
     /// Model supports a mid-conversation system-prompt swap.
     MidConvSystem,
+    /// Model supports mid-conversation tool changes.
+    MidConvToolChange,
     /// Model participates in refusal-fallback routing.
     RefusalFallback,
     /// Model ships the Opus-5 prompt bundle.
@@ -43,6 +45,7 @@ impl ModelCapability {
             Self::AdaptiveThinking => "adaptive_thinking",
             Self::LeanPrompt => "lean_prompt",
             Self::MidConvSystem => "mid_conv_system",
+            Self::MidConvToolChange => "mid_conv_tool_change",
             Self::RefusalFallback => "refusal_fallback",
             Self::Opus5PromptBundle => "opus_5_prompt_bundle",
             Self::Fable5Mitigations => "fable_5_mitigations",
@@ -58,6 +61,19 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
     match model_id {
         "claude-3-5-haiku" => &[],
         "claude-haiku-4-5" => &["context_management"],
+        "claude-haiku-5-5" => &[
+            "effort",
+            "max_effort",
+            "xhigh_effort",
+            "adaptive_thinking",
+            "mid_conv_tool_change",
+            "context_management",
+            "rejects_disabled_thinking",
+            "per_turn_effort",
+            "lean_prompt",
+            "org_locked_thinking",
+            "haiku_5_5_early_stopping_guidance",
+        ],
         "claude-3-5-sonnet" => &[],
         "claude-3-7-sonnet" => &[],
         "claude-sonnet-4-0" => &["context_management"],
@@ -206,6 +222,7 @@ const KNOWN_MODEL_IDS: &[&str] = &[
     "claude-mythos-5-1",
     "claude-3-5-haiku",
     "claude-haiku-4-5",
+    "claude-haiku-5-5",
     "claude-fable-5-1",
     "claude-sonnet-5",
     "claude-opus-4-0",
@@ -221,6 +238,36 @@ const KNOWN_MODEL_IDS: &[&str] = &[
     "claude-3-opus",
     "claude-3-sonnet",
     "claude-3-haiku",
+];
+
+/// Exact model ids present in Claude Code 2.1.295's baked `SAr` catalog. The
+/// source binding manifest is
+/// `acceptance/source-alignment-295-r31/tool-search-state-source/helper-bindings/chunk-tz5k4dyb.js.binding.json`
+/// (binary offset 186669406). This is separate from `KNOWN_MODEL_IDS`, which
+/// also contains legacy aliases and omits catalog rows without capabilities.
+const NATIVE_BAKED_MODEL_CATALOG_IDS: &[&str] = &[
+    "claude-3-5-haiku",
+    "claude-haiku-4-5",
+    "claude-haiku-5-5",
+    "claude-3-5-sonnet",
+    "claude-3-7-sonnet",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-5-5",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-opus-5-5",
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-mythos-5",
+    "claude-mythos-5-1",
 ];
 
 fn known_wrapper_suffix(suffix: &str) -> bool {
@@ -300,6 +347,15 @@ pub fn normalize_model_id(model_id: &str) -> String {
 #[must_use]
 pub fn capabilities_for_loose(model_id: &str) -> &'static [&'static str] {
     capabilities_for(&normalize_model_id(model_id))
+}
+
+/// Whether the normalized identity has an entry in Native's baked model
+/// catalog. This distinguishes an absent capability on a known model from an
+/// unknown model whose Native fallback is capability-enabled.
+#[must_use]
+pub fn is_known_model_id(model_id: &str) -> bool {
+    let canonical = normalize_model_id(model_id);
+    NATIVE_BAKED_MODEL_CATALOG_IDS.contains(&canonical.as_str())
 }
 
 /// Does `model_id` carry `capability`? Oracle `LN(model, capability)`.
@@ -587,6 +643,18 @@ mod tests {
     }
 
     #[test]
+    fn mid_conversation_tool_change_matches_haiku_55_catalog_entry() {
+        assert!(has_capability(
+            "claude-haiku-5-5",
+            ModelCapability::MidConvToolChange
+        ));
+        assert!(!has_capability(
+            "claude-haiku-4-5",
+            ModelCapability::MidConvToolChange
+        ));
+    }
+
+    #[test]
     fn fable_5_carries_its_mitigations() {
         assert!(has_capability(
             "claude-fable-5-1",
@@ -605,7 +673,12 @@ mod tests {
         for id in ["gpt-5", "deepseek/deepseek-chat", "claude-opus-9", ""] {
             assert!(capabilities_for_loose(id).is_empty(), "{id}");
             assert!(!has_capability(id, ModelCapability::LeanPrompt), "{id}");
+            assert!(!is_known_model_id(id), "{id}");
         }
+        assert!(is_known_model_id("claude-opus-4-8"));
+        assert!(is_known_model_id("openrouter/anthropic/claude-opus-5"));
+        assert!(is_known_model_id("claude-haiku-5-5"));
+        assert!(!is_known_model_id("claude-3-opus"));
     }
 
     #[test]

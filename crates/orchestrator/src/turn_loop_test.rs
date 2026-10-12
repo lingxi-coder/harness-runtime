@@ -3614,22 +3614,181 @@ mod read_file_state_tests {
             assert!(is_error, "{content}");
             assert_eq!(
                 content,
-                "tool.call step resolved Schemic with a result that does not match its output shape: expected object or string output"
+                "<tool_use_error>tool.call step resolved Schemic with a result that does not match its output shape: expected object or string output</tool_use_error>"
             );
             assert_eq!(
                 called.load(std::sync::atomic::Ordering::SeqCst),
                 core_should_run
             );
+            let persisted = orch.transcript.tool_use_results.lock().await;
+            let persisted = persisted
+                .get(uses[0].0.as_str())
+                .and_then(|value| value.string_at(""))
+                .expect("toolUseResult retains the raw output validation message");
+            assert_eq!(
+                persisted,
+                "Error: tool.call step resolved Schemic with a result that does not match its output shape: expected object or string output"
+            );
             assert!(
-                orch.transcript
-                    .tool_use_results
-                    .lock()
-                    .await
-                    .get(uses[0].0.as_str())
-                    .and_then(|value| value.string_at(""))
-                    .is_some_and(|raw| raw.starts_with("Error: tool.call step resolved Schemic"))
+                !persisted.contains("<tool_use_error>"),
+                "toolUseResult keeps the unwrapped validation message"
             );
         }
+    }
+
+    struct GenericOutputParserFailureTool;
+
+    #[async_trait]
+    impl Tool for GenericOutputParserFailureTool {
+        fn name(&self) -> &str {
+            "ParserError"
+        }
+
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| source_fixture!({"type":"object"}));
+            &SCHEMA
+        }
+
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
+        fn output_schema(&self) -> Option<&lingxi_core::types::utf16_json::Utf16JsonProjection> {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| source_fixture!({"type":"object"}));
+            Some(&SCHEMA)
+        }
+
+        async fn parse_output(
+            &self,
+            _output: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolError> {
+            Err(ToolError::Io("output parser unavailable".into()))
+        }
+
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
+            true
+        }
+
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
+            true
+        }
+
+        async fn check_permissions(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+
+        async fn description(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "parser failure test".into()
+        }
+
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
+        }
+
+        async fn call(
+            &self,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: source_fixture!({}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+                subagent_hooks_fired: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_keeps_generic_output_parser_failures_bare() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        let source = "export function register(on) { on('tool.call', () => ({ result: 42 })); }";
+        std::fs::write(&module, source).unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load(
+            "generic-parser-error",
+            dir.path(),
+            &module,
+            source_fixture!({}),
+        )
+        .await
+        .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(GenericOutputParserFailureTool)],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "ParserError".to_string(),
+            source_fixture!({}),
+            None,
+        )];
+        let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
+            .await
+            .unwrap();
+        let (content, is_error) = schema_gate_tool_result(&dispatched.results[0]);
+        assert!(is_error);
+        assert_eq!(
+            content,
+            "tool.call step resolved ParserError with a result that does not match its output shape: output parser unavailable"
+        );
+        assert!(!content.contains("<tool_use_error>"));
+        let persisted = orch.transcript.tool_use_results.lock().await;
+        assert_eq!(
+            persisted
+                .get(uses[0].0.as_str())
+                .and_then(|value| value.string_at("")),
+            Some("Error: tool.call step resolved ParserError with a result that does not match its output shape: output parser unavailable")
+        );
     }
 
     #[tokio::test]
@@ -4132,25 +4291,25 @@ mod read_file_state_tests {
             assert_eq!(
                 orch.context_attachment_history(&session.history),
                 vec![
+                    source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
                     source_fixture!({"type":"session_context","context":{}}),
                     source_fixture!({"type":"date","date":date}),
-                    source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
                 ]
             );
             assert!(
-                matches!(&session.history[0], lingxi_core::types::ConversationMessage::System {
+                matches!(&session.history[1], lingxi_core::types::ConversationMessage::System {
                 subtype: Some(subtype), content, ..
             } if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
             );
             assert_eq!(
-                session.history[1].text_content(),
-                format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+                session.history[0].text_content(),
+                "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
             );
             assert_eq!(
                 session.history[2].text_content(),
-                "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+                format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
             );
-            assert!(session.history[1].is_meta() && session.history[2].is_meta());
+            assert!(session.history[0].is_meta() && session.history[2].is_meta());
             match &session.history[3] {
                 lingxi_core::types::ConversationMessage::Assistant { id, content, .. } => {
                     assert!(
@@ -4403,6 +4562,7 @@ mod read_file_state_tests {
             value: PermissionRuleValue {
                 tool_name: (*d).to_string(),
                 rule_content: None,
+                original_rule: None,
             },
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -5304,24 +5464,24 @@ mod max_output_tokens_recovery_tests {
         assert_eq!(
             orch.context_attachment_history(&h),
             vec![
+                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
                 source_fixture!({"type":"session_context","context":{}}),
                 source_fixture!({"type":"date","date":date}),
-                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
             ]
         );
         assert!(
-            matches!(&h[len_before], ConversationMessage::System { subtype: Some(subtype), content, .. }
+            matches!(&h[len_before + 1], ConversationMessage::System { subtype: Some(subtype), content, .. }
             if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
         );
         assert_eq!(
-            h[len_before + 1].text_content(),
-            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+            h[len_before].text_content(),
+            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
         );
         assert_eq!(
             h[len_before + 2].text_content(),
-            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
         );
-        assert!(h[len_before + 1].is_meta() && h[len_before + 2].is_meta());
+        assert!(h[len_before].is_meta() && h[len_before + 2].is_meta());
         assert!(
             matches!(&h[len_before + 3], ConversationMessage::Assistant { stop_reason: Some(reason), .. } if reason == "max_tokens")
         );
@@ -5386,24 +5546,24 @@ mod max_output_tokens_recovery_tests {
         assert_eq!(
             orch.context_attachment_history(&h),
             vec![
+                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
                 source_fixture!({"type":"session_context","context":{}}),
                 source_fixture!({"type":"date","date":date}),
-                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
             ]
         );
         assert!(
-            matches!(&h[len_before], ConversationMessage::System { subtype: Some(subtype), content, .. }
+            matches!(&h[len_before + 1], ConversationMessage::System { subtype: Some(subtype), content, .. }
             if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
         );
         assert_eq!(
-            h[len_before + 1].text_content(),
-            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+            h[len_before].text_content(),
+            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
         );
         assert_eq!(
             h[len_before + 2].text_content(),
-            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
         );
-        assert!(h[len_before + 1].is_meta() && h[len_before + 2].is_meta());
+        assert!(h[len_before].is_meta() && h[len_before + 2].is_meta());
         assert!(
             matches!(&h[len_before + 3], ConversationMessage::Assistant { stop_reason: Some(reason), .. } if reason == "model_context_window_exceeded")
         );
@@ -5467,24 +5627,24 @@ mod max_output_tokens_recovery_tests {
         assert_eq!(
             orch.context_attachment_history(&h),
             vec![
+                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
                 source_fixture!({"type":"session_context","context":{}}),
                 source_fixture!({"type":"date","date":date}),
-                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
             ]
         );
         assert!(
-            matches!(&h[len_before], ConversationMessage::System { subtype: Some(subtype), content, .. }
+            matches!(&h[len_before + 1], ConversationMessage::System { subtype: Some(subtype), content, .. }
             if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
         );
         assert_eq!(
-            h[len_before + 1].text_content(),
-            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+            h[len_before].text_content(),
+            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
         );
         assert_eq!(
             h[len_before + 2].text_content(),
-            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
         );
-        assert!(h[len_before + 1].is_meta() && h[len_before + 2].is_meta());
+        assert!(h[len_before].is_meta() && h[len_before + 2].is_meta());
         assert!(
             matches!(&h[len_before + 3], ConversationMessage::Assistant { stop_reason: Some(reason), .. } if reason == "refusal")
         );
@@ -8452,24 +8612,24 @@ mod pre_tool_hook_tests {
         assert_eq!(
             orch.context_attachment_history(&history),
             vec![
+                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
                 source_fixture!({"type":"session_context","context":{}}),
                 source_fixture!({"type":"date","date":date}),
-                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
             ]
         );
         assert!(
-            matches!(&history[0], ConversationMessage::System { subtype: Some(subtype), content, .. }
+            matches!(&history[1], ConversationMessage::System { subtype: Some(subtype), content, .. }
             if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
         );
         assert_eq!(
-            history[1].text_content(),
-            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+            history[0].text_content(),
+            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
         );
         assert_eq!(
             history[2].text_content(),
-            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
         );
-        assert!(history[1].is_meta() && history[2].is_meta());
+        assert!(history[0].is_meta() && history[2].is_meta());
         assert!(
             matches!(&history[3], ConversationMessage::Assistant { content, .. }
             if content.iter().any(|block| matches!(block, ContentBlock::ToolUse { id, name, .. }

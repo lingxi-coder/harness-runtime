@@ -5,7 +5,7 @@ use crate::test_support::{
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use lingxi_core::types::ContentBlock;
-use skill_api::DiscoveredSkill;
+use skill::DiscoveredSkill;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
@@ -59,7 +59,7 @@ fn orch_bare() -> ConversationOrchestrator {
 /// Build an orchestrator whose skill prefetch resolves to `seed`.
 fn orch_with_seed(seed: Vec<DiscoveredSkill>) -> ConversationOrchestrator {
     let runtime: Arc<dyn lingxi_core::host::RuntimeSpawner> = Arc::new(InlineRuntime);
-    let prefetch = Arc::new(skill_api::SkillDiscoveryPrefetch::with_fixed_result(
+    let prefetch = Arc::new(skill::SkillDiscoveryPrefetch::with_fixed_result(
         runtime, seed,
     ));
     orch_bare().with_skill_discovery_prefetch(prefetch)

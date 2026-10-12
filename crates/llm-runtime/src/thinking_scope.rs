@@ -13,7 +13,18 @@ struct State {
     marked: HashMap<lingxi_core::types::MessageId, usize>,
     pending_snapshot: bool,
     stripped: bool,
+    native_tool_search: NativeToolSearchState,
     recorder: Option<Arc<RecoveryRecorder>>,
+}
+
+/// Conversation-local Native tool-change latches used by `pfr` and the
+/// deferred-tool request normalizer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeToolSearchState {
+    /// A main request was actually dispatched with the MCTC beta header.
+    pub mid_conversation_tool_changes_sent: bool,
+    /// Native classified a sent tool-change header/block as refused.
+    pub tool_change_header_refused: bool,
 }
 
 /// Cloneable identity owned by one conversation or worker query.
@@ -119,6 +130,44 @@ mod beta_tests {
             "a context reset detaches old in-flight handles"
         );
     }
+
+    #[test]
+    fn beta_rejection_latches_detach_on_context_reset() {
+        let scope = ThinkingRecoveryScope::default();
+        scope
+            .beta_rejections()
+            .reject(Beta::MidConversationToolChanges);
+        scope.beta_rejections().reject(Beta::AfkMode);
+        assert!(scope.beta_rejected(Beta::MidConversationToolChanges));
+        assert!(scope.beta_rejected(Beta::AfkMode));
+
+        scope.reset_beta_rejections();
+        assert!(!scope.beta_rejected(Beta::MidConversationToolChanges));
+        assert!(!scope.beta_rejected(Beta::AfkMode));
+    }
+
+    #[test]
+    fn native_tool_search_latches_require_dispatch_and_reset_with_the_conversation() {
+        let scope = ThinkingRecoveryScope::default();
+        assert_eq!(
+            scope.native_tool_search_state(),
+            NativeToolSearchState::default()
+        );
+        scope.mark_mid_conversation_tool_changes_sent();
+        assert!(
+            scope
+                .native_tool_search_state()
+                .mid_conversation_tool_changes_sent
+        );
+        scope.refuse_mid_conversation_tool_changes();
+        assert!(scope.native_tool_search_state().tool_change_header_refused);
+
+        scope.reset_beta_rejections();
+        assert_eq!(
+            scope.native_tool_search_state(),
+            NativeToolSearchState::default()
+        );
+    }
 }
 
 impl ThinkingRecoveryScope {
@@ -156,12 +205,53 @@ impl ThinkingRecoveryScope {
             .clone()
     }
 
+    /// Current query-scoped latches used by Native `pfr`/tool-search flow.
+    #[must_use]
+    pub fn native_tool_search_state(&self) -> NativeToolSearchState {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .native_tool_search
+            .clone()
+    }
+
+    /// Record the first actual dispatch that carried MCTC. Header computation
+    /// or preparation alone is not sufficient to advance Native's `sent` set.
+    pub fn mark_mid_conversation_tool_changes_sent(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .native_tool_search
+            .mid_conversation_tool_changes_sent = true;
+    }
+
+    /// Retire the mid-conversation tool-change fallback after Native's exact
+    /// header/block refusal classifier reports a refusal for a sent change.
+    pub fn refuse_mid_conversation_tool_changes(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .native_tool_search
+            .tool_change_header_refused = true;
+    }
+
+    /// Whether this conversation has observed a rejection for one of its
+    /// computed Anthropic beta headers.
+    #[must_use]
+    pub fn beta_rejected(
+        &self,
+        beta: lingxi_llm_client::providers::anthropic::beta_repair::Beta,
+    ) -> bool {
+        self.beta_rejections().rejected(beta)
+    }
+
     /// Replace the latch identity on context reset. An older in-flight request
     /// may settle its captured scope without rejecting betas in the new scope.
     pub fn reset_beta_rejections(&self) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.betas = Default::default();
         state.server_betas = Default::default();
+        state.native_tool_search = Default::default();
     }
 
     /// Snapshot of rejected historical block ranges.

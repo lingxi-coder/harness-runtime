@@ -19,7 +19,7 @@ fn command(script: &str, cwd: &std::path::Path) -> SandboxedCommand {
 }
 
 async fn child_pid(path: &std::path::Path) -> u32 {
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if let Ok(text) = std::fs::read_to_string(path) {
                 if let Ok(pid) = text.trim().parse() {

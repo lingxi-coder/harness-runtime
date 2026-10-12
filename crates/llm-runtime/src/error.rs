@@ -127,6 +127,25 @@ pub enum LlmError {
         /// Transport-layer failure message.
         message: String,
     },
+    /// A typed HTTP CONNECT response from a proxy. A 407 is terminal unless
+    /// the SDK attached live proxy-helper evidence to `ProxyAuthHelperRetry`.
+    #[error("HTTP proxy tunnel rejected the connection with status {status}")]
+    ProxyTunnelResponse {
+        /// HTTP status returned by the proxy tunnel.
+        status: u16,
+        /// Raw typed challenge header, redacted by the SDK's Debug implementation.
+        proxy_authenticate: Option<lingxi_llm_client::protocol::ProxyAuthHeader>,
+    },
+    /// A real HTTP 407 challenge was passed to the configured Native helper.
+    /// The source error preserves its decoded provider/transport taxonomy and
+    /// the helper status is process-local retry evidence.
+    #[error("{source}")]
+    ProxyAuthHelperRetry {
+        /// Original error returned by the proxy or provider.
+        source: Box<LlmError>,
+        /// Live typed challenge; deserialized wrappers have no retry authority.
+        challenge: Option<lingxi_llm_client::protocol::ProxyAuthHelperChallenge>,
+    },
     /// The host rejected this prepared request at the logical SDK dispatch boundary.
     /// `prior_dispatch` is true when an earlier physical attempt in this drive was admitted.
     #[error("model request was not admitted for dispatch")]
@@ -285,22 +304,61 @@ impl LlmError {
     #[must_use]
     pub fn classification_source(&self) -> &Self {
         match self {
-            Self::ProviderErrorText { source, .. } => source.classification_source(),
+            Self::ProviderErrorText { source, .. } | Self::ProxyAuthHelperRetry { source, .. } => {
+                source.classification_source()
+            }
             other => other,
         }
     }
 
     pub fn classification_source_mut(&mut self) -> &mut Self {
         match self {
-            Self::ProviderErrorText { source, .. } => source.classification_source_mut(),
+            Self::ProviderErrorText { source, .. } | Self::ProxyAuthHelperRetry { source, .. } => {
+                source.classification_source_mut()
+            }
             other => other,
         }
+    }
+
+    /// True only when the SDK retained live evidence that its configured
+    /// helper handled an observed HTTP 407 challenge.
+    #[must_use]
+    pub fn is_proxy_auth_helper_retry(&self) -> bool {
+        self.proxy_auth_helper_challenge()
+            .is_some_and(|challenge| challenge.status == 407)
+    }
+
+    /// Live helper evidence, through provider-text wrappers.
+    #[must_use]
+    pub fn proxy_auth_helper_challenge(
+        &self,
+    ) -> Option<&lingxi_llm_client::protocol::ProxyAuthHelperChallenge> {
+        match self {
+            Self::ProxyAuthHelperRetry {
+                source, challenge, ..
+            } => challenge
+                .as_ref()
+                .or_else(|| source.proxy_auth_helper_challenge()),
+            Self::ProviderErrorText { source, .. } => source.proxy_auth_helper_challenge(),
+            _ => None,
+        }
+    }
+
+    /// Whether the original cause is a typed CONNECT 407 with no helper retry
+    /// authority. Provider-text and helper wrappers preserve this source.
+    #[must_use]
+    pub fn is_proxy_tunnel_auth_rejection(&self) -> bool {
+        matches!(
+            self.classification_source(),
+            Self::ProxyTunnelResponse { status: 407, .. }
+        )
     }
 
     #[must_use]
     pub fn provider_error_text(&self) -> Option<&lingxi_llm_client::protocol::ProviderErrorText> {
         match self {
             Self::ProviderErrorText { text, .. } => Some(text),
+            Self::ProxyAuthHelperRetry { source, .. } => source.provider_error_text(),
             _ => None,
         }
     }
@@ -314,6 +372,7 @@ impl LlmError {
                 native_anthropic_facts,
                 ..
             } => native_anthropic_facts.as_ref(),
+            Self::ProxyAuthHelperRetry { source, .. } => source.native_anthropic_error_facts(),
             _ => None,
         }
     }
@@ -354,8 +413,13 @@ impl LlmError {
     /// numeric status.
     #[must_use]
     pub fn http_status(&self) -> Option<u16> {
-        if let Self::ProviderTimeout { status, .. } = self.classification_source() {
-            return *status;
+        match self.classification_source() {
+            Self::ProviderTimeout { status, .. } => return *status,
+            Self::ProxyTunnelResponse { status, .. } => return Some(*status),
+            _ => {}
+        }
+        if let Some(challenge) = self.proxy_auth_helper_challenge() {
+            return Some(challenge.status);
         }
         self.provider_message().and_then(api_error_status)
     }
@@ -370,6 +434,7 @@ impl LlmError {
     pub fn provider_message(&self) -> Option<&str> {
         match self {
             Self::ProviderErrorText { text, .. } => Some(text.display()),
+            Self::ProxyAuthHelperRetry { source, .. } => source.provider_message(),
             LlmError::Authentication { message }
             | LlmError::ProviderTimeout { message, .. }
             | LlmError::PermissionDenied { message }

@@ -538,6 +538,14 @@ mod tests {
             instruction_context: Default::default(),
             instruction_context_is_override: false,
             instruction_provider: None,
+            native_settings_prompt_provider: None,
+            native_settings_prompt_context: lingxi_core::host::NativeSettingsPromptContext {
+                agent_context: lingxi_core::host::NativeSettingsAgentContext::Subagent {
+                    is_main_session: false,
+                },
+                bare_fork: None,
+                isolated_context: None,
+            },
             mobile_runtime_workspace_reminder: None,
             content_replacement_state: None,
             agent_memory: None,

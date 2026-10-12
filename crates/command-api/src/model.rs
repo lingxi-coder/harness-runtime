@@ -178,11 +178,19 @@ pub struct SlashCommand {
     /// the native implementation permits it, but do not appear in discovery.
     #[serde(skip, default = "command_enabled_by_default")]
     pub is_enabled: bool,
-    /// Native `type === "prompt"` classification. Dispatch shape alone is not
-    /// sufficient: some local builtins inject user messages without being
-    /// prompt commands in Native's headless preview.
+    /// Native command execution type used by Headless's `MPe` admission
+    /// predicate. `None` means this producer has no matching Native command
+    /// object, so it is not admitted to the Native Headless command pool.
     #[serde(skip)]
-    pub is_prompt: bool,
+    pub native_type: Option<NativeCommandType>,
+    /// Native `disableNonInteractive` property. For prompt commands, a missing
+    /// source property is false; for other types this field has no effect.
+    #[serde(skip)]
+    pub disable_non_interactive: bool,
+    /// Native `supportsNonInteractive` property. For local commands, a missing
+    /// source property is false; for other types this field has no effect.
+    #[serde(skip)]
+    pub supports_non_interactive: bool,
     /// Whether the model is forbidden from invoking this command.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_model_invocation: bool,
@@ -213,6 +221,26 @@ pub struct SlashCommand {
         skip_serializing_if = "Option::is_none"
     )]
     pub argument_hint: Option<Utf16JsonProjection>,
+    /// Native prompt command's explicit `userFacingName`, when its factory
+    /// supplies one. This is internal model-listing metadata; it is not part of
+    /// the Bridge command wire shape.
+    #[serde(skip)]
+    pub user_facing_name: Option<Utf16JsonProjection>,
+    /// Native prompt command's exact `unqualifiedName`, when its factory
+    /// supplies one (currently relevant to synced-skill name resolution).
+    #[serde(skip)]
+    pub unqualified_name: Option<Utf16JsonProjection>,
+    /// Native plugin prompt's manifest name, when the plugin factory owns it.
+    /// It is separate from the namespaced command name and plugin ID.
+    #[serde(skip)]
+    pub plugin_name: Option<Utf16JsonProjection>,
+    /// Native model-facing source tag used by skill listing diagnostics.
+    /// Command factories set it only when the source is authoritative.
+    #[serde(skip)]
+    pub native_source: Option<Utf16JsonProjection>,
+    /// Native synced-skill reservation fact used when resolving a bare name.
+    #[serde(skip)]
+    pub bare_name_reserved: bool,
     /// Exact declared positional argument names.
     #[serde(
         default,
@@ -243,7 +271,9 @@ impl Default for SlashCommand {
             kind: SlashCommandKind::default(),
             is_hidden: false,
             is_enabled: true,
-            is_prompt: false,
+            native_type: None,
+            disable_non_interactive: false,
+            supports_non_interactive: false,
             disable_model_invocation: false,
             has_user_specified_description: false,
             loaded_from: None,
@@ -251,11 +281,51 @@ impl Default for SlashCommand {
             paths: None,
             aliases: Vec::new(),
             argument_hint: None,
+            user_facing_name: None,
+            unqualified_name: None,
+            plugin_name: None,
+            native_source: None,
+            bare_name_reserved: false,
             argument_names: Vec::new(),
             skill_root: None,
             user_invocable: None,
             content_length: None,
             menu_description: None,
+        }
+    }
+}
+
+/// Native command execution kind. This is distinct from [`SlashCommandKind`],
+/// which selects the Harness dispatcher and does not establish Native
+/// Headless availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeCommandType {
+    /// A prompt command backed by content injected into the conversation.
+    Prompt,
+    /// A text/local command that can run without the interactive TUI only when
+    /// `supports_non_interactive` is true.
+    Local,
+    /// An interactive renderer command, excluded by Native Headless filtering.
+    LocalJsx,
+}
+
+impl SlashCommand {
+    /// Whether this command has Native `type === "prompt"` semantics.
+    #[must_use]
+    pub const fn is_prompt(&self) -> bool {
+        matches!(self.native_type, Some(NativeCommandType::Prompt))
+    }
+
+    /// The known result of Native's Headless `bge` pool-builder predicate.
+    /// `None` preserves unresolved producer metadata instead of treating it as
+    /// proof that the source command is unavailable.
+    #[must_use]
+    pub const fn native_non_interactive_admission(&self) -> Option<bool> {
+        match self.native_type {
+            Some(NativeCommandType::Prompt) => Some(!self.disable_non_interactive),
+            Some(NativeCommandType::Local) => Some(self.supports_non_interactive),
+            Some(NativeCommandType::LocalJsx) => Some(false),
+            None => None,
         }
     }
 }
@@ -597,10 +667,17 @@ pub trait BuiltinCommandHandler: Send + Sync {
     fn argument_hint(&self) -> Option<&str> {
         None
     }
-    /// Native command object classification for headless unknown-command
-    /// previews. Most handler-backed commands are local; prompt handlers opt
-    /// in explicitly even when their Rust dispatch shape is `Builtin`.
-    fn is_prompt_command(&self) -> bool {
+    /// Native command object type for Headless command-pool admission. A
+    /// producer without an exact Native command object returns `None`.
+    fn native_type(&self) -> Option<NativeCommandType> {
+        None
+    }
+    /// Native `disableNonInteractive` property for prompt command objects.
+    fn disable_non_interactive(&self) -> bool {
+        false
+    }
+    /// Native `supportsNonInteractive` property for local command objects.
+    fn supports_non_interactive(&self) -> bool {
         false
     }
     /// Native `isHidden` value for the current host context.

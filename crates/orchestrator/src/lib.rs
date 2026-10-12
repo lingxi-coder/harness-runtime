@@ -53,6 +53,7 @@ pub mod mod_surface_roster;
 pub mod mod_turn_step;
 pub mod model;
 pub mod native_computer;
+pub mod native_user_message_source;
 pub mod prompt;
 pub mod provider_adapter;
 pub use lingxi_core::host::refusal_cascade;
@@ -112,13 +113,13 @@ pub use config::{
     QUERY_SOURCE_SDK,
 };
 pub use conversation::{
+    realtime_history, QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd,
+    RealtimeAgentInput, RealtimeAgentLimits, ScheduledLoopFire,
+};
+pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
     OrchestratorApiClient, OrchestratorApiRequest, SessionMemoryHandle, StreamingApiClient,
     TurnExecutionMetrics, TurnOutcome,
-};
-pub use conversation::{
-    realtime_history, QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits, ScheduledLoopFire,
 };
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;
@@ -130,6 +131,7 @@ pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };
 pub use provider_adapter::ProviderApiAdapter;
+pub use request_context::RequestContextTranscriptAttachment;
 pub use resume::{
     client_state_tool_results_from_messages, deferred_tool_replays_from_messages,
     prompt_snapshot_from_messages, replay_deferred_tools_after_resume, replay_session_state,

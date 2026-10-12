@@ -260,6 +260,7 @@ fn permission_rule_from_core(rule: &core_permission::PermissionToolCheckRule) ->
         value: crate::rule::PermissionRuleValue {
             tool_name: rule.tool_name.clone(),
             rule_content: rule.rule_content.clone(),
+            original_rule: None,
         },
         behavior: match rule.behavior {
             core_permission::PermissionToolCheckBehavior::Allow => PermissionBehavior::Allow,
@@ -744,6 +745,17 @@ pub struct PolicyPermissionGate {
     /// check, mirroring claude-code reading `toolPermissionContext.mode` LIVE.
     /// Read briefly per check (the value is `Copy`, never held across an `await`).
     mode_override: std::sync::RwLock<Option<PermissionMode>>,
+    /// Native's session AutoMode latch. Auto sets it, Plan preserves it, and
+    /// leaving Auto/Plan clears it. This distinguishes a Plan session entered
+    /// directly from a Plan session reached from Auto.
+    active_auto_mode: std::sync::atomic::AtomicBool,
+    /// Native `HIo` / `needsAutoModeExitAttachment` latch. Set by the live
+    /// permission-mode transition that leaves Auto, except Auto<->Plan, and
+    /// consumed by the next staged main-model policy batch.
+    needs_native_auto_mode_exit_attachment: std::sync::atomic::AtomicBool,
+    /// Native's per-session circuit set when the server rejects the AFK beta.
+    /// It survives later mode changes and is separate from tool-denial counts.
+    native_auto_mode_circuit_broken: std::sync::atomic::AtomicBool,
     /// An explicit acknowledgement from an interactive host for this session.
     /// This permits a live transition into `bypassPermissions` without making
     /// the mode available to unrelated sessions or weakening the settings
@@ -871,6 +883,7 @@ impl PolicyPermissionGate {
                     value: PermissionRuleValue {
                         tool_name: crate::rule::normalize_legacy_tool_name(&tool_name),
                         rule_content,
+                        original_rule: None,
                     },
                     behavior,
                     source,
@@ -948,6 +961,8 @@ impl PolicyPermissionGate {
     pub fn new(policy: Arc<PermissionPolicy>, inner: Arc<dyn PermissionGate>) -> Self {
         inner.set_permission_persistence_enabled(!policy.allow_managed_permission_rules_only);
         let auto_mode_disabled_from_settings = policy.auto_mode_disabled;
+        let active_auto_mode =
+            policy.mode == PermissionMode::Auto && !auto_mode_disabled_from_settings;
         Self {
             live_state: std::sync::RwLock::new(LivePermissionState::from_policy(&policy)),
             bypass_permissions_confirmed: std::sync::atomic::AtomicBool::new(
@@ -956,6 +971,9 @@ impl PolicyPermissionGate {
             policy,
             inner,
             mode_override: std::sync::RwLock::new(None),
+            active_auto_mode: std::sync::atomic::AtomicBool::new(active_auto_mode),
+            needs_native_auto_mode_exit_attachment: std::sync::atomic::AtomicBool::new(false),
+            native_auto_mode_circuit_broken: std::sync::atomic::AtomicBool::new(false),
             mcp_mode_overrides: std::sync::RwLock::new(std::collections::HashMap::new()),
             live_model_provider: Arc::new(std::sync::OnceLock::new()),
             loop_classifier: Arc::new(std::sync::OnceLock::new()),
@@ -1032,10 +1050,11 @@ impl PolicyPermissionGate {
                     .to_string(),
             );
         }
-        *self
+        let mut mode_override = self
             .mode_override
             .write()
-            .unwrap_or_else(|error| error.into_inner()) = Some(PermissionMode::BypassPermissions);
+            .unwrap_or_else(|error| error.into_inner());
+        self.active_auto_mode_for_transition(PermissionMode::BypassPermissions, &mut mode_override);
         Ok(())
     }
 
@@ -1071,10 +1090,27 @@ impl PolicyPermissionGate {
             let active_mode = mode.unwrap_or(self.policy.mode);
             if active_mode == PermissionMode::Auto {
                 *mode = Some(PermissionMode::Default);
+                self.active_auto_mode
+                    .store(false, std::sync::atomic::Ordering::Release);
+                self.needs_native_auto_mode_exit_attachment
+                    .store(true, std::sync::atomic::Ordering::Release);
                 // There is no reliable transport-neutral system-message
                 // channel on PermissionGate. Keep the oracle's exact reason
                 // in the permission log for hosts to surface.
                 tracing::warn!(target: "permission", "auto mode disabled by settings");
+            } else if active_mode == PermissionMode::Plan
+                && self
+                    .active_auto_mode
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                // Native `NQn` handles a disabled auto gate while the visible
+                // mode is Plan but its `prePlanMode` is Auto: it keeps Plan,
+                // restores the pre-plan mode to Default, and directly calls
+                // `ED(true)` to queue the same exit attachment. `active_auto_mode`
+                // is this host's source for that hidden pre-plan Auto state.
+                self.needs_native_auto_mode_exit_attachment
+                    .store(true, std::sync::atomic::Ordering::Release);
+                tracing::warn!(target: "permission", "auto mode disabled by settings while session is in plan mode");
             }
             drop(mode);
 
@@ -1126,6 +1162,11 @@ impl PolicyPermissionGate {
             .load(std::sync::atomic::Ordering::Acquire)
         {
             Some(crate::auto_gate::AutoGateDenialReason::Settings)
+        } else if self
+            .native_auto_mode_circuit_broken
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            Some(crate::auto_gate::AutoGateDenialReason::CircuitBreaker)
         } else if self
             .policy
             .denial_tracking
@@ -1232,6 +1273,44 @@ impl PolicyPermissionGate {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .unwrap_or(self.policy.mode)
+    }
+
+    fn active_auto_mode_for_transition(
+        &self,
+        mode: PermissionMode,
+        mode_override: &mut Option<PermissionMode>,
+    ) {
+        let previous_mode = mode_override.unwrap_or(self.policy.mode);
+        if !matches!(
+            (previous_mode, mode),
+            (PermissionMode::Auto, PermissionMode::Plan)
+                | (PermissionMode::Plan, PermissionMode::Auto)
+        ) {
+            match (previous_mode, mode) {
+                (PermissionMode::Auto, next) if next != PermissionMode::Auto => self
+                    .needs_native_auto_mode_exit_attachment
+                    .store(true, std::sync::atomic::Ordering::Release),
+                (previous, PermissionMode::Auto) if previous != PermissionMode::Auto => self
+                    .needs_native_auto_mode_exit_attachment
+                    .store(false, std::sync::atomic::Ordering::Release),
+                _ => {}
+            }
+        }
+        let was_active = self
+            .active_auto_mode
+            .load(std::sync::atomic::Ordering::Acquire);
+        let native_auto_mode_circuit_broken = self
+            .native_auto_mode_circuit_broken
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.active_auto_mode.store(
+            match mode {
+                PermissionMode::Auto => !native_auto_mode_circuit_broken,
+                PermissionMode::Plan => was_active,
+                _ => false,
+            },
+            std::sync::atomic::Ordering::Release,
+        );
+        *mode_override = Some(mode);
     }
 
     /// Effective mode for one specific tool, including the tighten-only
@@ -2549,7 +2628,7 @@ impl PolicyPermissionGate {
                         );
                         return;
                     }
-                    *mode_override = Some(parsed);
+                    self.active_auto_mode_for_transition(parsed, &mut mode_override);
                 }
             }
             ValidatedPermissionUpdate::Rules {
@@ -3729,8 +3808,65 @@ impl PermissionGate for PolicyPermissionGate {
                 crate::auto_gate::AutoGateDenialReason::Settings,
             ));
         }
-        *mode_override = Some(parsed);
+        self.active_auto_mode_for_transition(parsed, &mut mode_override);
         Ok(())
+    }
+
+    async fn set_permission_mode_for_proactivity(
+        &self,
+        level: &str,
+        offer_bypass: Option<bool>,
+        baseline_mode: &str,
+        selector_gate_ever_on: bool,
+    ) -> Result<Option<String>, String> {
+        use PermissionMode::{AcceptEdits, Auto, BypassPermissions, Default};
+
+        let current_mode = self.effective_mode();
+        let auto_available = self.auto_mode_denial_reason().is_none();
+        let bypass_available = offer_bypass.unwrap_or(true)
+            && (self.policy.bypass_permissions_available
+                || self
+                    .bypass_permissions_confirmed
+                    .load(std::sync::atomic::Ordering::Acquire))
+            && !self.policy.restricted
+            && !self.policy.bypass_killswitch_active;
+
+        // Native K1r/Y1r -> qce. Ask selects Auto when available, except that
+        // an already-Auto session with an ever-enabled selector exits Auto.
+        // Default prefers Auto, then restores its captured ordinary baseline
+        // unless that baseline is unavailable. Proactive prefers Bypass, then
+        // Auto, then AcceptEdits.
+        let next_mode = match level {
+            "ask" if current_mode == Auto && selector_gate_ever_on => Default,
+            "ask" if auto_available => Auto,
+            "ask" => Default,
+            "default" if auto_available => Auto,
+            "default" => match parse_settable_mode(baseline_mode) {
+                Some(Auto) => Default,
+                Some(BypassPermissions) if !bypass_available => Default,
+                Some(mode) => mode,
+                None => Default,
+            },
+            "proactive" if bypass_available => BypassPermissions,
+            "proactive" if auto_available => Auto,
+            "proactive" => AcceptEdits,
+            _ => {
+                return Err(format!(
+                    "Cannot set proactivity: unrecognized level {level} (expected one of ask, default, proactive)"
+                ));
+            }
+        };
+
+        // `oTe` can also reject a transition under Native's HIPAA taint/pending
+        // service. LingXi has no corresponding account-service fact; the live
+        // local auto/bypass policy checks above remain authoritative here.
+        self.set_permission_mode(next_mode.wire_str()).await?;
+        Ok(self.permission_mode())
+    }
+
+    fn take_native_auto_mode_exit_attachment_pending(&self) -> bool {
+        self.needs_native_auto_mode_exit_attachment
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     fn update_auto_mode_disabled(&self, disabled: bool) {
@@ -3805,6 +3941,8 @@ impl PermissionGate for PolicyPermissionGate {
     fn permission_policy_snapshot(&self) -> Option<core_permission::PermissionPolicySnapshot> {
         fn snapshot_rules(
             buckets: &HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+            roots: Option<&crate::filesystem::FsRoots>,
+            diskless: bool,
         ) -> Vec<core_permission::PermissionPolicyRuleFact> {
             let mut sources: Vec<_> = buckets.keys().copied().collect();
             sources.sort_by_key(|source| std::cmp::Reverse(source.priority()));
@@ -3812,9 +3950,63 @@ impl PermissionGate for PolicyPermissionGate {
                 .into_iter()
                 .flat_map(|source| {
                     buckets.get(&source).into_iter().flatten().map(|rule| {
+                        let canonical = rule.value.to_rule_projection();
+                        let stored = rule
+                            .value
+                            .original_rule_projection()
+                            .cloned()
+                            .unwrap_or_else(|| canonical.clone());
+                        let canonical = (stored != canonical).then_some(canonical);
+                        let (root, pattern) =
+                            if matches!(rule.value.tool_name.as_str(), "Read" | "Edit") {
+                                match (
+                                    rule.value.rule_content_text(),
+                                    rule.value.rule_content_units(),
+                                    roots,
+                                ) {
+                                    (Some(content), _, Some(roots))
+                                        if !(diskless && content.starts_with("~/")) =>
+                                    {
+                                        let (pattern, root) = crate::filesystem::pattern_with_root(
+                                            content,
+                                            rule.source,
+                                            roots,
+                                        );
+                                        (
+                                            Some(root),
+                                            Some(Utf16JsonProjection::from(pattern.as_str())),
+                                        )
+                                    }
+                                    (None, Some(content), Some(roots))
+                                        if !(diskless
+                                            && content
+                                                .starts_with(&[b'~' as u16, b'/' as u16])) =>
+                                    {
+                                        let (pattern, root) =
+                                            crate::filesystem::pattern_with_root_units(
+                                                &content,
+                                                rule.source,
+                                                roots,
+                                            );
+                                        let display = String::from_utf16_lossy(&pattern);
+                                        let pattern =
+                                            Utf16JsonProjection::root_string(display, pattern)
+                                                .expect(
+                                                "path pattern display matches exact UTF-16 units",
+                                            );
+                                        (Some(root), Some(pattern))
+                                    }
+                                    _ => (None, None),
+                                }
+                            } else {
+                                (None, None)
+                            };
                         core_permission::PermissionPolicyRuleFact {
-                            rule: rule.value.to_rule_projection(),
+                            rule: stored,
+                            canonical,
                             source: rule.source.lingxi_settings_source().to_owned(),
+                            root,
+                            pattern,
                         }
                     })
                 })
@@ -3853,6 +4045,20 @@ impl PermissionGate for PolicyPermissionGate {
                 },
             )
             .collect();
+        let filesystem_roots = policy.roots.as_ref();
+        let diskless = self
+            .classifier_host_capabilities
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .diskless;
+        let mode_override = self
+            .mode_override
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let effective_mode = mode_override.unwrap_or(self.policy.mode);
+        let active_auto_mode = self
+            .active_auto_mode
+            .load(std::sync::atomic::Ordering::Acquire);
         let denial_tracking = self
             .policy
             .denial_tracking
@@ -3860,10 +4066,14 @@ impl PermissionGate for PolicyPermissionGate {
             .unwrap_or_else(|error| error.into_inner());
 
         Some(core_permission::PermissionPolicySnapshot {
-            permission_mode: self.effective_mode().wire_str().to_owned(),
-            allow_rules: snapshot_rules(&policy.allow_rules),
-            deny_rules: snapshot_rules(&policy.deny_rules),
-            ask_rules: snapshot_rules(&policy.ask_rules),
+            permission_mode: effective_mode.wire_str().to_owned(),
+            active_auto_mode,
+            native_auto_mode_circuit_broken: self
+                .native_auto_mode_circuit_broken
+                .load(std::sync::atomic::Ordering::Acquire),
+            allow_rules: snapshot_rules(&policy.allow_rules, filesystem_roots, diskless),
+            deny_rules: snapshot_rules(&policy.deny_rules, filesystem_roots, diskless),
+            ask_rules: snapshot_rules(&policy.ask_rules, filesystem_roots, diskless),
             rule_roots,
             home_directory: policy.roots.as_ref().and_then(|roots| roots.home.clone()),
             working_directory: policy.roots.as_ref().map(|roots| roots.cwd.clone()),
@@ -3893,6 +4103,19 @@ impl PermissionGate for PolicyPermissionGate {
             total_denials: denial_tracking.total_denials,
             denial_circuit_broken: denial_tracking.is_circuit_broken(),
         })
+    }
+
+    fn record_native_afk_beta_rejection(&self) {
+        // Serialize with the live mode transition so an in-flight AFK rejection
+        // cannot race with a user selecting Auto and leave its active latch on.
+        let _mode_override = self
+            .mode_override
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        self.native_auto_mode_circuit_broken
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.active_auto_mode
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -4188,6 +4411,7 @@ fn mod_check_rule(
             .map(|rule| PermissionRuleValue {
                 tool_name: rule.tool_name.clone(),
                 rule_content: rule.rule_content.clone(),
+                original_rule: None,
             })
             .map(|rule| rule.to_rule_projection())
     })
@@ -4412,6 +4636,7 @@ mod gate_sysmsg_test {
             value: PermissionRuleValue {
                 tool_name: "Bash".into(),
                 rule_content: None,
+                original_rule: None,
             },
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),

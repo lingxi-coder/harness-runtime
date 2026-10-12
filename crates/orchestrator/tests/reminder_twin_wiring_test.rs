@@ -37,6 +37,7 @@ const STREAMING: &str = concat!(
 );
 const COLLECTOR: &str = include_str!("../src/conversation/drivers/prepare.rs");
 const PROMPT_PIPELINE: &str = include_str!("../src/conversation/prompt.rs");
+const REMINDER_PRODUCERS: &str = include_str!("../src/conversation/reminders.rs");
 
 /// The collector's own file, excluded from the driver scan below.
 ///
@@ -104,51 +105,67 @@ fn driver_sources() -> Vec<(String, String)> {
     sources
 }
 
-/// Every producer the shared collector must invoke, in no particular order —
-/// position is not what this file checks. Add a row when you add a reminder:
-/// forgetting to wire it into the collector fails
-/// `shared_collector_invokes_every_per_turn_reminder`, and wiring it into one
-/// driver instead fails `neither_driver_reaches_a_reminder_behind_the_collector`.
-const TWIN_REMINDERS: &[&str] = &[
-    "brief_mode_reminder_message",
-    "output_style_reminder_message",
-    "plan_mode_turn_messages",
-    "plan_mode_exit_message",
-    "skill_listing_reminder_message",
-    "conditional_rules_reminder_messages",
-    "nested_memory_reminder_messages",
-    "new_diagnostics_reminder_message",
-    "agent_listing_reminder_message",
-    "changed_files_reminder_messages",
-    "todo_reminder_message",
-    "tool_search_usage_reminder_message",
-    "async_hook_response_reminder_message",
-    "task_notification_reminder_messages_in_turn",
-    "memory_update_reminder_messages",
-    "relevant_memory_reminder_messages",
-    "skill_discovery_reminder_message",
-    "silent_turn_reminder_message",
-    "total_tokens_reminder_message",
-    // Moved into the collector with `prepare_turn_step` (PR 2). They are
-    // PREPENDED rather than appended to `transient`, but they are per-turn
-    // reminders both drivers must get, and they are computed once per step for
-    // the same reason as the rest.
-    "deferred_tools_reminder_message",
-    "date_change_reminder_message",
+/// Every per-turn producer in the shared preparation path, with its expected
+/// number of call sites. Conditional rules are produced inside
+/// `nested_memory_reminder_messages`; they are not a separate call site. The
+/// deferred-tools attachment is produced before reminder collection and has a
+/// separate guard below. Task notifications have two mutually exclusive call
+/// sites: the bare-mode early return and the ordinary reminder fan-out.
+const TWIN_REMINDERS: &[(&str, usize)] = &[
+    ("brief_mode_reminder_message", 1),
+    ("output_style_reminder_message", 1),
+    ("plan_mode_turn_messages", 1),
+    ("plan_mode_exit_message", 1),
+    ("skill_listing_reminder_message", 1),
+    ("nested_memory_reminder_messages", 1),
+    ("new_diagnostics_reminder_message", 1),
+    ("agent_listing_reminder_message", 1),
+    ("changed_files_reminder_messages", 1),
+    ("todo_reminder_message", 1),
+    ("tool_search_usage_reminder_message", 1),
+    ("async_hook_response_mod_messages", 1),
+    ("task_notification_reminder_messages_in_turn", 2),
+    ("memory_update_reminder_messages", 1),
+    ("relevant_memory_reminder_messages", 1),
+    ("skill_discovery_reminder_message", 1),
+    ("silent_turn_reminder_message", 1),
+    ("total_tokens_reminder_message", 1),
+    ("mcp_instructions_reminder_message", 1),
+    // These model-facing rows are positioned separately from `transient`, but
+    // are produced in the shared preparation path for both turn drivers.
+    // The typed deferred-tools row is produced earlier in `prepare_turn_step`;
+    // this API-system projection is the per-step row still produced here.
+    ("native_tool_change_api_system_message", 1),
+    ("date_change_reminder_message", 1),
 ];
 
-/// Count CALL sites of `name`, wherever rustfmt put the receiver.
+/// Count method and qualified-function CALL sites of `name`.
 ///
-/// The leading dot is what makes this a call rather than a mention: a doc link
-/// spells the same method `Self::name` or `` `name` `` with no parenthesis, and
-/// a wrapped call (`self\n    .name(arg)`) still carries the dot.
+/// Parentheses make this a call rather than a mention, and both forms tolerate
+/// rustfmt wrapping: `self\n    .name(arg)` and
+/// `module::\n    name(arg)`.
 ///
 /// The previous matcher was `receiver.name().await`, which scores zero for any
 /// call rustfmt wrapped or that takes an argument — two of the producers here
 /// are both. A matcher that under-counts is the dangerous direction for a
 /// presence check, because the failure looks like a missing call.
 fn call_sites(src: &str, name: &str) -> usize {
-    src.matches(&format!(".{name}(")).count()
+    src.matches(&format!(".{name}(")).count() + src.matches(&format!("::{name}(")).count()
+}
+
+fn compact_whitespace(src: &str) -> String {
+    src.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn source_between<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+    let start = src
+        .find(start_marker)
+        .unwrap_or_else(|| panic!("missing source marker {start_marker:?}"));
+    let tail = &src[start..];
+    let end = tail
+        .find(end_marker)
+        .unwrap_or_else(|| panic!("missing source marker {end_marker:?} after {start_marker:?}"));
+    &tail[..end]
 }
 
 /// A row-count canary for [`TWIN_REMINDERS`].
@@ -166,32 +183,188 @@ fn call_sites(src: &str, name: &str) -> usize {
 /// added by hand — the same hazard one level further out, and the reason the
 /// per-name checks below exist as well rather than this canary alone.
 #[test]
-fn twin_reminder_list_covers_every_producer_in_the_collector() {
-    let producer_calls = COLLECTOR.matches("_message(").count()
+fn twin_reminder_list_covers_every_producer_in_shared_preparation() {
+    let message_shaped_calls = COLLECTOR.matches("_message(").count()
         + COLLECTOR.matches("_messages(").count()
         + COLLECTOR.matches("_messages_in_turn(").count();
+    // These calls only render previously-created model-history rows; they do
+    // not produce a per-turn reminder. Their suffix matches the producer
+    // naming convention, so exclude the two explicit formatting call sites.
+    let rendered_history_rows = COLLECTOR.matches("rendered_system_message(").count();
+    assert_eq!(rendered_history_rows, 2);
+    let producer_calls = message_shaped_calls - rendered_history_rows;
+    let listed_calls = TWIN_REMINDERS
+        .iter()
+        .map(|(_, expected_calls)| expected_calls)
+        .sum::<usize>();
     assert_eq!(
-        producer_calls,
-        TWIN_REMINDERS.len(),
-        "the collector makes {producer_calls} producer calls but TWIN_REMINDERS lists \
-         {}. Add the new reminder's row above — an unlisted producer is invisible to \
-         every other check in this file.",
-        TWIN_REMINDERS.len()
+        producer_calls, listed_calls,
+        "shared preparation makes {producer_calls} producer calls but TWIN_REMINDERS lists \
+         {listed_calls} call sites. Add the new reminder's row above — an unlisted \
+         producer is invisible to every other check in this file."
     );
 }
 
 #[test]
-fn shared_collector_invokes_every_per_turn_reminder() {
-    for name in TWIN_REMINDERS {
+fn shared_preparation_invokes_every_per_turn_reminder() {
+    for (name, expected_calls) in TWIN_REMINDERS {
         assert_eq!(
             call_sites(COLLECTOR, name),
-            1,
-            "{name} must be invoked exactly once by the shared collector \
-             (conversation/drivers/prepare.rs). Both turn drivers read their \
+            *expected_calls,
+            "{name} must be invoked {expected_calls} time(s) by shared per-turn \
+             preparation (conversation/drivers/prepare.rs). Both turn drivers read their \
              per-turn reminders from there; a producer missing here is missing \
              from BOTH paths."
         );
     }
+}
+
+#[test]
+fn bare_and_full_paths_each_collect_task_notifications_once() {
+    const TASK_NOTIFICATIONS: &str = "task_notification_reminder_messages_in_turn";
+    let bare_path = source_between(
+        COLLECTOR,
+        "if self.config.bare {",
+        "let mut transient = Vec::new();",
+    );
+    let full_path = &COLLECTOR[COLLECTOR
+        .find("let mut transient = Vec::new();")
+        .expect("the non-bare collector path starts with its transient list")..];
+
+    assert_eq!(call_sites(bare_path, TASK_NOTIFICATIONS), 1);
+    assert_eq!(call_sites(full_path, TASK_NOTIFICATIONS), 1);
+}
+
+#[test]
+fn conditional_rules_remain_owned_by_the_nested_memory_producer() {
+    let nested_memory = source_between(
+        REMINDER_PRODUCERS,
+        "pub async fn nested_memory_reminder_messages(",
+        "pub(super) async fn discard_stale_prefetches(",
+    );
+    assert_eq!(call_sites(nested_memory, "load_conditional_rules"), 1);
+    assert_eq!(
+        nested_memory.matches("rule_matches_touched_file(").count(),
+        1
+    );
+    assert!(compact_whitespace(nested_memory)
+        .contains(".persist_nested_memory_files(rules,&trigger,&cwd,&prior)"));
+}
+
+#[test]
+fn staged_prompt_ingress_is_consumed_without_duplicate_producer_calls() {
+    let prepare_step = source_between(
+        COLLECTOR,
+        "pub(crate) async fn prepare_turn_step(",
+        "pub(crate) fn collect_turn_reminders<'a>(",
+    );
+    assert_eq!(
+        call_sites(prepare_step, "deferred_tools_prompt_ingress_attachment"),
+        2,
+        "deferred_tools_delta is produced once from the Native NAr cache-aware \
+         branch and once from the legacy branch; the branches are mutually exclusive"
+    );
+    let compact_prepare_step = compact_whitespace(prepare_step);
+    assert!(compact_prepare_step.contains(
+        ".deferred_tools_prompt_ingress_attachment(&current_wire_tool_names,self.native_tool_pool_refresh_callback_available(),)"
+    ));
+    assert!(compact_prepare_step
+        .contains("self.deferred_tools_prompt_ingress_attachment(&current_wire_tool_names,None)"));
+    assert!(compact_prepare_step.contains(
+        "cache_prompt_ingress_producer_rows_pending(self,\"deferred_tools_delta\",rows.clone(),)"
+    ));
+
+    let snapshot_ingress = source_between(
+        COLLECTOR,
+        "let mut snapshot = prepared_call.history_snapshot;",
+        "let history = self.session.lock().await.model_context_history();",
+    );
+    assert_eq!(
+        snapshot_ingress
+            .matches("::staged_prompt_ingress_attachments(")
+            .count(),
+        1
+    );
+    assert!(snapshot_ingress.contains("snapshot.retain(|row| !ingress_ids.contains(&row.id()))"));
+
+    let reminder_collector = source_between(
+        COLLECTOR,
+        "pub(crate) fn collect_turn_reminders<'a>(",
+        "pub(crate) fn tool_result_reminder_suffixes_for_snapshot(",
+    );
+    assert_eq!(
+        reminder_collector
+            .matches("::staged_prompt_ingress_attachments(")
+            .count(),
+        2,
+        "the bare path checks whether rows are staged before persisting task \
+         notifications; the non-bare path snapshots them for consumption"
+    );
+    let bare_path = source_between(
+        reminder_collector,
+        "if self.config.bare {",
+        "let mut transient = Vec::new();",
+    );
+    assert_eq!(
+        bare_path
+            .matches("::staged_prompt_ingress_attachments(")
+            .count(),
+        1,
+        "bare mode performs a non-consuming presence check before it exits"
+    );
+    let full_path = &reminder_collector[reminder_collector
+        .find("let mut transient = Vec::new();")
+        .expect("the non-bare collector path starts with its transient list")..];
+    assert_eq!(
+        full_path
+            .matches("::staged_prompt_ingress_attachments(")
+            .count(),
+        1,
+        "the non-bare path snapshots the staged rows once for consumption"
+    );
+
+    let staged_settings_loop = source_between(
+        reminder_collector,
+        "for kind in [",
+        "if let Some(reminder) = self.brief_mode_reminder_message()",
+    );
+    let staged_settings_kinds = source_between(reminder_collector, "for kind in [", "]")
+        .strip_prefix("for kind in [")
+        .expect("the settings-row loop starts with its kind list")
+        .split(',')
+        .map(|kind| kind.trim().trim_matches('"'))
+        .filter(|kind| !kind.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        staged_settings_kinds,
+        vec![
+            "environment",
+            "model",
+            "output_style_instructions",
+            "language"
+        ],
+        "the staged row projection preserves Native's environment/model rows, \
+         then output-style/language deltas in source order"
+    );
+    let compact_settings_loop = compact_whitespace(staged_settings_loop);
+    assert!(compact_settings_loop.contains("ifletSome(rows)=&staged_ingress"));
+    assert!(compact_settings_loop
+        .contains("rows.iter().filter(|row|row.payload.string_at(\"/type\")==Some(kind))"));
+    assert!(compact_settings_loop.contains(".map(|row|row.message.clone())"));
+
+    for kind in [
+        "agent_listing_delta",
+        "skill_listing",
+        "total_tokens_reminder",
+        "budget_usd",
+    ] {
+        assert!(
+            COLLECTOR.contains(&format!("staged(\"{kind}\")")),
+            "staged ingress type {kind} must be consumed as a row"
+        );
+    }
+    assert!(COLLECTOR.contains("else if staged_ingress.is_none()"));
+    assert!(COLLECTOR.contains("let total_tokens = if staged_ingress.is_none()"));
 }
 
 #[test]
@@ -239,7 +412,7 @@ fn neither_driver_reaches_a_reminder_behind_the_collector() {
     // single-driver wiring bug this file was written for; adding it to the
     // collector instead is the fix, not adding it to both drivers.
     for (file, source) in &sources {
-        for name in TWIN_REMINDERS {
+        for (name, _) in TWIN_REMINDERS {
             assert_eq!(
                 call_sites(source, name),
                 0,
@@ -287,9 +460,7 @@ fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     // Before PR 2 there was one per driver; a driver that grows its own again
     // has stopped going through `prepare_turn_step`.
     assert_eq!(
-        COLLECTOR
-            .matches("self.prepend_leading_context(&mut snapshot).await")
-            .count(),
+        call_sites(COLLECTOR, "prepend_leading_context"),
         1,
         "the shared preparation must hand-roll exactly one assembly (the main \
          path); any other must go through reattach_outgoing_context"

@@ -163,19 +163,10 @@
       "reason": "They describe a mechanism this port deliberately does not have \u2014 ending a turn MID-TOOL-CALL to deliver an inbound message. Here a message queues, the agent parks, and the queue drains as a digest at rest. Porting the strings would produce markers nothing can emit. Reopen only alongside an interrupting-delivery path; both are needed then, and the distinction between them matters.",
       "decided_on": "2026-09-10",
       "decided_by": "user",
-      "status": "active",
-      "anchors": [
-        {
-          "kind": "present",
-          "path": "crates/tasks/src/observer.rs",
-          "text": "non-interrupting"
-        },
-        {
-          "kind": "absent",
-          "path": "crates",
-          "text": "Tool call skipped:"
-        }
-      ]
+      "status": "retired",
+      "retired_on": "2026-10-11",
+      "retired_because": "The fixed 2.1.295 alignment scope no longer permits this historical runtime exemption. The current task-delivery request projection recognizes both Native skipped-call markers in its interrupted-user classifier, so the old whole-tree absence anchor is also false. Retirement does not assert that every interrupting-delivery producer is implemented or runtime-verified; those contracts remain subject to the current acceptance matrix.",
+      "anchors": []
     },
     {
       "id": "ghost-bundled-skills",
@@ -263,7 +254,12 @@
         {
           "kind": "present",
           "path": "crates/command-api/src/builtins/register.rs",
-          "text": "register_alias(\"cost\".to_string(), \"usage\".to_string())"
+          "text": "reg.register_alias(\"cost\".into(), \"usage\".into());"
+        },
+        {
+          "kind": "present",
+          "path": "crates/command-api/src/builtins/register.rs",
+          "text": "reg.register_alias(\"stats\".into(), \"usage\".into());"
         }
       ]
     },

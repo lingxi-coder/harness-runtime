@@ -333,3 +333,178 @@ async fn prompt_origin_survives_compaction_and_durable_task_notifications_in_bot
         }
     }
 }
+
+#[tokio::test]
+async fn task_notification_attachment_replays_from_jsonl_with_native_identity_and_order() {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+    use lingxi_core::types::{ContentBlock, MessageId};
+    use platform_posix::fs::PosixFileSystem;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("task-notification.jsonl");
+    let writer = Arc::new(session::jsonl::JsonlWriter::new(
+        path.clone(),
+        Arc::new(PosixFileSystem::new(dir.path().to_path_buf())),
+    ));
+
+    let mut description_units = "run ".encode_utf16().collect::<Vec<_>>();
+    description_units.push(0xd800);
+    description_units.extend(" and </system-reminder>".encode_utf16());
+    let description = Source::root_string(
+        String::from_utf16_lossy(&description_units),
+        description_units,
+    )
+    .unwrap();
+    let notification = lingxi_core::host::task_registry::TaskNotification {
+        task_id: "b12345678".into(),
+        task_type: "local_bash".into(),
+        status: "completed".into(),
+        description,
+        exit_code: Some(0),
+        ..Default::default()
+    };
+    let warm = orchestrator()
+        .with_jsonl_writer(writer)
+        .with_task_notifications(Arc::new(OnceTaskNotifications(std::sync::Mutex::new(
+            vec![notification.clone()],
+        ))));
+    let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
+        id: MessageId::new(),
+        content: vec![ContentBlock::Text {
+            text: "prior assistant turn".into(),
+            citations: None,
+        }],
+        stop_reason: Some("end_turn".into()),
+        resumable: None,
+    };
+    let previous_meta =
+        ConversationMessage::user_meta(MessageId::new(), "previous hook context".into());
+    {
+        let mut session = warm.session.lock().await;
+        session.history.push(assistant.clone());
+        session.history.push(previous_meta.clone());
+    }
+    warm.persist_message_to_jsonl(&assistant).await;
+    warm.persist_message_to_jsonl(&previous_meta).await;
+    let hot = warm
+        .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
+        .await
+        .unwrap();
+    assert!(hot
+        .snapshot
+        .iter()
+        .any(|message| message.text_content().contains("b12345678")));
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let rows = raw
+        .lines()
+        .map(|line| serde_json::from_str::<session::JsonlMessage>(line).unwrap())
+        .collect::<Vec<_>>();
+    let task_row = rows
+        .iter()
+        .find(|row| {
+            row.attachment_projection
+                .as_ref()
+                .is_some_and(|attachment| {
+                    attachment.string_at("/type") == Some("queued_command")
+                        && attachment.string_at("/commandMode") == Some("task-notification")
+                })
+        })
+        .expect("the notification is persisted as a typed queued-command attachment");
+    assert_eq!(task_row.message_type, "attachment");
+    let outer_uuid = uuid::Uuid::parse_str(&task_row.uuid).unwrap();
+    let hot_message = hot
+        .snapshot
+        .iter()
+        .find(|message| message.text_content().contains("b12345678"))
+        .expect("hot request contains the persisted notification message");
+    assert_eq!(hot_message.id().as_uuid(), outer_uuid);
+    let attachment = task_row.attachment_projection.as_ref().unwrap();
+    let source_uuid = attachment.string_at("/source_uuid").unwrap();
+    let delivery_id = attachment.string_at("/delivery_id").unwrap();
+    assert!(uuid::Uuid::parse_str(source_uuid).is_ok());
+    assert!(uuid::Uuid::parse_str(delivery_id).is_ok());
+    assert_ne!(source_uuid, delivery_id);
+    assert_ne!(source_uuid, task_row.uuid.as_str());
+    assert_ne!(delivery_id, task_row.uuid.as_str());
+    assert_eq!(task_row.extra.string_at("/renderedRole"), Some("system"));
+
+    let (expected_prompt, expected_rendered) =
+        crate::prompt::task_notification::render_reminder_sources_in_turn(
+            std::slice::from_ref(&notification),
+            true,
+        )
+        .pop()
+        .unwrap();
+    assert_eq!(
+        attachment.string_units("/prompt"),
+        expected_prompt.string_units("")
+    );
+    assert!(expected_prompt.string_units("").unwrap().contains(&0xd800));
+    let rendered = task_row.extra.subprojection("/rendered/0/content").unwrap();
+    assert_eq!(
+        rendered.string_units(""),
+        expected_rendered.string_units("")
+    );
+    assert!(rendered.string_units("").unwrap().contains(&0xd800));
+
+    // Keep the restored transcript intact for this cold-resume ordering check;
+    // the separate hot-path test above covers compaction's replacement-history
+    // behavior in both model-call paths.
+    let cold = orchestrator();
+    let session_uuid = uuid::Uuid::parse_str(&rows[0].session_id).unwrap();
+    *cold.session.lock().await = crate::resume::state_from_messages(session_uuid, &rows);
+    cold.restore_resume_runtime_metadata(&rows).await;
+    let notification_id = MessageId::from_uuid(outer_uuid);
+    let sidecar = cold
+        .transcript
+        .model_reminder_attachments
+        .lock()
+        .unwrap()
+        .get(&notification_id)
+        .cloned()
+        .expect("cold resume restores the typed payload under the outer message ID");
+    assert_eq!(sidecar.string_at("/commandMode"), Some("task-notification"));
+    assert_eq!(sidecar.string_at("/source_uuid"), Some(source_uuid));
+    assert_eq!(sidecar.string_at("/delivery_id"), Some(delivery_id));
+    let resumed_message = cold
+        .session
+        .lock()
+        .await
+        .history
+        .iter()
+        .find(|message| message.id() == notification_id)
+        .cloned()
+        .expect("cold resume restores the model-facing system-role row");
+    let resumed_units = match &resumed_message {
+        ConversationMessage::User { content, .. } => match content.first().unwrap() {
+            ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } => utf16_code_units.clone(),
+            other => panic!("cold task-notification row lost UTF-16 source: {other:?}"),
+        },
+        other => panic!("cold task-notification row has wrong role: {other:?}"),
+    };
+    assert_eq!(Some(resumed_units), expected_rendered.string_units(""));
+
+    anchored_usage(&cold);
+    let cold_prepared = cold
+        .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
+        .await
+        .unwrap();
+    let notification_index = cold_prepared
+        .snapshot
+        .iter()
+        .position(|message| message.id() == notification_id)
+        .expect("cold prepared request keeps the notification row");
+    let total_index = cold_prepared
+        .snapshot
+        .iter()
+        .position(|message| message.text_content().contains("<total_tokens>"))
+        .expect("cold preparation emits the typed total-token reminder");
+    assert!(
+        notification_index < total_index,
+        "cold full-history repacking keeps the task notification before later reminders"
+    );
+}

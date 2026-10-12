@@ -958,6 +958,66 @@ mod next_step_tests {
         }
     }
 
+    #[test]
+    fn proxy_helper_407_uses_the_ordinary_budget_but_raw_connect_407_is_terminal() {
+        let helper_error = LlmError::ProxyAuthHelperRetry {
+            source: Box::new(LlmError::Authentication {
+                message: "407 {\"error\":\"proxy authentication required\"}".into(),
+            }),
+            challenge: Some(lingxi_llm_client::protocol::ProxyAuthHelperChallenge {
+                status: 407,
+                proxy_authenticate: Some(b"Basic realm=private-proxy".to_vec()),
+            }),
+        };
+        let policy = RetryPolicy;
+        let ctl = RetryControl {
+            max_retries: 1,
+            ..RetryControl::default()
+        };
+        assert!(matches!(
+            policy.classify_error(&helper_error),
+            RetryDecision::Retry { .. }
+        ));
+        let mut state = RetryState::default();
+        assert!(matches!(
+            next_step(&mut state, &ctl, &helper_error, 0),
+            DriveStep::RetryAfter(_)
+        ));
+        assert_eq!(state.attempt, 1);
+        assert_eq!(
+            next_step(&mut state, &ctl, &helper_error, 0),
+            DriveStep::Terminal
+        );
+
+        let raw_connect_407 = LlmError::ProxyTunnelResponse {
+            status: 407,
+            proxy_authenticate: None,
+        };
+        assert_eq!(
+            policy.classify_error(&raw_connect_407),
+            RetryDecision::DoNotRetry
+        );
+        assert_eq!(
+            next_step(
+                &mut RetryState::default(),
+                &RetryControl::default(),
+                &raw_connect_407,
+                0
+            ),
+            DriveStep::Terminal
+        );
+
+        let persisted_wrapper_without_live_challenge = LlmError::ProxyAuthHelperRetry {
+            source: Box::new(raw_connect_407),
+            challenge: None,
+        };
+        assert!(!persisted_wrapper_without_live_challenge.is_proxy_auth_helper_retry());
+        assert_eq!(
+            policy.classify_error(&persisted_wrapper_without_live_challenge),
+            RetryDecision::DoNotRetry
+        );
+    }
+
     // --- Table point 6: budget exhaustion for retryable classes ---
 
     #[test]

@@ -61,6 +61,12 @@ impl ProvenanceTrace {
                 });
             match strat {
                 MergeStrategy::ConcatDedup => entry.contributors.push(source),
+                MergeStrategy::DeepMerge if field_name == "skillOverrides" => {
+                    // This record composes entries across tiers, so the
+                    // top-level source set is cumulative. Exact per-name
+                    // ownership remains available in SettingsRawLayerStack.
+                    entry.contributors.push(source);
+                }
                 MergeStrategy::DeepMerge | MergeStrategy::Override => {
                     entry.contributors.clear();
                     entry.contributors.push(source);
@@ -92,6 +98,10 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
         ("sandbox", layer.sandbox.is_some()),
         ("hooks", layer.hooks.is_some()),
         ("outputStyle", layer.output_style.is_some()),
+        (
+            "disableBundledSkills",
+            layer.disable_bundled_skills.is_some(),
+        ),
         ("statusLine", layer.status_line.is_some()),
         ("subagentStatusLine", layer.subagent_status_line.is_some()),
         ("telemetryEnabled", layer.telemetry_enabled.is_some()),
@@ -100,6 +110,11 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
             layer.vision_delegation_enabled.is_some(),
         ),
         ("model", layer.model.is_some()),
+        ("availableModels", layer.available_models.is_some()),
+        (
+            "enforceAvailableModels",
+            layer.enforce_available_models.is_some(),
+        ),
         // 2.1.198 AWS/GCP auth-refresh script keys (scalar-override). The
         // Project provenance of awsAuthRefresh feeds the workspace-trust gate
         // (binary `mqe`: project/local-sourced command + trust unconfirmed ⇒
@@ -107,6 +122,16 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
         ("awsAuthRefresh", layer.aws_auth_refresh.is_some()),
         ("awsCredentialExport", layer.aws_credential_export.is_some()),
         ("gcpAuthRefresh", layer.gcp_auth_refresh.is_some()),
+        ("proxyAuthHelper", layer.proxy_auth_helper.is_some()),
+        (
+            "skillListingMaxDescChars",
+            layer.skill_listing_max_desc_chars.is_some(),
+        ),
+        (
+            "skillListingBudgetFraction",
+            layer.skill_listing_budget_fraction.is_some(),
+        ),
+        ("skillOverrides", layer.skill_overrides.is_some()),
         ("providers", layer.providers.is_some()),
         ("routing", layer.routing.is_some()),
     ]
@@ -120,6 +145,54 @@ mod tests {
     use crate::settings::{LoadInputs, Settings};
     use std::collections::BTreeMap;
     use std::io::Write;
+
+    #[test]
+    fn disable_bundled_skills_uses_the_highest_present_source() {
+        let user = SettingsJson {
+            disable_bundled_skills: Some(true),
+            ..Default::default()
+        };
+        let project = SettingsJson {
+            disable_bundled_skills: Some(false),
+            ..Default::default()
+        };
+        let mut trace = ProvenanceTrace::default();
+        trace.record_layer(Source::User, &user);
+        trace.record_layer(Source::Project, &project);
+        assert_eq!(
+            trace
+                .by_field
+                .get("disableBundledSkills")
+                .expect("disableBundledSkills provenance")
+                .contributors,
+            vec![Source::Project]
+        );
+        assert_eq!(
+            crate::settings::merger::merge(user, project).disable_bundled_skills,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn model_policy_fields_record_their_settings_source() {
+        let layer: SettingsJson = serde_json::from_str(
+            r#"{"availableModels":["allowed-\ud800"],"enforceAvailableModels":true}"#,
+        )
+        .expect("model policy keeps valid JavaScript string units");
+        let mut trace = ProvenanceTrace::default();
+        trace.record_layer(Source::Managed, &layer);
+
+        for field in ["availableModels", "enforceAvailableModels"] {
+            assert_eq!(
+                trace
+                    .by_field
+                    .get(field)
+                    .expect("model policy provenance")
+                    .contributors,
+                vec![Source::Managed]
+            );
+        }
+    }
 
     #[test]
     fn scalar_override_records_winning_source() {
@@ -148,6 +221,142 @@ mod tests {
             .effective_for("model")
             .expect("model must have provenance");
         assert_eq!(prov.contributors, vec![Source::User]);
+    }
+
+    #[test]
+    fn proxy_auth_helper_records_winning_source_with_lone_surrogate_value() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let user_home = tmp.path().join("home_proxy_auth");
+        let user_dir = user_home.join(".lingxi");
+        let project_settings_dir = project_dir.join(".lingxi");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::create_dir_all(&project_settings_dir).unwrap();
+
+        std::fs::write(
+            user_dir.join("settings.json"),
+            r#"{"proxyAuthHelper":"user-helper"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project_settings_dir.join("settings.json"),
+            r#"{"proxyAuthHelper":"/tmp/helper-\ud800","model":"project-sibling"}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", user_home);
+
+        let effective = Settings::load(LoadInputs {
+            env: &BTreeMap::new(),
+            project_dir,
+            defaults: SettingsJson::default(),
+        })
+        .expect("a lone-surrogate helper must not drop its settings tier");
+
+        let provenance = effective
+            .effective_for("proxyAuthHelper")
+            .expect("proxyAuthHelper must have provenance");
+        assert_eq!(provenance.contributors, vec![Source::Project]);
+        assert_eq!(effective.settings.model.as_deref(), Some("project-sibling"));
+        assert_eq!(
+            effective
+                .settings
+                .proxy_auth_helper
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(
+                "/tmp/helper-"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .collect::<Vec<_>>()
+            )
+        );
+    }
+
+    #[test]
+    fn skill_override_sources_accumulate_for_the_deep_merged_record() {
+        let user: SettingsJson =
+            serde_json::from_str(r#"{"skillOverrides":{"shared":"on","user-only":"off"}}"#)
+                .expect("valid user skill overrides");
+        let project: SettingsJson = serde_json::from_str(
+            r#"{"skillOverrides":{"shared":"name-only","project-only":"user-invocable-only"}}"#,
+        )
+        .expect("valid project skill overrides");
+
+        let mut trace = ProvenanceTrace::default();
+        trace.record_layer(Source::User, &user);
+        trace.record_layer(Source::Project, &project);
+        assert_eq!(
+            trace
+                .by_field
+                .get("skillOverrides")
+                .expect("skillOverrides provenance")
+                .contributors,
+            vec![Source::User, Source::Project]
+        );
+
+        let merged = crate::settings::merger::merge(user, project);
+        let overrides = merged.skill_overrides.expect("merged skill overrides");
+        let units = |name: &str| name.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            overrides.get_units(&units("shared")),
+            Some(crate::settings::schema::SkillOverride::NameOnly)
+        );
+        assert_eq!(
+            overrides.get_units(&units("user-only")),
+            Some(crate::settings::schema::SkillOverride::Off)
+        );
+        assert_eq!(
+            overrides.get_units(&units("project-only")),
+            Some(crate::settings::schema::SkillOverride::UserInvocableOnly)
+        );
+    }
+
+    #[test]
+    fn invalid_skill_numeric_or_override_rejects_the_entire_file_layer() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let user_home = tmp.path().join("home_invalid_skill_settings");
+        let user_dir = user_home.join(".lingxi");
+        let project_settings_dir = project_dir.join(".lingxi");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::create_dir_all(&project_settings_dir).unwrap();
+        std::fs::write(
+            user_dir.join("settings.json"),
+            r#"{"skillListingMaxDescChars":64,"model":"user-model"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project_settings_dir.join("settings.json"),
+            r#"{"skillListingMaxDescChars":null,"skillListingBudgetFraction":0,"skillOverrides":{"x":"invalid"},"model":"project-model"}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", user_home);
+
+        let effective = Settings::load(LoadInputs {
+            env: &BTreeMap::new(),
+            project_dir,
+            defaults: SettingsJson::default(),
+        })
+        .expect("invalid file layers are skipped, not fatal");
+
+        assert_eq!(effective.settings.model.as_deref(), Some("user-model"));
+        assert_eq!(effective.settings.skill_listing_max_desc_chars, Some(64.0));
+        assert!(effective.settings.skill_listing_budget_fraction.is_none());
+        assert!(effective.settings.skill_overrides.is_none());
+        assert_eq!(
+            effective
+                .effective_for("skillListingMaxDescChars")
+                .expect("user layer source")
+                .contributors,
+            vec![Source::User]
+        );
+        assert!(effective.effective_for("skillOverrides").is_none());
     }
 
     #[test]

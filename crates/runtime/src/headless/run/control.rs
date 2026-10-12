@@ -12,17 +12,54 @@ use std::sync::Arc;
 /// `if(fr!=null&&typeof fr!=="string"){…reject…} let or=model??"default",
 /// Jr=or.trim().toLowerCase()==="default",vr=Jr?SE():or`.
 pub(super) enum SetModelTarget {
-    /// Apply this model: the raw requested string, or the session default when
-    /// the request was absent / explicit `null` / case-insensitive `"default"`.
+    /// Apply the Native default sentinel. Keep it distinct from a concrete
+    /// model so the orchestrator can clear an explicit override without
+    /// applying the concrete-candidate admission gate.
+    Default,
+    /// Apply the raw concrete model requested by the caller.
     Apply(String),
     /// The `model` field was present but neither a string nor null — reject.
     Reject,
 }
 
-pub(super) fn resolve_set_model_target(
+fn native_json_value_for_error(
+    projection: &Utf16JsonProjection,
+    pointer: &str,
     field: Option<JsonValueView<'_>>,
-    default_model: &str,
-) -> SetModelTarget {
+    quote_strings: bool,
+) -> String {
+    let Some(field) = field else {
+        return "undefined".to_owned();
+    };
+    if !quote_strings {
+        if let Some(value) = field.as_str() {
+            return value.to_owned();
+        }
+    }
+    projection
+        .subprojection(pointer)
+        .ok()
+        .and_then(|value| value.to_json_string().ok())
+        .unwrap_or_else(|| "undefined".to_owned())
+}
+
+fn resolve_set_proactivity_offer_bypass(
+    projection: &Utf16JsonProjection,
+) -> Result<Option<bool>, String> {
+    let field = projection.get_property("offer_bypass");
+    match field {
+        None => Ok(None),
+        Some(value) => match value.as_bool() {
+            Some(value) => Ok(Some(value)),
+            None => Err(format!(
+                "Cannot set proactivity: offer_bypass must be a boolean when present (got {})",
+                native_json_value_for_error(projection, "/offer_bypass", Some(value), true)
+            )),
+        },
+    }
+}
+
+pub(super) fn resolve_set_model_target(field: Option<JsonValueView<'_>>) -> SetModelTarget {
     // CC: `fr != null` — in JS `!= null` covers both `null` and `undefined`, so
     // an explicit JSON `null` is treated as absent (→ default), not a type
     // error. `model ?? "default"` collapses absent/null to `"default"`.
@@ -36,7 +73,7 @@ pub(super) fn resolve_set_model_target(
     };
     // CC: `or.trim().toLowerCase() === "default"` — trimmed, case-insensitive.
     if requested.trim().to_lowercase() == "default" {
-        SetModelTarget::Apply(default_model.to_string())
+        SetModelTarget::Default
     } else {
         // CC: `vr = Jr ? SE() : or` — the RAW requested string (untrimmed).
         SetModelTarget::Apply(requested.to_string())
@@ -93,6 +130,10 @@ pub(super) async fn dispatch_control_request(
 
     match subtype {
         "initialize" => {
+            orchestrator.apply_native_proactivity_initialize(
+                field("proactivity").and_then(JsonValueView::as_bool),
+                field("reinitialize").and_then(JsonValueView::as_bool) == Some(true),
+            );
             let mut payload = initialize_response_payload(
                 init_commands,
                 init_agents,
@@ -216,12 +257,11 @@ pub(super) async fn dispatch_control_request(
         }
         "set_model" => {
             // §2.2 #5: `"default"` (or an absent model) resolves to the session
-            // default model and APPLIES it — so a client can revert a prior
-            // `set_model` override (claude-code re-resolves via
-            // getDefaultMainLoopModel() and calls setMainLoopModelOverride).
-            let default_model = orchestrator.default_model();
-            let target = match resolve_set_model_target(field("model"), default_model.as_str()) {
-                SetModelTarget::Apply(t) => t,
+            // default intent and clears a prior `set_model` override. Preserve
+            // the sentinel until the orchestrator resolves the concrete route.
+            let (target, source) = match resolve_set_model_target(field("model")) {
+                SetModelTarget::Default => ("default".to_owned(), "sdk"),
+                SetModelTarget::Apply(target) => (target, "sdk"),
                 SetModelTarget::Reject => {
                     // CC 2.1.208: `set_model: model must be a string`.
                     writer.reply_error(request_id, "set_model: model must be a string");
@@ -229,7 +269,7 @@ pub(super) async fn dispatch_control_request(
                 }
             };
             match orchestrator
-                .switch_model_with_source(&target, None, "sdk")
+                .switch_model_with_source(&target, None, source)
                 .await
             {
                 Ok(()) => writer.reply_success(request_id, None),
@@ -723,6 +763,51 @@ pub(super) async fn dispatch_control_request(
                     writer.reply_success(request_id, Some(json!({"mode": mode})));
                 }
                 Err(e) => writer.reply_error(request_id, &e),
+            }
+        }
+        "set_proactivity_level" => {
+            if let Err(error) = orchestrator.validate_native_proactivity_level_change() {
+                writer.reply_error(request_id, &error);
+            } else {
+                let level = native_json_value_for_error(
+                    &request_projection,
+                    "/level",
+                    field("level"),
+                    false,
+                );
+                if orchestrator::conversation::NativeProactivityLevel::parse_wire(&level).is_none()
+                {
+                    match orchestrator
+                        .set_native_proactivity_level(&level, None)
+                        .await
+                    {
+                        Ok(_) => writer
+                            .reply_error(request_id, "Cannot set proactivity: unrecognized level"),
+                        Err(error) => writer.reply_error(request_id, &error),
+                    }
+                } else {
+                    match resolve_set_proactivity_offer_bypass(&request_projection) {
+                        Ok(offer_bypass) => {
+                            match orchestrator
+                                .set_native_proactivity_level(&level, offer_bypass)
+                                .await
+                            {
+                                Ok(response) => {
+                                    host.remember_permission_mode(&response.permission_mode);
+                                    writer.reply_success(
+                                        request_id,
+                                        Some(json!({
+                                            "level": response.level.as_wire(),
+                                            "permissionMode": response.permission_mode,
+                                        })),
+                                    );
+                                }
+                                Err(error) => writer.reply_error(request_id, &error),
+                            }
+                        }
+                        Err(error) => writer.reply_error(request_id, &error),
+                    }
+                }
             }
         }
         "set_mcp_permission_mode_override" => {
@@ -1464,11 +1549,12 @@ mod tests {
         );
     }
 
-    fn apply(field: Option<serde_json::Value>) -> Option<String> {
+    fn apply(field: Option<serde_json::Value>) -> Option<(String, bool)> {
         let projection = field.as_ref().map(projection_from_value);
         let value = projection.as_ref().and_then(|value| value.at_pointer(""));
-        match resolve_set_model_target(value, "session-default") {
-            SetModelTarget::Apply(t) => Some(t),
+        match resolve_set_model_target(value) {
+            SetModelTarget::Default => Some(("default".into(), true)),
+            SetModelTarget::Apply(t) => Some((t, false)),
             SetModelTarget::Reject => None,
         }
     }
@@ -1477,10 +1563,10 @@ mod tests {
     fn set_model_absent_or_null_applies_session_default() {
         // CC `model ?? "default"`: both absent and explicit JSON null collapse
         // to the session default — never a type error.
-        assert_eq!(apply(None).as_deref(), Some("session-default"));
+        assert_eq!(apply(None), Some(("default".into(), true)));
         assert_eq!(
-            apply(Some(serde_json::Value::Null)).as_deref(),
-            Some("session-default")
+            apply(Some(serde_json::Value::Null)),
+            Some(("default".into(), true))
         );
     }
 
@@ -1495,8 +1581,8 @@ mod tests {
             "\tdefault\n",
         ] {
             assert_eq!(
-                apply(Some(serde_json::Value::String(s.into()))).as_deref(),
-                Some("session-default"),
+                apply(Some(serde_json::Value::String(s.into()))),
+                Some(("default".into(), true)),
                 "{s:?} must resolve to the session default"
             );
         }
@@ -1506,8 +1592,8 @@ mod tests {
     fn set_model_named_model_passes_raw_string() {
         // CC `vr = Jr ? SE() : or` — the raw requested string, untrimmed.
         assert_eq!(
-            apply(Some(serde_json::json!("claude-opus-4"))).as_deref(),
-            Some("claude-opus-4")
+            apply(Some(serde_json::json!("claude-opus-4"))),
+            Some(("claude-opus-4".into(), false))
         );
     }
 
@@ -1518,6 +1604,45 @@ mod tests {
         assert!(apply(Some(serde_json::json!(true))).is_none());
         assert!(apply(Some(serde_json::json!({"a": 1}))).is_none());
         assert!(apply(Some(serde_json::json!(["x"]))).is_none());
+    }
+
+    #[test]
+    fn set_proactivity_offer_bypass_preserves_absent_null_and_false() {
+        let absent = projection_from_value(&json!({}));
+        assert_eq!(resolve_set_proactivity_offer_bypass(&absent), Ok(None));
+
+        let disabled = projection_from_value(&json!({"offer_bypass": false}));
+        assert_eq!(
+            resolve_set_proactivity_offer_bypass(&disabled),
+            Ok(Some(false))
+        );
+
+        let explicit_null = projection_from_value(&json!({"offer_bypass": null}));
+        assert_eq!(
+            resolve_set_proactivity_offer_bypass(&explicit_null).unwrap_err(),
+            "Cannot set proactivity: offer_bypass must be a boolean when present (got null)"
+        );
+        let string_false = projection_from_value(&json!({"offer_bypass": "false"}));
+        assert!(resolve_set_proactivity_offer_bypass(&string_false).is_err());
+    }
+
+    #[test]
+    fn set_proactivity_level_error_value_keeps_absence_and_raw_string() {
+        let absent = projection_from_value(&json!({}));
+        assert_eq!(
+            native_json_value_for_error(&absent, "/level", None, false),
+            "undefined"
+        );
+        let null = projection_from_value(&json!({"level": null}));
+        assert_eq!(
+            native_json_value_for_error(&null, "/level", null.get_property("level"), false,),
+            "null"
+        );
+        let string = projection_from_value(&json!({"level": "unknown"}));
+        assert_eq!(
+            native_json_value_for_error(&string, "/level", string.get_property("level"), false,),
+            "unknown"
+        );
     }
 
     fn req(subtype: &str, body: serde_json::Value) -> Utf16JsonProjection {

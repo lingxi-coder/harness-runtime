@@ -151,7 +151,7 @@
 /// Bumped to 23.0.0 because `SkillAdminCommandDto.target` now carries
 /// `Option<ClientTextDto>` instead of `Option<String>`. The optional JSON value
 /// remains string-shaped, but the generated UniFFI record layout changes.
-
+///
 /// Bumped to 20.0.0 when the app families left the client protocol. Apps are an
 /// externally installed plugin now: the app/bridge/plugin command families
 /// (`ListApps` … `DeleteApp`, `ExecuteAppBridgeRequest`, `ResolveApp*`,

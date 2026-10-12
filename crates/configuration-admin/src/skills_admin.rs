@@ -347,8 +347,8 @@ fn scan_root(root: &Path, source: &str, writable: bool) -> Result<Vec<SkillCatal
 }
 
 fn bundled_entries() -> Result<Vec<SkillCatalogEntry>, String> {
-    let mut registry = skill_api::SkillRegistry::new();
-    skill_api::builtin::register_desktop(&mut registry);
+    let mut registry = skill::SkillRegistry::new();
+    skill::builtin::register_desktop(&mut registry);
     let mut names = registry.names();
     names.sort_unstable();
     Ok(names
@@ -377,8 +377,8 @@ fn bundled_entries() -> Result<Vec<SkillCatalogEntry>, String> {
 }
 
 fn bundled_markdown(name: &str) -> Result<String, String> {
-    let mut registry = skill_api::SkillRegistry::new();
-    skill_api::builtin::register_desktop(&mut registry);
+    let mut registry = skill::SkillRegistry::new();
+    skill::builtin::register_desktop(&mut registry);
     let skill = registry
         .get(name)
         .ok_or_else(|| format!("unknown bundled skill: {name}"))?;
@@ -690,15 +690,15 @@ fn validate_skill_markdown(markdown: &str, scope: &str) -> Result<(), String> {
         return Err("SKILL.md exceeds the 512 KiB limit".to_string());
     }
     let source = if scope == "user" {
-        skill_api::SkillSource::Settings(lingxi_core::types::SettingsScope::User)
+        skill::SkillSource::Settings(lingxi_core::types::SettingsScope::User)
     } else {
-        skill_api::SkillSource::Settings(lingxi_core::types::SettingsScope::Project)
+        skill::SkillSource::Settings(lingxi_core::types::SettingsScope::Project)
     };
-    skill_api::parse_skill_markdown(
+    skill::parse_skill_markdown(
         markdown,
         PathBuf::from(SKILL_FILE),
         source,
-        skill_api::LoadedFrom::Skills,
+        skill::LoadedFrom::Skills,
     )
     .map(|_| ())
     .map_err(|error| format!("invalid SKILL.md: {error}"))
@@ -853,11 +853,11 @@ fn inspect_markdown(markdown: &str) -> Inspection {
         };
     }
     let revision = Some(sha256_hex(markdown.as_bytes()));
-    match skill_api::parse_skill_markdown(
+    match skill::parse_skill_markdown(
         markdown,
         PathBuf::from(SKILL_FILE),
-        skill_api::SkillSource::Settings(lingxi_core::types::SettingsScope::User),
-        skill_api::LoadedFrom::Skills,
+        skill::SkillSource::Settings(lingxi_core::types::SettingsScope::User),
+        skill::LoadedFrom::Skills,
     ) {
         Ok(skill) => Inspection {
             markdown: markdown.to_string(),

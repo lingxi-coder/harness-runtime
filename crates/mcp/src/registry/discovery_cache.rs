@@ -393,6 +393,7 @@ impl McpRegistry {
             return Err(operation_guard_rejected());
         }
         let connection_id = McpConnectionId::new();
+        let dropped_tools = entry.dropped_tools.clone();
         let negotiated = negotiated_protocol_from_cache_entry(&entry);
         let invalidated_slot = self.invalidate_lazy_upgrade_slot(key).await;
         Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
@@ -420,6 +421,12 @@ impl McpRegistry {
                 age_ms,
             },
         );
+        drop(connections);
+        if key == config.name.as_str() {
+            self.clear_connection_failure_diagnostic(&config.name).await;
+            self.record_dropped_tool_snapshot(&config.name, connection_id, dropped_tools)
+                .await;
+        }
         telemetry::emit_mcp_discovery_source(&telemetry::tengu::mcp::DiscoverySourcePayload {
             transport_type: telemetry::pii::Verified::assert_safe(config.spec.kind().to_string()),
             source: telemetry::pii::Verified::assert_safe(
@@ -472,6 +479,7 @@ impl McpRegistry {
         captured_partition: Option<&DiscoveryCachePartition>,
         caps: &ServerCapabilitiesDto,
         tools: &[lingxi_core::host::McpToolDto],
+        dropped_tools: &[crate::connection::McpDroppedToolRecord],
         resources: &[lingxi_core::host::McpResourceDto],
         resource_templates: &[lingxi_core::host::McpResourceTemplateDto],
         prompts: &[lingxi_core::host::McpPromptDto],
@@ -537,6 +545,7 @@ impl McpRegistry {
                     resource_templates.to_vec(),
                     prompts.to_vec(),
                 )
+                .with_dropped_tools(dropped_tools.to_vec())
                 .with_negotiated_era(
                     negotiated
                         .map(|protocol| negotiated_era_label(protocol.era))

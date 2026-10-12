@@ -211,8 +211,7 @@ fn roots_input_schema_is_strict_while_dispatch_projects_loose_params() {
         .expect("roots/list dispatch accepts and omits non-object params");
     assert!(dispatched.params.is_none());
 
-    let malformed_meta =
-        projection(r#"{"method":"roots/list","params":{"_meta":"not-object"}}"#);
+    let malformed_meta = projection(r#"{"method":"roots/list","params":{"_meta":"not-object"}}"#);
     assert!(!validate_input_request_schema(&malformed_meta));
     let dispatched = validate_embedded_request(&[], &malformed_meta)
         .expect("roots/list dispatch retains loose source params");

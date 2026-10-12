@@ -5,6 +5,58 @@ use platform_windows::WindowsMcpTransport;
 
 use super::DesktopConfig;
 
+/// Parse just the settings fields the sandbox runtime consumes, retaining the
+/// exact raw JSON until the filesystem path fields cross into Rust's OS-facing
+/// `String` representation. Other top-level settings cannot cause this sandbox
+/// tier to disappear merely because serde would reject an unrelated value.
+fn sandbox_settings_tier_from_raw(raw: &str) -> Option<sandbox::runtime_config::SettingsJson> {
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson, SettingsPermissions};
+
+    let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).ok()?;
+    let root = source.at_pointer("")?;
+    root.object_entries()?;
+
+    let sandbox = if let Some(value) = root.get_property("sandbox") {
+        if value.is_null() {
+            None
+        } else {
+            let raw_sandbox = source.subprojection("/sandbox").ok()?;
+            let value = lingxi_core::settings::sandbox_execution_value(&raw_sandbox).ok()??;
+            let value = serde_json::Value::Object(value.into_iter().collect());
+            let mut sandbox = serde_json::from_value::<SandboxSettingsJson>(value).ok()?;
+            if let Ok(raw_ignore_violations) = raw_sandbox.subprojection("/ignoreViolations") {
+                if raw_ignore_violations
+                    .at_pointer("")
+                    .is_some_and(|value| value.object_entries().is_some())
+                {
+                    sandbox.ignore_violations_source = Some(raw_ignore_violations);
+                }
+            }
+            Some(sandbox)
+        }
+    } else {
+        None
+    };
+
+    let permissions = if let Some(value) = root.get_property("permissions") {
+        if value.is_null() {
+            None
+        } else {
+            let raw_permissions = source.subprojection("/permissions").ok()?;
+            let json = raw_permissions.to_json_string().ok()?;
+            Some(serde_json::from_str::<SettingsPermissions>(&json).ok()?)
+        }
+    } else {
+        None
+    };
+
+    Some(SettingsJson {
+        permissions,
+        sandbox,
+        settings_dir: None,
+    })
+}
+
 /// Derive the [`permission::SandboxAutoAllowConfig`] the enforced
 /// [`permission::PermissionPolicy`] consults from the same `settings.json`
 /// tiers the policy block already reads.
@@ -49,7 +101,7 @@ pub(super) fn sandbox_auto_allow_from_settings_tiers(
     // can be applied only when NO tier set it.
     let mut explicit_auto_allow: Option<bool> = None;
     for raw in raw_tiers {
-        let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) else {
+        let Some(parsed) = sandbox_settings_tier_from_raw(raw) else {
             continue;
         };
         if let Some(p) = parsed.permissions {
@@ -118,6 +170,7 @@ pub(super) fn append_restricted_builtin_denies(
             value: permission::PermissionRuleValue {
                 tool_name: (*tool_name).to_string(),
                 rule_content: None,
+                original_rule: None,
             },
             behavior: permission::PermissionBehavior::Deny,
             source: permission::PermissionRuleSource::CliArg,
@@ -228,7 +281,7 @@ pub(super) struct BootPermissionTiers {
 ///   tier: claude-code's `Xv()` unconditionally re-adds `"policySettings"` to
 ///   the allowed-source set, so managed rules can NEVER be excluded.
 /// - Managed tiers (`managed-settings.json` + `managed-settings.d/*.json`,
-///   already ascending from `managed_settings_raw_tiers`) parse with
+///   already composed by the shared managed-policy selector) parse with
 ///   `PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)` (`RKt()→Fwt("policySettings")`),
 ///   so enterprise deny/ask/allow rules bind on the boot policy and decisions
 ///   cite "enterprise managed settings". Managed `defaultMode` /
@@ -290,6 +343,7 @@ pub(super) async fn reload_classifier_auto_mode_settings(
     include_user_settings: bool,
     flag_settings_configured: bool,
     flag_settings_source: Option<&str>,
+    managed_snapshot: &crate::desktop::settings_watch::ManagedSettingsSnapshot,
 ) -> Option<lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings> {
     if flag_settings_configured && flag_settings_source.is_none() {
         return None;
@@ -304,7 +358,12 @@ pub(super) async fn reload_classifier_auto_mode_settings(
     if let Some(raw) = flag_settings_source {
         trusted_raw_tiers.push(raw.to_owned());
     }
-    trusted_raw_tiers.extend(super::settings_watch::managed_settings_raw_tiers().await);
+    if managed_snapshot.read_failed() {
+        return None;
+    }
+    if let Some(raw) = managed_snapshot.effective_json() {
+        trusted_raw_tiers.push(raw);
+    }
     merge_trusted_auto_mode_settings(&trusted_raw_tiers)
 }
 
@@ -323,6 +382,26 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
     flag_settings_source: Option<&str>,
 ) -> BootPermissionTiers {
+    let managed_snapshot = crate::desktop::settings_watch::managed_settings_snapshot().await;
+    load_boot_permission_tiers_with_policy_snapshot(
+        lingxi_home,
+        cwd,
+        setting_source_scope,
+        flag_settings,
+        flag_settings_source,
+        &managed_snapshot,
+    )
+    .await
+}
+
+pub(super) async fn load_boot_permission_tiers_with_policy_snapshot(
+    lingxi_home: &std::path::Path,
+    cwd: &std::path::Path,
+    setting_source_scope: (bool, bool),
+    flag_settings: Option<&lingxi_core::settings::SettingsJson>,
+    flag_settings_source: Option<&str>,
+    managed_snapshot: &crate::desktop::settings_watch::ManagedSettingsSnapshot,
+) -> BootPermissionTiers {
     let mut rules = Vec::new();
     // With no explicit setting, new sessions start in Auto.  The resolved
     // mode is still passed through the existing model/provider/killswitch gate
@@ -339,7 +418,7 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
     // Native classifier policy reads only trusted user/flag/managed sources.
     // Keep this order independent from the broader user/project/local policy fold.
     let mut trusted_auto_mode_raw_tiers: Vec<String> = Vec::new();
-    let trusted_auto_mode_sources_complete =
+    let mut trusted_auto_mode_sources_complete =
         flag_settings.is_none() || flag_settings_source.is_some();
     let (incl_user_settings, incl_project_settings) = setting_source_scope;
     for (path, source, included) in [
@@ -487,7 +566,11 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
     }
     // Managed (policySettings) tier — HIGHEST priority, read LAST. Deliberately
     // NOT gated by `--setting-sources` (see the doc comment above).
-    let managed_tiers = crate::desktop::settings_watch::managed_settings_raw_tiers().await;
+    let managed_tiers = managed_snapshot
+        .effective_json()
+        .into_iter()
+        .collect::<Vec<_>>();
+    trusted_auto_mode_sources_complete &= !managed_snapshot.read_failed();
     for raw in &managed_tiers {
         trusted_auto_mode_raw_tiers.push(raw.clone());
         match permission::permission_rules_from_settings_json(
@@ -554,10 +637,19 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
     } else {
         None
     };
+    if managed_snapshot.read_failed() {
+        // A present but unresolved admin source must not look like an absent
+        // policy. Keep any recognized restrictions above and close the host's
+        // ambient permission paths until the next successful refresh.
+        mode = permission::PermissionMode::Default;
+        bypass_disabled = true;
+        auto_mode_disabled = true;
+        block_reads_outside_working_directories = true;
+    }
     BootPermissionTiers {
         rules,
         mode,
-        mode_preference_allowed,
+        mode_preference_allowed: mode_preference_allowed && !managed_snapshot.read_failed(),
         bypass_disabled,
         auto_mode_disabled,
         classify_all_shell,
@@ -565,46 +657,72 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
         additional_working_dirs,
         block_reads_outside_working_directories,
         raw_tiers,
-        allow_managed_permission_rules_only,
+        allow_managed_permission_rules_only: allow_managed_permission_rules_only
+            || managed_snapshot.read_failed(),
     }
 }
 
-/// Build the MANAGED (`policySettings`) model-restriction view for the
-/// `availableModels` / `enforceAvailableModels` / `modelOverrides` enforcement
-/// (parity 2.1.207 H-BIN-08), mirroring claude-code's per-source
-/// `getSettingsForSource("policySettings")` view (`ROn`/`sl`). The managed raw
-/// tiers arrive ASCENDING (base then drop-ins); scalar/array keys take the last
-/// (highest-priority) tier, `modelOverrides` unions per key. A tier that fails
-/// to parse marks the whole policy source failed — `refusing cascade-trust
-/// mode` (fail-closed), matching the binary `try{…}catch` around the policy
-/// read. Only the MANAGED tiers are consulted: the enforce flag requires a
-/// policy-OWNED allowlist, so user/project `availableModels` are deliberately
-/// NOT folded in here.
+/// Build the MANAGED (`policySettings`) model-restriction view from the one
+/// Native-selected policy projection. Incomplete source selection is a failed
+/// policy read, not an absent policy. The selector has already preserved local
+/// file order and the first applicable MDM candidate.
 pub(super) fn managed_model_policy_source(
-    managed_tiers: &[String],
+    snapshot: &crate::desktop::settings_watch::ManagedSettingsSnapshot,
 ) -> llm_runtime::model::allowlist::PolicySource {
     use llm_runtime::model::allowlist::{PolicyModelView, PolicySource};
-    let mut view = PolicyModelView::default();
-    for raw in managed_tiers {
-        match serde_json::from_str::<lingxi_core::settings::schema::SettingsJson>(raw) {
-            Ok(s) => {
-                if s.available_models.is_some() {
-                    view.available_models = s.available_models; // last tier wins
-                }
-                if s.enforce_available_models.is_some() {
-                    view.enforce = s.enforce_available_models; // last tier wins
-                }
-                if let Some(mo) = s.model_overrides {
-                    view.model_overrides
-                        .get_or_insert_with(std::collections::BTreeMap::new)
-                        .extend(mo); // union, later tier wins per key
-                }
-            }
-            // A managed file that exists but does not parse ⇒ fail-closed.
-            Err(_) => return PolicySource::Failed,
-        }
+    if snapshot.read_failed() {
+        return PolicySource::Failed;
     }
-    PolicySource::Loaded(view)
+    let Some(projection) = snapshot.effective_projection() else {
+        return PolicySource::Loaded(PolicyModelView::default());
+    };
+    let available_models = match projection.get_property("availableModels") {
+        None => None,
+        Some(value) => {
+            let Some(count) = value.array_len() else {
+                return PolicySource::Failed;
+            };
+            if (0..count).any(|index| {
+                value
+                    .get_index(index)
+                    .and_then(|entry| entry.code_units())
+                    .is_none()
+            }) {
+                return PolicySource::Failed;
+            }
+            match projection.subprojection("/availableModels") {
+                Ok(value) => Some(value),
+                Err(_) => return PolicySource::Failed,
+            }
+        }
+    };
+    let enforce = match projection.get_property("enforceAvailableModels") {
+        None => None,
+        Some(value) => match value.as_bool() {
+            Some(value) => Some(value),
+            None => return PolicySource::Failed,
+        },
+    };
+    let model_overrides = match projection.get_property("modelOverrides") {
+        None => None,
+        Some(_) => {
+            let Ok(raw) = projection
+                .subprojection("/modelOverrides")
+                .and_then(|value| value.to_json_string())
+            else {
+                return PolicySource::Failed;
+            };
+            match serde_json::from_str::<std::collections::BTreeMap<String, String>>(&raw) {
+                Ok(value) => Some(value),
+                Err(_) => return PolicySource::Failed,
+            }
+        }
+    };
+    PolicySource::Loaded(PolicyModelView {
+        available_models,
+        enforce,
+        model_overrides,
+    })
 }
 
 /// Resolve the model setting's ownership from the same effective settings
@@ -682,13 +800,15 @@ pub(super) fn managed_model_setting_for_config(
 /// (policy failed to parse) or `Inactive` source yields `(None, empty)`, leaving
 /// the consumer unrestricted — the boot default-model constraint owns the
 /// fail-closed behavior for the parse-failure case.
-pub async fn managed_model_allowlist() -> (
-    Option<Vec<String>>,
+pub async fn managed_model_allowlist(
+    cfg: &super::DesktopConfig,
+) -> (
+    Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     std::collections::BTreeMap<String, String>,
 ) {
     use llm_runtime::model::allowlist::{self, ModelEnforcement};
-    let managed_tiers = crate::desktop::settings_watch::managed_settings_raw_tiers().await;
-    let source = managed_model_policy_source(&managed_tiers);
+    let managed = crate::desktop::settings_watch::managed_settings_snapshot_for_config(cfg).await;
+    let source = managed_model_policy_source(&managed);
     match allowlist::resolve_enforcement(&source, &mut |_| {}) {
         ModelEnforcement::Active {
             allowlist,
@@ -700,15 +820,23 @@ pub async fn managed_model_allowlist() -> (
 
 /// The MANAGED `forceLoginOrgUUID` org pin in effect for the interactive
 /// Anthropic OAuth login (parity 2.1.207 H-BIN-09). Reads the managed policy
-/// tiers (the SAME `managed_settings_raw_tiers` the permission + model-allowlist
-/// policies read) and folds `forceLoginOrgUUID` via
+/// selected policy snapshot (the SAME source selection the permission and
+/// model-default policies read) and folds `forceLoginOrgUUID` via
 /// [`lingxi_core::settings::enterprise::fold_force_login_org_pin`] — the
 /// highest-priority tier that sets it wins. `Unset` when no policy pins login
 /// (the common case: login stays unrestricted). Read fresh at each login so a
 /// mid-session managed-settings edit takes effect on the next sign-in.
-pub async fn managed_force_login_org_pin() -> lingxi_core::settings::enterprise::ForceLoginOrgPin {
-    let managed_tiers = crate::desktop::settings_watch::managed_settings_raw_tiers().await;
-    lingxi_core::settings::enterprise::fold_force_login_org_pin(&managed_tiers)
+pub async fn managed_force_login_org_pin(
+    cache: &crate::desktop::settings_watch::ManagedPolicySnapshotCache,
+) -> lingxi_core::settings::enterprise::ForceLoginOrgPin {
+    let Some(managed) = cache.snapshot() else {
+        return lingxi_core::settings::enterprise::ForceLoginOrgPin::Invalid;
+    };
+    if managed.read_failed() {
+        return lingxi_core::settings::enterprise::ForceLoginOrgPin::Invalid;
+    }
+    let selected = managed.effective_json().into_iter().collect::<Vec<_>>();
+    lingxi_core::settings::enterprise::fold_force_login_org_pin(&selected)
 }
 
 /// Fold the MANAGED (`policySettings`) raw tiers into telemetry env overrides.
@@ -717,9 +845,15 @@ pub async fn managed_force_login_org_pin() -> lingxi_core::settings::enterprise:
 /// mutating the process environment. The canonical `env` object overrides the
 /// legacy root-level fallback within each tier. Unknown or non-scalar values
 /// are ignored; later managed tiers override earlier ones.
-pub async fn managed_otel_env_overrides() -> std::collections::BTreeMap<String, String> {
-    let tiers = crate::desktop::settings_watch::managed_settings_raw_tiers().await;
-    fold_managed_otel_env_overrides(&tiers)
+pub async fn managed_otel_env_overrides(
+    cfg: &super::DesktopConfig,
+) -> std::collections::BTreeMap<String, String> {
+    let managed = crate::desktop::settings_watch::managed_settings_snapshot_for_config(cfg).await;
+    if managed.read_failed() {
+        return std::collections::BTreeMap::new();
+    }
+    let selected = managed.effective_json().into_iter().collect::<Vec<_>>();
+    fold_managed_otel_env_overrides(&selected)
 }
 
 pub(super) fn fold_managed_otel_env_overrides(
@@ -877,7 +1011,7 @@ pub(super) fn sandbox_runtime_config_from_settings_tiers(
     let mut merged_perms = SettingsPermissions::default();
     let mut saw_perms = false;
     for raw in raw_tiers {
-        let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) else {
+        let Some(parsed) = sandbox_settings_tier_from_raw(raw) else {
             continue;
         };
         if let Some(p) = parsed.permissions {
@@ -918,7 +1052,7 @@ pub(super) fn managed_only_sandbox_overrides(
     let mut merged_perms = SettingsPermissions::default();
     let mut saw_perms = false;
     for raw in managed_raw_tiers {
-        let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) else {
+        let Some(parsed) = sandbox_settings_tier_from_raw(raw) else {
             continue;
         };
         if let Some(p) = parsed.permissions {
@@ -975,12 +1109,11 @@ pub(super) fn apple_events_override(
     flag_settings_raw: Option<&str>,
     user_settings_raw: Option<&str>,
 ) -> Option<bool> {
-    use sandbox::runtime_config::SettingsJson;
     // Managed/policy file tiers are deep-merged, so resolve `allowAppleEvents`
     // per-field last-defined (later drop-ins win, `None` tiers don't clobber).
     let mut merged_managed: Option<bool> = None;
     for raw in managed_raw_tiers {
-        if let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) {
+        if let Some(parsed) = sandbox_settings_tier_from_raw(raw) {
             if let Some(v) = parsed.sandbox.and_then(|s| s.allow_apple_events) {
                 merged_managed = Some(v);
             }
@@ -990,14 +1123,14 @@ pub(super) fn apple_events_override(
         return Some(v);
     }
     if let Some(v) = flag_settings_raw
-        .and_then(|raw| serde_json::from_str::<SettingsJson>(raw).ok())
+        .and_then(sandbox_settings_tier_from_raw)
         .and_then(|s| s.sandbox)
         .and_then(|s| s.allow_apple_events)
     {
         return Some(v);
     }
     user_settings_raw
-        .and_then(|raw| serde_json::from_str::<SettingsJson>(raw).ok())
+        .and_then(sandbox_settings_tier_from_raw)
         .and_then(|s| s.sandbox)
         .and_then(|s| s.allow_apple_events)
 }
@@ -1039,12 +1172,11 @@ pub(super) fn strict_allowlist_override(
 /// `{"strictAllowlist": false}` from an omitted field. Source precedence needs
 /// that distinction: a managed `false` must override a lower-tier user `true`.
 pub(super) fn strict_allowlist_setting(raw: &str) -> Option<bool> {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .ok()?
-        .get("sandbox")?
-        .get("network")?
-        .get("strictAllowlist")?
-        .as_bool()
+    let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).ok()?;
+    let strict_allowlist = source
+        .subprojection("/sandbox/network/strictAllowlist")
+        .ok()?;
+    serde_json::from_str::<bool>(&strict_allowlist.to_json_string().ok()?).ok()
 }
 
 /// Resolve the SOURCE-RESTRICTED `sandbox.ripgrep` (2.1.232).
@@ -1082,9 +1214,13 @@ pub(super) fn ripgrep_override(
 }
 
 pub(super) fn ripgrep_object(raw: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
-    let ripgrep = value.get("sandbox")?.get("ripgrep")?;
-    ripgrep.as_object().cloned()
+    let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).ok()?;
+    let ripgrep = source.subprojection("/sandbox/ripgrep").ok()?;
+    let json = ripgrep.to_json_string().ok()?;
+    serde_json::from_str::<serde_json::Value>(&json)
+        .ok()?
+        .as_object()
+        .cloned()
 }
 
 pub(super) fn ripgrep_config_from_object(
@@ -1177,5 +1313,202 @@ pub fn platform_in_enabled_list(
         None => true,
         Some([]) => false,
         Some(list) => list.contains(&current),
+    }
+}
+
+#[cfg(test)]
+mod sandbox_utf16_execution_tests {
+    use super::{sandbox_runtime_config_from_settings_tiers, strict_allowlist_setting};
+    use std::path::Path;
+
+    #[test]
+    fn real_project_settings_reach_runner_with_exact_ignore_violation_units() {
+        use lingxi_core::settings::{
+            FileLayerScope, LoadInputs, Settings, SettingsJson, SupplementalLayers,
+        };
+        use std::collections::BTreeMap;
+
+        let project = tempfile::tempdir().expect("temporary project root");
+        let settings_dir = project.path().join(branding::DOT_DIR);
+        std::fs::create_dir_all(&settings_dir).expect("project settings directory");
+        let settings_path = settings_dir.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"model":"sibling-model","outputStyle":"\ud800","permissions":{"allow":["Edit(/tmp/permission-write)"]},"sandbox":{"enabled":true,"filesystem":{"allowWrite":["/tmp/path-\ud800"]},"ignoreViolations":{"filesystem":["valid-pattern","pattern-\ud800"],"network":["host-denied"]}}}"#,
+        )
+        .expect("write project settings");
+
+        let env = BTreeMap::new();
+        let scope = FileLayerScope {
+            include_user: false,
+            include_project: true,
+            include_local: true,
+        };
+        let typed = Settings::load_with_layers_from_user_path(
+            LoadInputs {
+                env: &env,
+                project_dir: project.path(),
+                defaults: SettingsJson::default(),
+            },
+            scope,
+            SupplementalLayers::default(),
+            None,
+        )
+        .expect("load the actual project settings tier");
+        assert_eq!(typed.settings.model.as_deref(), Some("sibling-model"));
+        assert_eq!(
+            typed
+                .settings
+                .output_style
+                .as_ref()
+                .and_then(|style| style.string_units("")),
+            Some(vec![0xd800])
+        );
+
+        let raw = std::fs::read_to_string(&settings_path).expect("read source settings");
+        let engine = sandbox_runtime_config_from_settings_tiers(
+            &[raw.as_str()],
+            project.path(),
+            &sandbox::policy_convert::SandboxConvertContext::default(),
+        );
+        assert!(engine.enabled);
+        assert!(engine
+            .filesystem
+            .allow_write
+            .iter()
+            .any(|path| path == "/tmp/path-\u{fffd}"));
+        assert!(engine
+            .filesystem
+            .allow_write
+            .iter()
+            .any(|path| path.contains("permission-write")));
+
+        let runner_config = super::super::sandbox_runner::to_runtime_config(&engine);
+        let typed_ignore = runner_config
+            .ignore_violations
+            .as_ref()
+            .expect("representable ignoreViolations siblings reach execution");
+        assert_eq!(
+            typed_ignore.get("filesystem"),
+            Some(&vec!["valid-pattern".to_owned()])
+        );
+        assert_eq!(
+            typed_ignore.get("network"),
+            Some(&vec!["host-denied".to_owned()])
+        );
+
+        let exact_ignore = runner_config
+            .ignore_violations_utf16
+            .expect("the live runner retains the source projection");
+        let filesystem_key = "filesystem".encode_utf16().collect::<Vec<u16>>();
+        assert_eq!(
+            exact_ignore
+                .entries
+                .iter()
+                .find(|(key, _)| key == &filesystem_key)
+                .map(|(_, patterns)| patterns.clone()),
+            Some(vec![
+                "valid-pattern".encode_utf16().collect::<Vec<_>>(),
+                "pattern-"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .collect::<Vec<_>>(),
+            ])
+        );
+    }
+
+    #[test]
+    fn filesystem_surrogates_do_not_drop_sandbox_or_permission_settings() {
+        let raw = r#"{
+            "permissions": {
+                "allow": ["Edit(/tmp/permission-write)"],
+                "deny": ["Read(/private/permission-deny)"],
+                "additionalDirectories": ["/tmp/extra-write"]
+            },
+            "sandbox": {
+                "enabled": true,
+                "filesystem": {
+                    "allowWrite": ["/tmp/path-\ud800"],
+                    "denyRead": ["/private/path-\udfff"]
+                },
+                "credentials": {"files": [{"path": "/private/credential-\ud800"}]},
+                "ignoreViolations": {"filesystem": ["/tmp/ignored", "inert-\ud800-pattern"], "network": ["host-denied"]}
+            }
+        }"#;
+        let cfg = sandbox_runtime_config_from_settings_tiers(
+            &[raw],
+            Path::new("/tmp"),
+            &sandbox::policy_convert::SandboxConvertContext::default(),
+        );
+
+        assert!(
+            cfg.enabled,
+            "sandbox.enabled must survive path normalization"
+        );
+        assert!(cfg
+            .filesystem
+            .allow_write
+            .iter()
+            .any(|path| path == "/tmp/path-\u{fffd}"));
+        assert!(cfg
+            .filesystem
+            .allow_write
+            .iter()
+            .any(|path| path == "/tmp/extra-write"));
+        assert!(cfg
+            .filesystem
+            .allow_write
+            .iter()
+            .any(|path| path.contains("permission-write")));
+        assert!(cfg
+            .filesystem
+            .deny_read
+            .iter()
+            .any(|path| path == "/private/path-\u{fffd}"));
+        assert!(cfg
+            .filesystem
+            .deny_read
+            .iter()
+            .any(|path| path.contains("permission-deny")));
+        assert!(cfg
+            .filesystem
+            .deny_read
+            .iter()
+            .any(|path| path == "/private/credential-\u{fffd}"));
+        let filesystem_violations = cfg
+            .ignore_violations
+            .get("filesystem")
+            .expect("filesystem ignoreViolations entry");
+        assert_eq!(filesystem_violations.len(), 1);
+        assert_eq!(filesystem_violations[0], "/tmp/ignored");
+        assert_eq!(
+            cfg.ignore_violations.get("network"),
+            Some(&vec!["host-denied".to_owned()]),
+            "a pattern outside Rust String must not discard valid ignoreViolations siblings"
+        );
+        let raw_ignore_violations = cfg
+            .ignore_violations_source
+            .as_ref()
+            .expect("the source-preserving execution sidecar");
+        let expected_pattern = "inert-"
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("-pattern".encode_utf16())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw_ignore_violations.string_units("/filesystem/1"),
+            Some(expected_pattern),
+            "the typed map and execution sidecar keep distinct source/Unicode views"
+        );
+    }
+
+    #[test]
+    fn source_restricted_scalar_parser_ignores_unrelated_surrogate_paths() {
+        assert_eq!(
+            strict_allowlist_setting(
+                r#"{"sandbox":{"network":{"strictAllowlist":true},"filesystem":{"allowWrite":["/tmp/\ud800"]}}}"#
+            ),
+            Some(true)
+        );
     }
 }

@@ -7,10 +7,33 @@ use command_api::builtin_support::help_render::render_help_screen;
 
 const GOLDEN: &str = include_str!("../src/parity/fixtures/parity_help_screen.txt");
 
+// 2.1.295 HSo in acceptance/rea-evaluation-20261011/native-chunks/src_194447854.js uses Claude/.claude; `/agents` is product-branded here.
+fn product_branded_golden() -> String {
+    const NATIVE_AGENTS_DESCRIPTION: &str =
+        "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/";
+    assert_eq!(
+        GOLDEN.matches(NATIVE_AGENTS_DESCRIPTION).count(),
+        1,
+        "the source baseline contains one versioned /agents description"
+    );
+    GOLDEN.replace(
+        NATIVE_AGENTS_DESCRIPTION,
+        &format!(
+            "(removed) Ask {} to create/manage subagents, or edit {}/agents/",
+            branding::PRODUCT_NAME,
+            branding::DOT_DIR
+        ),
+    )
+}
+
 #[test]
-fn render_help_screen_matches_golden_byte_for_byte() {
+fn render_help_screen_matches_native_golden_with_product_agents_identity() {
     let actual = render_help_screen();
-    assert_eq!(actual, GOLDEN, "/help output drifted from golden fixture");
+    assert_eq!(
+        actual,
+        product_branded_golden(),
+        "/help output drifted outside the approved /agents branding projection"
+    );
 }
 
 #[test]

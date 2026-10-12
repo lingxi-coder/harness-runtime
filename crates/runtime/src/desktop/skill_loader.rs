@@ -132,6 +132,9 @@ pub struct CommandRegistrySkillLoader {
     /// `getSessionId()`). `None` keeps the token un-substituted (e.g. tests that
     /// construct the loader without a session).
     session_id: Option<String>,
+    /// Shared per-session lifetime usage recorder. The same handle is wired to
+    /// slash dispatch so the Native 60-second debounce spans both paths.
+    skill_usage_session: Option<command_api::skill_usage::SkillUsageSession>,
     invocation_observer: Option<command_api::SkillInvocationObserver>,
 }
 
@@ -146,6 +149,7 @@ impl CommandRegistrySkillLoader {
         Self {
             registry,
             session_id: None,
+            skill_usage_session: None,
             invocation_observer: None,
         }
     }
@@ -170,6 +174,16 @@ impl CommandRegistrySkillLoader {
         self.invocation_observer = Some(observer);
         self
     }
+
+    /// Share the session-scoped lifetime usage recorder with slash dispatch.
+    #[must_use]
+    pub fn with_skill_usage_session(
+        mut self,
+        session: command_api::skill_usage::SkillUsageSession,
+    ) -> Self {
+        self.skill_usage_session = Some(session);
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -183,9 +197,18 @@ impl SkillLoader for CommandRegistrySkillLoader {
             .map(|cmd| to_descriptor(cmd, self.session_id.as_deref())))
     }
 
-    async fn skill_invoked(&self, name: &Utf16JsonProjection) {
+    async fn skill_invoked(
+        &self,
+        canonical_name: &Utf16JsonProjection,
+        input_name: &Utf16JsonProjection,
+    ) {
+        if let Some(session) = self.skill_usage_session.as_ref() {
+            if let Err(error) = session.record(canonical_name) {
+                tracing::warn!(%error, "failed to record Skill-tool usage");
+            }
+        }
         if let Some(observer) = self.invocation_observer.as_ref() {
-            observer(name.clone()).await;
+            observer(input_name.clone()).await;
         }
     }
 

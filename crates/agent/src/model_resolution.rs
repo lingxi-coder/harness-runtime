@@ -407,7 +407,12 @@ impl<'a> ModelRestriction<'a> {
     /// `newest_permitted_in_family`); `None` for Inactive/Refused. The returned
     /// borrows carry the restriction's `'a` lifetime (they come from the
     /// `&'a ModelEnforcement`), not the temporary `&self`.
-    fn active(&self) -> Option<(&'a [String], &'a std::collections::BTreeMap<String, String>)> {
+    fn active(
+        &self,
+    ) -> Option<(
+        &'a lingxi_core::types::utf16_json::Utf16JsonProjection,
+        &'a std::collections::BTreeMap<String, String>,
+    )> {
         match self.enforcement {
             ModelEnforcement::Active {
                 allowlist,
@@ -970,6 +975,101 @@ pub fn resolve_agent_model_with_context(
     )
 }
 
+/// Resolve Native's plan-mode main-loop model from the current route and raw
+/// user model setting. `main_loop_model` is the resolved route model before the
+/// plan-mode alias substitution; `raw_model_setting` must remain distinct from
+/// that wire id so `opusplan` and `haiku` can select their Native plan models.
+///
+/// The Opus upgrade is skipped after the context exceeds 200k tokens. A barred
+/// upgrade selects the newest permitted model in its family, or falls back to
+/// the resting model resolved from the raw setting when the family has no
+/// permitted candidate. Route-local family defaults and `opusplan` aliases are
+/// resolved only through `context`; this function does not consult ambient
+/// provider environment to guess a route.
+pub fn resolve_main_loop_model_restricted_with_context(
+    permission_mode: PermissionMode,
+    main_loop_model: &str,
+    exceeds_200k_tokens: bool,
+    raw_model_setting: Option<&str>,
+    restriction: Option<ModelRestriction<'_>>,
+    context: &ModelResolutionContext,
+    warn: &mut dyn FnMut(&str),
+) -> Result<String, ModelResolutionError> {
+    if permission_mode != PermissionMode::Plan {
+        return Ok(main_loop_model.to_owned());
+    }
+
+    // `opusplan` upgrades to the route's Opus default in Plan mode until the
+    // context crosses Native's 200k threshold.
+    if matches!(raw_model_setting, Some("opusplan" | "opusplan[1m]")) && !exceeds_200k_tokens {
+        let one_m = raw_model_setting == Some("opusplan[1m]");
+        let mut upgrade = match resolve_user_specified_model("opus", context) {
+            Ok(model) => model,
+            Err(error @ ModelResolutionError::MissingFamilyDefault { .. }) => {
+                match resolve_configured_catalog_alias("opusplan", context, one_m)? {
+                    Some(model) => model,
+                    None => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        if one_m && !upgrade.to_lowercase().ends_with("[1m]") {
+            upgrade.push_str("[1m]");
+        }
+        if restriction_bars(restriction, &upgrade) {
+            if let Some((allowed_models, overrides, catalog)) =
+                restriction.and_then(|restriction| {
+                    restriction
+                        .active()
+                        .map(|(allowlist, overrides)| (allowlist, overrides, restriction.catalog))
+                })
+            {
+                if let Some(newest) = allowlist::newest_permitted_in_family(
+                    "opus",
+                    catalog,
+                    Some(allowed_models),
+                    Some(overrides),
+                ) {
+                    warn(allowlist::warnings::PLAN_OPUSPLAN_NEWEST);
+                    return Ok(newest);
+                }
+            }
+            warn(allowlist::warnings::PLAN_OPUSPLAN_RESTING);
+            return resolve_user_specified_model(raw_model_setting.unwrap_or("opusplan"), context);
+        }
+        return Ok(upgrade);
+    }
+
+    // A `haiku` raw setting upgrades to the route's Sonnet default in Plan mode.
+    if raw_model_setting == Some("haiku") {
+        let upgrade = resolve_user_specified_model("sonnet", context)?;
+        if restriction_bars(restriction, &upgrade) {
+            if let Some((allowed_models, overrides, catalog)) =
+                restriction.and_then(|restriction| {
+                    restriction
+                        .active()
+                        .map(|(allowlist, overrides)| (allowlist, overrides, restriction.catalog))
+                })
+            {
+                if let Some(newest) = allowlist::newest_permitted_in_family(
+                    "sonnet",
+                    catalog,
+                    Some(allowed_models),
+                    Some(overrides),
+                ) {
+                    warn(allowlist::warnings::PLAN_HAIKU_NEWEST);
+                    return Ok(newest);
+                }
+            }
+            warn(allowlist::warnings::PLAN_HAIKU_RESTING);
+            return resolve_user_specified_model("haiku", context);
+        }
+        return Ok(upgrade);
+    }
+
+    Ok(main_loop_model.to_owned())
+}
+
 /// [`resolve_agent_model_with_context`] with the managed-model restriction.
 /// Route identity and family aliases still come exclusively from `context`.
 pub fn resolve_agent_model_restricted_with_context(
@@ -981,71 +1081,16 @@ pub fn resolve_agent_model_restricted_with_context(
     context: &ModelResolutionContext,
     warn: &mut dyn FnMut(&str),
 ) -> Result<String, ModelResolutionError> {
-    let inherit = |warn: &mut dyn FnMut(&str)| -> Result<String, ModelResolutionError> {
-        let plan = permission_mode == PermissionMode::Plan;
-        if plan
-            && !model_setting
-                .is_some_and(|setting| setting == "opusplan" || setting == "opusplan[1m]")
-            && model_setting == Some("haiku")
-        {
-            let upgrade = resolve_user_specified_model("sonnet", context)?;
-            if restriction_bars(restriction, &upgrade) {
-                if let Some((allow, overrides, catalog)) =
-                    restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
-                {
-                    if let Some(newest) = allowlist::newest_permitted_in_family(
-                        "sonnet",
-                        catalog,
-                        Some(allow),
-                        Some(overrides),
-                    ) {
-                        warn(allowlist::warnings::PLAN_HAIKU_NEWEST);
-                        return Ok(newest);
-                    }
-                }
-                warn(allowlist::warnings::PLAN_HAIKU_RESTING);
-                return resolve_user_specified_model("haiku", context);
-            }
-            return Ok(upgrade);
-        }
-        if plan && (model_setting == Some("opusplan") || model_setting == Some("opusplan[1m]")) {
-            let one_m = model_setting == Some("opusplan[1m]");
-            // `opusplan` upgrades to the Opus family when that route provides
-            // one. If the selected non-first-party route has no Opus default,
-            // an explicit route-local `opusplan` alias can provide its target.
-            let mut upgrade = match resolve_user_specified_model("opus", context) {
-                Ok(model) => model,
-                Err(error @ ModelResolutionError::MissingFamilyDefault { .. }) => {
-                    match resolve_configured_catalog_alias("opusplan", context, one_m)? {
-                        Some(model) => model,
-                        None => return Err(error),
-                    }
-                }
-                Err(error) => return Err(error),
-            };
-            if one_m && !upgrade.to_lowercase().ends_with("[1m]") {
-                upgrade.push_str("[1m]");
-            }
-            if restriction_bars(restriction, &upgrade) {
-                if let Some((allow, overrides, catalog)) =
-                    restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
-                {
-                    if let Some(newest) = allowlist::newest_permitted_in_family(
-                        "opus",
-                        catalog,
-                        Some(allow),
-                        Some(overrides),
-                    ) {
-                        warn(allowlist::warnings::PLAN_OPUSPLAN_NEWEST);
-                        return Ok(newest);
-                    }
-                }
-                warn(allowlist::warnings::PLAN_OPUSPLAN_RESTING);
-                return resolve_user_specified_model(model_setting.unwrap_or("opusplan"), context);
-            }
-            return Ok(upgrade);
-        }
-        Ok(parent_model.to_string())
+    let inherit = |warn: &mut dyn FnMut(&str)| {
+        resolve_main_loop_model_restricted_with_context(
+            permission_mode,
+            parent_model,
+            false,
+            model_setting,
+            restriction,
+            context,
+            warn,
+        )
     };
 
     // `LINGXI_SUBAGENT_MODEL` is a user override, not a provider identity
@@ -2252,6 +2297,150 @@ mod tests {
     }
 
     #[test]
+    fn main_loop_plan_selection_uses_route_defaults_and_native_threshold() {
+        let context = ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: "aws-sonnet".into(),
+                profile: Some("anthropic-aws".into()),
+                provider: Some(ModelProviderKind::AnthropicAws),
+                ..Default::default()
+            },
+            family_defaults: FamilyModelDefaults {
+                opus: Some("aws-opus".into()),
+                sonnet: Some("aws-sonnet".into()),
+                haiku: Some("aws-haiku".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_main_loop_model_restricted_with_context(
+                PermissionMode::Plan,
+                "aws-sonnet",
+                false,
+                Some("opusplan"),
+                None,
+                &context,
+                &mut |_| {},
+            )
+            .unwrap(),
+            "aws-opus"
+        );
+        assert_eq!(
+            resolve_main_loop_model_restricted_with_context(
+                PermissionMode::Plan,
+                "aws-sonnet",
+                true,
+                Some("opusplan"),
+                None,
+                &context,
+                &mut |_| {},
+            )
+            .unwrap(),
+            "aws-sonnet",
+            "Native keeps the resting model after the context exceeds 200k tokens"
+        );
+        assert_eq!(
+            resolve_main_loop_model_restricted_with_context(
+                PermissionMode::Plan,
+                "aws-opus",
+                true,
+                Some("haiku"),
+                None,
+                &context,
+                &mut |_| {},
+            )
+            .unwrap(),
+            "aws-sonnet",
+            "the 200k threshold only suppresses the opusplan upgrade"
+        );
+        assert_eq!(
+            resolve_main_loop_model_restricted_with_context(
+                PermissionMode::Default,
+                "aws-haiku",
+                false,
+                Some("opusplan"),
+                None,
+                &context,
+                &mut |_| {},
+            )
+            .unwrap(),
+            "aws-haiku"
+        );
+    }
+
+    #[test]
+    fn main_loop_plan_selection_applies_managed_family_fallbacks() {
+        let context = ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: "claude-sonnet-5".into(),
+                profile: Some("anthropic".into()),
+                provider: Some(ModelProviderKind::FirstParty),
+                ..Default::default()
+            },
+            family_defaults: FamilyModelDefaults {
+                opus: Some("claude-opus-4-8".into()),
+                sonnet: Some("claude-sonnet-5".into()),
+                haiku: Some("claude-haiku-4-5".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let enforcement = active(&["opus-4-6", "sonnet"]);
+        let catalog_models = catalog(&["claude-opus-4-6", "claude-opus-4-8", "claude-sonnet-5"]);
+        let restriction = ModelRestriction {
+            enforcement: &enforcement,
+            catalog: &catalog_models,
+        };
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            resolve_main_loop_model_restricted_with_context(
+                PermissionMode::Plan,
+                "claude-sonnet-5",
+                false,
+                Some("opusplan"),
+                Some(restriction),
+                &context,
+                &mut |message| warnings.push(message.to_owned()),
+            )
+            .unwrap(),
+            "claude-opus-4-6"
+        );
+        assert_eq!(
+            warnings,
+            vec![allowlist::warnings::PLAN_OPUSPLAN_NEWEST.to_string()]
+        );
+
+        let enforcement = active(&["sonnet"]);
+        let catalog_models = catalog(&["claude-sonnet-5"]);
+        let restriction = ModelRestriction {
+            enforcement: &enforcement,
+            catalog: &catalog_models,
+        };
+        warnings.clear();
+        assert_eq!(
+            resolve_main_loop_model_restricted_with_context(
+                PermissionMode::Plan,
+                "claude-sonnet-5",
+                false,
+                Some("opusplan"),
+                Some(restriction),
+                &context,
+                &mut |message| warnings.push(message.to_owned()),
+            )
+            .unwrap(),
+            "claude-sonnet-5",
+            "without a permitted Opus candidate, fall back to the resting model"
+        );
+        assert_eq!(
+            warnings,
+            vec![allowlist::warnings::PLAN_OPUSPLAN_RESTING.to_string()]
+        );
+    }
+
+    #[test]
     fn non_first_party_reserved_aliases_use_the_route_catalog() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _subagent = clear_subagent_env();
@@ -2690,7 +2879,10 @@ mod tests {
     /// An Active enforcement over `allow` with no overrides.
     fn active(allow: &[&str]) -> ModelEnforcement {
         ModelEnforcement::Active {
-            allowlist: allow.iter().map(|s| (*s).to_string()).collect(),
+            allowlist: lingxi_core::types::utf16_json::Utf16JsonProjection::array(
+                allow.iter().map(|item| (*item).into()).collect(),
+            )
+            .expect("test model allowlist is an array of strings"),
             overrides: BTreeMap::new(),
         }
     }

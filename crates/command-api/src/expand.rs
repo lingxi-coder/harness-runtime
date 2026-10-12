@@ -276,6 +276,7 @@ mod tests {
             file_path: PathBuf::from("/x/.lingxi/commands/foo.md"),
             base_dir: PathBuf::from("/x/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
+            frontmatter_name: None,
             content: "Hello $0".to_string(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };

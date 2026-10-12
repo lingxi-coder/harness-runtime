@@ -258,6 +258,50 @@ pub(crate) fn pattern_with_root(
     }
 }
 
+/// Resolve a permission pattern that may contain an isolated UTF-16 code unit.
+/// Well-formed strings use [`pattern_with_root`] unchanged. For an unpaired
+/// unit, apply the same slash-prefix operations directly to code units so the
+/// pattern never passes through an OS path or a lossy string conversion.
+pub(crate) fn pattern_with_root_units(
+    pattern_units: &[u16],
+    source: PermissionRuleSource,
+    roots: &FsRoots,
+) -> (Vec<u16>, Option<PathBuf>) {
+    if let Ok(pattern) = String::from_utf16(pattern_units) {
+        let (pattern, root) = pattern_with_root(&pattern, source, roots);
+        return (pattern.encode_utf16().collect(), root);
+    }
+
+    const SLASH: u16 = b'/' as u16;
+    const TILDE: u16 = b'~' as u16;
+    const DOT: u16 = b'.' as u16;
+    if pattern_units.starts_with(&[SLASH, SLASH]) {
+        let mut relative_pattern = Vec::with_capacity(pattern_units.len() - 1);
+        relative_pattern.push(SLASH);
+        relative_pattern.extend_from_slice(&pattern_units[2..]);
+        (relative_pattern, Some(PathBuf::from("/")))
+    } else if pattern_units.starts_with(&[TILDE, SLASH]) {
+        match &roots.home {
+            Some(home) => {
+                let mut relative_pattern = Vec::with_capacity(pattern_units.len() - 1);
+                relative_pattern.push(SLASH);
+                relative_pattern.extend_from_slice(&pattern_units[2..]);
+                (relative_pattern, Some(home.clone()))
+            }
+            None => (pattern_units.to_vec(), None),
+        }
+    } else if pattern_units.first() == Some(&SLASH) {
+        (
+            pattern_units.to_vec(),
+            Some(root_path_for_source(source, roots)),
+        )
+    } else if pattern_units.starts_with(&[DOT, SLASH]) {
+        (pattern_units[2..].to_vec(), None)
+    } else {
+        (pattern_units.to_vec(), None)
+    }
+}
+
 /// Lexically expand a tool path to an absolute, normalized path — same
 /// `expandPath` mirror as the orchestrator's `absolutize` (trim; bare `~` /
 /// `~/…` against home; absolute kept; relative joined to cwd; then `.`/`..`
@@ -1390,6 +1434,25 @@ mod tests {
 
     fn pattern_units(prefix: &str, middle: &[u16], suffix: &str) -> Vec<u16> {
         path_units(prefix, middle, suffix)
+    }
+
+    #[test]
+    fn pattern_with_root_units_preserves_unpaired_surrogate_patterns() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User);
+        let lone_surrogate = [0xd800u16];
+        let relative = pattern_units("./private/", &lone_surrogate, ".txt");
+        let (relative_pattern, relative_root) =
+            pattern_with_root_units(&relative, source, &roots());
+        assert_eq!(relative_root, None);
+        assert_eq!(
+            relative_pattern,
+            pattern_units("private/", &lone_surrogate, ".txt")
+        );
+
+        let rooted = pattern_units("/private/", &lone_surrogate, ".txt");
+        let (rooted_pattern, rooted_root) = pattern_with_root_units(&rooted, source, &roots());
+        assert_eq!(rooted_root, Some(PathBuf::from("/home/u/.lingxi")));
+        assert_eq!(rooted_pattern, rooted);
     }
 
     #[test]

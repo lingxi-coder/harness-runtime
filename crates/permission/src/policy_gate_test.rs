@@ -2994,6 +2994,67 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     // ── set_permission_mode (live mode override) ─────────────────────────────
 
     #[tokio::test]
+    async fn native_proactivity_level_selects_modes_from_live_auto_and_bypass_gates() {
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(PermissionMode::Default, Vec::new())
+                .with_bypass_available(true),
+        );
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+
+        assert_eq!(
+            gate.set_permission_mode_for_proactivity("proactive", Some(true), "default", true)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("bypassPermissions")
+        );
+        assert_eq!(
+            gate.set_permission_mode_for_proactivity("proactive", Some(false), "default", true)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("auto"),
+            "offer_bypass=false suppresses only bypass and preserves the live Auto fallback"
+        );
+        assert_eq!(
+            gate.set_permission_mode_for_proactivity("ask", None, "default", true)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("default"),
+            "an ever-enabled selector exits current Auto for ask"
+        );
+        assert!(gate.take_native_auto_mode_exit_attachment_pending());
+    }
+
+    #[tokio::test]
+    async fn native_default_level_restores_baseline_when_auto_is_unavailable() {
+        let mut policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        policy.auto_mode_disabled = true;
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+
+        assert_eq!(
+            gate.set_permission_mode_for_proactivity("default", None, "acceptEdits", true)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("acceptEdits")
+        );
+        assert_eq!(
+            gate.set_permission_mode_for_proactivity("proactive", None, "default", true)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("acceptEdits"),
+            "proactive falls back to AcceptEdits when neither Bypass nor Auto is available"
+        );
+    }
+
+    #[tokio::test]
     async fn set_permission_mode_override_changes_authorize_outcome() {
         // No rules, boot mode Default: a mutating tool with no allow rule is an
         // Ask → delegates to the inner prompt transport (here: Deny).
@@ -4037,6 +4098,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             .permission_policy_snapshot()
             .expect("policy-backed gate exposes its source facts");
         assert_eq!(before.permission_mode, "default");
+        assert!(!before.active_auto_mode);
         assert_eq!(
             before.classifier_auto_mode_settings,
             Some(classifier_settings),
@@ -4100,6 +4162,10 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             .permission_policy_snapshot()
             .expect("policy-backed gate keeps exposing live facts");
         assert_eq!(after.permission_mode, "plan");
+        assert!(
+            !after.active_auto_mode,
+            "a direct Plan transition stays unlatched"
+        );
         assert_eq!(after.deny_rules[0].source, "userSettings");
         let added = after
             .allow_rules
@@ -4133,6 +4199,293 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             .permission_policy_snapshot()
             .expect("policy-backed gate exposes current kill state");
         assert!(with_live_kill.auto_mode_disabled);
+    }
+
+    #[test]
+    fn policy_snapshot_preserves_stored_canonical_and_path_rule_metadata() {
+        let user_source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User);
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                vec![
+                    crate::rule::PermissionRule {
+                        value: crate::rule::PermissionRuleValue::from_rule_string("KillBash"),
+                        behavior: crate::rule::PermissionBehavior::Deny,
+                        source: user_source,
+                    },
+                    crate::rule::PermissionRule {
+                        value: crate::rule::PermissionRuleValue::from_rule_string(
+                            "Read(~/private/**)",
+                        ),
+                        behavior: crate::rule::PermissionBehavior::Deny,
+                        source: user_source,
+                    },
+                    crate::rule::PermissionRule {
+                        value: crate::rule::PermissionRuleValue::from_rule_string(
+                            "Edit(./secrets/**)",
+                        ),
+                        behavior: crate::rule::PermissionBehavior::Ask,
+                        source: user_source,
+                    },
+                    crate::rule::PermissionRule {
+                        value: crate::rule::PermissionRuleValue::from_rule_projection(
+                            &Utf16JsonProjection::parse(r#""Read(./private/\ud800.txt)""#).unwrap(),
+                        )
+                        .unwrap(),
+                        behavior: crate::rule::PermissionBehavior::Deny,
+                        source: user_source,
+                    },
+                ],
+            )
+            .with_roots(FsRoots {
+                cwd: PathBuf::from("/workspace/project"),
+                home: Some(PathBuf::from("/home/tester")),
+                lingxi_home: PathBuf::from("/home/tester/.lingxi"),
+            }),
+        );
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        let snapshot = gate
+            .permission_policy_snapshot()
+            .expect("policy-backed gate exposes classifier rules");
+
+        let alias = snapshot
+            .deny_rules
+            .iter()
+            .find(|rule| rule.rule.string_at("") == Some("KillBash"))
+            .expect("stored alias remains visible");
+        assert_eq!(
+            alias.canonical.as_ref().and_then(|rule| rule.string_at("")),
+            Some("TaskStop")
+        );
+        assert_eq!(alias.root, None);
+        assert_eq!(alias.pattern, None);
+
+        let home_rule = snapshot
+            .deny_rules
+            .iter()
+            .find(|rule| rule.rule.string_at("") == Some("Read(~/private/**)"))
+            .expect("home-relative path rule remains visible");
+        assert_eq!(home_rule.canonical, None);
+        assert_eq!(home_rule.root, Some(Some(PathBuf::from("/home/tester"))));
+        assert_eq!(
+            home_rule
+                .pattern
+                .as_ref()
+                .and_then(|pattern| pattern.string_at("")),
+            Some("/private/**")
+        );
+
+        let relative_rule = snapshot
+            .ask_rules
+            .iter()
+            .find(|rule| rule.rule.string_at("") == Some("Edit(./secrets/**)"))
+            .expect("relative path rule remains visible");
+        assert_eq!(relative_rule.root, Some(None));
+        assert_eq!(
+            relative_rule
+                .pattern
+                .as_ref()
+                .and_then(|pattern| pattern.string_at("")),
+            Some("secrets/**")
+        );
+
+        let surrogate = snapshot
+            .deny_rules
+            .iter()
+            .find(|rule| {
+                rule.rule
+                    .string_units("")
+                    .is_some_and(|units| units.contains(&0xd800))
+            })
+            .expect("surrogate-bearing Read rule remains visible");
+        assert_eq!(surrogate.root, Some(None));
+        let mut expected_pattern = "private/".encode_utf16().collect::<Vec<_>>();
+        expected_pattern.push(0xd800);
+        expected_pattern.extend(".txt".encode_utf16());
+        assert_eq!(
+            surrogate.pattern.as_ref().unwrap().string_units(""),
+            Some(expected_pattern)
+        );
+    }
+
+    #[tokio::test]
+    async fn active_auto_mode_latch_tracks_boot_live_and_updated_permission_modes() {
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Plan,
+                Vec::new(),
+            )),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let snapshot = || {
+            gate.permission_policy_snapshot()
+                .expect("policy-backed gate exposes mode state")
+        };
+
+        assert!(
+            !snapshot().active_auto_mode,
+            "booting directly in Plan is inactive"
+        );
+        gate.set_permission_mode("plan").await.unwrap();
+        assert!(
+            !snapshot().active_auto_mode,
+            "reselecting Plan does not activate Auto"
+        );
+
+        gate.set_permission_mode("auto").await.unwrap();
+        assert!(snapshot().active_auto_mode);
+        assert!(
+            !gate.take_native_auto_mode_exit_attachment_pending(),
+            "entering Auto clears an older exit transition"
+        );
+        gate.set_permission_mode("plan").await.unwrap();
+        assert!(
+            snapshot().active_auto_mode,
+            "Auto to Plan preserves the latch"
+        );
+        assert!(
+            !gate.take_native_auto_mode_exit_attachment_pending(),
+            "Auto to Plan does not queue an exit row"
+        );
+        gate.set_permission_mode("default").await.unwrap();
+        assert!(
+            !snapshot().active_auto_mode,
+            "leaving Plan clears the latch"
+        );
+
+        gate.apply_permission_update_from_fixture(&serde_json::json!({
+            "type": "setMode",
+            "mode": "auto"
+        }));
+        assert!(
+            snapshot().active_auto_mode,
+            "updatedPermissions entering Auto sets it"
+        );
+        gate.apply_permission_update_from_fixture(&serde_json::json!({
+            "type": "setMode",
+            "mode": "plan"
+        }));
+        assert!(
+            snapshot().active_auto_mode,
+            "updatedPermissions Auto to Plan retains it"
+        );
+        gate.apply_permission_update_from_fixture(&serde_json::json!({
+            "type": "setMode",
+            "mode": "acceptEdits"
+        }));
+        assert!(
+            !snapshot().active_auto_mode,
+            "updatedPermissions leaving Plan clears it"
+        );
+
+        gate.set_permission_mode("auto").await.unwrap();
+        assert!(
+            !gate.take_native_auto_mode_exit_attachment_pending(),
+            "entering Auto does not queue an exit row"
+        );
+        gate.set_permission_mode("default").await.unwrap();
+        assert!(gate.take_native_auto_mode_exit_attachment_pending());
+        assert!(
+            !gate.take_native_auto_mode_exit_attachment_pending(),
+            "the next staged batch consumes the exit transition exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_auto_mode_latch_initializes_from_resolved_boot_mode_and_settings_eviction() {
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Auto,
+                Vec::new(),
+            )),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let snapshot = || {
+            gate.permission_policy_snapshot()
+                .expect("policy-backed gate exposes mode state")
+        };
+
+        assert!(
+            snapshot().active_auto_mode,
+            "resolved Auto boot mode starts active"
+        );
+        gate.set_permission_mode("plan").await.unwrap();
+        assert!(snapshot().active_auto_mode);
+        gate.set_permission_mode("auto").await.unwrap();
+        gate.update_auto_mode_disabled_from_settings(true);
+        assert_eq!(snapshot().permission_mode, "default");
+        assert!(
+            !snapshot().active_auto_mode,
+            "managed eviction clears Auto activity"
+        );
+        assert!(gate.take_native_auto_mode_exit_attachment_pending());
+
+        gate.update_auto_mode_disabled_from_settings(false);
+        assert_eq!(snapshot().permission_mode, "default");
+        assert!(
+            !snapshot().active_auto_mode,
+            "reopening availability does not re-enter Auto"
+        );
+
+        gate.set_permission_mode("auto").await.unwrap();
+        gate.set_permission_mode("plan").await.unwrap();
+        assert!(snapshot().active_auto_mode);
+        assert!(
+            !gate.take_native_auto_mode_exit_attachment_pending(),
+            "Auto to Plan is not an exit while the pre-plan Auto mode remains active"
+        );
+        gate.update_auto_mode_disabled_from_settings(true);
+        assert_eq!(snapshot().permission_mode, "plan");
+        assert!(
+            !snapshot().active_auto_mode,
+            "the gate removes the hidden pre-plan Auto mode without leaving Plan"
+        );
+        assert!(
+            gate.take_native_auto_mode_exit_attachment_pending(),
+            "Native NQn explicitly calls ED(true) when Plan's prePlanMode was Auto"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_afk_beta_rejection_trips_sticky_auto_circuit_without_changing_mode() {
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Auto,
+                Vec::new(),
+            )),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let snapshot = || {
+            gate.permission_policy_snapshot()
+                .expect("policy-backed gate exposes mode state")
+        };
+
+        assert_eq!(snapshot().permission_mode, "auto");
+        assert!(snapshot().active_auto_mode);
+        assert!(!snapshot().native_auto_mode_circuit_broken);
+
+        gate.record_native_afk_beta_rejection();
+
+        let rejected = snapshot();
+        assert_eq!(rejected.permission_mode, "auto");
+        assert!(!rejected.active_auto_mode);
+        assert!(rejected.native_auto_mode_circuit_broken);
+
+        assert_eq!(
+            gate.set_permission_mode("auto").await,
+            Err(
+                "Cannot set permission mode to auto: auto mode is unavailable for your plan"
+                    .to_owned()
+            )
+        );
+        let after_reselecting_auto = snapshot();
+        assert_eq!(after_reselecting_auto.permission_mode, "auto");
+        assert!(
+            !after_reselecting_auto.active_auto_mode,
+            "the sticky Native circuit prevents reactivating Auto"
+        );
+        assert!(after_reselecting_auto.native_auto_mode_circuit_broken);
     }
 
     #[test]

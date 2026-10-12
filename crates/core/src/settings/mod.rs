@@ -10,6 +10,9 @@ pub mod enterprise;
 pub mod env_parser;
 pub mod loader;
 pub mod merger;
+pub mod native_policy;
+mod native_policy_parser;
+pub mod raw_layer_stack;
 pub mod schema;
 pub mod tracer;
 
@@ -66,7 +69,19 @@ pub enum SettingsError {
     },
 }
 
-pub use schema::{ProviderRegion, SettingsJson};
+pub use native_policy::{
+    resolve_native_policy, NativeManagedSourcesBehavior, NativeParentSettingsBehavior,
+    NativePolicyAdmission, NativePolicyControls, NativePolicyDocument, NativePolicyEffective,
+    NativePolicyHostFacts, NativePolicyHostKind, NativePolicyInputs, NativePolicyLoadState,
+    NativePolicyManagedFileFacts, NativePolicyParentFacts, NativePolicyPlistFacts,
+    NativePolicySelection, NativePolicySource, NativePolicySourceMetadata, NativePolicyUnresolved,
+};
+pub use raw_layer_stack::{
+    RawSupplementalLayers, SettingsAdmittedLayer, SettingsRawLayer, SettingsRawLayerStack,
+};
+pub use schema::{
+    sandbox_execution_value, ProviderRegion, SettingsJson, SkillOverride, SkillOverrides,
+};
 
 /// Observes settings-load outcomes without coupling the shared core to a
 /// particular analytics transport or its privacy-tagged wire format.

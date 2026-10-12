@@ -731,9 +731,11 @@ async fn explicit_fork_context_bypasses_omit_and_preserves_sent_cursor() {
     );
     assert!(provider.loads.lock().unwrap().is_empty());
     assert!(!selected.managed_instructions_only);
-    assert!(selected
-        .sent_paths
-        .contains(Path::new("/project/nested/AGENTS.md")));
+    assert!(
+        selected
+            .sent_paths
+            .contains(Path::new("/project/nested/AGENTS.md"))
+    );
 }
 
 #[tokio::test]
@@ -999,9 +1001,11 @@ async fn nested_read_then_fork_retains_policy_body_and_cursor_without_reemitting
             .count(),
         1
     );
-    assert!(!rows
-        .iter()
-        .any(|row| row["message"]["subtype"] == "instruction_context"));
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row["message"]["subtype"] == "instruction_context")
+    );
     assert_eq!(
         model_text(&restored_history).matches("FULL POLICY").count(),
         1
@@ -1018,10 +1022,12 @@ async fn nested_read_then_fork_retains_policy_body_and_cursor_without_reemitting
     assert_eq!(model_text(&fork.messages).matches("FULL POLICY").count(), 1);
     let mut child = fresh_subagent_ctx();
     child.instruction_context = invocation.instruction_context.unwrap();
-    assert!(child
-        .instruction_context
-        .sent_paths
-        .contains(Path::new("/project/pkg/AGENTS.md")));
+    assert!(
+        child
+            .instruction_context
+            .sent_paths
+            .contains(Path::new("/project/pkg/AGENTS.md"))
+    );
     child.instruction_context_is_override = true;
     let directive = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
         "fork directive".into(),
@@ -1142,10 +1148,12 @@ async fn cold_child_recovers_native_inline_hint_without_persisting_its_prefix() 
         std::fs::read_to_string(directory.path().join(format!("agent-{id}.jsonl"))).unwrap();
     assert!(!saved.contains("FULL POLICY"));
     assert!(!saved.contains("instruction_context"));
-    assert!(!saved
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .any(|row| row["attachment"]["type"] == "instructions"));
+    assert!(
+        !saved
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .any(|row| row["attachment"]["type"] == "instructions")
+    );
 }
 
 #[test]

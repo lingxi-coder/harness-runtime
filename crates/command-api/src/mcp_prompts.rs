@@ -18,7 +18,7 @@
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 
-use crate::model::{CommandSource, SlashCommand, SlashCommandKind};
+use crate::model::{CommandSource, NativeCommandType, SlashCommand, SlashCommandKind};
 
 /// The `loaded_from` marker claude uses for an MCP-sourced command.
 pub const MCP_LOADED_FROM: &str = "mcp";
@@ -117,6 +117,8 @@ pub fn mcp_prompt_commands(
                 has_user_specified_description: described.is_some(),
                 name,
                 source: CommandSource::Mcp,
+                native_source: Some("mcp".into()),
+                native_type: Some(NativeCommandType::Prompt),
                 aliases: mcp_prompt_command_aliases(server, &prompt.name),
                 kind: SlashCommandKind::Mcp {
                     connection_id: *connection_id,

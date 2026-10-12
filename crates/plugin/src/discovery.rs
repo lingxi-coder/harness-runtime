@@ -64,7 +64,7 @@ use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, PiiTagged, Verif
 /// `serde_json` does not treat U+FEFF as whitespace, so every manifest/config
 /// JSON string read in this file must have it stripped before parsing (same
 /// convention as `command-api::markdown_loader::UTF8_BOM`,
-/// `skill-api::frontmatter`, `agent::catalog`).
+/// `skill::frontmatter`, `agent::catalog`).
 const UTF8_BOM: char = '\u{feff}';
 
 /// Raw shape of `.lingxi-plugin/plugin.json`.
@@ -2498,11 +2498,11 @@ pub(crate) async fn plugin_component_inventory_for_path(
         let Ok(raw) = tokio::fs::read_to_string(&component.path).await else {
             continue;
         };
-        let Ok(skill) = skill_api::parse_skill_markdown(
+        let Ok(skill) = skill::parse_skill_markdown(
             &raw,
             component.path.clone(),
-            skill_api::SkillSource::Plugin,
-            skill_api::LoadedFrom::Plugin,
+            skill::SkillSource::Plugin,
+            skill::LoadedFrom::Plugin,
         ) else {
             continue;
         };

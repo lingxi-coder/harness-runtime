@@ -276,28 +276,6 @@ fn submit_run_slash_command_preserves_lone_surrogate_in_streamed_and_durable_pro
 
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 1, "one slash dispatch makes one model request");
-        let request_prompt = calls[0]
-            .messages
-            .iter()
-            .find_map(|message| match message {
-                ConversationMessage::User { content, .. } => content.iter().find_map(|block| {
-                    match block {
-                        ContentBlock::TextJsUtf16 {
-                            utf16_code_units, ..
-                        } => Some(utf16_code_units.clone()),
-                        _ => None,
-                    }
-                }),
-                _ => None,
-            })
-            .expect("the expanded user prompt is source-backed");
-        assert!(
-            request_prompt
-                .windows(raw_argument.len())
-                .any(|units| units == raw_argument.as_slice()),
-            "the model request must retain the lone surrogate between the slash argument sentinels: {request_prompt:?}"
-        );
-
         let transcript_path = session::jsonl::session_path(
             &cfg.lingxi_home,
             &cfg.cwd.to_string_lossy(),
@@ -305,23 +283,61 @@ fn submit_run_slash_command_preserves_lone_surrogate_in_streamed_and_durable_pro
         );
         let transcript = std::fs::read_to_string(&transcript_path)
             .expect("mobile turn writes the durable session transcript");
-        let transcript_has_exact_argument = transcript.lines().any(|line| {
-            let Ok(row) = Utf16JsonProjection::parse(line) else {
-                return false;
-            };
-            row.string_at("/type") == Some("user")
-                && row
-                    .string_units("/message/content/0/text")
-                    .is_some_and(|units| {
-                        units
-                            .windows(raw_argument.len())
-                            .any(|window| window == raw_argument.as_slice())
-                    })
-        });
-        assert!(
-            transcript_has_exact_argument,
-            "the durable user row must retain the isolated surrogate source units"
-        );
+        let durable_prompt_row = transcript
+            .lines()
+            .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+            .find(|row| {
+                row.string_at("/type") == Some("user")
+                    && row
+                        .string_units("/message/content/0/text")
+                        .is_some_and(|units| {
+                            units
+                                .windows(raw_argument.len())
+                                .any(|window| window == raw_argument.as_slice())
+                        })
+            })
+            .expect("the durable user row retains the isolated surrogate source units");
+        let durable_prompt_units = durable_prompt_row
+            .string_units("/message/content/0/text")
+            .expect("the matching durable prompt is source-backed");
+        assert!(durable_prompt_units
+            .windows(raw_argument.len())
+            .any(|units| units == raw_argument.as_slice()));
+
+        // Ingress attachments can also be user-role messages. Bind the API
+        // assertion to the exact durable user row by UUID, then inspect only
+        // that row's source-backed text block for the original argument.
+        let prompt_uuid = uuid::Uuid::parse_str(
+            durable_prompt_row
+                .string_at("/uuid")
+                .expect("durable prompt row UUID"),
+        )
+        .expect("durable prompt row UUID parses");
+        let prompt_message = calls[0]
+            .messages
+            .iter()
+            .find(|message| message.id().as_uuid() == prompt_uuid)
+            .expect("the model request contains the durable prompt row by identity");
+        let request_prompt = match prompt_message {
+            ConversationMessage::User { content, .. } => content.iter().find_map(|block| {
+                match block {
+                    ContentBlock::TextJsUtf16 {
+                        utf16_code_units, ..
+                    } if utf16_code_units
+                        .windows(raw_argument.len())
+                        .any(|units| units == raw_argument.as_slice()) =>
+                    {
+                        Some(utf16_code_units.clone())
+                    }
+                    _ => None,
+                }
+            }),
+            _ => None,
+        }
+        .expect("the identified model user prompt retains exact UTF-16 source units");
+        assert!(request_prompt
+            .windows(raw_argument.len())
+            .any(|units| units == raw_argument.as_slice()));
     });
 }
 

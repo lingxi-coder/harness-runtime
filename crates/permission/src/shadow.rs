@@ -289,6 +289,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: tool.to_string(),
                 rule_content: content.map(Into::into),
+                original_rule: None,
             },
             behavior,
             source,

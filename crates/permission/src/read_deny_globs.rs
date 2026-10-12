@@ -284,6 +284,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Read".into(),
                 rule_content: Some(content.into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Deny,
             source,
@@ -405,6 +406,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Edit".into(),
                 rule_content: Some("/secrets/**".into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -420,6 +422,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Read".into(),
                 rule_content: Some("/secrets/**".into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -437,6 +440,7 @@ mod tests {
                 value: PermissionRuleValue {
                     tool_name: "Read".into(),
                     rule_content: None,
+                    original_rule: None,
                 },
                 behavior: PermissionBehavior::Deny,
                 source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),

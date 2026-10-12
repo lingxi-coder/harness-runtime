@@ -17,7 +17,7 @@
 use crate::conversation::StreamingApiClient;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
-use lingxi_core::types::{ConversationMessage, ToolUseId};
+use lingxi_core::types::{ConversationMessage, MessageId, ToolUseId};
 use lingxi_llm_client::protocol::JsonPayload;
 use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryContentDelta, HistoryEvent,
@@ -169,10 +169,17 @@ impl StreamingApiClient for MockStreamingApiClient {
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
         request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
         native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+        typed_attachment_ids: std::collections::HashSet<MessageId>,
+        task_deliveries: std::collections::HashMap<
+            lingxi_core::types::MessageId,
+            lingxi_core::host::task_delivery::TaskDeliveryRequest,
+        >,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = tool_result_reminder_suffixes;
         let _ = request_dispatch_observer;
         let _ = native_anthropic_request_context;
+        let _ = typed_attachment_ids;
+        let _ = task_deliveries;
         let stream = self
             .stream(
                 model,

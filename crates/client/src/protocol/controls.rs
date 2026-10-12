@@ -118,6 +118,24 @@ pub struct PermissionControlStateDto {
     pub options: Vec<PermissionModeOptionDto>,
 }
 
+/// Native's session-local proactivity eligibility, opt-in, and level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct NativeProactivityControlStateDto {
+    /// Whether the session has an explicit proactivity opt-in.
+    pub opted_in: bool,
+    /// Whether the opt-in, feature, and environment gates currently allow levels.
+    pub selector_gate: bool,
+    /// Whether Native's selector gate has ever been on in this session.
+    pub selector_gate_ever_on: bool,
+    /// Whether model-facing attachments are available in this session.
+    pub attachments_enabled: bool,
+    /// Whether a user opt-in can currently activate proactivity controls.
+    pub opt_in_available: bool,
+    /// The current Native level (`ask`, `default`, or `proactive`).
+    pub level: String,
+}
+
 /// Full conversation-controls snapshot authored by the engine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -128,4 +146,7 @@ pub struct ConversationControlsDto {
     pub permission: PermissionControlStateDto,
     /// Authoritative reasoning state + capabilities for the active model.
     pub reasoning: ReasoningControlStateDto,
+    /// Session-local proactivity control when the engine exposes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proactivity: Option<NativeProactivityControlStateDto>,
 }

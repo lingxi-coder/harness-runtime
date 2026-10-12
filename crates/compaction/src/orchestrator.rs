@@ -786,6 +786,8 @@ mod tests {
                 append_system_prompt: None,
             },
             fork_context_messages: Vec::new(),
+            typed_attachment_ids: std::collections::HashSet::new(),
+            task_deliveries: std::collections::HashMap::new(),
             transcript_path: None,
             generation: 0,
             tools: Vec::new(),

@@ -401,34 +401,40 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
     sink.turn_start().await;
     let turn_result = if argv.no_stream {
         if argv.prompt_images.is_empty() {
-            orchestrator::mod_prompt_origin::with_origin(
-                serde_json::json!({"kind":"sdk"}),
-                runtime
-                    .orchestrator
-                    .run_turn_with_cancel(prompt_source.clone(), runtime.turn_cancel()),
+            orchestrator::native_user_message_source::with_sdk_source(
+                orchestrator::mod_prompt_origin::with_origin(
+                    serde_json::json!({"kind":"sdk"}),
+                    runtime
+                        .orchestrator
+                        .run_turn_with_cancel(prompt_source.clone(), runtime.turn_cancel()),
+                ),
             )
             .await
         } else {
-            orchestrator::mod_prompt_origin::with_origin(
-                serde_json::json!({"kind":"sdk"}),
-                runtime.orchestrator.run_turn_with_cancel_image_sources(
-                    prompt_source.clone(),
-                    argv.prompt_images.clone(),
-                    runtime.turn_cancel(),
+            orchestrator::native_user_message_source::with_sdk_source(
+                orchestrator::mod_prompt_origin::with_origin(
+                    serde_json::json!({"kind":"sdk"}),
+                    runtime.orchestrator.run_turn_with_cancel_image_sources(
+                        prompt_source.clone(),
+                        argv.prompt_images.clone(),
+                        runtime.turn_cancel(),
+                    ),
                 ),
             )
             .await
         }
     } else {
-        orchestrator::mod_prompt_origin::with_origin(
-            serde_json::json!({"kind":"sdk"}),
-            runtime
-                .orchestrator
-                .run_turn_streaming_with_cancel_image_sources(
-                    prompt_source.clone(),
-                    argv.prompt_images.clone(),
-                    runtime.turn_cancel(),
-                ),
+        orchestrator::native_user_message_source::with_sdk_source(
+            orchestrator::mod_prompt_origin::with_origin(
+                serde_json::json!({"kind":"sdk"}),
+                runtime
+                    .orchestrator
+                    .run_turn_streaming_with_cancel_image_sources(
+                        prompt_source.clone(),
+                        argv.prompt_images.clone(),
+                        runtime.turn_cancel(),
+                    ),
+            ),
         )
         .await
     };
@@ -760,34 +766,40 @@ async fn run_stream_json_print_inner(
         } else if argv.no_stream {
             let prompt_source = Utf16JsonProjection::from(prompt.as_str());
             if argv.prompt_images.is_empty() {
-                orchestrator::mod_prompt_origin::with_origin(
-                    json!({"kind":"sdk"}),
-                    runtime
-                        .orchestrator
-                        .run_turn_with_cancel(prompt_source, runtime.turn_cancel()),
+                orchestrator::native_user_message_source::with_sdk_source(
+                    orchestrator::mod_prompt_origin::with_origin(
+                        json!({"kind":"sdk"}),
+                        runtime
+                            .orchestrator
+                            .run_turn_with_cancel(prompt_source, runtime.turn_cancel()),
+                    ),
                 )
                 .await
             } else {
-                orchestrator::mod_prompt_origin::with_origin(
-                    json!({"kind":"sdk"}),
-                    runtime.orchestrator.run_turn_with_cancel_image_sources(
-                        prompt_source,
-                        argv.prompt_images.clone(),
-                        runtime.turn_cancel(),
+                orchestrator::native_user_message_source::with_sdk_source(
+                    orchestrator::mod_prompt_origin::with_origin(
+                        json!({"kind":"sdk"}),
+                        runtime.orchestrator.run_turn_with_cancel_image_sources(
+                            prompt_source,
+                            argv.prompt_images.clone(),
+                            runtime.turn_cancel(),
+                        ),
                     ),
                 )
                 .await
             }
         } else {
-            orchestrator::mod_prompt_origin::with_origin(
-                json!({"kind":"sdk"}),
-                runtime
-                    .orchestrator
-                    .run_turn_streaming_with_cancel_image_sources(
-                        &prompt,
-                        argv.prompt_images.clone(),
-                        runtime.turn_cancel(),
-                    ),
+            orchestrator::native_user_message_source::with_sdk_source(
+                orchestrator::mod_prompt_origin::with_origin(
+                    json!({"kind":"sdk"}),
+                    runtime
+                        .orchestrator
+                        .run_turn_streaming_with_cancel_image_sources(
+                            &prompt,
+                            argv.prompt_images.clone(),
+                            runtime.turn_cancel(),
+                        ),
+                ),
             )
             .await
         };
@@ -1525,15 +1537,17 @@ async fn run_stream_json_input_loop_inner(
                 Err(error) => Err(error),
             }
         } else {
-            orchestrator::mod_prompt_origin::with_origin(
-                json!({"kind":"sdk"}),
-                runtime
-                    .orchestrator
-                    .run_turn_streaming_with_cancel_projected_content(
-                        &turn.content_projection,
-                        cancel,
-                        external_message_id,
-                    ),
+            orchestrator::native_user_message_source::with_sdk_source(
+                orchestrator::mod_prompt_origin::with_origin(
+                    json!({"kind":"sdk"}),
+                    runtime
+                        .orchestrator
+                        .run_turn_streaming_with_cancel_projected_content(
+                            &turn.content_projection,
+                            cancel,
+                            external_message_id,
+                        ),
+                ),
             )
             .await
         };
@@ -1834,28 +1848,32 @@ async fn execute_structured_output(
     // driver. Re-entering run_turn here would create another user message,
     // rerun UserPromptSubmit, and reset the query's limits and identity.
     let outcome = if let Some(projected) = projected_content {
-        orchestrator::mod_prompt_origin::with_origin(
-            json!({"kind":"sdk"}),
-            runtime
-                .orchestrator
-                .run_turn_streaming_with_cancel_projected_content(
-                    projected,
-                    cancel.clone(),
-                    message_id,
-                ),
+        orchestrator::native_user_message_source::with_sdk_source(
+            orchestrator::mod_prompt_origin::with_origin(
+                json!({"kind":"sdk"}),
+                runtime
+                    .orchestrator
+                    .run_turn_streaming_with_cancel_projected_content(
+                        projected,
+                        cancel.clone(),
+                        message_id,
+                    ),
+            ),
         )
         .await
     } else {
-        orchestrator::mod_prompt_origin::with_origin(
-            json!({"kind":"sdk"}),
-            runtime
-                .orchestrator
-                .run_turn_streaming_with_cancel_image_sources_and_message_id(
-                    prompt,
-                    images,
-                    cancel.clone(),
-                    message_id,
-                ),
+        orchestrator::native_user_message_source::with_sdk_source(
+            orchestrator::mod_prompt_origin::with_origin(
+                json!({"kind":"sdk"}),
+                runtime
+                    .orchestrator
+                    .run_turn_streaming_with_cancel_image_sources_and_message_id(
+                        prompt,
+                        images,
+                        cancel.clone(),
+                        message_id,
+                    ),
+            ),
         )
         .await
     };
@@ -1928,17 +1946,25 @@ async fn run_slash_command_with_budget(
             sink.turn_start().await;
             let cancel = runtime.turn_cancel();
             let turn_result = if no_stream {
-                orchestrator::mod_prompt_origin::with_origin(
-                    serde_json::json!({"kind":"sdk"}),
-                    runtime.orchestrator.run_turn_with_cancel(prompt, cancel),
+                orchestrator::native_user_message_source::with_sdk_source(
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"sdk"}),
+                        runtime.orchestrator.run_turn_with_cancel(prompt, cancel),
+                    ),
                 )
                 .await
             } else {
-                orchestrator::mod_prompt_origin::with_origin(
-                    serde_json::json!({"kind":"sdk"}),
-                    runtime
-                        .orchestrator
-                        .run_turn_streaming_with_cancel_image_sources(&prompt, Vec::new(), cancel),
+                orchestrator::native_user_message_source::with_sdk_source(
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"sdk"}),
+                        runtime
+                            .orchestrator
+                            .run_turn_streaming_with_cancel_image_sources(
+                                &prompt,
+                                Vec::new(),
+                                cancel,
+                            ),
+                    ),
                 )
                 .await
             };
@@ -1963,12 +1989,14 @@ async fn run_slash_command_with_budget(
             }
         }
         SlashDispatchResult::Unknown { name, .. } => {
-            let catalog = runtime.dispatcher.headless_command_catalog().await;
+            let catalog = runtime.headless_command_catalog().await;
             let reminder = command_api::render_unknown_command_reminder(&name, &catalog);
+            let attachment = unknown_command_fallback_attachment(&name, &catalog, reminder.clone());
             run_fallback_prompt_turn(
                 runtime,
                 input.clone(),
                 vec![reminder],
+                Some(attachment),
                 max_budget_usd,
                 no_stream,
                 sink,
@@ -1976,8 +2004,16 @@ async fn run_slash_command_with_budget(
             .await
         }
         SlashDispatchResult::ParseFailure { input } => {
-            run_fallback_prompt_turn(runtime, input, Vec::new(), max_budget_usd, no_stream, sink)
-                .await
+            run_fallback_prompt_turn(
+                runtime,
+                input,
+                Vec::new(),
+                None,
+                max_budget_usd,
+                no_stream,
+                sink,
+            )
+            .await
         }
         SlashDispatchResult::NotASlashCommand => {
             // Defensive: only reached when caller violated the slash-prefix
@@ -1990,10 +2026,38 @@ async fn run_slash_command_with_budget(
     }
 }
 
+fn unknown_command_fallback_attachment(
+    command_name: &Utf16JsonProjection,
+    catalog: &command_api::HeadlessCommandCatalog,
+    rendered: Utf16JsonProjection,
+) -> orchestrator::RequestContextTranscriptAttachment {
+    let available_names = Utf16JsonProjection::array(catalog.prompt_command_names.clone())
+        .expect("command catalog names form a JSON array");
+    let available_count = Utf16JsonProjection::parse(&catalog.available_command_count.to_string())
+        .expect("command count is a JSON number");
+    let payload = Utf16JsonProjection::object(vec![
+        ("type".to_owned(), "unknown_command_fallback".into()),
+        ("commandName".to_owned(), command_name.clone()),
+        ("availableCommandNames".to_owned(), available_names),
+        ("availableCommandCount".to_owned(), available_count),
+    ])
+    .expect("unknown command fallback is a JSON object");
+    let rendered = Utf16JsonProjection::object(vec![("content".to_owned(), rendered)])
+        .and_then(|line| Utf16JsonProjection::array(vec![line]))
+        .expect("unknown command rendered view is a content array");
+    orchestrator::RequestContextTranscriptAttachment {
+        message_id: lingxi_core::types::MessageId::new(),
+        payload,
+        rendered,
+        rendered_role: "user",
+    }
+}
+
 async fn run_fallback_prompt_turn(
     runtime: &Runtime,
     prompt: Utf16JsonProjection,
     request_context: Vec<Utf16JsonProjection>,
+    transcript_attachment: Option<orchestrator::RequestContextTranscriptAttachment>,
     max_budget_usd: Option<f64>,
     no_stream: bool,
     sink: &dyn OutputSink,
@@ -2001,19 +2065,31 @@ async fn run_fallback_prompt_turn(
     sink.turn_start().await;
     let cancel = runtime.turn_cancel();
     let result = if no_stream {
-        orchestrator::mod_prompt_origin::with_origin(
-            json!({"kind":"sdk"}),
-            runtime
-                .orchestrator
-                .run_turn_with_request_context(prompt, request_context, cancel),
+        orchestrator::native_user_message_source::with_sdk_source(
+            orchestrator::mod_prompt_origin::with_origin(
+                json!({"kind":"sdk"}),
+                runtime.orchestrator.run_turn_with_request_context(
+                    prompt,
+                    request_context,
+                    transcript_attachment,
+                    cancel,
+                ),
+            ),
         )
         .await
     } else {
-        orchestrator::mod_prompt_origin::with_origin(
-            json!({"kind":"sdk"}),
-            runtime
-                .orchestrator
-                .run_turn_streaming_with_request_context(prompt, request_context, cancel),
+        orchestrator::native_user_message_source::with_sdk_source(
+            orchestrator::mod_prompt_origin::with_origin(
+                json!({"kind":"sdk"}),
+                runtime
+                    .orchestrator
+                    .run_turn_streaming_with_request_context(
+                        prompt,
+                        request_context,
+                        transcript_attachment,
+                        cancel,
+                    ),
+            ),
         )
         .await
     };
@@ -2059,6 +2135,14 @@ mod stdio_lifecycle_tests;
 #[cfg(test)]
 #[path = "run/ui_lifecycle_tests.rs"]
 mod ui_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "run/native_proactivity_control_tests.rs"]
+mod native_proactivity_control_tests;
+
+#[cfg(test)]
+#[path = "run/native_commands_295_replay_test.rs"]
+mod native_commands_295_replay_tests;
 
 async fn set_result_position(
     runtime: &Runtime,
@@ -2355,8 +2439,17 @@ mod result_publication_tests {
     }
 
     #[tokio::test]
-    async fn unknown_slash_uses_request_context_without_persisting_the_reminder() {
+    async fn unknown_slash_persists_typed_user_fallback_and_request_context() {
+        use lingxi_core::host::FileSystem;
+        use platform_posix::fs::PosixFileSystem;
+        use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
+
         let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("session.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
         let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
             tokio::io::sink(),
         )));
@@ -2379,9 +2472,13 @@ mod result_publication_tests {
                 Arc::new(NoOpPermissionGate),
                 stream.clone(),
                 Arc::new(StaticMemoryProvider::empty()),
-                root.path().join("project"),
+                cwd,
             )
-            .with_task_registry(runtime.task_registry.clone()),
+            .with_task_registry(runtime.task_registry.clone())
+            .with_jsonl_writer(Arc::new(JsonlWriter::new(
+                transcript.clone(),
+                filesystem.clone(),
+            ))),
         );
         let input = Utf16JsonProjection::from("/__missing_command__ keep this prompt");
         let sink = crate::headless::output::PlainSink::new(
@@ -2403,11 +2500,34 @@ mod result_publication_tests {
         assert!(calls[0].messages.iter().any(|message| {
             matches!(
                 message,
-                lingxi_core::types::ConversationMessage::User { is_meta: true, .. }
+                lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
             ) && message
                 .text_content()
                 .contains("The user's message starts with the slash command")
         }));
+        let outbound_fallback = calls[0]
+            .messages
+            .iter()
+            .find(|message| {
+                matches!(
+                    message,
+                    lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+                ) && message
+                    .text_content()
+                    .contains("The user's message starts with the slash command")
+            })
+            .expect("the request includes the typed fallback as a user row");
+        let fallback_request_index = calls[0]
+            .messages
+            .iter()
+            .position(|message| message.id() == outbound_fallback.id())
+            .unwrap();
+        let prompt_request_index = calls[0]
+            .messages
+            .iter()
+            .position(|message| message.text_content() == "/__missing_command__ keep this prompt")
+            .expect("the original slash prompt remains in the request");
+        assert!(fallback_request_index < prompt_request_index);
         let history = runtime.orchestrator.session().lock().await.history.clone();
         assert!(history.iter().any(|message| {
             matches!(
@@ -2415,11 +2535,58 @@ mod result_publication_tests {
                 lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
             ) && message.text_content() == "/__missing_command__ keep this prompt"
         }));
-        assert!(!history.iter().any(|message| {
-            message
-                .text_content()
-                .contains("The user's message starts with the slash command")
-        }));
+        let history_fallback = history
+            .iter()
+            .find(|message| {
+                matches!(
+                    message,
+                    lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+                ) && message
+                    .text_content()
+                    .contains("The user's message starts with the slash command")
+            })
+            .expect("the fallback remains in live model history");
+        assert_eq!(history_fallback.id(), outbound_fallback.id());
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| {
+                    message.id() == outbound_fallback.id()
+                        && message
+                            .text_content()
+                            .contains("The user's message starts with the slash command")
+                })
+                .count(),
+            1
+        );
+
+        let rows = JsonlReader::new(transcript, filesystem)
+            .read_all()
+            .await
+            .unwrap();
+        let persisted_fallback = rows
+            .iter()
+            .find(|row| {
+                row.message_type == "attachment"
+                    && row
+                        .attachment_projection
+                        .as_ref()
+                        .and_then(|payload| payload.string_at("/type"))
+                        == Some("unknown_command_fallback")
+            })
+            .expect("the typed fallback is persisted in the transcript");
+        assert_eq!(
+            persisted_fallback.uuid,
+            outbound_fallback.id().as_uuid().to_string()
+        );
+        assert_eq!(
+            persisted_fallback.extra.string_at("/renderedRole"),
+            Some("user")
+        );
+        assert!(persisted_fallback
+            .extra
+            .string_at("/rendered/0/content")
+            .is_some_and(|content| content == outbound_fallback.text_content()));
         stream.finish().await.unwrap();
     }
 
@@ -2508,6 +2675,16 @@ mod result_publication_tests {
             .with_task_notifications(Arc::new(
                 orchestrator::task_notifications_provider::RegistryTaskNotifications::new(
                     runtime.task_registry.clone(),
+                    orchestrator::task_notifications_provider::TaskDeliveryHostFacts {
+                        windows_or_wsl: cfg!(windows)
+                            || matches!(
+                                platform_posix::wsl_detect::detect(),
+                                platform_posix::wsl_detect::WslKind::WslOne
+                                    | platform_posix::wsl_detect::WslKind::WslTwo
+                            ),
+                        strict_tool_result_pairing: false,
+                        bare_mode: false,
+                    },
                 ),
             )),
         );

@@ -1,9 +1,7 @@
 //! Build the source-preserving Native classifier context from the live host
 //! permission snapshot and current workspace facts.
 
-use lingxi_core::host::permission_gate::{
-    PermissionPolicyRuleFact, PermissionPolicySnapshot,
-};
+use lingxi_core::host::permission_gate::{PermissionPolicyRuleFact, PermissionPolicySnapshot};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_llm_client::protocol::JsonPayload;
 use lingxi_llm_client::{NativeAnthropicRequestContext, NativeAnthropicServerClassifierContext};
@@ -13,19 +11,85 @@ use std::time::Duration;
 
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_millis(300);
 const GIT_STATUS_MAX_BYTES: usize = 1024 * 1024;
+const NATIVE_CLASSIFIER_CONTEXT_BUDGET_BYTES: usize = 128_000;
+const NATIVE_CLASSIFIER_INITIAL_ALLOW_RULE_LIMIT: usize = 64;
+const NATIVE_CLASSIFIER_ALLOW_RULE_MAX_UNITS: usize = 200;
+const NATIVE_CLASSIFIER_RULE_MAX_UNITS: usize = 1024;
+const NATIVE_CLASSIFIER_PATH_MAX_UNITS: usize = 1024;
+const NATIVE_CLASSIFIER_IDENTITY_MAX_UNITS: usize = 200;
+const NATIVE_CLASSIFIER_DIRECTORY_LIMIT: usize = 16;
 
-/// Build request-local Native facts only when the live permission gate is in
-/// Auto or Plan and all trusted AutoMode source tiers were resolved.
+/// Build Native request facts independently from the optional server-classifier
+/// context. AutoMode permission state controls AFK and classifier admission;
+/// MCTC remains a provider/model beta decision in llm-runtime.
 pub(crate) async fn request_context(
     snapshot: Option<PermissionPolicySnapshot>,
+    server_classifier_route: bool,
+    mid_conversation_tool_changes_route: bool,
+    query_source: &str,
 ) -> Option<NativeAnthropicRequestContext> {
-    let snapshot = snapshot?;
-    if !matches!(snapshot.permission_mode.as_str(), "auto" | "plan")
-        || (snapshot.permission_mode == "auto"
-            && (snapshot.auto_mode_disabled || snapshot.denial_circuit_broken))
-    {
-        return None;
+    let mut request_context = NativeAnthropicRequestContext {
+        // The selected provider route has been admitted by the caller. The
+        // runtime still applies Native's model, feature, and sticky
+        // beta-rejection gates before emitting this beta.
+        mid_conversation_tool_changes: mid_conversation_tool_changes_route,
+        ..NativeAnthropicRequestContext::default()
+    };
+    let Some(snapshot) = snapshot else {
+        return Some(request_context);
+    };
+    request_context.afk_mode = afk_mode_admitted(
+        &snapshot,
+        query_source,
+        telemetry::flag_bool("tengu_fizzy_bonbon", false),
+    );
+
+    if server_classifier_route && classifier_session_admitted(&snapshot) {
+        request_context.server_classifier = server_classifier_context(&snapshot).await;
     }
+    Some(request_context)
+}
+
+fn afk_mode_admitted(
+    snapshot: &PermissionPolicySnapshot,
+    query_source: &str,
+    auto_mode_latch_only: bool,
+) -> bool {
+    if !afk_query_source_allowed(query_source)
+        || snapshot.denial_circuit_broken
+        || snapshot.native_auto_mode_circuit_broken
+    {
+        return false;
+    }
+    match snapshot.permission_mode.as_str() {
+        // Native's default branch accepts AFK in Auto directly; the enabled
+        // `tengu_fizzy_bonbon` branch requires the AutoMode latch in every mode.
+        "auto" => !auto_mode_latch_only || snapshot.active_auto_mode,
+        "plan" => snapshot.active_auto_mode,
+        _ => false,
+    }
+}
+
+fn afk_query_source_allowed(query_source: &str) -> bool {
+    query_source.starts_with("repl_main_thread")
+        || query_source.starts_with("agent:")
+        || matches!(query_source, "sdk" | "hook_agent")
+}
+
+fn classifier_session_admitted(snapshot: &PermissionPolicySnapshot) -> bool {
+    if !snapshot.active_auto_mode
+        || snapshot.native_auto_mode_circuit_broken
+        || !matches!(snapshot.permission_mode.as_str(), "auto" | "plan")
+    {
+        return false;
+    }
+    snapshot.permission_mode != "auto"
+        || (!snapshot.auto_mode_disabled && !snapshot.denial_circuit_broken)
+}
+
+async fn server_classifier_context(
+    snapshot: &PermissionPolicySnapshot,
+) -> Option<NativeAnthropicServerClassifierContext> {
     let auto_mode = snapshot.classifier_auto_mode_settings.as_ref()?;
     let cwd = snapshot.working_directory.as_deref()?;
     let diskless = snapshot.classifier_host_capabilities.diskless;
@@ -40,17 +104,40 @@ pub(crate) async fn request_context(
             git.user_email.as_deref(),
         )
     };
-    let projection = classifier_projection(&snapshot, auto_mode, cwd, git.value, identity)?;
+    let context = classifier_projection(&snapshot, auto_mode, cwd, identity)?;
+    let git = git.value.unwrap_or_else(|| pending_git_state_value(cwd));
+    // Native's ip() wraps the independently bounded D8o context with sibling
+    // git data. Keep Git outside D8o's byte budget and on the wire's `git` key.
+    let projection = classifier_safeguard_payload(context, git);
     let source = projection.to_json_string().ok()?;
-    // Keep the source context intact if it exceeds Native's budget. Native
-    // prunes it through a tiered projection; that exact pruning order is still
-    // unverified here, so dropping the whole safeguard object would be worse.
     let payload = JsonPayload::parse(&source).ok()?;
-    let classifier_context = NativeAnthropicServerClassifierContext::new(payload).ok()?;
-    Some(NativeAnthropicRequestContext {
-        server_classifier: Some(classifier_context),
-        ..NativeAnthropicRequestContext::default()
-    })
+    NativeAnthropicServerClassifierContext::new(payload).ok()
+}
+
+pub(crate) fn supports_native_request_context_route(
+    protocol: &llm_runtime::ProtocolFamily,
+) -> bool {
+    matches!(
+        protocol,
+        llm_runtime::ProtocolFamily::AnthropicMessages
+            | llm_runtime::ProtocolFamily::BedrockClaude
+            | llm_runtime::ProtocolFamily::VertexClaude
+            | llm_runtime::ProtocolFamily::FoundryClaude
+    )
+}
+
+pub(crate) fn supports_native_mid_conversation_tool_changes_route(
+    protocol: &llm_runtime::ProtocolFamily,
+    first_party_anthropic: bool,
+) -> bool {
+    match protocol {
+        // Native's `vh()` admits first-party Anthropic, Anthropic AWS/GCP, and
+        // Foundry. The current runtime route identity exposes direct
+        // Anthropic and Foundry, but no distinct Anthropic AWS/GCP providers.
+        llm_runtime::ProtocolFamily::AnthropicMessages => first_party_anthropic,
+        llm_runtime::ProtocolFamily::FoundryClaude => true,
+        _ => false,
+    }
 }
 
 pub(crate) fn supports_native_classifier_route(
@@ -68,7 +155,6 @@ fn classifier_projection(
     snapshot: &PermissionPolicySnapshot,
     auto_mode: &lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings,
     cwd: &Path,
-    git_state: Option<Utf16JsonProjection>,
     user_identity: Option<String>,
 ) -> Option<Utf16JsonProjection> {
     let root_facts = snapshot.rule_roots.as_ref()?;
@@ -82,36 +168,146 @@ fn classifier_projection(
         home: snapshot.home_directory.clone(),
         lingxi_home,
     };
-    let primary = path_projection(cwd);
+    let mut allow_rule_limit = NATIVE_CLASSIFIER_INITIAL_ALLOW_RULE_LIMIT;
+    let mut shedding_stage = 0_u8;
+    loop {
+        let (projection, flags) = classifier_projection_pass(
+            snapshot,
+            auto_mode,
+            cwd,
+            user_identity.as_deref(),
+            allow_rule_limit,
+            shedding_stage >= 2,
+            &filesystem_roots,
+        );
+        let byte_count = projection.to_json_string().ok()?.len();
+        if byte_count <= NATIVE_CLASSIFIER_CONTEXT_BUDGET_BYTES || shedding_stage >= 2 {
+            if byte_count > NATIVE_CLASSIFIER_CONTEXT_BUDGET_BYTES && !flags.truncated() {
+                return Some(append_object_field(
+                    projection,
+                    "truncated",
+                    bool_projection(true),
+                ));
+            }
+            return Some(projection);
+        }
+        if shedding_stage == 0 {
+            shedding_stage = 1;
+            allow_rule_limit /= 2;
+        } else if shedding_stage == 1 && allow_rule_limit > 0 {
+            allow_rule_limit /= 2;
+        } else {
+            shedding_stage = 2;
+        }
+    }
+}
+
+#[derive(Default)]
+struct ClassifierProjectionPruning {
+    path_clamped: bool,
+    identity_clamped: bool,
+    list_capped: bool,
+    resolved_spellings_shed: bool,
+    dropped_allow: usize,
+    dropped_deny: usize,
+    dropped_ask: usize,
+}
+
+#[derive(Clone, Copy)]
+enum ClassifierRuleSet {
+    Allow,
+    Deny,
+    Ask,
+}
+
+impl ClassifierProjectionPruning {
+    fn truncated(&self) -> bool {
+        self.path_clamped
+            || self.identity_clamped
+            || self.list_capped
+            || self.resolved_spellings_shed
+    }
+
+    fn dropped_projection(&self) -> Option<Utf16JsonProjection> {
+        let dropped = [
+            ("allow", self.dropped_allow),
+            ("deny", self.dropped_deny),
+            ("ask", self.dropped_ask),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(rule_set, count)| (rule_set.to_owned(), number_projection(count)))
+        .collect::<Vec<_>>();
+        (!dropped.is_empty()).then(|| object_projection(dropped))
+    }
+
+    fn add_dropped(&mut self, rule_set: ClassifierRuleSet, count: usize) {
+        match rule_set {
+            ClassifierRuleSet::Allow => self.dropped_allow += count,
+            ClassifierRuleSet::Deny => self.dropped_deny += count,
+            ClassifierRuleSet::Ask => self.dropped_ask += count,
+        }
+    }
+}
+
+fn classifier_projection_pass(
+    snapshot: &PermissionPolicySnapshot,
+    auto_mode: &lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings,
+    cwd: &Path,
+    user_identity: Option<&str>,
+    allow_rule_limit: usize,
+    omit_resolved_spellings: bool,
+    filesystem_roots: &permission::filesystem::FsRoots,
+) -> (Utf16JsonProjection, ClassifierProjectionPruning) {
+    let mut pruning = ClassifierProjectionPruning::default();
     let primary_directory = trusted_directory(
         cwd,
-        &primary,
         snapshot.classifier_host_capabilities.diskless,
-        &filesystem_roots,
+        filesystem_roots,
+        omit_resolved_spellings,
+        &mut pruning,
     );
     let additional = snapshot
         .additional_working_directories
         .iter()
+        .take(NATIVE_CLASSIFIER_DIRECTORY_LIMIT)
         .map(|directory| {
-            let spelling = path_projection(&directory.path);
             trusted_directory_with_source(
                 &directory.path,
-                &spelling,
                 &directory.source,
                 snapshot.classifier_host_capabilities.diskless,
-                &filesystem_roots,
+                filesystem_roots,
+                omit_resolved_spellings,
+                &mut pruning,
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if snapshot.additional_working_directories.len() > additional.len() {
+        pruning.list_capped = true;
+    }
     let network = snapshot
         .classifier_host_capabilities
         .trusted_network_directories
         .iter()
-        .map(|path| path_projection(path))
-        .collect();
+        .take(NATIVE_CLASSIFIER_DIRECTORY_LIMIT)
+        .map(|path| {
+            clamp_projection(
+                path_projection(path),
+                NATIVE_CLASSIFIER_PATH_MAX_UNITS,
+                &mut pruning.path_clamped,
+            )
+        })
+        .collect::<Vec<_>>();
+    if snapshot
+        .classifier_host_capabilities
+        .trusted_network_directories
+        .len()
+        > network.len()
+    {
+        pruning.list_capped = true;
+    }
 
     let mut fields = vec![
-        ("v".to_owned(), number_projection(1)),
         (
             "permission_mode".to_owned(),
             string_projection(&snapshot.permission_mode),
@@ -120,20 +316,46 @@ fn classifier_projection(
             "platform".to_owned(),
             string_projection(super::node_platform_name(std::env::consts::OS)),
         ),
-        ("live_cwd".to_owned(), path_projection(cwd)),
+        (
+            "live_cwd".to_owned(),
+            clamp_projection(
+                path_projection(cwd),
+                NATIVE_CLASSIFIER_PATH_MAX_UNITS,
+                &mut pruning.path_clamped,
+            ),
+        ),
     ];
     if !snapshot.classifier_host_capabilities.diskless {
         if let Some(home) = snapshot.home_directory.as_deref() {
-            fields.push(("home_dir".to_owned(), path_projection(home)));
+            fields.push((
+                "home_dir".to_owned(),
+                clamp_projection(
+                    path_projection(home),
+                    NATIVE_CLASSIFIER_PATH_MAX_UNITS,
+                    &mut pruning.path_clamped,
+                ),
+            ));
         }
     }
     fields.extend([
         (
             "rule_roots".to_owned(),
             object_projection(
-                root_facts
+                snapshot
+                    .rule_roots
+                    .as_deref()
+                    .unwrap_or_default()
                     .iter()
-                    .map(|root| (root.source.clone(), path_projection(&root.path)))
+                    .map(|root| {
+                        (
+                            root.source.clone(),
+                            clamp_projection(
+                                path_projection(&root.path),
+                                NATIVE_CLASSIFIER_PATH_MAX_UNITS,
+                                &mut pruning.path_clamped,
+                            ),
+                        )
+                    })
                     .collect(),
             ),
         ),
@@ -152,9 +374,36 @@ fn classifier_projection(
         (
             "rules".to_owned(),
             object_projection(vec![
-                ("allow".to_owned(), rules_projection(&snapshot.allow_rules)),
-                ("deny".to_owned(), rules_projection(&snapshot.deny_rules)),
-                ("ask".to_owned(), rules_projection(&snapshot.ask_rules)),
+                (
+                    "allow".to_owned(),
+                    rules_projection(
+                        &snapshot.allow_rules,
+                        NATIVE_CLASSIFIER_ALLOW_RULE_MAX_UNITS,
+                        allow_rule_limit,
+                        ClassifierRuleSet::Allow,
+                        &mut pruning,
+                    ),
+                ),
+                (
+                    "deny".to_owned(),
+                    rules_projection(
+                        &snapshot.deny_rules,
+                        NATIVE_CLASSIFIER_RULE_MAX_UNITS,
+                        usize::MAX,
+                        ClassifierRuleSet::Deny,
+                        &mut pruning,
+                    ),
+                ),
+                (
+                    "ask".to_owned(),
+                    rules_projection(
+                        &snapshot.ask_rules,
+                        NATIVE_CLASSIFIER_RULE_MAX_UNITS,
+                        usize::MAX,
+                        ClassifierRuleSet::Ask,
+                        &mut pruning,
+                    ),
+                ),
             ]),
         ),
         (
@@ -209,24 +458,72 @@ fn classifier_projection(
         ),
         (
             "user_identity".to_owned(),
-            option_string_projection(user_identity.as_deref()),
+            user_identity.map_or_else(null_projection, |identity| {
+                clamp_projection(
+                    string_projection(identity),
+                    NATIVE_CLASSIFIER_IDENTITY_MAX_UNITS,
+                    &mut pruning.identity_clamped,
+                )
+            }),
         ),
     ]);
-    if let Some(git_state) = git_state {
-        fields.push(("git_state".to_owned(), git_state));
+    if let Some(dropped) = pruning.dropped_projection() {
+        fields.push(("dropped".to_owned(), dropped));
     }
-    Some(object_projection(fields))
+    if pruning.truncated() {
+        fields.push(("truncated".to_owned(), bool_projection(true)));
+    }
+    (object_projection(fields), pruning)
 }
 
-fn rules_projection(rules: &[PermissionPolicyRuleFact]) -> Utf16JsonProjection {
+fn rules_projection(
+    rules: &[PermissionPolicyRuleFact],
+    max_rule_units: usize,
+    max_count: usize,
+    rule_set: ClassifierRuleSet,
+    pruning: &mut ClassifierProjectionPruning,
+) -> Utf16JsonProjection {
+    let filtered = rules
+        .iter()
+        .filter(|rule| {
+            rule.rule
+                .string_units("")
+                .is_some_and(|units| units.len() <= max_rule_units)
+        })
+        .collect::<Vec<_>>();
+    let dropped_count = rules
+        .len()
+        .saturating_sub(filtered.len())
+        .saturating_add(filtered.len().saturating_sub(max_count));
+    pruning.add_dropped(rule_set, dropped_count);
     array_projection(
-        rules
-            .iter()
+        filtered
+            .into_iter()
+            .take(max_count)
             .map(|rule| {
-                object_projection(vec![
-                    ("rule".to_owned(), rule.rule.clone()),
-                    ("source".to_owned(), string_projection(&rule.source)),
-                ])
+                let mut fields = vec![("rule".to_owned(), rule.rule.clone())];
+                if let Some(canonical) = &rule.canonical {
+                    fields.push(("canonical".to_owned(), canonical.clone()));
+                }
+                fields.push(("source".to_owned(), string_projection(&rule.source)));
+                if let Some(root) = &rule.root {
+                    fields.push((
+                        "root".to_owned(),
+                        root.as_ref()
+                            .map(|path| {
+                                clamp_projection(
+                                    path_projection(path),
+                                    NATIVE_CLASSIFIER_PATH_MAX_UNITS,
+                                    &mut pruning.path_clamped,
+                                )
+                            })
+                            .unwrap_or_else(null_projection),
+                    ));
+                }
+                if let Some(pattern) = &rule.pattern {
+                    fields.push(("pattern".to_owned(), pattern.clone()));
+                }
+                object_projection(fields)
             })
             .collect(),
     )
@@ -234,34 +531,79 @@ fn rules_projection(rules: &[PermissionPolicyRuleFact]) -> Utf16JsonProjection {
 
 fn trusted_directory(
     path: &Path,
-    spelling: &Utf16JsonProjection,
     diskless: bool,
     roots: &permission::filesystem::FsRoots,
+    omit_resolved_spellings: bool,
+    pruning: &mut ClassifierProjectionPruning,
 ) -> Utf16JsonProjection {
-    object_projection(vec![
-        ("path".to_owned(), spelling.clone()),
-        (
-            "resolved".to_owned(),
-            resolved_spellings(path, spelling, diskless, roots),
-        ),
-    ])
+    trusted_directory_projection(
+        path,
+        None,
+        diskless,
+        roots,
+        omit_resolved_spellings,
+        pruning,
+    )
 }
 
 fn trusted_directory_with_source(
     path: &Path,
-    spelling: &Utf16JsonProjection,
     source: &str,
     diskless: bool,
     roots: &permission::filesystem::FsRoots,
+    omit_resolved_spellings: bool,
+    pruning: &mut ClassifierProjectionPruning,
 ) -> Utf16JsonProjection {
-    object_projection(vec![
-        ("path".to_owned(), spelling.clone()),
+    trusted_directory_projection(
+        path,
+        Some(source),
+        diskless,
+        roots,
+        omit_resolved_spellings,
+        pruning,
+    )
+}
+
+fn trusted_directory_projection(
+    path: &Path,
+    source: Option<&str>,
+    diskless: bool,
+    roots: &permission::filesystem::FsRoots,
+    omit_resolved_spellings: bool,
+    pruning: &mut ClassifierProjectionPruning,
+) -> Utf16JsonProjection {
+    let spelling = path_projection(path);
+    let resolved = resolved_spellings(path, &spelling, diskless, roots);
+    let resolved = if omit_resolved_spellings {
+        pruning.resolved_spellings_shed |= !resolved.is_empty();
+        Vec::new()
+    } else {
+        resolved
+            .into_iter()
+            .map(|resolved| {
+                clamp_projection(
+                    resolved,
+                    NATIVE_CLASSIFIER_PATH_MAX_UNITS,
+                    &mut pruning.path_clamped,
+                )
+            })
+            .collect()
+    };
+    let mut fields = vec![
         (
-            "resolved".to_owned(),
-            resolved_spellings(path, spelling, diskless, roots),
+            "path".to_owned(),
+            clamp_projection(
+                spelling,
+                NATIVE_CLASSIFIER_PATH_MAX_UNITS,
+                &mut pruning.path_clamped,
+            ),
         ),
-        ("source".to_owned(), string_projection(source)),
-    ])
+        ("resolved".to_owned(), array_projection(resolved)),
+    ];
+    if let Some(source) = source {
+        fields.push(("source".to_owned(), string_projection(source)));
+    }
+    object_projection(fields)
 }
 
 fn resolved_spellings(
@@ -269,9 +611,9 @@ fn resolved_spellings(
     original: &Utf16JsonProjection,
     diskless: bool,
     roots: &permission::filesystem::FsRoots,
-) -> Utf16JsonProjection {
+) -> Vec<Utf16JsonProjection> {
     if diskless {
-        return array_projection(vec![original.clone()]);
+        return vec![original.clone()];
     }
     let mut spellings = vec![original.clone()];
     for resolved in
@@ -282,7 +624,63 @@ fn resolved_spellings(
             spellings.push(projection);
         }
     }
-    array_projection(spellings)
+    spellings
+}
+
+fn clamp_projection(
+    projection: Utf16JsonProjection,
+    max_units: usize,
+    clamped: &mut bool,
+) -> Utf16JsonProjection {
+    let Some(units) = projection.string_units("") else {
+        return projection;
+    };
+    if units.len() <= max_units {
+        return projection;
+    }
+    *clamped = true;
+    let units = units.into_iter().take(max_units).collect::<Vec<_>>();
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("clamped UTF-16 units match the display spelling")
+}
+
+fn append_object_field(
+    object: Utf16JsonProjection,
+    key: &str,
+    value: Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let mut source = object
+        .to_json_string()
+        .expect("classifier projection serializes to JSON");
+    debug_assert!(source.starts_with('{') && source.ends_with('}'));
+    source.pop();
+    if source.len() > 1 {
+        source.push(',');
+    }
+    source.push_str(
+        &string_projection(key)
+            .to_json_string()
+            .expect("object key serializes to JSON"),
+    );
+    source.push(':');
+    source.push_str(
+        &value
+            .to_json_string()
+            .expect("object value serializes to JSON"),
+    );
+    source.push('}');
+    Utf16JsonProjection::parse(&source).expect("appended classifier object field forms valid JSON")
+}
+
+fn classifier_safeguard_payload(
+    context: Utf16JsonProjection,
+    git: Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    object_projection(vec![
+        ("context".to_owned(), context),
+        ("git".to_owned(), git),
+    ])
 }
 
 fn path_projection(path: &Path) -> Utf16JsonProjection {
@@ -395,7 +793,15 @@ async fn git_command(cwd: &Path, arguments: &[&str]) -> GitCommandResult {
 async fn git_state(cwd: &Path, diskless: bool) -> GitState {
     if diskless {
         return GitState {
-            value: None,
+            value: Some(git_state_value(
+                cwd,
+                None,
+                None,
+                None,
+                None,
+                Some(null_projection()),
+                Some("error"),
+            )),
             user_email: None,
         };
     }
@@ -689,14 +1095,27 @@ fn git_state_value(
             default_branch.unwrap_or_else(null_projection),
         ),
         ("status".to_owned(), status.unwrap_or_else(null_projection)),
+        (
+            "visibility".to_owned(),
+            visibility.unwrap_or_else(null_projection),
+        ),
     ];
-    if let Some(visibility) = visibility {
-        fields.push(("visibility".to_owned(), visibility));
-    }
     if let Some(error) = error {
         fields.push(("error".to_owned(), string_projection(error)));
     }
     object_projection(fields)
+}
+
+fn pending_git_state_value(cwd: &Path) -> Utf16JsonProjection {
+    git_state_value(
+        cwd,
+        None,
+        None,
+        None,
+        None,
+        Some(null_projection()),
+        Some("pending"),
+    )
 }
 
 #[cfg(test)]
@@ -719,10 +1138,15 @@ mod tests {
         ];
         PermissionPolicySnapshot {
             permission_mode: "plan".to_owned(),
+            active_auto_mode: true,
+            native_auto_mode_circuit_broken: false,
             allow_rules: vec![PermissionPolicyRuleFact {
                 rule: Utf16JsonProjection::parse(r#""\ud800""#)
                     .expect("isolated UTF-16 unit is a valid source JSON string"),
+                canonical: None,
                 source: "userSettings".to_owned(),
+                root: None,
+                pattern: None,
             }],
             deny_rules: Vec::new(),
             ask_rules: Vec::new(),
@@ -794,13 +1218,12 @@ mod tests {
             .as_ref()
             .unwrap()
             .clone();
-        let source = classifier_projection(&snapshot, &auto_mode, &cwd, None, None)
+        let source = classifier_projection(&snapshot, &auto_mode, &cwd, None)
             .unwrap()
             .to_json_string()
             .unwrap();
         assert!(source.contains(r#""rule":"\ud800""#));
         let expected_order = [
-            "\"v\"",
             "\"permission_mode\"",
             "\"platform\"",
             "\"live_cwd\"",
@@ -821,7 +1244,352 @@ mod tests {
             .map(|needle| source.find(needle).expect("field is present"))
             .collect();
         assert!(positions.windows(2).all(|window| window[0] < window[1]));
-        assert!(request_context(Some(snapshot)).await.is_some());
+        let context = request_context(Some(snapshot), true, true, "repl_main_thread")
+            .await
+            .unwrap();
+        assert!(context.server_classifier.is_some());
+        assert!(context.afk_mode);
+        assert!(context.mid_conversation_tool_changes);
+    }
+
+    #[tokio::test]
+    async fn native_safeguard_wire_payload_wraps_context_with_default_git_sibling() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("cwd");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let mut snapshot = admitted_plan_snapshot(&cwd, &home);
+        snapshot.classifier_host_capabilities.diskless = true;
+
+        let request_context = request_context(Some(snapshot), true, false, "repl_main_thread")
+            .await
+            .unwrap();
+        let serialized = request_context
+            .server_classifier
+            .as_ref()
+            .expect("admitted route produces the server safeguard")
+            .classifier_context()
+            .as_json_source();
+        let wire = Utf16JsonProjection::parse(serialized).unwrap();
+        let context = wire
+            .get_property("context")
+            .expect("D8o projection is nested under context");
+        let git = wire
+            .get_property("git")
+            .expect("ip() always supplies git state");
+
+        assert!(context.object_entries().is_some());
+        assert!(context.get_property("permission_mode").is_some());
+        assert!(context.get_property("git_state").is_none());
+        assert_eq!(
+            git.get_property("cwd").and_then(|value| value.as_str()),
+            Some(cwd.to_str().unwrap())
+        );
+        for field in ["root", "branch", "default_branch", "status", "visibility"] {
+            assert!(git.get_property(field).unwrap().is_null(), "{field}");
+        }
+        assert_eq!(
+            git.get_property("error").and_then(|value| value.as_str()),
+            Some("error")
+        );
+        assert_eq!(wire.object_entries().unwrap().len(), 2);
+        assert!(
+            wire.subprojection("/context")
+                .unwrap()
+                .to_json_string()
+                .unwrap()
+                .len()
+                <= NATIVE_CLASSIFIER_CONTEXT_BUDGET_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_plan_keeps_mctc_but_omits_auto_mode_facts() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("cwd");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let mut snapshot = admitted_plan_snapshot(&cwd, &home);
+        snapshot.active_auto_mode = false;
+
+        let context = request_context(Some(snapshot), true, true, "repl_main_thread")
+            .await
+            .unwrap();
+
+        assert!(context.server_classifier.is_none());
+        assert!(!context.afk_mode);
+        assert!(context.mid_conversation_tool_changes);
+    }
+
+    #[test]
+    fn native_afk_auto_latch_flag_switches_auto_admission() {
+        let cwd = Path::new("/workspace");
+        let home = Path::new("/home/tester");
+        let mut snapshot = admitted_plan_snapshot(cwd, home);
+        snapshot.permission_mode = "auto".to_owned();
+        snapshot.active_auto_mode = false;
+
+        assert!(afk_mode_admitted(&snapshot, "repl_main_thread", false));
+        assert!(!afk_mode_admitted(&snapshot, "repl_main_thread", true));
+
+        snapshot.active_auto_mode = true;
+        assert!(afk_mode_admitted(&snapshot, "repl_main_thread", false));
+        assert!(afk_mode_admitted(&snapshot, "repl_main_thread", true));
+
+        snapshot.permission_mode = "plan".to_owned();
+        assert!(afk_mode_admitted(&snapshot, "repl_main_thread", false));
+        assert!(afk_mode_admitted(&snapshot, "repl_main_thread", true));
+
+        snapshot.active_auto_mode = false;
+        assert!(!afk_mode_admitted(&snapshot, "repl_main_thread", false));
+        assert!(!afk_mode_admitted(&snapshot, "repl_main_thread", true));
+
+        snapshot.permission_mode = "auto".to_owned();
+        snapshot.active_auto_mode = true;
+        snapshot.native_auto_mode_circuit_broken = true;
+        assert!(!afk_mode_admitted(&snapshot, "repl_main_thread", false));
+        assert!(!afk_mode_admitted(&snapshot, "repl_main_thread", true));
+    }
+
+    #[tokio::test]
+    async fn native_afk_circuit_blocks_auto_facts_without_changing_selected_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("cwd");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let mut snapshot = admitted_plan_snapshot(&cwd, &home);
+        snapshot.permission_mode = "auto".to_owned();
+        snapshot.native_auto_mode_circuit_broken = true;
+
+        let context = request_context(Some(snapshot), true, true, "repl_main_thread")
+            .await
+            .unwrap();
+
+        assert!(context.server_classifier.is_none());
+        assert!(!context.afk_mode);
+        assert!(context.mid_conversation_tool_changes);
+    }
+
+    #[test]
+    fn classifier_projection_applies_native_directory_and_path_caps() {
+        use lingxi_core::host::permission_gate::PermissionPolicyWorkingDirectory;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("cwd");
+        let home = temp.path().join("home");
+        let mut snapshot = admitted_plan_snapshot(&cwd, &home);
+        snapshot.classifier_host_capabilities.diskless = true;
+        snapshot.additional_working_directories = (0..17)
+            .map(|index| PermissionPolicyWorkingDirectory {
+                path: if index == 0 {
+                    PathBuf::from(format!("/{}", "a".repeat(1100)))
+                } else {
+                    PathBuf::from(format!("/extra/{index}"))
+                },
+                source: "userSettings".to_owned(),
+            })
+            .collect();
+        snapshot
+            .classifier_host_capabilities
+            .trusted_network_directories = (0..17)
+            .map(|index| PathBuf::from(format!("/network/{index}")))
+            .collect();
+        let auto_mode = snapshot.classifier_auto_mode_settings.as_ref().unwrap();
+        let projection =
+            classifier_projection(&snapshot, auto_mode, &cwd, Some("i".repeat(201))).unwrap();
+
+        assert_eq!(
+            projection.array_len("/trusted_directories/additional"),
+            Some(16)
+        );
+        assert_eq!(
+            projection.array_len("/trusted_directories/network"),
+            Some(16)
+        );
+        assert_eq!(
+            projection
+                .string_units("/trusted_directories/additional/0/path")
+                .unwrap()
+                .len(),
+            NATIVE_CLASSIFIER_PATH_MAX_UNITS
+        );
+        assert_eq!(
+            projection.string_units("/user_identity").unwrap().len(),
+            NATIVE_CLASSIFIER_IDENTITY_MAX_UNITS
+        );
+        assert_eq!(
+            projection.get_property("truncated").unwrap().as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn classifier_projection_halves_allowed_rules_until_native_budget_fits() {
+        use lingxi_core::host::permission_gate::PermissionPolicyRuleFact;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("cwd");
+        let home = temp.path().join("home");
+        let mut snapshot = admitted_plan_snapshot(&cwd, &home);
+        snapshot.classifier_host_capabilities.diskless = true;
+        snapshot.allow_rules = (0..NATIVE_CLASSIFIER_INITIAL_ALLOW_RULE_LIMIT)
+            .map(|index| PermissionPolicyRuleFact {
+                rule: string_projection(&format!("Bash({index:02}{} )", "a".repeat(188))),
+                canonical: None,
+                source: "userSettings".to_owned(),
+                root: None,
+                pattern: None,
+            })
+            .collect();
+        let auto_mode = snapshot.classifier_auto_mode_settings.as_ref().unwrap();
+        let roots = snapshot.rule_roots.as_ref().unwrap();
+        let filesystem_roots = permission::filesystem::FsRoots {
+            cwd: cwd.clone(),
+            home: snapshot.home_directory.clone(),
+            lingxi_home: roots
+                .iter()
+                .find(|root| root.source == "userSettings")
+                .unwrap()
+                .path
+                .clone(),
+        };
+
+        let mut matching_deny_count = None;
+        for deny_count in 1..256 {
+            snapshot.deny_rules = (0..deny_count)
+                .map(|_| PermissionPolicyRuleFact {
+                    rule: string_projection(&"d".repeat(NATIVE_CLASSIFIER_RULE_MAX_UNITS)),
+                    canonical: None,
+                    source: "userSettings".to_owned(),
+                    root: None,
+                    pattern: None,
+                })
+                .collect();
+            let (full, _) = classifier_projection_pass(
+                &snapshot,
+                auto_mode,
+                &cwd,
+                None,
+                NATIVE_CLASSIFIER_INITIAL_ALLOW_RULE_LIMIT,
+                false,
+                &filesystem_roots,
+            );
+            let (half, _) = classifier_projection_pass(
+                &snapshot,
+                auto_mode,
+                &cwd,
+                None,
+                NATIVE_CLASSIFIER_INITIAL_ALLOW_RULE_LIMIT / 2,
+                false,
+                &filesystem_roots,
+            );
+            let full_bytes = full.to_json_string().unwrap().len();
+            let half_bytes = half.to_json_string().unwrap().len();
+            if full_bytes > NATIVE_CLASSIFIER_CONTEXT_BUDGET_BYTES
+                && half_bytes <= NATIVE_CLASSIFIER_CONTEXT_BUDGET_BYTES
+            {
+                matching_deny_count = Some(deny_count);
+                break;
+            }
+        }
+        assert!(
+            matching_deny_count.is_some(),
+            "fixture crosses the native 128 KB boundary"
+        );
+        let projection = classifier_projection(&snapshot, auto_mode, &cwd, None).unwrap();
+
+        assert_eq!(projection.array_len("/rules/allow"), Some(32));
+        assert_eq!(
+            projection
+                .get_property("dropped")
+                .unwrap()
+                .get_property("allow")
+                .unwrap()
+                .as_number(),
+            Some(32.0)
+        );
+
+        let git = object_projection(vec![(
+            "status_blob".to_owned(),
+            string_projection(&"g".repeat(NATIVE_CLASSIFIER_CONTEXT_BUDGET_BYTES)),
+        )]);
+        let safeguard = classifier_safeguard_payload(projection.clone(), git);
+        let serialized_safeguard = safeguard.to_json_string().unwrap();
+        assert!(
+            projection.to_json_string().unwrap().len() <= NATIVE_CLASSIFIER_CONTEXT_BUDGET_BYTES,
+            "D8o's 128 KB cap applies to context"
+        );
+        assert!(
+            serialized_safeguard.len() > NATIVE_CLASSIFIER_CONTEXT_BUDGET_BYTES,
+            "the sibling git payload stays outside D8o's budget"
+        );
+    }
+
+    #[test]
+    fn afk_query_sources_match_native_main_and_agent_predicate() {
+        for source in [
+            "repl_main_thread",
+            "repl_main_thread:outputStyle:custom",
+            "agent:custom",
+            "sdk",
+            "hook_agent",
+        ] {
+            assert!(afk_query_source_allowed(source), "{source}");
+        }
+        for source in [
+            "side_question",
+            "auto_mode",
+            "hook_prompt",
+            "web_search_tool",
+        ] {
+            assert!(!afk_query_source_allowed(source), "{source}");
+        }
+    }
+
+    #[test]
+    fn request_context_routes_include_only_claude_wire_families() {
+        use llm_runtime::ProtocolFamily;
+
+        for protocol in [
+            ProtocolFamily::AnthropicMessages,
+            ProtocolFamily::BedrockClaude,
+            ProtocolFamily::VertexClaude,
+            ProtocolFamily::FoundryClaude,
+        ] {
+            assert!(supports_native_request_context_route(&protocol));
+        }
+        assert!(!supports_native_request_context_route(
+            &ProtocolFamily::OpenAiResponses
+        ));
+    }
+
+    #[test]
+    fn mctc_route_matches_the_native_provider_gate_available_in_this_runtime() {
+        use llm_runtime::ProtocolFamily;
+
+        assert!(supports_native_mid_conversation_tool_changes_route(
+            &ProtocolFamily::AnthropicMessages,
+            true
+        ));
+        assert!(!supports_native_mid_conversation_tool_changes_route(
+            &ProtocolFamily::AnthropicMessages,
+            false
+        ));
+        assert!(supports_native_mid_conversation_tool_changes_route(
+            &ProtocolFamily::FoundryClaude,
+            false
+        ));
+        assert!(!supports_native_mid_conversation_tool_changes_route(
+            &ProtocolFamily::BedrockClaude,
+            false
+        ));
+        assert!(!supports_native_mid_conversation_tool_changes_route(
+            &ProtocolFamily::VertexClaude,
+            false
+        ));
     }
 
     #[test]
@@ -929,7 +1697,13 @@ mod tests {
             lingxi_home,
         };
         let raw = Path::new("~/alias");
-        let actual = resolved_spellings(raw, &path_projection(raw), false, &roots);
+        let actual = Utf16JsonProjection::array(resolved_spellings(
+            raw,
+            &path_projection(raw),
+            false,
+            &roots,
+        ))
+        .unwrap();
         let value =
             serde_json::from_str::<serde_json::Value>(&actual.to_json_string().unwrap()).unwrap();
         assert_eq!(value[0], "~/alias");
@@ -974,9 +1748,6 @@ mod tests {
             permission::filesystem::native_permission_directory_path_spellings(&missing);
         assert_eq!(spellings.first(), Some(&missing));
         let resolved_target = std::fs::canonicalize(&target).unwrap();
-        assert_eq!(
-            spellings.get(1),
-            Some(&resolved_target.join("not-created"))
-        );
+        assert_eq!(spellings.get(1), Some(&resolved_target.join("not-created")));
     }
 }

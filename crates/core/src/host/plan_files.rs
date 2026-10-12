@@ -29,7 +29,7 @@
 //! ## Divergence (reason)
 //!
 //! `ZUe()` gates the `.workshop.md` sibling on the workshop skill being present.
-//! LingXi ships no workshop skill (`git grep workshop -- commands/ skill-api/`
+//! LingXi ships no workshop skill (`git grep workshop -- commands/ skill/`
 //! → 0 hits), so [`PlanFileIdentity::workshop_enabled`] is `false` everywhere
 //! and that arm is unreachable — exactly as it is unreachable upstream without
 //! the skill. The arm is implemented anyway so enabling the skill later needs no

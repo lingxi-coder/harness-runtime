@@ -211,7 +211,7 @@ mod tests {
             .expect("clock before epoch")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "lingxi-skill-api-listing-{name}-{}-{nanos}",
+            "lingxi-skill-listing-{name}-{}-{nanos}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).expect("create temp root");

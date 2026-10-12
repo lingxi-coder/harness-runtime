@@ -1552,6 +1552,15 @@ mod deferred_invoker_tests {
         SubagentInvocationContext, ToolInvoker, ToolInvokerError,
     };
 
+    macro_rules! source_json {
+        ($($tokens:tt)*) => {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!($($tokens)*)
+            )
+            .expect("test JSON value is valid source JSON")
+        };
+    }
+
     struct RecordingInvoker;
 
     #[async_trait::async_trait]

@@ -1,4 +1,4 @@
-//! The `/checkup` bundled skill — port of Claude Code 2.1.267's `No()`
+//! The `/doctor` bundled skill — port of Claude Code 2.1.295's `Mo()`
 //! registrar (`src_172124278.js`), whose body is `is()`.
 //!
 //! ```js
@@ -12,18 +12,12 @@
 //!        return [{type:"text",text:o}] } })
 //! ```
 //!
-//! ## Why this is `/checkup` and not `/doctor`
+//! ## Canonical name and alias
 //!
-//! Upstream registers it as `doctor` with `checkup` as an alias. This port
-//! already ships a `/doctor` that is a DIFFERENT thing: a deterministic command
-//! producing a structured `DoctorReport` DTO that the GUI clients render as a
-//! screen (`client-adapter`'s `doctor_report_parity`). Upstream's is a
-//! `terminalOriented` model-driven narrative. Both want the name; they serve
-//! different surfaces and neither subsumes the other.
-//!
-//! Registering under upstream's own alias keeps both, breaks no client, and
-//! avoids inventing a name: `checkup` is what upstream calls it too. Decision
-//! taken by the user, 2026-09-10.
+//! The Native factory registers canonical `doctor` with alias `checkup`; this
+//! command keeps that identity and prompt behavior. The structured GUI
+//! `DoctorReport` remains a separate host event produced from
+//! `OrchestratorHandle::run_doctor_checks`, not a slash command.
 //!
 //! ## What was cut, and why
 //!

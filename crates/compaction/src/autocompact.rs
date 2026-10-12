@@ -1028,6 +1028,8 @@ mod tests {
             user_context_message: None,
             tool_use_options: tool_use_options(),
             fork_context_messages: prefix,
+            typed_attachment_ids: std::collections::HashSet::new(),
+            task_deliveries: std::collections::HashMap::new(),
             transcript_path: None,
             generation: 0,
             tools: Vec::new(),
@@ -1220,6 +1222,8 @@ mod tests {
             .expect("wired compact succeeds");
 
         let sent = client.seen.lock().unwrap().clone().expect("client called");
+        assert!(sent.typed_attachment_ids.is_empty());
+        assert!(sent.task_deliveries.is_empty());
         // The forked request replays the cache prefix first, then the compact
         // prompt (the byte-faithful `get_compact_prompt(None)`).
         let texts: Vec<String> = sent

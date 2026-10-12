@@ -24,7 +24,7 @@ engine = [
     "dep:sidequery",
     "dep:cost",
     "dep:tasks",
-    "dep:skill-api",
+    "dep:skill",
     "dep:command-api",
 ]
 desktop = [
@@ -227,7 +227,7 @@ serde_json = { workspace = true }
 session = { path = "../session", optional = true }
 sha2 = { version = "0.10", optional = true }
 sidequery = { path = "../sidequery", optional = true }
-skill-api = { path = "../skill-api", optional = true }
+skill = { path = "../skill", optional = true }
 tasks = { path = "../tasks", optional = true }
 telemetry = { path = "../telemetry", optional = true }
 thiserror = { workspace = true }
@@ -262,7 +262,7 @@ uuid = { version = "1.10", optional = true }
 workflow = { path = "../workflow", optional = true }
 
 [target."cfg(unix)".dependencies]
-nix = { version = "0.27", default-features = false, features = ["user"], optional = true }
+nix = { version = "0.27", default-features = false, features = ["fs", "user"], optional = true }
 
 [target."cfg(windows)".dependencies]
 platform-windows = { path = "../platforms/windows", optional = true }

@@ -49,7 +49,7 @@ use lsp::LspRegistry;
 use mcp::{McpRegistry, McpServerConfig};
 use outputstyles::{OutputStyle, OutputStyleFrontmatter, OutputStyleRegistry, OutputStyleSource};
 use secret::CredentialManager;
-use skill_api::{parse_skill_markdown, LoadedFrom, SkillRegistry, SkillSource};
+use skill::{parse_skill_markdown, LoadedFrom, SkillRegistry, SkillSource};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -1512,6 +1512,10 @@ impl PluginManager {
                         file.content.clone().into(),
                     ),
                 };
+                let (user_facing_name, aliases) = command_api::plugin_prompt_name_metadata(
+                    &namespaced_name,
+                    file.frontmatter_name.as_ref(),
+                );
                 cmds.push(command_api::SlashCommand {
                     name: namespaced_name,
                     source: command_api::CommandSource::Plugin,
@@ -1522,6 +1526,10 @@ impl PluginManager {
                         prompt_template,
                     },
                     loaded_from: Some("plugin".to_string()),
+                    plugin_name: Some(manifest.name.as_str().into()),
+                    native_source: Some("plugin".into()),
+                    user_facing_name: Some(user_facing_name),
+                    aliases,
                     ..base
                 });
             }
@@ -1533,7 +1541,7 @@ impl PluginManager {
         //     and stamp the owning plugin id so unload can target it. A file
         //     that cannot be read or parsed is skipped (TS filters nulls).
         let plugin_name = &manifest.name;
-        let mut skills: Vec<skill_api::Skill> = Vec::new();
+        let mut skills: Vec<skill::Skill> = Vec::new();
         let mut bare_skill_names = Vec::new();
         {
             let mut sources = Vec::new();
@@ -1594,6 +1602,12 @@ impl PluginManager {
                 );
                 let base =
                     command_api::build_skill_command(&file, command_api::CommandSource::Plugin);
+                let canonical_name: lingxi_core::types::utf16_json::Utf16JsonProjection =
+                    skill.name.clone().into();
+                let (user_facing_name, aliases) = command_api::plugin_prompt_name_metadata(
+                    &canonical_name,
+                    file.frontmatter_name.as_ref(),
+                );
                 let frontmatter = match &base.kind {
                     command_api::SlashCommandKind::Markdown { frontmatter, .. } => {
                         frontmatter.clone()
@@ -1614,6 +1628,10 @@ impl PluginManager {
                         prompt_template: skill.content.clone(),
                     },
                     loaded_from: Some("plugin".to_string()),
+                    plugin_name: Some(manifest.name.as_str().into()),
+                    native_source: Some("plugin".into()),
+                    user_facing_name: Some(user_facing_name),
+                    aliases,
                     ..base
                 });
                 skills.push(skill);
@@ -1909,8 +1927,7 @@ impl PluginManager {
                 Utf16JsonProjection::from(mod_plugin_provenance(manifest, install_dir)),
             ));
             let uses = match prepared.as_ref() {
-                Some(prepared) => Utf16JsonProjection::from_serde_value(&prepared.uses)
-                    .map_err(|error| PluginManagerError::Loader(error.to_string()))?,
+                Some(prepared) => prepared.uses.clone(),
                 None => Utf16JsonProjection::parse(r#"{"events":[],"calls":[]}"#)
                     .expect("empty plugin registration uses are valid JSON"),
             };
@@ -3275,7 +3292,7 @@ mod unload_tests {
         PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
         PosixRuntime,
     };
-    use skill_api::SkillRegistry;
+    use skill::SkillRegistry;
     use std::collections::HashMap;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3639,7 +3656,7 @@ mod telemetry_tests {
         PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
         PosixMcpTransport, PosixRuntime,
     };
-    use skill_api::SkillRegistry;
+    use skill::SkillRegistry;
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::fs;
@@ -3823,6 +3840,27 @@ mod telemetry_tests {
         let command = commands
             .resolve(&"source-plugin:greeter".into())
             .expect("plugin skill command is registered");
+        assert_eq!(
+            command
+                .native_source
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("plugin")
+        );
+        assert_eq!(
+            command
+                .plugin_name
+                .as_ref()
+                .and_then(|name| name.string_at("")),
+            Some("source-plugin")
+        );
+        assert_eq!(
+            command
+                .user_facing_name
+                .as_ref()
+                .and_then(|name| name.string_at("")),
+            Some("source-plugin:greeter")
+        );
         let command_api::SlashCommandKind::Plugin {
             prompt_template, ..
         } = &command.kind
@@ -3873,7 +3911,7 @@ mod telemetry_tests {
             .ok()?
             .lines()
             .filter_map(|line| line.trim().parse::<u32>().ok())
-            .last()
+            .next_back()
     }
 
     async fn dispatch_mod_tool(
@@ -3939,10 +3977,14 @@ mod telemetry_tests {
         let bun = find_bun_executable();
         let pid_file = root.path().join("mod-worker.pid");
         let wrapper = root.path().join("bun-wrapper.sh");
+        // `prepare_module` also starts a short-lived Bun source transformer via
+        // the same configured executable. Record only the long-lived worker
+        // entry; otherwise its later compiler PID replaces the worker PID in
+        // this file and makes the liveness assertion observe an exited process.
         fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" >> {}\nexec {} \"$@\"\n",
+                "#!/bin/sh\nif [ \"$1\" = '--no-warnings' ]; then\n  case \"$2\" in\n    */mods_worker.mjs) printf '%s\\n' \"$$\" >> {} ;;\n  esac\nfi\nexec {} \"$@\"\n",
                 shell_single_quote(&pid_file.to_string_lossy()),
                 shell_single_quote(&bun.to_string_lossy()),
             ),
@@ -4406,7 +4448,7 @@ mod monitor_lifecycle_tests {
         PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
         PosixMcpTransport, PosixRuntime,
     };
-    use skill_api::SkillRegistry;
+    use skill::SkillRegistry;
     use std::fs;
     use std::sync::Mutex as StdMutex;
     use tokio::time::{timeout, Duration};

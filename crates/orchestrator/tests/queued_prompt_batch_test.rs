@@ -60,6 +60,13 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
                 } else {
                     serde_json::json!({"kind":"bridge"})
                 }),
+                message_origin: (!*is_meta).then(|| {
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                        r#"{"kind":"human"}"#,
+                    )
+                    .unwrap()
+                }),
+                prompt_source: None,
                 message_id: Some(ids[i]),
                 transcript_row_token: None,
                 queue_priority: is_meta.then(|| "later".into()),
@@ -97,24 +104,45 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
             "one model request for the whole batch"
         );
         let history = orch.snapshot_history().await;
+        let mut history_positions = Vec::new();
         for (i, expected) in flags.iter().enumerate() {
+            let position = history
+                .iter()
+                .position(|message| message.id() == ids[i])
+                .expect("each queued input keeps its caller-supplied identity");
+            history_positions.push(position);
             assert!(
-                matches!(&history[i], ConversationMessage::User { id, is_meta, .. } if *id == ids[i] && is_meta == expected)
+                matches!(&history[position], ConversationMessage::User { id, is_meta, .. } if *id == ids[i] && is_meta == expected)
             );
         }
+        assert!(history_positions[0] < history_positions[1]);
         let records = JsonlReader::new(path.clone(), fs.clone())
             .read_all()
             .await
             .unwrap();
-        assert_eq!(records[0].uuid, ids[0].as_uuid().to_string());
-        assert_eq!(records[1].uuid, ids[1].as_uuid().to_string());
+        let first_record_index = records
+            .iter()
+            .position(|record| record.uuid == ids[0].as_uuid().to_string())
+            .expect("first queue row is persisted with its supplied identity");
+        let second_record_index = records
+            .iter()
+            .position(|record| record.uuid == ids[1].as_uuid().to_string())
+            .expect("second queue row is persisted with its supplied identity");
+        assert!(first_record_index < second_record_index);
         assert_eq!(
-            records[1].parent_uuid.as_deref(),
-            Some(records[0].uuid.as_str())
+            records[second_record_index].parent_uuid.as_deref(),
+            Some(records[second_record_index - 1].uuid.as_str()),
+            "intervening turn-ingress rows stay in the same JSONL parent chain"
         );
         for (i, is_meta) in flags.iter().enumerate() {
             assert_eq!(
-                records[i].extra.string_at("/queuePriority"),
+                records[if i == 0 {
+                    first_record_index
+                } else {
+                    second_record_index
+                }]
+                .extra
+                .string_at("/queuePriority"),
                 if *is_meta { Some("later") } else { None }
             );
         }
@@ -124,31 +152,51 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
                 .contains("queuePriority")
         );
         for (i, is_meta) in flags.iter().enumerate() {
+            let record = &records[if i == 0 {
+                first_record_index
+            } else {
+                second_record_index
+            }];
             assert_eq!(
-                records[i].extra.string_at("/scheduledTaskId"),
+                record.extra.string_at("/scheduledTaskId"),
                 is_meta.then(|| format!("task-{i}")).as_deref()
             );
             assert_eq!(
-                records[i].extra.string_at("/scheduledFireId"),
+                record.extra.string_at("/scheduledFireId"),
                 is_meta.then(|| format!("fire-{i}")).as_deref(),
                 "fire id without task id stays absent"
             );
         }
         for (i, expected) in flags.iter().enumerate() {
+            let record = &records[if i == 0 {
+                first_record_index
+            } else {
+                second_record_index
+            }];
             assert_eq!(
-                records[i]
+                record
                     .extra
                     .at_pointer("/isMeta")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false),
                 *expected
             );
+            assert_eq!(
+                record
+                    .origin_projection
+                    .as_ref()
+                    .and_then(|origin| origin.string_at("/kind")),
+                (!*expected).then_some("human"),
+                "only a real queued prompt gets the explicit Native human origin"
+            );
         }
 
         // No per-turn override can leak out of an all-meta or mixed batch.
-        orch.run_turn_streaming_with_cancel("later human", CancellationToken::new())
-            .await
-            .unwrap();
+        orchestrator::native_user_message_source::with_sdk_source(
+            orch.run_turn_streaming_with_cancel("later sdk", CancellationToken::new()),
+        )
+        .await
+        .unwrap();
         assert_eq!(api.captured_calls().await.len(), 2);
         let after = JsonlReader::new(path, fs).read_all().await.unwrap();
         assert!(after
@@ -166,6 +214,8 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
             .unwrap();
         assert!(!ordinary.extra.contains_property("scheduledTaskId"));
         assert!(!ordinary.extra.contains_property("scheduledFireId"));
+        assert_eq!(ordinary.extra.string_at("/promptSource"), Some("sdk"));
+        assert!(ordinary.origin_projection.is_none());
         let model_messages =
             serde_json::to_string(&api.captured_calls().await[0].messages).unwrap();
         assert!(
@@ -177,7 +227,7 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
             .iter()
             .find(|message| {
                 matches!(message, ConversationMessage::User { .. })
-                    && message.text_content() == "later human"
+                    && message.text_content() == "later sdk"
             })
             .is_some_and(|message| !message.is_meta()));
     }
@@ -280,20 +330,36 @@ async fn prompt_submit_mod_screens_each_batch_entry_before_persistence() {
         .iter()
         .any(|text| text.contains("plugin text") || text.contains("typed bridge")));
     let records = JsonlReader::new(path, fs).read_all().await.unwrap();
-    assert_eq!(records[0].message_type, "user");
-    assert!(serde_json::to_string(&records[0])
+    let bridge_record_index = records
+        .iter()
+        .position(|record| {
+            record.message_type == "user"
+                && record.message.string_at("/content/0/text") == Some("rewritten bridge")
+        })
+        .expect("the persisted bridge prompt uses the prompt.submit rewrite");
+    let hook_record_index = records
+        .iter()
+        .position(|record| {
+            record.message_type == "attachment"
+                && record
+                    .attachment_projection
+                    .as_ref()
+                    .and_then(|payload| payload.string_at("/hookName"))
+                    == Some("prompt.submit")
+        })
+        .expect("the prompt.submit context is persisted as its own attachment");
+    let timer_record_index = records
+        .iter()
+        .position(|record| {
+            record.message_type == "user"
+                && record.message.string_at("/content/0/text") == Some("timer")
+        })
+        .expect("the scheduled timer row is persisted");
+    assert!(bridge_record_index < hook_record_index && hook_record_index < timer_record_index);
+    assert!(serde_json::to_string(&records[bridge_record_index])
         .unwrap()
         .contains("rewritten bridge"));
-    assert_eq!(records[1].message_type, "attachment");
-    assert_eq!(
-        records[1]
-            .attachment_projection
-            .as_ref()
-            .and_then(|attachment| attachment.string_at("/hookName")),
-        Some("prompt.submit")
-    );
-    assert_eq!(records[2].message_type, "user");
-    assert!(serde_json::to_string(&records[2])
+    assert!(serde_json::to_string(&records[timer_record_index])
         .unwrap()
         .contains("timer"));
     assert!(!serde_json::to_string(&records)

@@ -1,12 +1,12 @@
-//! Parity: lock the 86 builtin slash-command names plus the per-command
+//! Parity: lock the 82 builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
 //! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total name count = 86
-//! - Core name count = 19
+//! - Total builtin name count = 82
+//! - Core builtin name count = 18
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
 //! - Unknown literal template = "Unknown command: /{name}"
@@ -15,19 +15,20 @@ use command_api::builtin_support::names::{
     BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES, CORRECT_BY_DESIGN_STUBS, HOST_BOUND_DEFERRED_GAPS,
 };
 use command_api::builtins::{
-    register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
+    register_all_builtin_commands, register_bundled_skills, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5, register_core_batch_8,
 };
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
 use lingxi_core::host::{
-    AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult,
+    AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::test_support::MockOrchestratorHandle;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use tempfile::TempDir;
 use test_harness::parity::load_fixture;
 use tokio::sync::RwLock;
 
@@ -56,10 +57,14 @@ impl AuthHandle for MockAuth {
     }
 }
 
-fn fully_wired_registry() -> CommandRegistry {
+fn fully_wired_registry(cwd: &std::path::Path) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
     let handle: Arc<MockOrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+    handle.set_status_snapshot(StatusSnapshot {
+        cwd: cwd.to_path_buf(),
+        ..StatusSnapshot::default()
+    });
     register_core_batch_1(&mut reg, handle.clone());
     let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth {
         result: StdMutex::new(Ok(LoginInfo {
@@ -82,6 +87,7 @@ fn fully_wired_registry() -> CommandRegistry {
         false,
         false,
     );
+    register_bundled_skills(&mut reg, false);
     reg
 }
 
@@ -153,19 +159,15 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "cd",
     "clear",
     "color",
-    "commit",
-    "commit-push-pr",
     "compact",
     "config",
     "context",
     "copy",
     "diff",
-    "doctor",
     "effort",
     "exit",
     "export",
     "fast",
-    "files",
     "focus",
     "fork",
     "goal",
@@ -173,7 +175,6 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "hooks",
     "ide",
     "init",
-    "init-verifiers",
     "insights",
     "keybindings",
     "login",
@@ -226,9 +227,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 87);
-    assert_eq!(f.commands.len(), 87);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
+    assert_eq!(f.meta.total_count_lock, 82);
+    assert_eq!(f.commands.len(), 82);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 
@@ -241,9 +242,9 @@ fn fixture_core_matches_constant() {
         .filter(|c| c.is_core)
         .map(|c| c.name.as_str())
         .collect();
-    assert_eq!(fixture_core.len(), 19);
-    assert_eq!(f.meta.core_count_lock, 19);
-    assert_eq!(BUILTIN_CORE_NAMES.len(), 19);
+    assert_eq!(fixture_core.len(), 18);
+    assert_eq!(f.meta.core_count_lock, 18);
+    assert_eq!(BUILTIN_CORE_NAMES.len(), 18);
 
     // Order-sensitive equality (both are ASCII-sorted by construction).
     let const_core: Vec<&str> = BUILTIN_CORE_NAMES.to_vec();
@@ -290,7 +291,8 @@ async fn every_fixture_command_dispatches_to_handled() {
     // output (e.g. /commit), so this locks the full name surface dispatches,
     // not the exact body.
     let f = fixture();
-    let reg = fully_wired_registry();
+    let export_dir = TempDir::new().expect("temporary export directory");
+    let reg = fully_wired_registry(export_dir.path());
     let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
     for entry in &f.commands {
@@ -300,11 +302,23 @@ async fn every_fixture_command_dispatches_to_handled() {
             other => panic!("/{} must dispatch to Handled, got {other:?}", entry.name),
         }
     }
+
+    assert!(
+        std::fs::read_dir(export_dir.path())
+            .expect("list temporary export directory")
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("conversation-")),
+        "/export should write its default output inside the isolated command cwd"
+    );
 }
 
 #[tokio::test]
 async fn unknown_command_uses_locked_literal() {
-    let reg = fully_wired_registry();
+    let scratch = TempDir::new().expect("temporary command directory");
+    let reg = fully_wired_registry(scratch.path());
     let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
     let outcome = d
@@ -328,16 +342,29 @@ fn core_command_description_matches_fixture() {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
     for entry in f.commands.iter().filter(|c| c.is_core) {
-        let expected = entry
+        let source_description = entry
             .description
             .as_deref()
             .unwrap_or_else(|| panic!("core /{} missing description in fixture", entry.name));
+        // Native HSo in 2.1.295 src_194447854.js uses Claude; /agents uses the current product name.
+        let expected = if entry.name == "agents" {
+            assert_eq!(
+                source_description,
+                format!(
+                    "(removed) Ask Claude to create/manage subagents, or edit {}/agents/",
+                    branding::DOT_DIR
+                )
+            );
+            source_description.replace("Ask Claude", &format!("Ask {}", branding::PRODUCT_NAME))
+        } else {
+            source_description.to_owned()
+        };
         let cmd = reg
             .resolve(&Utf16JsonProjection::from(entry.name.as_str()))
             .expect("core cmd missing");
         assert_eq!(
             cmd.description.string_at(""),
-            Some(expected),
+            Some(expected.as_str()),
             "/{}: description drift (fixture vs registry)",
             entry.name
         );
@@ -345,7 +372,7 @@ fn core_command_description_matches_fixture() {
 }
 
 // ============================================================================
-// T3 — M5-14: `implemented` field coverage (67 implemented / 19 unimplemented)
+// T3 — M5-14: `implemented` field coverage (63 implemented / 19 unimplemented)
 // ============================================================================
 
 #[test]
@@ -464,7 +491,8 @@ fn correct_by_design_and_host_bound_sets_remain_explicit() {
 
 #[tokio::test]
 async fn target_implemented_commands_do_not_return_m5_stub() {
-    let reg = fully_wired_registry();
+    let scratch = TempDir::new().expect("temporary command directory");
+    let reg = fully_wired_registry(scratch.path());
 
     for name in TARGET_IMPLEMENTED {
         // These commands are installed by the interactive composition root:

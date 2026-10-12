@@ -1101,10 +1101,9 @@ async fn async_hook_rewake_runs_without_persisting_a_synthetic_user_prompt() {
             .map(|attachment| attachment.to_json_string().unwrap())
             .collect::<Vec<_>>(),
         vec![
+            r#"{"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}"#.to_string(),
             r#"{"type":"session_context","context":{}}"#.to_string(),
             format!(r#"{{"type":"date","date":"{date}"}}"#),
-            r#"{"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}"#.to_string(),
-
         ]
     );
     assert_eq!(

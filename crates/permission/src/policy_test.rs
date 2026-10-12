@@ -142,6 +142,7 @@ mod tests {
                 value: PermissionRuleValue {
                     tool_name: "Bash".into(),
                     rule_content: None,
+                    original_rule: None,
                 },
                 behavior: PermissionBehavior::Allow,
                 source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
@@ -155,6 +156,7 @@ mod tests {
                 value: PermissionRuleValue {
                     tool_name: "Bash".into(),
                     rule_content: None,
+                    original_rule: None,
                 },
                 behavior: PermissionBehavior::Deny,
                 source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -174,6 +176,7 @@ mod tests {
                 value: PermissionRuleValue {
                     tool_name: "WebFetch".into(),
                     rule_content: None,
+                    original_rule: None,
                 },
                 behavior: PermissionBehavior::Deny,
                 source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -183,6 +186,7 @@ mod tests {
                 value: PermissionRuleValue {
                     tool_name: "mcp__github".into(),
                     rule_content: None,
+                    original_rule: None,
                 },
                 behavior: PermissionBehavior::Deny,
                 source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
@@ -192,6 +196,7 @@ mod tests {
                 value: PermissionRuleValue {
                     tool_name: "Bash".into(),
                     rule_content: Some("rm:*".into()),
+                    original_rule: None,
                 },
                 behavior: PermissionBehavior::Deny,
                 source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -229,6 +234,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Bash".into(),
                 rule_content: Some("curl:*".into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -292,6 +298,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Bash".into(),
                 rule_content: Some("git status:*".into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -1380,6 +1387,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: tool.into(),
                 rule_content: content.map(Utf16JsonProjection::from),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
@@ -1397,6 +1405,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Bash".into(),
                 rule_content: Some("rm:*".into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Ask,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -1440,6 +1449,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Bash".into(),
                 rule_content: Some("rm:*".into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
@@ -1459,6 +1469,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "Bash".into(),
                 rule_content: None,
+                original_rule: None,
             },
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
@@ -1477,6 +1488,7 @@ mod tests {
             value: PermissionRuleValue {
                 tool_name: "PowerShell".into(),
                 rule_content: Some("iex:*".into()),
+                original_rule: None,
             },
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),

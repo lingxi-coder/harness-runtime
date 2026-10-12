@@ -298,6 +298,7 @@ pub fn mcp_server_policy_rules(servers: &[McpServerPolicyView]) -> Vec<Permissio
             value: PermissionRuleValue {
                 tool_name: name.clone(),
                 rule_content: None,
+                original_rule: None,
             },
             behavior: behavior_for_severity(severity[name]),
             source: PermissionRuleSource::McpServerPolicy,
@@ -401,6 +402,7 @@ pub fn permission_rules_from_mcp_tool_policies<T: McpPolicyTool>(
             value: PermissionRuleValue {
                 tool_name,
                 rule_content: None,
+                original_rule: None,
             },
             behavior: behavior_from_policy(policy),
             source: PermissionRuleSource::McpServerPolicy,

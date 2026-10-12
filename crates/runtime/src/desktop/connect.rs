@@ -274,6 +274,7 @@ impl ChatGptConnectDriver for EngineChatGptConnect {
 pub struct EngineOAuthConnect {
     auth: Arc<dyn AuthHandle>,
     chatgpt: Arc<dyn ChatGptConnectDriver>,
+    managed_policy_snapshot_cache: Option<super::settings_watch::ManagedPolicySnapshotCache>,
     /// Test seam: a fixed `forceLoginOrgUUID` pin. `None` in production — the pin
     /// is read fresh from managed settings at each login via
     /// [`crate::desktop::managed_force_login_org_pin`].
@@ -287,8 +288,18 @@ impl EngineOAuthConnect {
         Self {
             auth,
             chatgpt,
+            managed_policy_snapshot_cache: None,
             org_pin_override: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_managed_policy_snapshot_cache(
+        mut self,
+        cache: super::settings_watch::ManagedPolicySnapshotCache,
+    ) -> Self {
+        self.managed_policy_snapshot_cache = Some(cache);
+        self
     }
 
     /// (test seam) Force a fixed `forceLoginOrgUUID` pin instead of reading the
@@ -306,7 +317,10 @@ impl EngineOAuthConnect {
     async fn resolve_org_pin(&self) -> ForceLoginOrgPin {
         match &self.org_pin_override {
             Some(p) => p.clone(),
-            None => crate::desktop::managed_force_login_org_pin().await,
+            None => match self.managed_policy_snapshot_cache.as_ref() {
+                Some(cache) => crate::desktop::managed_force_login_org_pin(cache).await,
+                None => ForceLoginOrgPin::Invalid,
+            },
         }
     }
 }
@@ -354,12 +368,24 @@ impl OAuthConnectDriver for EngineOAuthConnect {
 /// fresh at each login from the managed policy tiers
 /// ([`crate::desktop::managed_force_login_org_pin`]) and defers to the landed
 /// [`check_org_membership`].
-pub struct DesktopLoginOrgPolicy;
+pub struct DesktopLoginOrgPolicy {
+    managed_policy_snapshot_cache: super::settings_watch::ManagedPolicySnapshotCache,
+}
+
+impl DesktopLoginOrgPolicy {
+    #[must_use]
+    pub fn new(cache: super::settings_watch::ManagedPolicySnapshotCache) -> Self {
+        Self {
+            managed_policy_snapshot_cache: cache,
+        }
+    }
+}
 
 #[async_trait]
 impl command_api::builtins::LoginOrgPolicy for DesktopLoginOrgPolicy {
     async fn check(&self, account_org_ids: &[String]) -> Result<(), String> {
-        let pin = crate::desktop::managed_force_login_org_pin().await;
+        let pin =
+            crate::desktop::managed_force_login_org_pin(&self.managed_policy_snapshot_cache).await;
         match check_org_membership(&pin, account_org_ids) {
             OrgMembershipCheck::Permitted => Ok(()),
             OrgMembershipCheck::Denied(message) => Err(message),

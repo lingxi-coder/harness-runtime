@@ -2178,10 +2178,10 @@ mod tests {
         assert_eq!(got, "FROM_USER");
     }
 
-    /// The ORACLE half of the old `description_matches_the_binary_byte_for_byte`.
-    /// Unchanged in substance: the oracle files are still pinned to the binary,
-    /// byte for byte. What moved out is the claim that the SHIPPED text equals
-    /// them — that is now [`the_shipped_description_is_the_oracle_plus_the_register`].
+    /// Both oracle files and their shipped base renderings are pinned to the
+    /// binary byte-for-byte. The local divergence register is empty, so a
+    /// future deliberate exception must be source-backed and explicitly
+    /// restore a named composition check instead of weakening this lock.
     ///
     /// 2.1.267 split the 19,200-byte 2.1.245 description in two, so this pins
     /// both halves. Every marker below was re-derived by resolving `Epn`'s two
@@ -2254,129 +2254,21 @@ mod tests {
         }
     }
 
-    /// Every entry in the register carries the two things a bare byte count
-    /// could never carry: a name and a reason. An anchor that is missing or
-    /// ambiguous is a defect in the register, not a licence to skip the entry.
+    /// There are no active local edits to either model-facing text. Keep the
+    /// shipped copies byte-locked to their oracle sources so accidental drift
+    /// cannot be excused as an unregistered divergence.
     #[test]
-    fn every_description_divergence_is_named_reasoned_and_uniquely_anchored() {
-        assert!(
-            !DESCRIPTION_DIVERGENCES.is_empty(),
-            "the register is empty — if every divergence was retired, restore the plain \
-             byte-for-byte lock rather than leaving this machinery answering nothing"
+    fn shipped_workflow_texts_match_the_oracle_byte_for_byte() {
+        assert_eq!(
+            DESCRIPTION.as_bytes(),
+            ORACLE_DESCRIPTION.as_bytes(),
+            "Workflow description has no active local divergence"
         );
-        let mut seen: Vec<&str> = Vec::new();
-        for divergence in DESCRIPTION_DIVERGENCES.iter() {
-            assert!(!divergence.id.trim().is_empty(), "a divergence has no id");
-            assert!(
-                !seen.contains(&divergence.id.as_str()),
-                "duplicate divergence id `{}`",
-                divergence.id
-            );
-            seen.push(&divergence.id);
-            assert!(
-                divergence.reason.trim().len() > 40,
-                "divergence `{}` has no real reason. An unexplained divergence is exactly what \
-                 this register exists to prevent — say what the oracle text gets wrong here.",
-                divergence.id
-            );
-            assert!(
-                !divergence.text.trim().is_empty(),
-                "divergence `{}` inserts nothing",
-                divergence.id
-            );
-            let (target, other, target_name, other_name) = match divergence.target {
-                DivergenceTarget::Description => (
-                    &*ORACLE_DESCRIPTION,
-                    &*ORACLE_AUTHORING_SKILL,
-                    "description",
-                    "authoring reference",
-                ),
-                DivergenceTarget::Skill => (
-                    &*ORACLE_AUTHORING_SKILL,
-                    &*ORACLE_DESCRIPTION,
-                    "authoring reference",
-                    "description",
-                ),
-            };
-            assert_eq!(
-                target.matches(divergence.anchor.as_str()).count(),
-                1,
-                "divergence `{}`: its anchor must occur exactly once in the ORACLE {target_name}, \
-                 so an oracle refresh that moves the anchored passage fails here by name",
-                divergence.id
-            );
-            // ...and ZERO times in the other half. 2.1.267 split the text in
-            // two; a passage that migrates across would otherwise keep its stale
-            // `target` and still compose, landing the insert in the document the
-            // register no longer describes.
-            assert_eq!(
-                other.matches(divergence.anchor.as_str()).count(),
-                0,
-                "divergence `{}`: its anchor also occurs in the {other_name}, so `target` is \
-                 ambiguous — the anchored passage moved between the two oracle texts",
-                divergence.id
-            );
-        }
-    }
-
-    /// The replacement for the old single number. It still catches an
-    /// unregistered edit to either file — the length has to be the oracle plus
-    /// exactly what the register declares — but it no longer conflates a
-    /// deliberate divergence with accidental drift.
-    #[test]
-    fn the_shipped_description_is_the_oracle_plus_the_register() {
-        for (target, oracle, shipped, name) in [
-            (
-                DivergenceTarget::Description,
-                &*ORACLE_DESCRIPTION,
-                &*DESCRIPTION,
-                "description",
-            ),
-            (
-                DivergenceTarget::Skill,
-                &*ORACLE_AUTHORING_SKILL,
-                &*AUTHORING_SKILL,
-                "authoring reference",
-            ),
-        ] {
-            let entries = || {
-                DESCRIPTION_DIVERGENCES
-                    .iter()
-                    .filter(|d| d.target == target)
-            };
-            let registered: usize = entries().map(|d| d.text.len()).sum();
-            assert_eq!(
-                shipped.len(),
-                oracle.len() + registered,
-                "shipped {name} length is not the oracle plus its registered divergences: \
-                 either the oracle drifted, or something was edited into one of the two files \
-                 without an entry in workflow_description_divergences.json"
-            );
-            for divergence in entries() {
-                assert_eq!(
-                    shipped.matches(divergence.text.as_str()).count(),
-                    1,
-                    "divergence `{}` is registered but does not appear exactly once in the \
-                     shipped {name}",
-                    divergence.id
-                );
-                assert!(
-                    !oracle.contains(divergence.text.as_str()),
-                    "divergence `{}` is already in the oracle — retire the entry instead of \
-                     inserting a duplicate",
-                    divergence.id
-                );
-            }
-        }
-        // Each shipped text is still the oracle at both ends: every registered
-        // insert is interior, so a divergence cannot silently re-open either
-        // document or change how it closes.
-        assert!(DESCRIPTION.starts_with(
-            "Execute a workflow script that orchestrates multiple subagents deterministically."
-        ));
-        assert!(DESCRIPTION.ends_with("No wasted wall-clock."));
-        assert!(AUTHORING_SKILL.starts_with("# Workflow authoring reference"));
-        assert!(AUTHORING_SKILL.ends_with("hand-author a continuation script."));
+        assert_eq!(
+            AUTHORING_SKILL.as_bytes(),
+            ORACLE_AUTHORING_SKILL.as_bytes(),
+            "Workflow authoring reference has no active local divergence"
+        );
     }
 
     /// Serialises the tests that drive the process-global reachability flags.
@@ -2523,8 +2415,9 @@ mod tests {
         );
     }
 
-    /// The composition must be able to go RED, and to say WHICH entry failed.
-    /// Without this the register is a mechanism nobody has watched fail.
+    /// `compose_description` still builds the production description and
+    /// authoring reference from the registry. Keep its named failure path
+    /// covered so a future source-backed registry entry cannot land silently.
     #[test]
     fn a_divergence_whose_anchor_drifted_fails_by_name() {
         let drifted = vec![DescriptionDivergence {

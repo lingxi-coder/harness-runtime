@@ -55,13 +55,28 @@ async fn eligible_skill_provenance_matches_native_precommit_fixture() {
                 }
             }
             let enabled = step["include_code_review_suggestion"] == true;
-            let provider = registry_skill_listing_provider(
+            let mut native_settings = super::NativeSkillListingSettings::default();
+            if case["name"] == "all_three" {
+                // The 2.1.286 fixture predates `rQ`. Model the concrete 2.1.295
+                // source case where PolicyVerdictState exists but
+                // rememberedCoreSkills is nullish: Native then uses its fixed
+                // remembered-core catalog, which includes code-review. This
+                // keeps the builtin gate active for unremembered skills while
+                // exercising the source-backed allow path for this fixture.
+                native_settings.policy_remembered_core_skills = Some(None);
+            }
+            let settings_loader = Arc::new(move || native_settings.clone());
+            let provider = super::registry_skill_listing_provider_with_sources(
                 Arc::new(RwLock::new(registry)),
                 tool_api::read_file_state::new_read_file_state_map(),
                 Arc::new(move || enabled),
+                settings_loader,
+                Arc::new(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+                None,
             );
+            let snapshot = provider.skill_listing_snapshot().await;
             assert_eq!(
-                provider.bash_precommit_skills().await,
+                provider.bash_precommit_skills(&snapshot.entries).await,
                 BashPrecommitSkills {
                     custom_verify: output["skills"]["verify"].as_bool().unwrap(),
                     custom_simplify: output["skills"]["simplify"].as_bool().unwrap(),
@@ -88,12 +103,135 @@ async fn disabled_and_conditional_skills_do_not_reach_precommit_suggestions() {
         tool_api::read_file_state::new_read_file_state_map(),
         Arc::new(|| true),
     );
+    let snapshot = provider.skill_listing_snapshot().await;
     assert_eq!(
-        provider.bash_precommit_skills().await,
+        provider.bash_precommit_skills(&snapshot.entries).await,
         BashPrecommitSkills::default()
     );
 }
 
+#[tokio::test]
+async fn desktop_skill_listing_uses_native_catalog_overrides_and_usage_snapshot() {
+    use orchestrator::prompt::skill_listing::SkillListingBudgetSettings;
+
+    let home = tempfile::tempdir().expect("isolated skill usage home");
+    command_api::skill_usage::record_skill_usage(home.path(), &"verify".into())
+        .expect("record one canonical skill use");
+
+    let mut verify = command("verify", "skills");
+    verify.native_type = Some(command_api::NativeCommandType::Prompt);
+    verify.user_facing_name = Some("review".into());
+    verify.aliases = vec!["review".into()];
+    // Native applies `is_enabled` before building the alias-resolution
+    // catalog. This disabled exact-name collision must not suppress verify's
+    // valid display alias.
+    let mut disabled_collision = command("review", "skills");
+    disabled_collision.native_type = Some(command_api::NativeCommandType::Prompt);
+    disabled_collision.is_enabled = false;
+    // The full catalog is broader than the model-invocable prompt list. An
+    // enabled manual-only command still participates in `Rwt` name
+    // resolution, even though it cannot become a listing entry.
+    let mut manual_name_owner = command("manual-owner", "skills");
+    manual_name_owner.user_facing_name = Some("short-name".into());
+    manual_name_owner.disable_model_invocation = true;
+    let mut short_name_entry = command("short-entry", "skills");
+    short_name_entry.native_type = Some(command_api::NativeCommandType::Prompt);
+    short_name_entry.user_facing_name = Some("short-name".into());
+    verify.unqualified_name = Some("short-verify".into());
+    let mut hidden = command("hidden", "skills");
+    hidden.native_type = Some(command_api::NativeCommandType::Prompt);
+    let mut ordinary = command("ordinary", "skills");
+    ordinary.native_type = Some(command_api::NativeCommandType::Prompt);
+    let mut builtin = command("builtin-prompt", "skills");
+    builtin.source = CommandSource::Builtin;
+    builtin.native_type = Some(command_api::NativeCommandType::Prompt);
+    let mut plugin = command("plugin-off", "plugin");
+    plugin.source = CommandSource::Plugin;
+    plugin.native_type = Some(command_api::NativeCommandType::Prompt);
+    plugin.native_source = Some("plugin".into());
+    plugin.plugin_name = Some("fixture-plugin".into());
+
+    let mut registry = CommandRegistry::new();
+    registry.register_command(verify);
+    registry.register_command(disabled_collision);
+    registry.register_command(manual_name_owner);
+    registry.register_command(short_name_entry);
+    registry.register_command(hidden);
+    registry.register_command(ordinary);
+    registry.register_command(builtin);
+    registry.register_command(plugin);
+
+    let parsed: lingxi_core::settings::SettingsJson = serde_json::from_str(
+        r#"{"skillOverrides":{"verify":"name-only","hidden":"off","plugin-off":"off"}}"#,
+    )
+    .expect("valid native skill override settings");
+    let settings = super::NativeSkillListingSettings {
+        base: parsed.skill_overrides,
+        policy: None,
+        flag: None,
+        disable_bundled_skills: false,
+        policy_remembered_core_skills: None,
+        budget: SkillListingBudgetSettings {
+            budget_fraction: Some(0.12),
+            max_desc_chars: Some(32.0),
+        },
+    };
+    let root = home.path().to_path_buf();
+    let provider = super::registry_skill_listing_provider_with_sources(
+        Arc::new(RwLock::new(registry)),
+        tool_api::read_file_state::new_read_file_state_map(),
+        Arc::new(|| false),
+        Arc::new(move || settings.clone()),
+        Arc::new(move || root.clone()),
+        Some(home.path().to_path_buf()),
+    );
+
+    let snapshot = provider.skill_listing_snapshot().await;
+    let entries = &snapshot.entries;
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.name.string_at("").unwrap())
+            .collect::<Vec<_>>(),
+        vec!["verify", "short-entry", "ordinary", "plugin-off"]
+    );
+    assert_eq!(
+        entries[0].display_name.string_at(""),
+        Some("verify (review)")
+    );
+    assert_eq!(
+        entries[1].display_name.string_at(""),
+        Some("short-entry"),
+        "enabled manual-only commands remain in Native's full name-resolution catalog"
+    );
+    assert!(entries[0].is_name_only);
+    assert!(entries[0].priority > 0.0);
+    let plugin_entry = entries
+        .iter()
+        .find(|entry| entry.name.string_at("") == Some("plugin-off"))
+        .expect("plugin prompt remains listed despite its prompt override");
+    assert_eq!(
+        plugin_entry
+            .source
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some("plugin")
+    );
+    assert_eq!(
+        plugin_entry
+            .plugin_name
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some("fixture-plugin")
+    );
+    assert_eq!(
+        snapshot.budget_settings,
+        SkillListingBudgetSettings {
+            budget_fraction: Some(0.12),
+            max_desc_chars: Some(32.0),
+        }
+    );
+}
 struct LiveSkillGate(AtomicBool);
 
 #[async_trait::async_trait]

@@ -498,8 +498,8 @@ impl ModelRuntime {
                 | AuthStrategy::GcpToken
         ) {
             return Err(LlmError::UnsupportedCapability {
-                capability: "this profile's authentication cannot be reduced to a service key/token"
-                    .into(),
+                capability:
+                    "this profile's authentication cannot be reduced to a service key/token".into(),
             });
         }
         let credential = self.load_credential(entry, profile).await?.ok_or_else(|| {
@@ -516,7 +516,8 @@ impl ModelRuntime {
             } => token,
             Credential::ChatGptOAuth { .. } | Credential::AwsSigV4 { .. } => {
                 return Err(LlmError::UnsupportedCapability {
-                    capability: "the selected credential requires account headers or signing".into(),
+                    capability: "the selected credential requires account headers or signing"
+                        .into(),
                 })
             }
         };
@@ -1141,6 +1142,7 @@ impl ModelRuntime {
                 .as_ref()
                 .map(|scope| scope.beta_rejections())
                 .unwrap_or_default(),
+            thinking_recovery_scope: request.execution.thinking_recovery_scope.clone(),
             authenticator,
             fast_account_binding: None,
             host_failure,
@@ -1767,6 +1769,9 @@ pub struct PreparedLlmCall {
     pub(crate) computed_beta_headers: Vec<String>,
     pub(crate) beta_rejection_state:
         lingxi_llm_client::providers::anthropic::beta_repair::ConversationBetaState,
+    /// Captured conversation-local state for actual request dispatch and
+    /// Native tool-change refusal observations.
+    pub(crate) thinking_recovery_scope: Option<crate::thinking_scope::ThinkingRecoveryScope>,
     pub(crate) authenticator: Arc<crate::execution::HostAuthenticator>,
     pub(crate) fast_account_binding: Option<crate::model::fast_admission::Binding>,
     /// Native Fast admission captured before SDK validation and credential work.

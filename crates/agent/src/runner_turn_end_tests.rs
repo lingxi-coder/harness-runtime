@@ -265,9 +265,11 @@ async fn successful_tool_turn_end_finishes_batch_and_persists_read_context_befor
             "<system-reminder>\ntool.call hook additional context: Contents of /project/pkg/AGENTS.md:\n\nKeep this instruction.\n</system-reminder>"
         );
         assert_eq!(rows.last().unwrap()["status"], "completed");
-        assert!(!rows
-            .iter()
-            .any(|row| row["message"]["subtype"] == "instruction_context"));
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row["message"]["subtype"] == "instruction_context")
+        );
         assert_eq!(
             one_completed(&events).string_at("/stop_reason"),
             Some("tool_use")
@@ -436,9 +438,11 @@ async fn tool_turn_end_stops_schema_nudges_but_preserves_final_schema_failure() 
         );
         assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. }
             if error == "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)")));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Completed { .. }))
+        );
         assert!(events.iter().any(|event| {
             let SubagentEvent::Message { message, .. } = event else {
                 return false;
@@ -505,11 +509,13 @@ async fn persistent_tool_turn_end_resets_on_a_later_real_message() {
         "the previous terminal marker must reset"
     );
     assert_eq!(*invoker.calls.lock().unwrap(), ["Finish", "Read"]);
-    assert!(api.histories.lock().unwrap()[2]
-        .iter()
-        .any(|message| matches!(message,
+    assert!(
+        api.histories.lock().unwrap()[2]
+            .iter()
+            .any(|message| matches!(message,
         ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block,
-            ContentBlock::Text { text, .. } if text == "continue with a real task")))));
+            ContentBlock::Text { text, .. } if text == "continue with a real task"))))
+    );
     drop(event_tx);
     runner.await.unwrap();
 }

@@ -12,12 +12,18 @@ impl RetryPolicy {
     /// Classify an error into a retry decision.
     #[must_use]
     pub fn classify_error(&self, error: &LlmError) -> RetryDecision {
+        if error.is_proxy_auth_helper_retry() {
+            return RetryDecision::Retry { after: None };
+        }
         match error.classification_source() {
             LlmError::Transport { .. }
             | LlmError::TransportTimeout { .. }
             | LlmError::ProviderInternal
             | LlmError::ProviderTimeout { .. }
             | LlmError::Overloaded { .. } => RetryDecision::Retry { after: None },
+            LlmError::ProxyTunnelResponse { status, .. } if *status != 407 => {
+                RetryDecision::Retry { after: None }
+            }
             LlmError::RateLimited { retry_after, .. } => RetryDecision::Retry {
                 after: *retry_after,
             },
@@ -43,8 +49,9 @@ impl RetryPolicy {
             | LlmError::UnsupportedCapability { .. }
             | LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. } => RetryDecision::DoNotRetry,
-            LlmError::ProviderErrorText { .. } => {
-                unreachable!("classification_source removes provider text wrappers")
+            LlmError::ProxyTunnelResponse { .. } => RetryDecision::DoNotRetry,
+            LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+                unreachable!("classification_source removes carrier wrappers")
             }
         }
     }

@@ -3,7 +3,7 @@
     "plan": "M5-14",
     "spec_section": "§3 cross-cutting locks — byte-equivalent session JSONL",
     "_lingxi_version": "0.6.0",
-    "description": "Normal .286 announced-context turn with an empty host context and tool registry: ConversationOrchestrator → JsonlWriter → read-back validates exact attachment payloads, projections, stable IDs, the complete parent chain, line format and telemetry linkage.",
+    "description": "Normal .295 environment/model ingress composed with .286 announced-context turn and an empty host context/tool registry: ConversationOrchestrator → JsonlWriter → read-back validates typed ingress fields, exact announcement payloads/projections, stable IDs, the complete parent chain, line format and telemetry linkage.",
     "oracle_version": "2.1.286",
     "oracle_sha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
     "locks": {
@@ -25,23 +25,21 @@
         "line": 2,
         "type": "attachment",
         "parent_uuid": "line1",
-        "attachment_type": "session_context",
+        "attachment_type": "environment",
         "expected_attachment": {
-          "type": "session_context",
-          "context": {}
+          "type": "environment"
         },
-        "why": "Native Br still emits the known-empty carriesContext anchor. The pinned instruction_announcements_2_1_286.json successful-empty-initial case records this exact payload and an empty rendered projection. No instructions or context_sections are produced for this host context."
+        "why": "The 2.1.295 environment ingress producer stores its typed snapshot before the model and turn reminders. The test validates the exact current snapshot field set and types, rendered system reminder, and equality between durable and request projections."
       },
       {
         "line": 3,
         "type": "attachment",
         "parent_uuid": "line2",
-        "attachment_type": "date",
+        "attachment_type": "model",
         "expected_attachment": {
-          "type": "date",
-          "date": "$currentDate"
+          "type": "model"
         },
-        "why": "The same pinned native Br case emits date immediately after session_context; only the local YYYY-MM-DD date is substituted. Its exact meta-user rendering is checked against the native fixture."
+        "why": "The 2.1.295 model ingress producer stores the effective request identity after environment and before turn reminders. The test validates the complete identity shape and exact durable/request rendered projection."
       },
       {
         "line": 4,
@@ -52,12 +50,34 @@
           "type": "total_tokens_reminder",
           "text": "<total_tokens>15000000 tokens left</total_tokens>"
         },
-        "why": "The .286 producer reanchors a regular human prompt at zero usage. Native bvt=15000000, padded-countdown mode, wvt.remaining and hne yield this exact raw payload. The fan-out follows eager context announcements; the raw attachment and its exact system-reminder projection are both asserted."
+        "why": "The .286 producer reanchors a regular human prompt at zero usage. Native bvt=15000000, padded-countdown mode, wvt.remaining and hne yield this exact raw payload. The reminder follows environment/model ingress and precedes context announcements in the prepared request; both the raw attachment and its exact system-reminder projection are asserted."
       },
       {
         "line": 5,
         "type": "attachment",
         "parent_uuid": "line4",
+        "attachment_type": "session_context",
+        "expected_attachment": {
+          "type": "session_context",
+          "context": {}
+        },
+        "why": "Native Br emits the known-empty carriesContext anchor after turn reminders. The pinned instruction_announcements_2_1_286.json successful-empty-initial case records this exact payload and an empty rendered projection. No instructions or context_sections are produced for this host context."
+      },
+      {
+        "line": 6,
+        "type": "attachment",
+        "parent_uuid": "line5",
+        "attachment_type": "date",
+        "expected_attachment": {
+          "type": "date",
+          "date": "$currentDate"
+        },
+        "why": "The same pinned native Br case emits date immediately after session_context; only the local YYYY-MM-DD date is substituted. Its exact meta-user rendering is checked against the native fixture."
+      },
+      {
+        "line": 7,
+        "type": "attachment",
+        "parent_uuid": "line6",
         "attachment_type": "prompt_snapshot",
         "expected_attachment": {
           "type": "prompt_snapshot",
@@ -69,15 +89,15 @@
         "why": "Snapshot recording is eligible by default. The pinned valid-announced-system-prompt native fmn/xd case validates this payload family and lowercase route key. The sole static system prompt is compared in full to the actual API capture; empty tools are omitted, and the snapshot is not a model message."
       },
       {
-        "line": 6,
+        "line": 8,
         "type": "assistant",
-        "parent_uuid": "line5",
+        "parent_uuid": "line7",
         "role": "assistant"
       }
     ],
     "session_telemetry_events": [
       "tengu_session_appended"
     ],
-    "single_turn_sequence_provenance": "A composition of hash-pinned .286 native producer/schema/renderer evidence checked at the actual orchestrator JSONL seam, not a captured whole native session. Context payloads and projections use core/tests/fixtures/instruction_announcements_2_1_286.json (successful-empty-initial and valid-announced-system-prompt), generated by scripts/tests/instruction_announcements_286_oracle.mjs. Total tokens use src_183727495.js:1043 (bvt, Sge/Sno, wvt.remaining, hne), :3229 (producer), :3574 (renderer). Snapshot serialization uses src_191662485.js:40. Dynamic date, generated UUIDs and the host's branded static prompt are asserted relationally rather than frozen. Attachment rows have no inner message key on disk and decode as message:null; user and assistant content remain exact. The preexisting M5-14 outer-format locks remain unchanged."
+    "single_turn_sequence_provenance": "A composition of current 2.1.295 environment/model ingress producers and hash-pinned .286 native producer/schema/renderer evidence checked at the actual orchestrator JSONL seam, not a captured whole native session. Environment/model field schemas and rendered rows are checked against their in-repository Native-aligned producers; context payloads and projections use core/tests/fixtures/instruction_announcements_2_1_286.json (successful-empty-initial and valid-announced-system-prompt), generated by scripts/tests/instruction_announcements_286_oracle.mjs. Total tokens use src_183727495.js:1043 (bvt, Sge/Sno, wvt.remaining, hne), :3229 (producer), :3574 (renderer). Snapshot serialization uses src_191662485.js:40. Dynamic date, generated UUIDs, environment values and the host's branded static prompt are asserted relationally rather than frozen. Attachment rows have no inner message key on disk and decode as message:null; user and assistant content remain exact. The preexisting M5-14 outer-format locks remain unchanged."
   }
 }

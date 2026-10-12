@@ -22,6 +22,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 const FIXTURE: &str = include_str!("../src/parity/fixtures/parity_session_jsonl.json");
+const PRIVATE_SOURCE_KEY_ORDER_KEY: &str = "lingxi_jsonl_source_key_order";
 
 // ============================================================================
 // Fixture types
@@ -71,6 +72,174 @@ fn source_test_view(source: &Utf16JsonProjection) -> Value {
     .expect("these scalar parity fixtures decode as JSON test views")
 }
 
+fn assert_reader_source_key_order(line: &session::JsonlMessage, raw_line: &str) {
+    let raw = Utf16JsonProjection::parse(raw_line).expect("raw JSONL source parses exactly");
+    assert!(
+        !raw.contains_property(PRIVATE_SOURCE_KEY_ORDER_KEY),
+        "reader-only key-order metadata is not serialized to the raw row"
+    );
+    let raw_key_order = raw
+        .object_entries()
+        .expect("raw JSONL row is an object")
+        .into_iter()
+        .map(|entry| entry.code_units.to_vec())
+        .collect::<Vec<_>>();
+    let recorded = line
+        .extra
+        .get_property(PRIVATE_SOURCE_KEY_ORDER_KEY)
+        .expect("reader records raw outer-key order in private metadata");
+    let recorded_key_order = (0..recorded.array_len().expect("key order is an array"))
+        .map(|index| {
+            recorded
+                .get_index(index)
+                .and_then(|key| key.code_units().map(|units| units.to_vec()))
+                .expect("each recorded source key is a string")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded_key_order, raw_key_order,
+        "reader metadata exactly preserves raw top-level key order"
+    );
+}
+
+fn reader_only_extra(line: &session::JsonlMessage) -> Value {
+    let extra = source_test_view(&line.extra);
+    let mut expected = serde_json::Map::new();
+    expected.insert(
+        PRIVATE_SOURCE_KEY_ORDER_KEY.to_owned(),
+        extra[PRIVATE_SOURCE_KEY_ORDER_KEY].clone(),
+    );
+    Value::Object(expected)
+}
+
+fn assert_exact_keys(value: &Value, expected: &[&str], label: &str) {
+    let object = value
+        .as_object()
+        .unwrap_or_else(|| panic!("{label} must be an object"));
+    let mut actual = object.keys().map(String::as_str).collect::<Vec<_>>();
+    let mut expected = expected.to_vec();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(actual, expected, "{label} keys");
+}
+
+fn assert_single_system_rendering(extra: &Value, label: &str) -> String {
+    assert_eq!(extra["renderedRole"], "system", "{label} role");
+    let rendered = extra["rendered"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} rendering must be an array"));
+    assert_eq!(rendered.len(), 1, "{label} has one rendered block");
+    assert_exact_keys(
+        &rendered[0],
+        &["content"],
+        &format!("{label} rendered block"),
+    );
+    let rendered = rendered[0]["content"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} rendered content must be text"));
+    assert!(
+        rendered.starts_with("<system-reminder>\n"),
+        "{label} wrapper start"
+    );
+    assert!(
+        rendered.ends_with("\n</system-reminder>"),
+        "{label} wrapper end"
+    );
+    rendered.to_owned()
+}
+
+fn assert_environment_ingress(extra: &Value, payload: &Value, raw_row: &Value) -> (Value, String) {
+    assert_exact_keys(
+        extra,
+        &["rendered", "renderedRole", PRIVATE_SOURCE_KEY_ORDER_KEY],
+        "environment rendering metadata",
+    );
+    assert_exact_keys(payload, &["type", "snapshot"], "environment attachment");
+    assert_eq!(payload["type"], "environment");
+    assert_eq!(raw_row["attachment"], *payload, "environment on disk");
+
+    let snapshot = &payload["snapshot"];
+    assert_exact_keys(
+        snapshot,
+        &[
+            "workingDirectory",
+            "isWorktree",
+            "isGitRepo",
+            "additionalWorkingDirectories",
+            "platform",
+            "shell",
+            "osVersion",
+        ],
+        "environment snapshot",
+    );
+    let working_directory = snapshot["workingDirectory"]
+        .as_str()
+        .expect("working directory is a string");
+    assert!(std::path::Path::new(working_directory).is_absolute());
+    assert!(snapshot["isWorktree"].is_boolean());
+    assert!(snapshot["isGitRepo"].is_boolean());
+    assert!(snapshot["additionalWorkingDirectories"]
+        .as_array()
+        .is_some_and(|paths| paths.iter().all(Value::is_string)));
+    for field in ["platform", "shell", "osVersion"] {
+        assert!(
+            snapshot[field]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "{field}"
+        );
+    }
+
+    let rendered = assert_single_system_rendering(extra, "environment");
+    assert!(rendered.contains("# Environment\n"));
+    assert!(rendered.contains(working_directory));
+    assert!(rendered.contains(snapshot["platform"].as_str().unwrap()));
+    assert!(rendered.contains(snapshot["shell"].as_str().unwrap()));
+    assert!(rendered.contains(snapshot["osVersion"].as_str().unwrap()));
+    (payload.clone(), rendered)
+}
+
+fn assert_model_ingress(extra: &Value, payload: &Value, raw_row: &Value) -> (Value, String) {
+    assert_exact_keys(
+        extra,
+        &["rendered", "renderedRole", PRIVATE_SOURCE_KEY_ORDER_KEY],
+        "model rendering metadata",
+    );
+    assert_exact_keys(payload, &["type", "identity", "text"], "model attachment");
+    assert_eq!(payload["type"], "model");
+    assert_eq!(raw_row["attachment"], *payload, "model on disk");
+
+    let identity = &payload["identity"];
+    assert_exact_keys(
+        identity,
+        &["modelId", "marketingName", "knowledgeCutoff"],
+        "model identity",
+    );
+    let model_id = identity["modelId"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("model ID is a nonempty string");
+    for field in ["marketingName", "knowledgeCutoff"] {
+        assert!(
+            identity[field].is_null() || identity[field].is_string(),
+            "{field} type"
+        );
+    }
+    let text = payload["text"].as_str().expect("model text is a string");
+    assert!(
+        text.contains(model_id),
+        "model reminder names its exact identity"
+    );
+
+    let rendered = assert_single_system_rendering(extra, "model");
+    assert_eq!(
+        rendered,
+        format!("<system-reminder>\n{text}\n</system-reminder>"),
+        "model rendered reminder"
+    );
+    (payload.clone(), rendered)
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -106,8 +275,9 @@ async fn assert_native_single_turn_rows(
 
     let fixture = load();
     assert_eq!(lines.len(), fixture.meta.single_turn_sequence.len());
-    let raw_rows: Vec<Value> = raw
-        .lines()
+    let raw_lines = raw.lines().collect::<Vec<_>>();
+    let raw_rows: Vec<Value> = raw_lines
+        .iter()
         .map(|line| serde_json::from_str(line).expect("valid JSONL row"))
         .collect();
     assert_eq!(raw_rows.len(), lines.len());
@@ -133,12 +303,20 @@ async fn assert_native_single_turn_rows(
     assert_eq!(native["expected"][0]["rendered"], serde_json::json!([]));
     assert_eq!(
         fixture.meta.single_turn_sequence[1].expected_attachment,
+        Some(serde_json::json!({"type": "environment"}))
+    );
+    assert_eq!(
+        fixture.meta.single_turn_sequence[2].expected_attachment,
+        Some(serde_json::json!({"type": "model"}))
+    );
+    assert_eq!(
+        fixture.meta.single_turn_sequence[4].expected_attachment,
         Some(native["expected"][0]["attachment"].clone())
     );
     let mut native_date = native["expected"][1]["attachment"].clone();
     native_date["date"] = serde_json::json!("$currentDate");
     assert_eq!(
-        fixture.meta.single_turn_sequence[2].expected_attachment,
+        fixture.meta.single_turn_sequence[5].expected_attachment,
         Some(native_date)
     );
     let native_snapshot = oracle["snapshotCases"]
@@ -151,7 +329,7 @@ async fn assert_native_single_turn_rows(
     let mut snapshot_payload = native_snapshot["prior"][0]["attachment"].clone();
     snapshot_payload["systemPrompt"] = serde_json::json!(["$capturedSystem"]);
     assert_eq!(
-        fixture.meta.single_turn_sequence[4].expected_attachment,
+        fixture.meta.single_turn_sequence[6].expected_attachment,
         Some(snapshot_payload)
     );
 
@@ -165,14 +343,23 @@ async fn assert_native_single_turn_rows(
     // Native persists the source string vector before dynamic context. The
     // default mock route has no provider profile, so its source vector carries
     // no global-cache marker.
-    let extra = source_test_view(&lines[4].extra);
-    let snapshot_system = extra["attachment"]["systemPrompt"].clone();
+    let snapshot_extra = source_test_view(&lines[6].extra);
+    assert_reader_source_key_order(&lines[6], raw_lines[6]);
+    assert_eq!(snapshot_extra, reader_only_extra(&lines[6]));
+    let snapshot_payload = source_test_view(
+        lines[6]
+            .attachment_projection
+            .as_ref()
+            .expect("prompt snapshot is a top-level Native attachment payload"),
+    );
+    assert_eq!(snapshot_payload["type"], "prompt_snapshot");
+    let snapshot_system = snapshot_payload["systemPrompt"].clone();
     let snapshot_blocks = snapshot_system
         .as_array()
-        .expect("Native source block array");
+        .expect("the persisted source-vector snapshot is a Native string array");
     assert!(!snapshot_blocks.is_empty());
     assert!(snapshot_blocks.iter().all(Value::is_string));
-    assert!(extra["attachment"].get("sharedBoundary").is_none());
+    assert!(snapshot_payload.get("sharedBoundary").is_none());
     let snapshot_text = snapshot_blocks
         .iter()
         .map(Value::as_str)
@@ -180,6 +367,10 @@ async fn assert_native_single_turn_rows(
         .expect("source blocks are strings")
         .join("\n\n");
     assert!(system_text.starts_with(&snapshot_text));
+    assert_eq!(
+        raw_rows[6]["attachment"], snapshot_payload,
+        "the raw JSONL row preserves the complete prompt snapshot payload"
+    );
     assert!(api.captured_tools().await[0].is_empty());
 
     let date = orchestrator::prompt::env_meta::current_date_string();
@@ -189,6 +380,7 @@ async fn assert_native_single_turn_rows(
         .zip(&fixture.meta.single_turn_sequence)
         .enumerate()
     {
+        assert_reader_source_key_order(line, raw_lines[index]);
         let uuid = uuid::Uuid::parse_str(&line.uuid).expect("valid row UUID");
         assert_eq!(line.uuid, uuid.to_string(), "canonical UUID at row {index}");
         assert!(seen.insert(uuid), "distinct UUID at row {index}");
@@ -201,8 +393,14 @@ async fn assert_native_single_turn_rows(
             let mut payload = expected
                 .expected_attachment
                 .clone()
-                .expect("exact attachment payload in fixture");
+                .expect("attachment discriminator in fixture");
             match kind {
+                "environment" => {
+                    assert_eq!(payload, serde_json::json!({"type": "environment"}));
+                }
+                "model" => {
+                    assert_eq!(payload, serde_json::json!({"type": "model"}));
+                }
                 "date" => payload["date"] = serde_json::json!(date),
                 "prompt_snapshot" => {
                     payload["systemPrompt"] = snapshot_system.clone();
@@ -211,8 +409,69 @@ async fn assert_native_single_turn_rows(
             }
             assert_eq!(payload["type"], kind);
             let line_extra = source_test_view(&line.extra);
-            assert_eq!(line_extra.get("attachment"), Some(&payload), "row {index}");
-            assert_eq!(raw_rows[index]["attachment"], payload, "disk row {index}");
+            let attachment = source_test_view(
+                line.attachment_projection
+                    .as_ref()
+                    .expect("attachment row keeps its top-level raw payload"),
+            );
+            match kind {
+                "environment" => {
+                    let (actual, rendered) =
+                        assert_environment_ingress(&line_extra, &attachment, &raw_rows[index]);
+                    assert_eq!(actual["type"], payload["type"]);
+                    assert!(rendered.starts_with("<system-reminder>\n# Environment\n"));
+                }
+                "model" => {
+                    let (actual, rendered) =
+                        assert_model_ingress(&line_extra, &attachment, &raw_rows[index]);
+                    assert_eq!(actual["type"], payload["type"]);
+                    assert_eq!(
+                        rendered,
+                        format!(
+                            "<system-reminder>\n{}\n</system-reminder>",
+                            actual["text"].as_str().unwrap()
+                        )
+                    );
+                }
+                "total_tokens_reminder" => {
+                    assert_eq!(attachment, payload, "total-token payload at row {index}");
+                    assert_exact_keys(
+                        &line_extra,
+                        &["rendered", "renderedRole", PRIVATE_SOURCE_KEY_ORDER_KEY],
+                        "total-token rendering metadata",
+                    );
+                    let rendered = assert_single_system_rendering(&line_extra, "total tokens");
+                    assert_eq!(line_extra["renderedRole"], "system");
+                    assert_eq!(
+                        rendered,
+                        format!(
+                            "<system-reminder>\n{}\n</system-reminder>",
+                            payload["text"]
+                                .as_str()
+                                .expect("total-token text is a string")
+                        ),
+                        "total-token rendering preserves the exact typed payload text"
+                    );
+                    assert_eq!(
+                        raw_rows[index]["attachment"], payload,
+                        "raw JSONL row preserves the typed total-token payload"
+                    );
+                    assert_eq!(
+                        raw_rows[index]["rendered"], line_extra["rendered"],
+                        "raw JSONL row preserves the rendered cache"
+                    );
+                    assert_eq!(raw_rows[index]["renderedRole"], "system");
+                }
+                _ => {
+                    assert_eq!(attachment, payload, "typed payload at row {index}");
+                    assert_eq!(
+                        line_extra,
+                        reader_only_extra(line),
+                        "no duplicated extra at row {index}"
+                    );
+                    assert_eq!(raw_rows[index]["attachment"], payload, "disk row {index}");
+                }
+            }
             assert_eq!(
                 source_test_view(&line.message),
                 Value::Null,
@@ -234,7 +493,7 @@ async fn assert_native_single_turn_rows(
         source_test_view(&lines[0].message),
         serde_json::json!({"role":"user","content":[{"type":"text","text":"say hi"}]})
     );
-    let assistant_message = source_test_view(&lines[5].message);
+    let assistant_message = source_test_view(&lines[7].message);
     assert_eq!(assistant_message["role"], "assistant");
     assert_eq!(
         assistant_message["content"],
@@ -242,23 +501,55 @@ async fn assert_native_single_turn_rows(
     );
     assert_eq!(assistant_message["stop_reason"], "end_turn");
 
-    // Announcements and total_tokens preserve their prepared-request IDs.
-    // The empty native session_context has no model-visible user projection.
+    // Durable JSONL starts at the user's parent chain; the Native prepared
+    // request projects environment/model and turn reminders before that user.
+    // The prompt snapshot remains durable-only and is not a model request row.
     let sent = &calls[0];
     assert_eq!(
         sent.len(),
-        4,
-        "human, empty context anchor, date, total_tokens"
+        6,
+        "environment, model, total_tokens, session_context, date, human prompt"
     );
-    for (line, message) in lines[..4].iter().zip(sent) {
-        assert_eq!(line.uuid, message.id().as_uuid().to_string());
+    for (line_index, message) in [1usize, 2, 3, 4, 5, 0].into_iter().zip(sent) {
+        assert_eq!(lines[line_index].uuid, message.id().as_uuid().to_string());
     }
+    let environment_extra = source_test_view(&lines[1].extra);
+    let environment_payload = source_test_view(
+        lines[1]
+            .attachment_projection
+            .as_ref()
+            .expect("environment attachment payload"),
+    );
+    let (_, environment_rendered) =
+        assert_environment_ingress(&environment_extra, &environment_payload, &raw_rows[1]);
     assert!(
-        matches!(&sent[0], ConversationMessage::User { content, is_meta: false, .. }
-        if content == &[ContentBlock::Text { text: "say hi".into(), citations: None }])
+        matches!(&sent[0], ConversationMessage::User { content, is_meta: true, .. }
+        if content.iter().filter_map(ContentBlock::visible_text).collect::<String>() == environment_rendered)
+    );
+    let model_extra = source_test_view(&lines[2].extra);
+    let model_payload = source_test_view(
+        lines[2]
+            .attachment_projection
+            .as_ref()
+            .expect("model attachment payload"),
+    );
+    let (_, model_rendered) = assert_model_ingress(&model_extra, &model_payload, &raw_rows[2]);
+    assert!(
+        matches!(&sent[1], ConversationMessage::User { content, is_meta: true, .. }
+        if content.iter().filter_map(ContentBlock::visible_text).collect::<String>() == model_rendered)
+    );
+    let token_body = fixture.meta.single_turn_sequence[3]
+        .expected_attachment
+        .as_ref()
+        .unwrap()["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        matches!(&sent[2], ConversationMessage::User { content, is_meta: true, .. }
+        if content == &[ContentBlock::Text { text: format!("<system-reminder>\n{token_body}\n</system-reminder>"), citations: None }])
     );
     assert!(
-        matches!(&sent[1], ConversationMessage::System { content, subtype, compact_metadata: None, refusal_fallback: None, .. }
+        matches!(&sent[3], ConversationMessage::System { content, subtype, compact_metadata: None, refusal_fallback: None, .. }
         if content.string_at("").is_some_and(str::is_empty)
             && subtype.as_deref() == Some("model_reminder_attachment"))
     );
@@ -272,23 +563,30 @@ async fn assert_native_single_turn_rows(
             &date,
         );
     assert!(
-        matches!(&sent[2], ConversationMessage::User { content, is_meta: true, .. }
+        matches!(&sent[4], ConversationMessage::User { content, is_meta: true, .. }
         if content == &[ContentBlock::Text { text: date_body, citations: None }])
     );
-    let token_body = fixture.meta.single_turn_sequence[3]
-        .expected_attachment
-        .as_ref()
-        .unwrap()["text"]
-        .as_str()
-        .unwrap();
-    assert!(
-        matches!(&sent[3], ConversationMessage::User { content, is_meta: true, .. }
-        if content == &[ContentBlock::Text { text: format!("<system-reminder>\n{token_body}\n</system-reminder>"), citations: None }])
-    );
+    let expected_prompt_units = "say hi".encode_utf16().collect::<Vec<_>>();
+    assert!(matches!(
+        &sent[5],
+        ConversationMessage::User {
+            content,
+            is_meta: false,
+            ..
+        } if matches!(
+            content.as_slice(),
+            [ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations: None,
+            }] if text == "say hi"
+                && utf16_code_units.as_slice() == expected_prompt_units.as_slice()
+        )
+    ));
 }
 
 // ============================================================================
-// T4 — single turn: human + four native attachments + assistant
+// T4 — single turn: user + six typed attachments + assistant
 // ============================================================================
 
 #[tokio::test]
@@ -386,7 +684,7 @@ async fn single_turn_line_types_follow_the_fixture_order() {
 }
 
 // ============================================================================
-// T4 — UUID chain: line2.parentUuid == line1.uuid, line1.parentUuid == null
+// T4 — UUID chain: all attachment and assistant rows follow their parent
 // ============================================================================
 
 #[tokio::test]
@@ -415,16 +713,23 @@ async fn single_turn_parent_uuid_chain_is_correct() {
     let lines = reader.read_all().await.expect("read_all must succeed");
 
     let user = &lines[0];
-    let assistant = &lines[1];
+    let assistant = lines.last().expect("assistant is the final row");
+    assert_eq!(lines.len(), load().meta.single_turn_sequence.len());
 
     assert!(
         user.parent_uuid.is_none(),
         "first line (user) must have parentUuid = null"
     );
+    for pair in lines.windows(2) {
+        assert_eq!(
+            pair[1].parent_uuid.as_deref(),
+            Some(pair[0].uuid.as_str()),
+            "every typed attachment and assistant row follows its direct parent"
+        );
+    }
     assert_eq!(
-        assistant.parent_uuid.as_deref(),
-        Some(user.uuid.as_str()),
-        "assistant parentUuid must equal user uuid"
+        assistant.message_type, "assistant",
+        "assistant follows the full environment/model/reminder/context chain"
     );
 }
 

@@ -36,8 +36,10 @@ fn capabilities_default_shape() {
         json,
         // Key ORDER is what this locks; the version tracks the constant so a
         // reviewed §0.10 bump cannot break an unrelated shape assertion.
+        // `realtime_audio` is defaulted for deserialization but serialized
+        // explicitly, in declaration order, even when false.
         format!(
-            r#"{{"supports_streaming":true,"supports_tools":true,"supports_skills":true,"supports_commands":true,"client_protocol_version":"{CLIENT_PROTOCOL_VERSION}"}}"#
+            r#"{{"realtime_audio":false,"supports_streaming":true,"supports_tools":true,"supports_skills":true,"supports_commands":true,"client_protocol_version":"{CLIENT_PROTOCOL_VERSION}"}}"#
         )
     );
 }

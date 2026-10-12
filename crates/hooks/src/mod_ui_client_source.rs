@@ -1206,24 +1206,123 @@ fn js_property_name_is(node: tree_sitter::Node<'_>, expected: &str, source: &[u8
     }
 }
 
-fn js_string_value(
+/// Return the cooked value of a parser-confirmed JavaScript string literal or
+/// no-substitution template. Hook graph resolution and Mods scanning share
+/// this decoder so the spelled import and event values stay in sync.
+pub(super) fn js_string_value(
     node: tree_sitter::Node<'_>,
     source: &[u8],
 ) -> Result<Option<String>, ClientSourceError> {
+    let Some(units) = js_string_units(node, source)? else {
+        return Ok(None);
+    };
+    String::from_utf16(&units).map(Some).map_err(|_| {
+        ClientSourceError::Source(
+            "JavaScript string literal contains an unpaired UTF-16 surrogate".into(),
+        )
+    })
+}
+
+/// Return the exact cooked UTF-16 code units for a parser-confirmed JavaScript
+/// string literal or no-substitution template.
+pub(super) fn js_string_units(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+) -> Result<Option<Vec<u16>>, ClientSourceError> {
     match node.kind() {
-        "string" => decode_js_quoted(source_text(node, source)).map(Some),
+        "string" => decode_js_quoted_units(source_text(node, source)).map(Some),
         "template_string" => {
-            let text = source_text(node, source);
-            if text.contains("${") {
+            let mut cursor = node.walk();
+            if node
+                .named_children(&mut cursor)
+                .any(|child| child.kind() == "template_substitution")
+            {
                 return Ok(None);
             }
-            decode_js_quoted(text).map(Some)
+            decode_js_quoted_units(source_text(node, source)).map(Some)
         }
         _ => Ok(None),
     }
 }
 
+/// Return the cooked ECMAScript name for a parser-confirmed identifier token.
+/// Tree-sitter intentionally exposes the raw token slice; Native's Acorn AST
+/// exposes `Identifier.name` after Unicode escapes have been cooked.
+pub(super) fn js_identifier_name(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    if !matches!(
+        node.kind(),
+        "identifier"
+            | "property_identifier"
+            | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern"
+            | "statement_identifier"
+    ) {
+        return None;
+    }
+    let units = decode_js_identifier_units(source_text(node, source)).ok()?;
+    String::from_utf16(&units).ok()
+}
+
+fn decode_js_identifier_units(raw: &str) -> Result<Vec<u16>, ClientSourceError> {
+    let mut chars = raw.chars().peekable();
+    let mut output = Vec::new();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            push_utf16_char(&mut output, ch);
+            continue;
+        }
+        if chars.next() != Some('u') {
+            return Err(ClientSourceError::Source(
+                "invalid escape in JavaScript identifier".into(),
+            ));
+        }
+        if chars.peek() == Some(&'{') {
+            chars.next();
+            let mut digits = String::new();
+            let mut closed = false;
+            for ch in chars.by_ref() {
+                if ch == '}' {
+                    closed = true;
+                    break;
+                }
+                digits.push(ch);
+            }
+            if !closed || digits.is_empty() {
+                return Err(ClientSourceError::Source(
+                    "invalid Unicode escape in JavaScript identifier".into(),
+                ));
+            }
+            let code_point = u32::from_str_radix(&digits, 16).map_err(|_| {
+                ClientSourceError::Source("invalid Unicode escape in JavaScript identifier".into())
+            })?;
+            push_utf16_code_point(&mut output, code_point)?;
+        } else {
+            let mut digits = String::with_capacity(4);
+            for _ in 0..4 {
+                digits.push(chars.next().ok_or_else(|| {
+                    ClientSourceError::Source(
+                        "short Unicode escape in JavaScript identifier".into(),
+                    )
+                })?);
+            }
+            output.push(u16::from_str_radix(&digits, 16).map_err(|_| {
+                ClientSourceError::Source("invalid Unicode escape in JavaScript identifier".into())
+            })?);
+        }
+    }
+    Ok(output)
+}
+
 fn decode_js_quoted(raw: &str) -> Result<String, ClientSourceError> {
+    let units = decode_js_quoted_units(raw)?;
+    String::from_utf16(&units).map_err(|_| {
+        ClientSourceError::Source(
+            "JavaScript string literal contains an unpaired UTF-16 surrogate".into(),
+        )
+    })
+}
+
+fn decode_js_quoted_units(raw: &str) -> Result<Vec<u16>, ClientSourceError> {
     let Some(quote) = raw.chars().next() else {
         return Err(ClientSourceError::Source("empty string literal".into()));
     };
@@ -1232,10 +1331,17 @@ fn decode_js_quoted(raw: &str) -> Result<String, ClientSourceError> {
     }
     let body = &raw[quote.len_utf8()..raw.len() - quote.len_utf8()];
     let mut chars = body.chars().peekable();
-    let mut output = String::new();
+    let mut output = Vec::new();
     while let Some(ch) = chars.next() {
         if ch != '\\' {
-            output.push(ch);
+            if quote == '`' && ch == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                output.push(b'\n' as u16);
+                continue;
+            }
+            push_utf16_char(&mut output, ch);
             continue;
         }
         let escaped = chars
@@ -1243,34 +1349,51 @@ fn decode_js_quoted(raw: &str) -> Result<String, ClientSourceError> {
             .ok_or_else(|| ClientSourceError::Source("unterminated string escape".into()))?;
         match escaped {
             '\n' => {}
+            '\u{2028}' | '\u{2029}' => {}
             '\r' => {
                 if chars.peek() == Some(&'\n') {
                     chars.next();
                 }
             }
-            '\'' => output.push('\''),
-            '"' => output.push('"'),
-            '`' => output.push('`'),
-            '\\' => output.push('\\'),
-            '/' => output.push('/'),
-            'b' => output.push('\u{0008}'),
-            'f' => output.push('\u{000c}'),
-            'n' => output.push('\n'),
-            'r' => output.push('\r'),
-            't' => output.push('\t'),
-            'v' => output.push('\u{000b}'),
-            '0' => output.push('\0'),
-            'x' => output.push(decode_hex_scalar(&mut chars, 2)?),
+            '\'' => output.push('\'' as u16),
+            '"' => output.push('"' as u16),
+            '`' => output.push('`' as u16),
+            '\\' => output.push('\\' as u16),
+            '/' => output.push('/' as u16),
+            'b' => output.push(0x0008),
+            'f' => output.push(0x000c),
+            'n' => output.push(b'\n' as u16),
+            'r' => output.push(b'\r' as u16),
+            't' => output.push(b'\t' as u16),
+            'v' => output.push(0x000b),
+            '0' => output.push(0),
+            'x' => output.push(decode_hex_unit(&mut chars, 2)?),
             'u' => {
-                let first = if chars.peek() == Some(&'{') {
+                if chars.peek() == Some(&'{') {
                     chars.next();
-                    let digits = chars
-                        .by_ref()
-                        .take_while(|ch| *ch != '}')
-                        .collect::<String>();
-                    u32::from_str_radix(&digits, 16).map_err(|_| {
-                        ClientSourceError::Source("invalid Unicode escape in string".into())
-                    })?
+                    let mut digits = String::new();
+                    let mut closed = false;
+                    for ch in chars.by_ref() {
+                        if ch == '}' {
+                            closed = true;
+                            break;
+                        }
+                        digits.push(ch);
+                    }
+                    if !closed || digits.is_empty() {
+                        return Err(ClientSourceError::Source(
+                            "invalid Unicode escape in string".into(),
+                        ));
+                    }
+                    let significant = digits.trim_start_matches('0');
+                    let code_point = if significant.is_empty() {
+                        0
+                    } else {
+                        u32::from_str_radix(significant, 16).map_err(|_| {
+                            ClientSourceError::Source("invalid Unicode escape in string".into())
+                        })?
+                    };
+                    push_utf16_code_point(&mut output, code_point)?;
                 } else {
                     let mut digits = String::with_capacity(4);
                     for _ in 0..4 {
@@ -1278,58 +1401,44 @@ fn decode_js_quoted(raw: &str) -> Result<String, ClientSourceError> {
                             ClientSourceError::Source("short Unicode escape in string".into())
                         })?);
                     }
-                    u32::from_str_radix(&digits, 16).map_err(|_| {
+                    let unit = u16::from_str_radix(&digits, 16).map_err(|_| {
                         ClientSourceError::Source("invalid Unicode escape in string".into())
-                    })?
-                };
-                if (0xD800..=0xDBFF).contains(&first) {
-                    let mut lookahead = chars.clone();
-                    if lookahead.next() == Some('\\') && lookahead.next() == Some('u') {
-                        chars.next();
-                        chars.next();
-                        let mut digits = String::with_capacity(4);
-                        for _ in 0..4 {
-                            digits.push(chars.next().ok_or_else(|| {
-                                ClientSourceError::Source("short Unicode escape in string".into())
-                            })?);
-                        }
-                        let second = u32::from_str_radix(&digits, 16).map_err(|_| {
-                            ClientSourceError::Source("invalid Unicode escape in string".into())
-                        })?;
-                        if (0xDC00..=0xDFFF).contains(&second) {
-                            let scalar = 0x1_0000 + ((first - 0xD800) << 10) + (second - 0xDC00);
-                            output.push(char::from_u32(scalar).ok_or_else(|| {
-                                ClientSourceError::Source("invalid Unicode scalar in string".into())
-                            })?);
-                            continue;
-                        }
-                        return Err(ClientSourceError::Source(
-                            "unpaired Unicode surrogate in Client module path".into(),
-                        ));
-                    }
-                    return Err(ClientSourceError::Source(
-                        "unpaired Unicode surrogate in Client module path".into(),
-                    ));
+                    })?;
+                    output.push(unit);
                 }
-                if (0xDC00..=0xDFFF).contains(&first) {
-                    return Err(ClientSourceError::Source(
-                        "unpaired Unicode surrogate in Client module path".into(),
-                    ));
-                }
-                output.push(char::from_u32(first).ok_or_else(|| {
-                    ClientSourceError::Source("invalid Unicode scalar in string".into())
-                })?);
             }
-            other => output.push(other),
+            other => push_utf16_char(&mut output, other),
         }
     }
     Ok(output)
 }
 
-fn decode_hex_scalar(
+fn push_utf16_char(output: &mut Vec<u16>, value: char) {
+    let mut buffer = [0; 2];
+    output.extend_from_slice(value.encode_utf16(&mut buffer));
+}
+
+fn push_utf16_code_point(output: &mut Vec<u16>, value: u32) -> Result<(), ClientSourceError> {
+    if value > 0x10ffff {
+        return Err(ClientSourceError::Source(
+            "invalid Unicode code point in string escape".into(),
+        ));
+    }
+    if value <= 0xffff {
+        output.push(value as u16);
+    } else {
+        let character = char::from_u32(value).ok_or_else(|| {
+            ClientSourceError::Source("invalid Unicode code point in string escape".into())
+        })?;
+        push_utf16_char(output, character);
+    }
+    Ok(())
+}
+
+fn decode_hex_unit(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     count: usize,
-) -> Result<char, ClientSourceError> {
+) -> Result<u16, ClientSourceError> {
     let mut digits = String::with_capacity(count);
     for _ in 0..count {
         digits.push(
@@ -1338,10 +1447,8 @@ fn decode_hex_scalar(
                 .ok_or_else(|| ClientSourceError::Source("short hex escape in string".into()))?,
         );
     }
-    let scalar = u32::from_str_radix(&digits, 16)
-        .map_err(|_| ClientSourceError::Source("invalid hex escape in string".into()))?;
-    char::from_u32(scalar)
-        .ok_or_else(|| ClientSourceError::Source("invalid scalar in hex escape".into()))
+    u16::from_str_radix(&digits, 16)
+        .map_err(|_| ClientSourceError::Source("invalid hex escape in string".into()))
 }
 
 fn make_manifest(
@@ -1737,6 +1844,157 @@ mod tests {
             graph.links[1].file,
             path_string(&lexical_root.join("folder/index.ts")).unwrap(),
             "Native interleaves each appended extension with its index candidate"
+        );
+    }
+
+    #[test]
+    fn js_literal_decoder_cooks_escapes_and_keeps_template_dollars_literal() {
+        let source = r#"const values = [
+            '\x70rompt.read',
+            "\x70rompt.read",
+            `tool.\u0063all`,
+            `escaped \${name}`,
+            '\u{1F600}',
+            '\uD83D\uDE00'
+        ];"#;
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let bytes = source.as_bytes();
+        let mut values = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if matches!(node.kind(), "string" | "template_string") {
+                values.push(
+                    js_string_value(node, bytes)
+                        .unwrap()
+                        .expect("these literals are static strings"),
+                );
+            }
+            let mut cursor = node.walk();
+            let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+            stack.extend(children.into_iter().rev());
+        }
+        assert_eq!(
+            values,
+            vec![
+                "prompt.read".to_owned(),
+                "prompt.read".to_owned(),
+                "tool.call".to_owned(),
+                String::from("escaped $") + "{name}",
+                "😀".to_owned(),
+                "😀".to_owned(),
+            ]
+        );
+
+        let dynamic_source = "const value = `interpolated ${name}`;";
+        let dynamic_tree = parser.parse(dynamic_source, None).unwrap();
+        let mut stack = vec![dynamic_tree.root_node()];
+        let mut dynamic_template = None;
+        while let Some(node) = stack.pop() {
+            if node.kind() == "template_string" {
+                dynamic_template = Some(node);
+                break;
+            }
+            let mut cursor = node.walk();
+            let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+            stack.extend(children.into_iter().rev());
+        }
+        assert_eq!(
+            js_string_value(
+                dynamic_template.expect("template literal node"),
+                dynamic_source.as_bytes()
+            )
+            .unwrap(),
+            None
+        );
+
+        let lone_surrogate_source = r#"const value = '\uD800';"#;
+        let lone_surrogate_tree = parser.parse(lone_surrogate_source, None).unwrap();
+        let mut stack = vec![lone_surrogate_tree.root_node()];
+        let mut literal = None;
+        while let Some(node) = stack.pop() {
+            if node.kind() == "string" {
+                literal = Some(node);
+                break;
+            }
+            let mut cursor = node.walk();
+            let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+            stack.extend(children.into_iter().rev());
+        }
+        let literal = literal.expect("string literal node");
+        assert_eq!(
+            js_string_units(literal, lone_surrogate_source.as_bytes()).unwrap(),
+            Some(vec![0xd800])
+        );
+        assert!(js_string_value(literal, lone_surrogate_source.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn js_identifier_and_template_decoder_match_cooked_ecmascript_values() {
+        let identifier_source = r#"export function \u0068andler() { const \u0070lugin = `p
+q`; }"#;
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .unwrap();
+        let identifier_tree = parser.parse(identifier_source, None).unwrap();
+        assert!(!identifier_tree.root_node().has_error());
+        let mut stack = vec![identifier_tree.root_node()];
+        let mut cooked_names = Vec::new();
+        let mut template = None;
+        while let Some(node) = stack.pop() {
+            if node.kind() == "identifier" {
+                cooked_names.push(js_identifier_name(node, identifier_source.as_bytes()));
+            }
+            if node.kind() == "template_string" {
+                template = Some(node);
+            }
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
+        }
+        assert!(cooked_names
+            .iter()
+            .any(|name| name.as_deref() == Some("handler")));
+        assert!(cooked_names
+            .iter()
+            .any(|name| name.as_deref() == Some("plugin")));
+        assert_eq!(
+            js_string_value(
+                template.expect("template literal"),
+                identifier_source.as_bytes()
+            )
+            .unwrap(),
+            Some("p\nq".into())
+        );
+    }
+
+    #[test]
+    fn escaped_static_import_specifiers_resolve_to_the_cooked_path() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let lexical_root = absolute_normalized(root).unwrap();
+        let real_root = fs::canonicalize(root).unwrap();
+        fs::write(
+            root.join("entry.mjs"),
+            "import handler from './hand\\u006cer.mjs'; export { handler };",
+        )
+        .unwrap();
+        fs::write(
+            root.join("handler.mjs"),
+            "export default function handler() {}",
+        )
+        .unwrap();
+
+        let entry = resolve_entry_path(&lexical_root, &real_root, Path::new("entry.mjs")).unwrap();
+        let graph = read_module_graph(&lexical_root, &real_root, entry, true).unwrap();
+        assert_eq!(graph.links.len(), 1);
+        assert_eq!(graph.links[0].spelled, "./handler.mjs");
+        assert_eq!(
+            graph.links[0].file,
+            path_string(&lexical_root.join("handler.mjs")).unwrap()
         );
     }
 

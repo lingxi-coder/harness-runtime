@@ -617,7 +617,10 @@ async fn roots_list_dispatch_accepts_native_295_string_params_and_omits_them() {
     assert_eq!(to_value(&result), json!({"roots": []}));
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "the validated roots handler ran once");
-    assert!(seen[0].params.is_none(), "non-object roots params are omitted");
+    assert!(
+        seen[0].params.is_none(),
+        "non-object roots params are omitted"
+    );
     assert!(output.try_recv().is_err());
 }
 #[tokio::test]

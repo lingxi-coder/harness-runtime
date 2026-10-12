@@ -1,6 +1,6 @@
 //! Host settings snapshots for the interceptable Mod `settings.read` call.
 
-use super::{managed_model_policy_source, settings_watch, DesktopConfig};
+use super::{settings_watch, DesktopConfig};
 use hooks::mods::{ModError, ModSettingsReader};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::BTreeMap;
@@ -65,14 +65,18 @@ fn fold(target: &mut Utf16JsonProjection, source: &Utf16JsonProjection) {
     let _ = lingxi_core::settings::merger::merge_raw_source_layer(target, source);
 }
 
-fn managed_view(raw_tiers: &[String]) -> Utf16JsonProjection {
-    let mut merged = empty();
-    for raw in raw_tiers {
-        if let Some(source) = parse_valid_settings_source(raw) {
-            fold(&mut merged, &source);
-        }
+fn managed_view(
+    snapshot: &settings_watch::ManagedSettingsSnapshot,
+) -> Result<Utf16JsonProjection, ModError> {
+    if snapshot.read_failed() {
+        return Err(ModError::Hook(
+            "managed policy source selection is incomplete".into(),
+        ));
     }
-    merged
+    Ok(snapshot
+        .effective_projection()
+        .cloned()
+        .unwrap_or_else(empty))
 }
 
 fn settings_source(
@@ -82,19 +86,51 @@ fn settings_source(
     Utf16JsonProjection::parse(&raw).map_err(|error| ModError::Hook(error.to_string()))
 }
 
-fn model_allowed_in_managed_tiers(raw_tiers: &[String], model: &str) -> Option<bool> {
-    let source = managed_model_policy_source(raw_tiers);
-    let enforcement = llm_runtime::model::allowlist::resolve_enforcement(&source, &mut |_| {});
-    llm_runtime::model::allowlist::model_allowed_under(&enforcement, model)
+fn catalog_restriction_for_settings(
+    cfg: &DesktopConfig,
+    snapshot: &settings_watch::ManagedSettingsSnapshot,
+) -> (
+    llm_runtime::model::allowlist::CatalogRestriction,
+    Option<BTreeMap<String, String>>,
+) {
+    use llm_runtime::model::allowlist::{catalog_restriction_from_settings, CatalogRestriction};
+
+    if snapshot.read_failed() {
+        return (CatalogRestriction::Refused, None);
+    }
+    let managed = snapshot.effective_json().into_iter().collect::<Vec<_>>();
+    let Some(effective) = super::load_effective_settings_for_config(cfg, &managed) else {
+        return (CatalogRestriction::Refused, None);
+    };
+    (
+        catalog_restriction_from_settings(true, effective.settings.available_models.clone()),
+        Some(effective.settings.model_overrides.unwrap_or_default()),
+    )
+}
+
+fn model_allowed_in_settings(
+    cfg: &DesktopConfig,
+    snapshot: &settings_watch::ManagedSettingsSnapshot,
+    model: &str,
+) -> Option<bool> {
+    use llm_runtime::model::allowlist::{model_allowed_under_catalog, CatalogRestriction};
+
+    let (restriction, overrides) = catalog_restriction_for_settings(cfg, snapshot);
+    match restriction {
+        CatalogRestriction::Unrestricted => None,
+        restriction => Some(model_allowed_under_catalog(
+            model,
+            &restriction,
+            overrides.as_ref(),
+        )),
+    }
 }
 
 #[async_trait::async_trait]
 impl ModSettingsReader for DesktopModSettingsReader {
     async fn model_allowed(&self, model: &str) -> Result<Option<bool>, ModError> {
-        Ok(model_allowed_in_managed_tiers(
-            &settings_watch::managed_settings_raw_tiers().await,
-            model,
-        ))
+        let snapshot = settings_watch::managed_settings_snapshot_for_config(&self.cfg).await;
+        Ok(model_allowed_in_settings(&self.cfg, &snapshot, model))
     }
 
     async fn read(&self, input: Utf16JsonProjection) -> Result<Utf16JsonProjection, ModError> {
@@ -149,11 +185,11 @@ impl ModSettingsReader for DesktopModSettingsReader {
                 }
             }
             Some("flag") => Ok(flag),
-            Some("policy") => Ok(managed_view(
-                &settings_watch::managed_settings_raw_tiers().await,
-            )),
+            Some("policy") => {
+                managed_view(&settings_watch::managed_settings_snapshot_for_config(&self.cfg).await)
+            }
             None => {
-                let managed = settings_watch::managed_settings_raw_tiers().await;
+                let managed = settings_watch::managed_settings_snapshot_for_config(&self.cfg).await;
                 let mut raw = empty();
                 if user_allowed {
                     fold(&mut raw, &read_file(&user).await);
@@ -163,7 +199,7 @@ impl ModSettingsReader for DesktopModSettingsReader {
                     fold(&mut raw, &read_file(&local).await);
                 }
                 fold(&mut raw, &flag);
-                fold(&mut raw, &managed_view(&managed));
+                fold(&mut raw, &managed_view(&managed)?);
                 let env: BTreeMap<String, String> = std::env::vars().collect();
                 let (env_settings, _) = lingxi_core::settings::env_parser::parse_env(&env)
                     .map_err(|error| ModError::Hook(error.to_string()))?;
@@ -193,34 +229,76 @@ mod tests {
         source(&json!({"source": source_name}))
     }
 
-    #[test]
-    fn mod_model_policy_uses_managed_tiers_and_fails_closed() {
-        assert_eq!(model_allowed_in_managed_tiers(&[], "claude-opus-4-6"), None);
-        let managed = vec![
-            r#"{"availableModels":["claude-opus-4-6"],"enforceAvailableModels":true}"#.to_owned(),
-        ];
+    #[tokio::test]
+    async fn model_admission_uses_merged_settings_and_fails_closed_on_policy_read_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("work");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cfg = DesktopConfig {
+            cwd,
+            lingxi_home: home.clone(),
+            setting_source_scope: (true, true),
+            ..Default::default()
+        };
+        let settings = root.path().join("managed-settings.json");
+        let absent = settings_watch::read_managed_settings_snapshot(root.path()).await;
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"availableModels":["claude-opus-4-6"]}"#,
+        )
+        .unwrap();
         assert_eq!(
-            model_allowed_in_managed_tiers(&managed, "claude-opus-4-6"),
+            model_allowed_in_settings(&cfg, &absent, "claude-opus-4-6"),
             Some(true)
         );
         assert_eq!(
-            model_allowed_in_managed_tiers(&managed, "claude-sonnet-4-6"),
+            model_allowed_in_settings(&cfg, &absent, "claude-sonnet-4-6"),
+            Some(false)
+        );
+
+        std::fs::write(
+            &settings,
+            r#"{"availableModels":["claude-sonnet-4-6"],"enforceAvailableModels":false}"#,
+        )
+        .unwrap();
+        let managed = settings_watch::read_managed_settings_snapshot(root.path()).await;
+        assert_eq!(
+            model_allowed_in_settings(&cfg, &managed, "claude-opus-4-6"),
             Some(false)
         );
         assert_eq!(
-            model_allowed_in_managed_tiers(&["{".into()], "claude-opus-4-6"),
+            model_allowed_in_settings(&cfg, &managed, "claude-sonnet-4-6"),
+            Some(true)
+        );
+
+        std::fs::write(&settings, "{").unwrap();
+        let unresolved = settings_watch::read_managed_settings_snapshot(root.path()).await;
+        assert_eq!(
+            model_allowed_in_settings(&cfg, &unresolved, "claude-opus-4-6"),
             Some(false)
         );
     }
 
-    #[test]
-    fn policy_tiers_keep_unknown_keys_and_later_values() {
-        let tiers = [
-            r#"{"enabledPlugins":{"a@org":true},"permissions":{"deny":["Read"],"allow":["Read"]},"custom":"old"}"#.to_owned(),
-            r#"{"enabledPlugins":{"b@org":true},"permissions":{"allow":["Read","Bash"]},"custom":"new","allowManagedModsOnly":true}"#.to_owned(),
-        ];
+    #[tokio::test]
+    async fn policy_selection_keeps_unknown_keys_and_uses_source_merge_order() {
+        let root = tempfile::tempdir().unwrap();
+        let drop_ins = root.path().join("managed-settings.d");
+        std::fs::create_dir_all(&drop_ins).unwrap();
+        std::fs::write(
+            root.path().join("managed-settings.json"),
+            r#"{"enabledPlugins":{"a@org":true},"permissions":{"deny":["Read"],"allow":["Read"]},"custom":"old"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            drop_ins.join("10-org.json"),
+            r#"{"enabledPlugins":{"b@org":true},"permissions":{"allow":["Read","Bash"]},"custom":"new","allowManagedModsOnly":true}"#,
+        )
+        .unwrap();
+        let snapshot = settings_watch::read_managed_settings_snapshot(root.path()).await;
         assert_eq!(
-            view(&managed_view(&tiers)),
+            view(&managed_view(&snapshot).unwrap()),
             json!({
                 "enabledPlugins":{"a@org":true,"b@org":true},
                 "permissions":{"deny":["Read"],"allow":["Read","Bash"]},

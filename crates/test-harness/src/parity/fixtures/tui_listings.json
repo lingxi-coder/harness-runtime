@@ -5,7 +5,7 @@
   "empty_states": {
     "mcp":    "No MCP servers configured. Use `claude mcp add` to add a server.\n",
     "hooks":  "No hooks configured\n",
-    "agents": "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  • .lingxi/agents/       (this project)\n  • ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents"
+    "agents": "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  • .claude/agents/       (this project)\n  • ~/.claude/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents"
   },
   "non_empty_sample": {
     "mcp": {
@@ -25,7 +25,7 @@
       "input": [
         { "name": "reviewer", "description": "Reviews code", "tools_allowed": ["Read", "Grep"] }
       ],
-      "output": "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  • .lingxi/agents/       (this project)\n  • ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents"
+      "output": "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  • .claude/agents/       (this project)\n  • ~/.claude/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents"
     }
   }
 }

@@ -15,11 +15,13 @@ pub mod guest_fs;
 pub mod http;
 pub mod llm_config;
 pub mod mcp_http;
+pub mod mcp_proxy;
 pub mod mcp_remote;
 pub mod mcp_sse;
 pub mod mcp_stdio;
 pub mod mcp_ws;
 pub mod mobile_linux;
+pub mod proxy_auth_helper;
 pub mod worktree_create_guard;
 pub mod worktree_include;
 
@@ -41,4 +43,5 @@ pub use mobile_linux::{
 pub use worktree_create_guard::reject_worktree_create_symlinks;
 pub use worktree_include::copy_worktree_include_files;
 
-pub use http_client::provider_transport;
+pub use http_client::{provider_transport, provider_transport_with_proxy_auth_helper};
+pub use lingxi_llm_client::transport::ProxyAuthHelper;

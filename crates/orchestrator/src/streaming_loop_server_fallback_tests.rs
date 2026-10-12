@@ -4,7 +4,7 @@ use super::*;
 use crate::conversation::ConversationOrchestrator;
 use crate::streaming_executor::StreamingToolExecutor;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
 };
 use crate::test_support_stream::{
     content_block_start_text, content_block_start_thinking, content_block_start_tool_use,
@@ -196,7 +196,10 @@ fn orchestrator_with_fallback_allowlist_for_source(
     query_source: &str,
 ) -> Arc<ConversationOrchestrator> {
     let mut config = crate::OrchestratorConfig::default();
-    config.server_fallback_regular_available_models = Some(allowed_models);
+    config.server_fallback_regular_available_models = Some(
+        Utf16JsonProjection::array(allowed_models.into_iter().map(Into::into).collect())
+            .expect("test model allowlist is an array of strings"),
+    );
     config.query_source = query_source.to_string();
     ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
         config,
@@ -608,9 +611,11 @@ async fn accepted_midstream_hop_replaces_completed_rows_with_the_eligible_incomi
         })
         .collect();
     assert!(query_change_position < discarded_tombstone_positions[0]);
-    assert!(discarded_tombstone_positions
-        .iter()
-        .all(|position| *position < begin_position));
+    assert!(
+        discarded_tombstone_positions
+            .iter()
+            .all(|position| *position < begin_position)
+    );
     let retained_id = turn
         .assistant_rows
         .iter()
@@ -663,9 +668,11 @@ async fn accepted_midstream_hop_replaces_completed_rows_with_the_eligible_incomi
         Some("anthropic-profile")
     );
     assert_eq!(stitched_row.supersedes_row_ids.len(), 1);
-    assert!(stitch
-        .replaces_uuids
-        .contains(&stitched_row.supersedes_row_ids[0]));
+    assert!(
+        stitch
+            .replaces_uuids
+            .contains(&stitched_row.supersedes_row_ids[0])
+    );
     assert_eq!(
         stitched_row.content,
         vec![ContentBlock::Text {
@@ -802,9 +809,11 @@ async fn display_hook_replacement_carries_retained_text_without_rendering_it_ear
     assert_eq!(begins[0].replaces_uuids.len(), 1);
     assert!(!begins[0].display_salvage_text);
     assert_eq!(turn.replacement_message_id, turn.assistant_row_identity);
-    assert!(output_events
-        .iter()
-        .all(|event| !matches!(event, FallbackOutputEvent::Text(_))));
+    assert!(
+        output_events
+            .iter()
+            .all(|event| !matches!(event, FallbackOutputEvent::Text(_)))
+    );
     let text_blocks: Vec<&str> = turn
         .assistant_blocks
         .iter()
@@ -954,9 +963,11 @@ async fn empty_retained_text_removes_only_discarded_tool_cards() {
         event,
         FallbackOutputEvent::Text(text) if text.string_at("") == Some("fresh")
     )));
-    assert!(!output_events
-        .iter()
-        .any(|event| matches!(event, FallbackOutputEvent::RefusalContinuationBegin(_))));
+    assert!(
+        !output_events
+            .iter()
+            .any(|event| matches!(event, FallbackOutputEvent::RefusalContinuationBegin(_)))
+    );
     assert!(turn.replacement_message_id.is_none());
     assert!(turn.assistant_rows.iter().all(|row| {
         !row.content
@@ -1234,14 +1245,18 @@ async fn accepted_visible_hop_without_new_seed_reemits_the_pending_j_begin() {
         })
         .collect();
     assert_eq!(begins.len(), 2);
-    assert!(begins
-        .iter()
-        .all(|call| call.salvage_text == "retained text"));
+    assert!(
+        begins
+            .iter()
+            .all(|call| call.salvage_text == "retained text")
+    );
     assert_eq!(begins[0].replaces_uuids, begins[1].replaces_uuids);
     assert_eq!(turn.assistant_rows.len(), 1);
-    assert!(turn.assistant_rows[0]
-        .supersedes_row_ids
-        .contains(&begins[0].replaces_uuids[0]));
+    assert!(
+        turn.assistant_rows[0]
+            .supersedes_row_ids
+            .contains(&begins[0].replaces_uuids[0])
+    );
     let retained_tombstones: Vec<&TombstoneSummary> = output_events
         .iter()
         .filter_map(|event| match event {
@@ -1669,11 +1684,12 @@ async fn nonvisible_midstream_observation_does_not_replace_display_or_reset_tool
     .await
     .expect("nonvisible observation should remain observational");
 
-    assert!(sink
-        .snapshot()
-        .await
-        .iter()
-        .all(|event| matches!(event, FallbackOutputEvent::AssistantBlockIdentity(_))));
+    assert!(
+        sink.snapshot()
+            .await
+            .iter()
+            .all(|event| matches!(event, FallbackOutputEvent::AssistantBlockIdentity(_)))
+    );
     assert_eq!(turn.tool_uses.len(), 1);
     assert_eq!(turn.tool_uses[0].id, old_tool);
     assert_eq!(turn.server_fallback_events.len(), 1);
@@ -1758,10 +1774,12 @@ async fn server_fallback_tombstones_tools_by_completed_block_index_and_retains_t
         })
         .collect();
     assert_eq!(texts, ["retained textfresh answer"]);
-    assert!(!turn
-        .assistant_blocks
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Thinking { .. })));
+    assert!(
+        !turn
+            .assistant_blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Thinking { .. }))
+    );
     assert_eq!(turn.tool_uses.len(), 1);
     assert_eq!(turn.tool_uses[0].id, new_tool);
     assert_eq!(turn.served_model.as_deref(), Some("fallback-model"));

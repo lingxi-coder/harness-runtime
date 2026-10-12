@@ -62,6 +62,7 @@ impl LocalAgentHandler {
             .content;
         let mut history = Vec::new();
         let mut peer_attachments = Vec::new();
+        let mut native_settings_attachments = Vec::new();
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line).map_err(
                 |error| TaskError::Internal(format!("agent transcript source is invalid: {error}")),
@@ -156,14 +157,21 @@ impl LocalAgentHandler {
                     .map(str::to_owned);
             }
             if let Some(message) = value.get("message") {
-                history.push(
-                    serde_json::from_value::<lingxi_core::types::ConversationMessage>(
-                        message.clone(),
-                    )
-                    .map_err(|error| {
-                        TaskError::Internal(format!("invalid agent transcript message: {error}"))
-                    })?,
-                );
+                let message = serde_json::from_value::<lingxi_core::types::ConversationMessage>(
+                    message.clone(),
+                )
+                .map_err(|error| {
+                    TaskError::Internal(format!("invalid agent transcript message: {error}"))
+                })?;
+                if let Ok(attachment) = source.subprojection("/source_attachment") {
+                    if matches!(
+                        attachment.string_at("/type"),
+                        Some("output_style_instructions" | "language")
+                    ) {
+                        native_settings_attachments.push((message.id(), attachment));
+                    }
+                }
+                history.push(message);
             }
         }
         if history.is_empty() {
@@ -236,6 +244,13 @@ impl LocalAgentHandler {
                 .get_or_insert_with(Default::default)
                 .announcement_history
                 .extend(peer_attachments);
+        }
+        if !native_settings_attachments.is_empty() {
+            request
+                .instruction_context
+                .get_or_insert_with(Default::default)
+                .native_settings_attachments
+                .extend(native_settings_attachments);
         }
         request.prompt = lingxi_core::types::utf16_json::Utf16JsonProjection::from("");
         request.run_in_background = true;

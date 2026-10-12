@@ -6,7 +6,276 @@ use crate::connection::{ConfigScope, McpServerConfig};
 use crate::oauth;
 use lingxi_core::host::McpError;
 use lingxi_core::types::McpConnectionId;
+use std::sync::OnceLock;
 use tokio::sync::broadcast;
+
+/// Sanitize one raw text value through Claude Code 2.1.295's `nl` helper.
+/// This is intentionally separate from [`sanitize_diagnostic`], which ports
+/// `xLt` for ToolSearch notes and does not redact credential-shaped text.
+pub(super) fn sanitize_native_mcp_text(input: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+
+    const INPUT_UTF16_LIMIT: usize = 4096;
+    const OUTPUT_LIMIT: usize = 200;
+    const REDACTION_LOOKAHEAD: usize = 512;
+    const SAFE_INPUT_FLOOR: usize = 2000;
+
+    // Native evaluates nko(CZ(text)): NFKC happens before the 4,096 UTF-16
+    // code-unit cap, and nko replaces controls, format characters, default
+    // ignorables, line separators, and non-ASCII space separators.
+    let normalized: String = input.nfkc().collect();
+    let normalized = native_nko(&normalized, INPUT_UTF16_LIMIT);
+    let safe_limit = SAFE_INPUT_FLOOR.max(OUTPUT_LIMIT + REDACTION_LOOKAHEAD);
+    let was_truncated = utf16_len(&normalized) > safe_limit;
+    let safe_prefix = if was_truncated {
+        truncate_utf16(&normalized, safe_limit)
+    } else {
+        normalized
+    };
+
+    // l5t runs after delimiter/space normalization and before final clipping.
+    let redacted = redact_native_mcp_secrets(&safe_prefix);
+    if was_truncated || utf16_len(&redacted) > OUTPUT_LIMIT {
+        format!("{}…", truncate_utf16(&redacted, OUTPUT_LIMIT))
+    } else {
+        redacted
+    }
+}
+
+fn native_nko(input: &str, limit: usize) -> String {
+    static REPLACED_CHARACTERS: OnceLock<regex::Regex> = OnceLock::new();
+    let replaced_characters = REPLACED_CHARACTERS.get_or_init(|| {
+        regex::Regex::new(
+            r"^[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u2800\p{Zs}]$",
+        )
+        .expect("Native text character classes are valid")
+    });
+
+    let mut sanitized = String::with_capacity(input.len().min(limit));
+    let mut units = 0;
+    for character in input.chars() {
+        let character_units = character.len_utf16();
+        if units + character_units > limit {
+            // Native first slices UTF-16 and replaces an unpaired surrogate
+            // from a split pair with one space.
+            if units < limit {
+                sanitized.push(' ');
+            }
+            break;
+        }
+        units += character_units;
+        if character != ' ' && replaced_characters.is_match(&character.to_string()) {
+            sanitized.push(' ');
+        } else {
+            sanitized.push(character);
+        }
+    }
+
+    let mut collapsed = String::with_capacity(sanitized.len());
+    let mut pending_space = false;
+    for character in sanitized.chars() {
+        if native_nl_delimiter(character) || is_ecmascript_whitespace(character) {
+            pending_space = !collapsed.is_empty();
+            continue;
+        }
+        if pending_space {
+            collapsed.push(' ');
+            pending_space = false;
+        }
+        collapsed.push(character);
+    }
+    collapsed
+}
+
+fn is_ecmascript_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'
+            | '\u{000A}'
+            | '\u{000B}'
+            | '\u{000C}'
+            | '\u{000D}'
+            | ' '
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+    )
+}
+
+fn native_nl_delimiter(character: char) -> bool {
+    matches!(
+        character,
+        '<' | '>'
+            | '"'
+            | ';'
+            | '\u{2018}'
+            | '\u{2019}'
+            | '\u{201A}'
+            | '\u{201C}'
+            | '\u{201D}'
+            | '\u{201E}'
+            | '\u{00AB}'
+            | '\u{00BB}'
+            | '\u{2039}'
+            | '\u{203A}'
+            | '\u{2329}'
+            | '\u{232A}'
+            | '\u{27E8}'
+            | '\u{27E9}'
+            | '\u{27EA}'
+            | '\u{27EB}'
+            | '\u{3008}'
+            | '\u{3009}'
+            | '\u{300A}'
+            | '\u{300B}'
+    )
+}
+
+fn utf16_len(input: &str) -> usize {
+    input.encode_utf16().count()
+}
+
+fn truncate_utf16(input: &str, limit: usize) -> String {
+    let mut units = 0;
+    let mut end = 0;
+    for (byte_index, character) in input.char_indices() {
+        let character_units = character.len_utf16();
+        if units + character_units > limit {
+            break;
+        }
+        units += character_units;
+        end = byte_index + character.len_utf8();
+    }
+    input[..end].to_owned()
+}
+
+fn redact_native_mcp_secrets(input: &str) -> String {
+    static BEARER_SECRET: OnceLock<fancy_regex::Regex> = OnceLock::new();
+    static LABELED_SECRET: OnceLock<fancy_regex::Regex> = OnceLock::new();
+
+    const SECRET_LABEL: &str = r"(?:access[-_ ]?|refresh[-_ ]?|id[-_ ]?|client[-_ ]?|api[-_ ]?|x[-_]api[-_ ]?|session[-_ ]?|auth[-_ ]?)?(?:token|key|secret|password|authorization|credential)s?";
+
+    let token_start = format!(
+        r#"\b{SECRET_LABEL}(?:\\*["']|\+)?\s*[:=\uFF1A\uFF1D]\s*(?:\\*["']|\+)?\s*(?!=*{SECRET_LABEL}=*(?![A-Za-z0-9._~+/=%-]))(?=[A-Za-z0-9._~+/=%-]{{8}})[A-Za-z]*[0-9._~+/=%-]"#
+    );
+    let token_value =
+        format!(r"(?:[A-Za-z0-9._~+/=%-]+?(?={token_start})|[A-Za-z0-9._~+/=%-]{{8,}})");
+    let bearer_secret = BEARER_SECRET.get_or_init(|| {
+        fancy_regex::RegexBuilder::new(&format!(
+            r#"(?:\b|(?<=\\[A-Za-z"']))(bearer|basic)(?![\s:=\uFF1A\uFF1D]+(?:(?:\\*["']|\+)\s*)?{SECRET_LABEL}=*(?![A-Za-z0-9._~+/=%-]))[\s:=\uFF1A\uFF1D]+(?:(?:\\*["']|\+)\s*)?({token_value})"#
+        ))
+        .case_insensitive(true)
+        .unicode_mode(false)
+        .build()
+        .expect("Native bearer credential expression is valid")
+    });
+    let labeled_secret = LABELED_SECRET.get_or_init(|| {
+        fancy_regex::RegexBuilder::new(&format!(
+            r#"(?:\b|(?<=\\[A-Za-z"']))({SECRET_LABEL})(?:\\*["']|\+)?\s*[:=\uFF1A\uFF1D]\s*(?:\\*["']|\+)?\s*(?!=*{SECRET_LABEL}=*(?![A-Za-z0-9._~+/=%-]))({token_value})"#
+        ))
+        .case_insensitive(true)
+        .unicode_mode(false)
+        .build()
+        .expect("Native labeled credential expression is valid")
+    });
+
+    let input = redact_matches(input, bearer_secret);
+    redact_matches(&input, labeled_secret)
+}
+
+fn redact_matches(input: &str, expression: &fancy_regex::Regex) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut copied_through = 0;
+    for capture in expression.captures_iter(input) {
+        let Ok(capture) = capture else {
+            // The source regex has no explicit backtracking limit. If the
+            // compatible regex engine reaches its default execution bound,
+            // preserve the conservative redaction result.
+            return "[redacted]".to_owned();
+        };
+        let Some(matched) = capture.get(0) else {
+            continue;
+        };
+        let Some(label) = capture.get(1) else {
+            continue;
+        };
+        let Some(secret) = capture.get(2) else {
+            continue;
+        };
+        if !secret.as_str().chars().any(native_secret_marker) {
+            continue;
+        }
+
+        output.push_str(&input[copied_through..matched.start()]);
+        output.push_str(label.as_str());
+        output.push_str(" [redacted]");
+        if input[matched.end()..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            output.push(' ');
+        }
+        copied_through = matched.end();
+    }
+    output.push_str(&input[copied_through..]);
+    output
+}
+
+fn native_secret_marker(character: char) -> bool {
+    character.is_ascii_digit() || matches!(character, '.' | '_' | '~' | '+' | '/' | '=' | '%' | '-')
+}
+
+pub(super) fn sanitize_native_mcp_projection(
+    value: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    let text = value
+        .string_units("")
+        .map(|units| decode_utf16_invalid_as_spaces(&units))
+        .map(|text| sanitize_native_mcp_text(&text))
+        .unwrap_or_default();
+    Utf16JsonProjection::root_string(text.clone(), text.encode_utf16().collect())
+        .expect("sanitized failure text is valid UTF-16")
+}
+
+fn decode_utf16_invalid_as_spaces(units: &[u16]) -> String {
+    let mut text = String::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit) {
+            if let Some(low) = units
+                .get(index + 1)
+                .copied()
+                .filter(|low| (0xDC00..=0xDFFF).contains(low))
+            {
+                let scalar =
+                    0x10000 + ((u32::from(unit) - 0xD800) << 10) + (u32::from(low) - 0xDC00);
+                text.push(char::from_u32(scalar).expect("valid UTF-16 pair"));
+                index += 2;
+            } else {
+                text.push(' ');
+                index += 1;
+            }
+        } else if (0xDC00..=0xDFFF).contains(&unit) {
+            text.push(' ');
+            index += 1;
+        } else {
+            text.push(char::from_u32(u32::from(unit)).expect("non-surrogate UTF-16 unit"));
+            index += 1;
+        }
+    }
+    text
+}
 
 /// Sanitize a model-visible diagnostic string (an MCP server name or failure
 /// message) — a 1:1 port of claude-code's `xLt`, used to build the `ToolSearch`

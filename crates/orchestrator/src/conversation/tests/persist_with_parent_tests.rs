@@ -1237,9 +1237,10 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
     )
     .await;
 
+    let message_id = lingxi_core::types::MessageId::new();
     let msg = ConversationMessage::User {
         api_message_override: None,
-        id: lingxi_core::types::MessageId::new(),
+        id: message_id.clone(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
             content: crate::tool_result_text::root_text("a"),
@@ -1257,6 +1258,21 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
     };
     orch.persist_message_to_jsonl_with_parent(&msg, Some(assistant_uuid.clone()))
         .await;
+
+    let retained_result = {
+        let session = orch.session.lock().await;
+        session
+            .native_request_history
+            .task_delivery_envelopes
+            .get(&message_id)
+            .and_then(|envelope| envelope.tool_use_result.clone())
+            .expect("hot request-history sidecar retains the raw toolUseResult")
+    };
+    assert!(retained_result.semantically_eq(&source_literal!({
+        "stdout":"a\n",
+        "stderr":"",
+        "interrupted":false
+    })));
 
     let raw = std::fs::read_to_string(&session_path).expect("session file");
     let line = raw.lines().nth(1).expect("tool_result line");

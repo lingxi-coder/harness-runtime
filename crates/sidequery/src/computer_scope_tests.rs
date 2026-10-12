@@ -96,6 +96,8 @@ async fn direct_plain_and_strict_queries_ignore_the_parent_computer_continuation
                     model: "model".into(),
                     profile: Some("test".into()),
                     system_prompt: None,
+                    typed_attachment_ids: std::collections::HashSet::new(),
+                    task_deliveries: std::collections::HashMap::new(),
                     system_prompt_input: None,
                     messages: messages.clone(),
                     tools: vec![],
@@ -142,7 +144,7 @@ async fn direct_plain_and_strict_queries_ignore_the_parent_computer_continuation
 }
 
 #[tokio::test]
-async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog() {
+async fn session_compaction_fork_preserves_typed_attachment_bytes_and_function_catalog() {
     use crate::{CacheSafeParams, ForkedAgentRequest, ForkedAgentRunner};
     use llm_runtime::computer::ComputerNativeDeclaration;
     use wire_sdk::protocol::computer::{
@@ -184,7 +186,13 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
         strict: false,
         defer_loading: false,
     }];
-    let prefix = vec![user("early context")];
+    let typed_attachment_id = MessageId::new();
+    let typed_attachment_ids: std::collections::HashSet<MessageId> =
+        [typed_attachment_id.clone()].into_iter().collect();
+    let prefix = vec![
+        user("early context"),
+        ConversationMessage::user(typed_attachment_id, "typed attachment".into()),
+    ];
     let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "model".into());
     scope_computer_request(
         Some(ComputerRequestProjection {
@@ -210,6 +218,8 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
                     model: "model".into(),
                     profile: Some("test".into()),
                     system_prompt: None,
+                    typed_attachment_ids: typed_attachment_ids.clone(),
+                    task_deliveries: std::collections::HashMap::new(),
                     system_prompt_input: None,
                     messages: prefix.clone(),
                     tools: llm_runtime::convert::to_tool_declarations(tools.clone()).unwrap(),
@@ -252,6 +262,8 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
                         effort: None,
                         fork_context_messages: prefix.clone(),
                         transcript_path: None,
+                        typed_attachment_ids: typed_attachment_ids.clone(),
+                        task_deliveries: std::collections::HashMap::new(),
                         generation: 1,
                     },
                     fork_label: "compaction".into(),
@@ -267,6 +279,15 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
             assert!(requests[0]["tools"][0]["input_schema"].is_object());
             assert!(requests[0].to_string().contains("early context"));
             assert!(requests[0].to_string().contains("summarize all context"));
+            let messages = requests[0]["messages"].as_array().expect("messages array");
+            assert_eq!(messages.len(), 1, "cached and fork user rows merge");
+            let content = messages[0]["content"].as_array().expect("content blocks");
+            assert_eq!(content[0]["text"], "early context");
+            assert_eq!(
+                content[1]["text"], "typed attachment\n",
+                "the typed cached row joins without an LF seam; only the next ordinary prompt gets the Native LF"
+            );
+            assert_eq!(content[2]["text"], "summarize all context");
         },
     )
     .await;

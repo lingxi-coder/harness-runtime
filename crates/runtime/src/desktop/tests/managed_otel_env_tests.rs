@@ -30,7 +30,10 @@ async fn production_loader_threads_nested_managed_env_into_otel_config() {
     let previous_managed_dir = std::env::var_os(super::settings_watch::MANAGED_DIR_ENV);
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
-    let managed = super::managed_otel_env_overrides().await;
+    let cfg = super::DesktopConfig::default();
+    cfg.managed_policy_snapshot_cache
+        .replace(super::settings_watch::read_managed_settings_snapshot(tmp.path()).await);
+    let managed = super::managed_otel_env_overrides(&cfg).await;
     if let Some(value) = previous_managed_dir {
         std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, value);
     } else {

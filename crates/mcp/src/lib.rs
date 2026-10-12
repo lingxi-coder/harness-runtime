@@ -104,8 +104,9 @@ pub use client::{
     MAX_MCP_DIRECTORY_PAGES,
 };
 pub use connection::{
-    ConfigScope, McpAgentSource, McpConnectionState, McpServerConfig, McpServerMetadata,
-    McpServerRole,
+    ConfigScope, McpAgentSource, McpConnectionFailure, McpConnectionState, McpDroppedToolRecord,
+    McpDroppedToolServerSnapshot, McpFailedServerSnapshot, McpNeedsAuthServerSnapshot,
+    McpServerConfig, McpServerMetadata, McpServerRole,
 };
 pub use discovery_cache::{
     cache_gate, cache_gate_with_metadata, decide, decide_with_metadata,

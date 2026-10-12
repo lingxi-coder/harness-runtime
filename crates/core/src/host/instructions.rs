@@ -125,6 +125,13 @@ pub struct InstructionContext {
     /// recovers these from existing attachment rows, never from reminder prose.
     #[serde(skip)]
     pub announcement_history: Vec<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Typed output-style/language rows retained by an independently resumed
+    /// query. These remain separate from user-context instruction sources.
+    #[serde(skip)]
+    pub native_settings_attachments: Vec<(
+        crate::types::MessageId,
+        crate::types::utf16_json::Utf16JsonProjection,
+    )>,
     #[serde(default)]
     pub user_context: BTreeMap<String, String>,
     /// JavaScript insertion order of the inherited userContext object.

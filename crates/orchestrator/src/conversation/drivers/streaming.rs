@@ -170,6 +170,10 @@ struct PumpedStreamingIteration<'a> {
     api_success_message_count: u32,
     api_success_message_tokens: u64,
     did_fall_back_to_non_streaming: bool,
+    /// Exact physical history for the successful stream or its recovery request.
+    cache_request_history: Vec<ConversationMessage>,
+    /// Inline Native context is removed from cache-safe fork history by identity.
+    cache_inline_context: Option<ConversationMessage>,
     /// PTL/529 rows passed through session.append before W1 dispatch, so the
     /// terminal per-block writer must not dispatch the hook again.
     assistant_session_append_dispatched: bool,
@@ -189,6 +193,7 @@ enum StreamErrorFallback<'a> {
     Recovered {
         pumped: crate::streaming_loop::PumpedTurn,
         executor: crate::streaming_executor::StreamingToolExecutor<'a>,
+        request_history: Vec<ConversationMessage>,
         cost_receipt: Option<cost::CostResponseReceipt>,
     },
     Declined(MessageId),
@@ -239,6 +244,9 @@ fn mod_turn_step_stream(
     output: Arc<dyn lingxi_core::host::OutputStream>,
     main_api: Arc<dyn crate::conversation::OrchestratorApiClient>,
     model_policy: Option<Arc<dyn hooks::mods::ModSettingsReader>>,
+    catalog_restriction: llm_runtime::model::allowlist::CatalogRestriction,
+    model_overrides: std::collections::BTreeMap<String, String>,
+    default_model: String,
     input: serde_json::Value,
     model_profile: Option<String>,
     system_prompt: Option<
@@ -258,6 +266,11 @@ fn mod_turn_step_stream(
     request_capture: llm_runtime::prompt_cache::RequestCapture,
     request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
     native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+    typed_attachment_ids: std::collections::HashSet<MessageId>,
+    task_deliveries: std::collections::HashMap<
+        lingxi_core::types::MessageId,
+        lingxi_core::host::task_delivery::TaskDeliveryRequest,
+    >,
 ) -> (
     futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
     Arc<StdMutex<Option<(String, Option<String>)>>>,
@@ -293,6 +306,8 @@ fn mod_turn_step_stream(
             let fallback_tool_result_reminder_suffixes = tool_result_reminder_suffixes.clone();
             let fallback_native_anthropic_request_context =
                 native_anthropic_request_context.clone();
+            let fallback_typed_attachment_ids = typed_attachment_ids.clone();
+            let fallback_task_deliveries = task_deliveries.clone();
             let fallback_publication_guards = publication_guards.clone();
             let fallback_query_source = query_source.clone();
             let fallback_observation = observation.clone();
@@ -303,12 +318,17 @@ fn mod_turn_step_stream(
             let source_request_capture = request_capture.clone();
             let source_tool_result_reminder_suffixes = tool_result_reminder_suffixes.clone();
             let source_native_anthropic_request_context = native_anthropic_request_context.clone();
+            let source_typed_attachment_ids = typed_attachment_ids;
+            let source_task_deliveries = task_deliveries;
             let source_dispatch_observer = request_dispatch_observer.clone();
             let source_output = output.clone();
             let source = move |forwarded: Utf16JsonProjection| {
                 let api = api.clone();
                 let main_api = main_api.clone();
                 let model_policy = model_policy.clone();
+                let catalog_restriction = catalog_restriction.clone();
+                let model_overrides = model_overrides.clone();
+                let default_model = default_model.clone();
                 let original_model = model.clone();
                 let original_effort = original_effort.clone();
                 let model_profile = model_profile.clone();
@@ -329,23 +349,75 @@ fn mod_turn_step_stream(
                 let tool_result_reminder_suffixes = source_tool_result_reminder_suffixes.clone();
                 let native_anthropic_request_context =
                     source_native_anthropic_request_context.clone();
+                let typed_attachment_ids = source_typed_attachment_ids.clone();
+                let task_deliveries = source_task_deliveries.clone();
                 async move {
                     let requested = forwarded.string_at("/model").unwrap_or_default().to_owned();
+                    let default_sentinel =
+                        lingxi_core::host::effort::trim_js_whitespace(&requested)
+                            .eq_ignore_ascii_case("default");
+                    let route_model = if default_sentinel {
+                        default_model.as_str()
+                    } else {
+                        requested.as_str()
+                    };
+                    let route_profile = if default_sentinel {
+                        None
+                    } else {
+                        model_profile.as_deref()
+                    };
                     let resolved = main_api
-                        .resolve_media_route(&requested, model_profile.as_deref())
-                        .or_else(|_| main_api.resolve_media_route(&requested, None))
+                        .resolve_media_route(route_model, route_profile)
+                        .or_else(|_| main_api.resolve_media_route(route_model, None))
                         .ok();
-                    let resolved_model = resolved.as_ref().map_or(requested.as_str(), |route| {
-                        route.main.request_model.as_str()
-                    });
-                    let denied = if let Some(policy) = model_policy.as_ref() {
-                        policy.model_allowed(resolved_model).await? == Some(false)
+                    let resolved_model = resolved
+                        .as_ref()
+                        .map_or(route_model, |route| route.main.request_model.as_str());
+                    let is_explicit_model_override = requested.as_str() != original_model.as_str();
+                    let native_catalog_route = resolved.as_ref().is_some_and(
+                        crate::ConversationOrchestrator::route_uses_native_model_catalog,
+                    );
+                    let same_active_model = is_explicit_model_override
+                        && crate::ConversationOrchestrator::same_native_model_identity(
+                            main_api.as_ref(),
+                            route_model,
+                            route_profile,
+                            &original_model,
+                            model_profile.as_deref(),
+                        );
+                    let same_default_model = is_explicit_model_override
+                        && crate::ConversationOrchestrator::matches_native_default_model_identity(
+                            main_api.as_ref(),
+                            route_model,
+                            route_profile,
+                            &default_model,
+                            None,
+                        );
+                    let denied = if is_explicit_model_override
+                        && native_catalog_route
+                        && !same_active_model
+                        && !same_default_model
+                    {
+                        let from_reader = if let Some(policy) = model_policy.as_ref() {
+                            policy.model_allowed(resolved_model).await?
+                        } else {
+                            None
+                        };
+                        !from_reader.unwrap_or_else(|| {
+                            llm_runtime::model::allowlist::model_allowed_under_catalog(
+                                resolved_model,
+                                &catalog_restriction,
+                                Some(&model_overrides),
+                            )
+                        })
                     } else {
                         false
                     };
                     let model = if denied {
                         tracing::warn!(requested, "turn.step model rewrite denied by policy");
                         original_model
+                    } else if default_sentinel {
+                        resolved_model.to_owned()
                     } else {
                         requested
                     };
@@ -354,7 +426,11 @@ fn mod_turn_step_stream(
                     } else {
                         resolved
                             .map(|route| route.main.profile_name)
-                            .or(model_profile)
+                            .or(if default_sentinel {
+                                None
+                            } else {
+                                model_profile
+                            })
                     };
                     let effort_override = forwarded
                         .string_at("/effort")
@@ -391,6 +467,8 @@ fn mod_turn_step_stream(
                             request_dispatch_admission,
                             request_dispatch_observer.clone(),
                             native_anthropic_request_context,
+                            typed_attachment_ids,
+                            task_deliveries,
                         )))
                         .await
                         .map_err(|error| {
@@ -569,6 +647,8 @@ fn mod_turn_step_stream(
                                         &fallback_output,
                                     ),
                                     fallback_native_anthropic_request_context.clone(),
+                                    fallback_typed_attachment_ids,
+                                    fallback_task_deliveries,
                                 ),
                             ))
                             .await;
@@ -741,7 +821,7 @@ impl StreamingTurnDriver<'_> {
         // `select!`, because that discards in-flight tool results (see the
         // DEFERRED-3 note on `run_turn_streaming_inputs_locked`).
         let is_regular_user_prompt = orch.regular_user_prompt_for_model_step().await;
-        let prepared = if let Some(previous) = previous_step {
+        let mut prepared = if let Some(previous) = previous_step {
             orch.reprepare_model_fallback(system_prompt.as_ref(), user_cancel.as_ref(), previous)
                 .await?
         } else {
@@ -754,6 +834,11 @@ impl StreamingTurnDriver<'_> {
             )
             .await?
         };
+        // A cancelled preparation has not been admitted. Keep request-context
+        // and shared context attachments staged for the next accepted turn.
+        if !token_aborted(user_cancel) {
+            orch.persist_prepared_turn_attachments(&mut prepared).await;
+        }
 
         // Capture the originating cost scope so a later session switch cannot
         // redirect observed usage to the active session. This used to be read
@@ -909,6 +994,7 @@ impl StreamingTurnDriver<'_> {
             skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
+            ..
         } = step;
         let tool_declarations = llm_runtime::convert::to_tool_declarations(wire_tools.clone())
             .map_err(OrchestratorError::ApiCall)?;
@@ -917,7 +1003,7 @@ impl StreamingTurnDriver<'_> {
             &mut turn_reminders,
             &mut guarded_async_hook_reminders,
         );
-        let query_history = snapshot.clone();
+        let mut query_history = snapshot.clone();
 
         let mut exec = match &user_cancel {
             Some(token) => {
@@ -982,6 +1068,12 @@ impl StreamingTurnDriver<'_> {
             &mut turn_reminders,
             &mut guarded_async_hook_reminders,
         );
+        // This is the last async-hook generation fence before the physical
+        // request; cache persistence and later tool dispatch use this exact
+        // projection rather than the earlier pre-fence clone.
+        query_history.clone_from(&snapshot);
+        let typed_attachment_ids = orch.typed_attachment_ids_for_snapshot(&snapshot);
+        let task_deliveries = orch.task_deliveries_for_snapshot(&snapshot).await;
         let turn_step_hook_active = mod_host.is_some();
         let mut mod_model_state = None;
         let stream_result = if let Some(host) = mod_host {
@@ -1006,6 +1098,9 @@ impl StreamingTurnDriver<'_> {
                 orch.output.clone(),
                 orch.api.clone(),
                 orch.mod_settings_reader.clone(),
+                orch.config.model_catalog_restriction.clone(),
+                orch.config.server_fallback_regular_model_overrides.clone(),
+                orch.config.model.clone(),
                 input,
                 model_profile.clone(),
                 system_prompt.clone(),
@@ -1020,6 +1115,8 @@ impl StreamingTurnDriver<'_> {
                 orch.model_runtime.prompt_cache_capture.clone(),
                 orch.turn_request_dispatch_observer(),
                 native_anthropic_request_context.clone(),
+                typed_attachment_ids.clone(),
+                task_deliveries.clone(),
             );
             mod_model_state = Some(effective_model.clone());
             // Poll one item before returning so connect-phase provider errors
@@ -1072,6 +1169,8 @@ impl StreamingTurnDriver<'_> {
                         request_dispatch_admission,
                         observe_main_dispatch(orch.turn_request_dispatch_observer(), &orch.output),
                         native_anthropic_request_context.clone(),
+                        typed_attachment_ids,
+                        task_deliveries,
                     ),
                 ))
                 .await
@@ -1082,6 +1181,7 @@ impl StreamingTurnDriver<'_> {
                     )
                 })
         };
+        orch.record_native_afk_beta_rejection_if_any();
         orch.persist_thinking_signature_strip_latch().await;
         // Cancellation can arrive while the HTTP connection is still opening.
         // Its terminal result must not turn a closed/empty response into an
@@ -1120,7 +1220,7 @@ impl StreamingTurnDriver<'_> {
                     && retry_scope.take_non_streaming_fallback() =>
             {
                 did_fall_back_to_non_streaming = true;
-                match Self::fallback_after_stream_error(
+                let fallback_result = Self::fallback_after_stream_error(
                     orch,
                     OrchestratorError::Streaming(error),
                     outgoing_history_rewriter.as_ref(),
@@ -1142,14 +1242,17 @@ impl StreamingTurnDriver<'_> {
                     retry_scope,
                     false,
                 )
-                .await
-                {
+                .await;
+                orch.record_native_afk_beta_rejection_if_any();
+                match fallback_result {
                     Ok(StreamErrorFallback::Recovered {
                         pumped,
                         executor,
+                        request_history,
                         cost_receipt: fallback_cost_receipt,
                     }) => {
                         exec = executor;
+                        query_history = request_history;
                         cost_receipt = fallback_cost_receipt;
                         OpenedModelStream::Recovered(pumped)
                     }
@@ -1237,7 +1340,7 @@ impl StreamingTurnDriver<'_> {
                     model: recov_model.clone(),
                     profile: recov_profile.clone(),
                 });
-                let recovered = call_api_with_ptl_recovery(
+                let recovered_result = call_api_with_ptl_recovery(
                     orch,
                     system_prompt.as_ref(),
                     skip_global_cache_for_system_prompt,
@@ -1256,7 +1359,9 @@ impl StreamingTurnDriver<'_> {
                     cost_scope.as_ref(),
                     native_anthropic_request_context.clone(),
                 )
-                .await?;
+                .await;
+                orch.record_native_afk_beta_rejection_if_any();
+                let recovered = recovered_result?;
                 let mut no_snapshot = Vec::new();
                 crate::prompt::async_hook_response::retain_current_async_hook_reminders(
                     &mut no_snapshot,
@@ -1268,6 +1373,7 @@ impl StreamingTurnDriver<'_> {
                         response: resp,
                         request_history,
                     } => {
+                        query_history = request_history.clone();
                         // Replay the recovered non-streaming response exactly
                         // like the 529 fallback below: emit text live, rebuild
                         // a fresh executor, register its tool_uses, and flow on
@@ -1589,6 +1695,10 @@ impl StreamingTurnDriver<'_> {
                                     skip_global_cache_for_system_prompt;
                                 request.opts.native_anthropic_request_context =
                                     native_anthropic_request_context.clone();
+                                request.opts.typed_attachment_ids =
+                                    orch.typed_attachment_ids_for_snapshot(&request.messages);
+                                request.opts.task_deliveries =
+                                    orch.task_deliveries_for_snapshot(&request.messages).await;
                                 request.opts.request_dispatch_admission =
                                     request_dispatch_admission;
                                 request.opts.request_dispatch_observer =
@@ -1770,6 +1880,7 @@ impl StreamingTurnDriver<'_> {
         Ok(StreamErrorFallback::Recovered {
             pumped: pumped_from_fallback,
             executor: exec,
+            request_history,
             cost_receipt,
         })
     }
@@ -1864,6 +1975,8 @@ impl StreamingTurnDriver<'_> {
             mut cost_receipt,
             retry_scope: _,
         } = opened_iteration;
+        let mut cache_request_history = query_history.clone();
+        let cache_inline_context = context_announcements.inline_context.clone();
         let mut assistant_session_append_dispatched =
             matches!(&opened, OpenedModelStream::Recovered(_));
         // Polling the stream can start tool execution immediately. Snapshot
@@ -1947,6 +2060,7 @@ impl StreamingTurnDriver<'_> {
                             },
                         )
                         .await;
+                    orch.record_native_afk_beta_rejection_if_any();
                     if let Err(error) = orch.check_output_accounting() {
                         let retained = match &observed_pump {
                             Ok((pumped, _)) => pumped,
@@ -2136,6 +2250,10 @@ impl StreamingTurnDriver<'_> {
                                     &re_snapshot,
                                     &guarded_async_hook_reminders,
                                 );
+                            let typed_attachment_ids =
+                                orch.typed_attachment_ids_for_snapshot(&re_snapshot);
+                            let task_deliveries =
+                                orch.task_deliveries_for_snapshot(&re_snapshot).await;
                             let retry_stream = retry_scope
                                 .run(
                                     orch.model_runtime.prompt_cache_capture.scope(
@@ -2160,6 +2278,8 @@ impl StreamingTurnDriver<'_> {
                                                 &orch.output,
                                             ),
                                             native_anthropic_request_context.clone(),
+                                            typed_attachment_ids,
+                                            task_deliveries,
                                         ),
                                     ),
                                 )
@@ -2464,7 +2584,7 @@ impl StreamingTurnDriver<'_> {
                                             | LlmError::ProviderTimeout { .. }
                                     )
                             );
-                        match Self::fallback_after_stream_error(
+                        let fallback_result = Self::fallback_after_stream_error(
                                 orch,
                                 f.error,
                                 outgoing_history_rewriter.as_ref(),
@@ -2486,14 +2606,17 @@ impl StreamingTurnDriver<'_> {
                                 &retry_scope,
                                 failed_stream_outlasted_timeout,
                             )
-                            .await?
-                        {
+                            .await;
+                        orch.record_native_afk_beta_rejection_if_any();
+                        match fallback_result? {
                             StreamErrorFallback::Recovered {
                                 pumped,
                                 executor,
+                                request_history,
                                 cost_receipt: fallback_cost_receipt,
                             } => {
                                 exec = executor;
+                                cache_request_history = request_history;
                                 cost_receipt = fallback_cost_receipt;
                                 assistant_session_append_dispatched = true;
                                 (pumped, None)
@@ -2662,6 +2785,8 @@ impl StreamingTurnDriver<'_> {
             api_success_message_count,
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
+            cache_request_history,
+            cache_inline_context,
             assistant_session_append_dispatched,
             pre_batch_mcp_tool_count,
             cost_receipt,
@@ -2694,6 +2819,8 @@ impl StreamingTurnDriver<'_> {
             api_success_message_count,
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
+            cache_request_history,
+            cache_inline_context,
             assistant_session_append_dispatched,
             pre_batch_mcp_tool_count,
             cost_receipt,
@@ -2799,8 +2926,16 @@ impl StreamingTurnDriver<'_> {
         // `session.history` here equals the streamed snapshot — the streaming
         // path does not mutate history mid-call — taken before the assistant
         // reply is appended below. Strict no-op when no slot is wired.
-        orch.save_cache_safe_params(system_prompt.as_ref(), &model, &wire_tools)
+        if partial_finalize.is_none() {
+            orch.save_cache_safe_params_for_request(
+                system_prompt.as_ref(),
+                &model,
+                &wire_tools,
+                &cache_request_history,
+                cache_inline_context.as_ref(),
+            )
             .await;
+        }
 
         // Task 8 (llm-runtime future-work batch 3): the streamed call (or
         // its non-streaming 529 fallback) completed — forward the
@@ -2835,6 +2970,12 @@ impl StreamingTurnDriver<'_> {
         {
             return Ok(FinalizedStreamingIteration::Complete(assistant_id));
         }
+        orch.record_main_loop_assistant_usage(
+            &assistant_msg,
+            pumped.served_model.as_deref().unwrap_or(&model),
+            pumped.usage.as_ref(),
+        )
+        .await;
         // The first-frame metric is latched at event receipt. Publish TTFT
         // only once the assistant row passes the conversation's guard.
         pumped.commit_accepted_assistant_timing();
@@ -3694,24 +3835,30 @@ impl StreamingTurnDriver<'_> {
             Some(inputs) => {
                 let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
                 let mut attached_images = Some(images);
-                inputs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, input)| {
-                        let message_images = if index == image_owner {
-                            attached_images.take().unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
-                        let message = super::user_message_from_projection(
-                            input.message_id.unwrap_or_default(),
-                            &input.text,
-                            input.is_meta,
-                            message_images,
-                        );
-                        (input, message)
-                    })
-                    .collect()
+                let mut submissions = Vec::with_capacity(inputs.len());
+                for (index, input) in inputs.into_iter().enumerate() {
+                    let message_images = if index == image_owner {
+                        attached_images.take().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let mut message = super::user_message_from_projection(
+                        input.message_id.unwrap_or_default(),
+                        &input.text,
+                        input.is_meta,
+                        message_images,
+                    );
+                    orch.apply_native_user_message_source(
+                        &mut message,
+                        &crate::native_user_message_source::NativeUserMessageSource {
+                            message_origin: input.message_origin.clone(),
+                            prompt_source: input.prompt_source.clone(),
+                        },
+                    )
+                    .await;
+                    submissions.push((input, message));
+                }
+                submissions
             }
             None => {
                 let mut message = super::user_message_from_projection(
@@ -3720,6 +3867,10 @@ impl StreamingTurnDriver<'_> {
                     !in_human_turn,
                     images,
                 );
+                let native_source =
+                    crate::native_user_message_source::current().unwrap_or_default();
+                orch.apply_native_user_message_source(&mut message, &native_source)
+                    .await;
                 if let (Some(projected), ConversationMessage::User { content, .. }) =
                     (projected_content, &mut message)
                 {
@@ -3760,9 +3911,19 @@ impl StreamingTurnDriver<'_> {
                 .map(ConversationMessage::id)
         };
         if !transient_rewake {
-            for ((input, message), context) in submissions.iter().zip(&mod_contexts) {
+            for (index, ((input, message), context)) in
+                submissions.iter().zip(&mod_contexts).enumerate()
+            {
                 orch.session.lock().await.history.push(message.clone());
                 orch.persist_queued_message_to_jsonl(message, input).await;
+                if index == primary && !input.is_meta {
+                    crate::request_context::persist_prompt_ingress_after_user(
+                        orch,
+                        message.id(),
+                        true,
+                    )
+                    .await;
+                }
                 orch.append_mod_prompt_context(context).await;
             }
         }

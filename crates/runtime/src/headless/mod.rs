@@ -167,6 +167,7 @@ pub struct HeadlessExit {
 pub(crate) struct HeadlessRuntime {
     inner: crate::desktop::DesktopRuntime,
     pub(crate) services: Arc<dyn HeadlessHostServices>,
+    native_catalog_user_agent: Option<llm_runtime::model::user_agent::UserAgentEnv>,
     pub(crate) output: io::Output,
     pub(crate) stdout: io::Output,
     pub(crate) shutdown: CancellationToken,
@@ -199,6 +200,15 @@ impl HeadlessRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = token.clone();
         token
+    }
+    pub(crate) async fn headless_command_catalog(&self) -> command_api::HeadlessCommandCatalog {
+        host::configure_native_command_catalog(
+            &self.inner,
+            self.native_catalog_user_agent.as_ref(),
+            self.services.as_ref(),
+        )
+        .await;
+        self.dispatcher.headless_command_catalog().await
     }
     fn interrupt(&self) {
         self.active_turn
@@ -639,6 +649,7 @@ async fn run_owned(
         None
     };
     config.desktop.diagnostics = Some(Arc::new(HeadlessDesktopDiagnostics(io.stderr.clone())));
+    let native_catalog_user_agent = config.desktop.user_agent_environment.clone();
     let inner = match session::build_prepared(
         config.desktop,
         prepared,
@@ -666,6 +677,7 @@ async fn run_owned(
     let runtime = Arc::new(HeadlessRuntime {
         inner,
         services,
+        native_catalog_user_agent: native_catalog_user_agent.clone(),
         output: io.stderr.clone(),
         stdout: io.stdout.clone(),
         shutdown: CancellationToken::new(),
@@ -721,6 +733,12 @@ async fn run_owned(
         close_prepared_stdio(&mut prepared_stdio, stream.as_deref(), &mut exit).await;
         return finish_delivery(exit, &io.stdout, &io.stderr, &last_signal, input_format).await;
     }
+    host::configure_native_command_catalog(
+        &runtime.inner,
+        native_catalog_user_agent.as_ref(),
+        runtime.services.as_ref(),
+    )
+    .await;
     *runtime_slot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime.clone());

@@ -9,3 +9,9 @@
 
 crates/tools/skill/src/prompt_shell.rs:CLAUDECODE  # 上游标记，唯一消费者是用户自己的 rc 文件（仓库外）。Plan B 前不动。
 crates/mcp/src/headers_helper.rs:CLAUDE_PLUGIN_ROOT  # 已安装插件的 headersHelper 脚本键入的已发布名。Plan B 才移除。
+
+# R30 reviewed source-parity fixture identities.
+crates/llm-runtime/tests/provider_services.rs:LINGXI_SERVICE_CREDENTIAL_TEST_CHILD  # Exact child-process fixture marker; does not define a public SDK provider or product namespace.
+crates/llm-runtime/tests/provider_services.rs:LINGXI_EXACT_AUDIO_CREDENTIAL_SOURCE  # Fixture configures and loads this exact environment credential name to verify source ownership.
+crates/orchestrator/src/conversation/native_classifier_context.rs:.lingxi  # Classifier tests seed the actual branded settings root; retaining branding is an approved difference.
+crates/runtime/src/headless/sdk_input_queue.rs:This is how LingXi  # Headless regression checks the actual branded interruption text; retained product name is intentional.

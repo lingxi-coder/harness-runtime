@@ -20,7 +20,7 @@ use platform_windows::process::supervisor as shell_supervisor;
 #[cfg(windows)]
 use platform_windows::WindowsMcpTransport;
 use sandbox::runtime_config::Platform as SandboxPlatform;
-use skill_api::SkillRegistry;
+use skill::SkillRegistry;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
@@ -34,12 +34,12 @@ use super::{
     append_restricted_builtin_denies, apple_events_override, apply_worktree_launch,
     auto_mode_propose, aws_auth_refresher, background_agent, build_agent_mcp_tool_set,
     build_shared_credential_stack_for_config, capture_legacy_opening_balance, cron_command,
-    cron_management, cron_native, cron_scheduler_enabled, desktop_command_registry,
+    cron_management, cron_native, cron_scheduler_enabled, current_uid, desktop_command_registry,
     desktop_fusion_attempts, desktop_fusion_executor, desktop_skill_registry, discover_plugin_set,
     emit_mcp_servers_inventory, emit_mcp_tools_commands_loaded, ephemeral_session_home,
     expand_trusted_dir, file_changed_watch, fork_resume, fusion_command, fusion_recorder,
     is_env_truthy, job_dir_from_env, lingxi_temp_dir, load_ask_user_question_timeout,
-    load_blocked_marketplaces, load_boot_permission_tiers_with_flag,
+    load_blocked_marketplaces, load_boot_permission_tiers_with_policy_snapshot,
     load_effective_settings_for_config, load_managed_plugin_names,
     load_merged_agent_push_notif_enabled, load_merged_allow_managed_hooks_only,
     load_merged_attribution, load_merged_bash_output_max_chars, load_merged_disable_all_hooks,
@@ -52,7 +52,7 @@ use super::{
     merge_agent_frontmatter_mcp_servers, merge_cli_flag_agents, new_desktop_mcp_transport,
     new_live_sandbox_runner_with_permission_gate, pane_teammate, platform_in_enabled_list,
     plugin_dir_watch_enabled, register_desktop_tools_with_fusion_recorder,
-    registered_mcp_tool_count, registry_skill_listing_provider, resolve_bash_edit_diff,
+    registered_mcp_tool_count, registry_skill_listing_provider_for_desktop, resolve_bash_edit_diff,
     resolve_llm_stack_with_credentials, resolve_memory_feature_gates,
     resolve_workflow_session_enabled, resolve_workflow_size_guideline, ripgrep_override,
     sandbox_auto_allow_from_settings_tiers, sandbox_runtime_config_from_settings_tiers,
@@ -63,13 +63,13 @@ use super::{
     AsyncHookResponseBuffer, BootPermissionTiers, BuildError,
     CoordinatorTeammateDefinitionResolver, CoordinatorWiring, CredentialStoreAuthProvider,
     DeferredToolInvoker, DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker,
-    DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle, DesktopWorkflowEvent,
-    DesktopWorkflowEventSink, DesktopWorktreeCommandHandler, FusionCatalogRefreshingChatGptConnect,
-    FusionCatalogRefreshingCopilotConnect, FusionCatalogRefreshingCredentialWriter,
-    FusionCatalogRefreshingOAuthConnect, JsonlWorktreeStatePersister, LlmStack,
-    OrchestratorTeammatePromptRenderer, OutputRetryReporter, PluginRuntime,
-    ProcessSessionActivationObserver, RegistryStopHookSnapshot, SharedCredentialStack,
-    TaskRegistryWorkflowLauncher, TeammateStatusFanout, TEAMMATE_POOL_CAP,
+    DesktopMcpTransport, DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle,
+    DesktopWorkflowEvent, DesktopWorkflowEventSink, DesktopWorktreeCommandHandler,
+    FusionCatalogRefreshingChatGptConnect, FusionCatalogRefreshingCopilotConnect,
+    FusionCatalogRefreshingCredentialWriter, FusionCatalogRefreshingOAuthConnect,
+    JsonlWorktreeStatePersister, LlmStack, OrchestratorTeammatePromptRenderer, OutputRetryReporter,
+    PluginRuntime, ProcessSessionActivationObserver, RegistryStopHookSnapshot,
+    SharedCredentialStack, TaskRegistryWorkflowLauncher, TeammateStatusFanout, TEAMMATE_POOL_CAP,
 };
 
 /// Rebuild the slash-command MCP partition from the same generation-checked
@@ -123,6 +123,397 @@ pub(super) async fn reconcile_mcp_prompt_catalog(
     commands.reconcile_mcp_prompt_commands(advertised);
 }
 
+struct DesktopNativeSettingsRefresher {
+    orchestrator: Arc<ConversationOrchestrator>,
+    proxy_auth_helper: Arc<platform_common::proxy_auth_helper::NativeProxyAuthHelper>,
+    home_dir: std::path::PathBuf,
+    project_dir: std::path::PathBuf,
+    interactive: bool,
+    workspace_trusted: bool,
+}
+
+#[async_trait::async_trait]
+impl settings_watch::NativeSettingsRefresher for DesktopNativeSettingsRefresher {
+    async fn refresh_native_settings(
+        &self,
+        output_style: Option<Utf16JsonProjection>,
+        language: Option<Utf16JsonProjection>,
+    ) {
+        self.orchestrator
+            .refresh_native_output_style(output_style)
+            .await;
+        self.orchestrator
+            .refresh_native_response_language(language)
+            .await;
+    }
+
+    async fn refresh_proxy_auth_helper(
+        &self,
+        command_utf16: Option<Vec<u16>>,
+        source: Option<lingxi_core::settings::tracer::Source>,
+    ) {
+        use lingxi_core::settings::tracer::Source;
+
+        self.proxy_auth_helper.update_config(
+            command_utf16.unwrap_or_default(),
+            platform_common::proxy_auth_helper::ProxyAuthHelperConfig {
+                home_dir: Some(self.home_dir.clone()),
+                project_dir: Some(self.project_dir.clone()),
+                from_project_or_local: matches!(source, Some(Source::Project | Source::Local)),
+                source_is_person_and_policy: matches!(source, Some(Source::User | Source::Managed)),
+                interactive: self.interactive,
+                workspace_trusted: self.workspace_trusted,
+            },
+        );
+    }
+}
+
+fn source_array_items(source: &Utf16JsonProjection, pointer: &str) -> Vec<Utf16JsonProjection> {
+    let Some(len) = source
+        .at_pointer(pointer)
+        .and_then(|value| value.array_len())
+    else {
+        return Vec::new();
+    };
+    (0..len)
+        .filter_map(|index| source.subprojection(&format!("{pointer}/{index}")).ok())
+        .filter(|value| value.string_units("").is_some())
+        .collect()
+}
+
+fn normalize_prompt_path(path: &str, cwd: &std::path::Path) -> String {
+    use std::path::{Component, Path, PathBuf};
+
+    let input = Path::new(path);
+    let joined = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        cwd.join(input)
+    };
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized.to_string_lossy().into_owned()
+}
+
+fn runtime_string_array_with_source(
+    values: &[String],
+    raw_settings: Option<&Utf16JsonProjection>,
+    raw_pointer: &str,
+    cwd: &std::path::Path,
+    paths: bool,
+) -> Utf16JsonProjection {
+    let raw = raw_settings
+        .map(|settings| source_array_items(settings, raw_pointer))
+        .unwrap_or_default();
+    let mut consumed = vec![false; raw.len()];
+    let mut projected = Vec::with_capacity(values.len());
+    for value in values {
+        let position = raw.iter().enumerate().position(|(index, source)| {
+            if consumed[index] {
+                return false;
+            }
+            let Some(raw_units) = source.string_units("") else {
+                return false;
+            };
+            // Settings strings are JavaScript UTF-16. The typed sandbox path
+            // has already crossed the OS boundary and may contain replacement
+            // characters for lone surrogates; use the same conversion only
+            // for matching, while returning the original source projection.
+            let raw_value = String::from_utf16_lossy(&raw_units);
+            if paths {
+                normalize_prompt_path(&raw_value, cwd) == normalize_prompt_path(value, cwd)
+            } else {
+                raw_value == value.as_str()
+            }
+        });
+        if let Some(index) = position {
+            consumed[index] = true;
+            projected.push(raw[index].clone());
+        } else {
+            projected.push(Utf16JsonProjection::from(value));
+        }
+    }
+    Utf16JsonProjection::array(projected).expect("sandbox prompt arrays are valid")
+}
+
+fn layer_setting_bool(
+    layer: &lingxi_core::settings::SettingsRawLayer,
+    pointer: &str,
+) -> Option<bool> {
+    layer.projection.at_pointer(pointer)?.as_bool()
+}
+
+fn managed_layer_has_filesystem_or_denied_credentials(
+    layer: &lingxi_core::settings::SettingsRawLayer,
+) -> bool {
+    if layer.projection.at_pointer("/sandbox/filesystem").is_some() {
+        return true;
+    }
+    let Some(len) = layer
+        .projection
+        .at_pointer("/sandbox/credentials/files")
+        .and_then(|value| value.array_len())
+    else {
+        return false;
+    };
+    (0..len).any(|index| {
+        layer
+            .projection
+            .string_at(&format!("/sandbox/credentials/files/{index}/mode"))
+            == Some("deny")
+    })
+}
+
+fn native_filesystem_policy_relaxed(
+    layers: &[lingxi_core::settings::SettingsRawLayer],
+    platform: Option<&str>,
+    subprocess_env_scrub_enabled: bool,
+) -> bool {
+    if subprocess_env_scrub_enabled || platform == Some("windows") {
+        return false;
+    }
+    let managed = layers
+        .iter()
+        .filter(|layer| layer.source == lingxi_core::settings::tracer::Source::Managed)
+        .collect::<Vec<_>>();
+    if let Some(disabled) = managed
+        .iter()
+        .rev()
+        .find_map(|layer| layer_setting_bool(layer, "/sandbox/filesystem/disabled"))
+    {
+        return disabled;
+    }
+    if managed
+        .iter()
+        .any(|layer| managed_layer_has_filesystem_or_denied_credentials(layer))
+    {
+        return false;
+    }
+    for source in [
+        lingxi_core::settings::tracer::Source::Managed,
+        lingxi_core::settings::tracer::Source::Cli,
+        lingxi_core::settings::tracer::Source::User,
+    ] {
+        if let Some(disabled) = layers
+            .iter()
+            .rev()
+            .filter(|layer| layer.source == source)
+            .find_map(|layer| layer_setting_bool(layer, "/sandbox/filesystem/disabled"))
+        {
+            return disabled;
+        }
+    }
+    // This host has no GrowthBook `tenguSandboxGbConfig.filesystemPolicy`
+    // source, so Native's unset value resolves to its default `strict`.
+    false
+}
+
+fn native_temp_paths() -> Vec<String> {
+    let primary = lingxi_temp_dir();
+    let base = std::env::var_os("LINGXI_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let name = if cfg!(target_os = "windows") {
+        "claude".to_owned()
+    } else {
+        format!("claude-{}", current_uid())
+    };
+    let unresolved_child = base.join(&name);
+    let child = if unresolved_child.to_string_lossy().len() <= 44 {
+        primary.clone()
+    } else {
+        let tmp = std::path::PathBuf::from("/tmp");
+        let resolved = std::fs::canonicalize(&tmp).unwrap_or(tmp).join(name);
+        let mut value = resolved.to_string_lossy().into_owned();
+        value.push(std::path::MAIN_SEPARATOR);
+        value
+    };
+    vec![primary, child]
+}
+
+fn subprocess_env_scrub_enabled() -> bool {
+    std::env::var("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+#[cfg(test)]
+mod sandbox_prompt_policy_tests {
+    use super::*;
+    use lingxi_core::settings::tracer::Source;
+
+    fn layer(source: Source, json: &str) -> lingxi_core::settings::SettingsRawLayer {
+        lingxi_core::settings::SettingsRawLayer {
+            source,
+            path: None,
+            projection: Utf16JsonProjection::parse(json).unwrap(),
+        }
+    }
+
+    #[test]
+    fn filesystem_policy_keeps_native_source_precedence_and_strict_fallback() {
+        let user_relaxed = layer(
+            Source::User,
+            r#"{"sandbox":{"filesystem":{"disabled":true}}}"#,
+        );
+        assert!(native_filesystem_policy_relaxed(
+            &[user_relaxed.clone()],
+            Some("macos"),
+            false,
+        ));
+
+        let managed_strict = layer(
+            Source::Managed,
+            r#"{"sandbox":{"filesystem":{"disabled":false}}}"#,
+        );
+        assert!(!native_filesystem_policy_relaxed(
+            &[user_relaxed.clone(), managed_strict],
+            Some("macos"),
+            false,
+        ));
+
+        let managed_filesystem = layer(
+            Source::Managed,
+            r#"{"sandbox":{"filesystem":{"allowWrite":["/managed"]}}}"#,
+        );
+        assert!(!native_filesystem_policy_relaxed(
+            &[user_relaxed.clone(), managed_filesystem],
+            Some("macos"),
+            false,
+        ));
+
+        let cli_relaxed = layer(
+            Source::Cli,
+            r#"{"sandbox":{"filesystem":{"disabled":true}}}"#,
+        );
+        assert!(native_filesystem_policy_relaxed(
+            &[cli_relaxed],
+            Some("macos"),
+            false,
+        ));
+
+        assert!(!native_filesystem_policy_relaxed(
+            &[user_relaxed.clone()],
+            Some("windows"),
+            false,
+        ));
+        assert!(!native_filesystem_policy_relaxed(
+            &[user_relaxed],
+            Some("macos"),
+            true,
+        ));
+        assert!(!native_filesystem_policy_relaxed(&[], Some("macos"), false));
+    }
+}
+
+#[cfg(test)]
+mod sandbox_prompt_source_tests {
+    use super::runtime_string_array_with_source;
+    use lingxi_core::settings::{
+        FileLayerScope, LoadInputs, RawSupplementalLayers, Settings, SettingsJson,
+        SupplementalLayers,
+    };
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn desktop_prompt_path_keeps_raw_surrogate_after_typed_os_boundary() {
+        let cwd = tempfile::tempdir().expect("temporary project root");
+        let settings_dir = cwd.path().join(branding::DOT_DIR);
+        std::fs::create_dir_all(&settings_dir).expect("project settings directory");
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            r#"{"sandbox":{"filesystem":{"allowWrite":["/tmp/\ud800"]},"ignoreViolations":{"Read":["pattern-\ud800"]}}}"#,
+        )
+        .expect("write a real project settings layer");
+
+        let env = BTreeMap::new();
+        let scope = FileLayerScope {
+            include_user: false,
+            include_project: true,
+            include_local: true,
+        };
+        let typed = Settings::load_with_layers_from_user_path(
+            LoadInputs {
+                env: &env,
+                project_dir: cwd.path(),
+                defaults: SettingsJson::default(),
+            },
+            scope,
+            SupplementalLayers::default(),
+            None,
+        )
+        .expect("typed project settings load");
+        let raw = Settings::load_raw_layer_stack_from_user_path(
+            LoadInputs {
+                env: &env,
+                project_dir: cwd.path(),
+                defaults: SettingsJson::default(),
+            },
+            scope,
+            RawSupplementalLayers::default(),
+            None,
+        )
+        .expect("source-preserving project settings load");
+
+        let typed_sandbox = typed
+            .settings
+            .sandbox
+            .as_ref()
+            .expect("typed sandbox settings");
+        let allow_write = typed_sandbox
+            .get("filesystem")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|filesystem| filesystem.get("allowWrite"))
+            .and_then(serde_json::Value::as_array)
+            .expect("typed allowWrite paths")
+            .iter()
+            .map(|value| value.as_str().expect("typed path string").to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(allow_write, vec!["/tmp/\u{fffd}".to_owned()]);
+
+        let sandbox_source = raw
+            .merged
+            .subprojection("/sandbox")
+            .expect("raw sandbox projection");
+        let prompt_paths = runtime_string_array_with_source(
+            &allow_write,
+            Some(&sandbox_source),
+            "/filesystem/allowWrite",
+            cwd.path(),
+            true,
+        );
+        let mut expected_path = "/tmp/".encode_utf16().collect::<Vec<_>>();
+        expected_path.push(0xd800);
+        assert_eq!(prompt_paths.string_units("/0"), Some(expected_path));
+
+        let ignore_violations = sandbox_source
+            .subprojection("/ignoreViolations")
+            .expect("raw ignoreViolations projection");
+        let mut expected_pattern = "pattern-".encode_utf16().collect::<Vec<_>>();
+        expected_pattern.push(0xd800);
+        assert_eq!(
+            ignore_violations.string_units("/Read/0"),
+            Some(expected_pattern),
+            "prompt-only ignoreViolations must retain the original UTF-16 source"
+        );
+    }
+}
+
 fn mcp_server_from_command_name(
     name: &Utf16JsonProjection,
 ) -> Option<(String, Utf16JsonProjection)> {
@@ -134,6 +525,61 @@ fn mcp_server_from_command_name(
         Utf16JsonProjection::root_string(String::from_utf16_lossy(&server_units), server_units)
             .ok()?;
     Some((server, source))
+}
+
+/// Derive the REPL query identity from the effective raw `outputStyle` value.
+/// Native 2.1.295's `V2e` checks that value against its built-in style object;
+/// unrecognized values, including strings that cannot be represented as Rust
+/// UTF-8, use the `custom` identity.
+fn query_output_style_identity(style: Option<&Utf16JsonProjection>) -> Option<String> {
+    let units = style?.string_units("")?;
+    if units == "default".encode_utf16().collect::<Vec<_>>() {
+        return None;
+    }
+    Some(String::from_utf16(&units).unwrap_or_else(|_| "custom".into()))
+}
+
+#[cfg(test)]
+mod output_style_query_source_tests {
+    use super::*;
+    use crate::desktop::DesktopSessionComposition;
+
+    #[test]
+    fn query_identity_uses_raw_setting_and_maps_unrepresentable_name_to_custom() {
+        assert_eq!(query_output_style_identity(None), None);
+        assert_eq!(
+            query_output_style_identity(Some(&Utf16JsonProjection::from("default"))),
+            None
+        );
+        assert_eq!(
+            query_output_style_identity(Some(&Utf16JsonProjection::from("Concise"))),
+            Some("Concise".into())
+        );
+        assert_eq!(
+            query_output_style_identity(Some(&Utf16JsonProjection::from(""))),
+            Some("".into())
+        );
+
+        let mut lone_surrogate = "style-".encode_utf16().collect::<Vec<_>>();
+        lone_surrogate.push(0xd800);
+        let source = Utf16JsonProjection::root_string("style-�".to_owned(), lone_surrogate)
+            .expect("raw UTF-16 outputStyle projection");
+        assert_eq!(
+            query_output_style_identity(Some(&source)),
+            Some("custom".into())
+        );
+        assert_eq!(
+            DesktopSessionComposition::InteractiveCli.query_source_and_print(
+                query_output_style_identity(Some(&source)).as_deref(),
+                false,
+            ),
+            ("repl_main_thread:outputStyle:custom".into(), false)
+        );
+        assert_eq!(
+            DesktopSessionComposition::InteractiveCli.query_source_and_print(Some(""), false),
+            ("repl_main_thread:outputStyle:custom".into(), false)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -362,9 +808,126 @@ pub async fn build_with_credential_stack(
             .ok()
             .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok()),
     ));
-    let managed_snapshot = crate::desktop::settings_watch::managed_settings_snapshot().await;
-    let managed_settings_for_strict = managed_snapshot.raw_tiers;
-    let effective_settings = load_effective_settings_for_config(&cfg, &managed_settings_for_strict);
+    let managed_snapshot =
+        crate::desktop::settings_watch::managed_settings_snapshot_for_config(&cfg).await;
+    let managed_policy_snapshot_cache = cfg.managed_policy_snapshot_cache.clone();
+    let managed_policy_layer = managed_snapshot
+        .effective_json()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let effective_settings = load_effective_settings_for_config(&cfg, &managed_policy_layer);
+    // Resolve the boot additional-working-directory union for permission
+    // enforcement and file/MCP access. Native's extension additional-directory
+    // callback is populated from the host's `--add-dir` input separately; the
+    // permissions settings tier is not a Skills/agent discovery root.
+    let enforce_permissions = cfg.restricted
+        || should_enforce_permissions(
+            std::env::var("LINGXI_ENFORCE_PERMISSIONS").ok().as_deref(),
+            cfg.use_noop_permission_gate,
+            cfg.permission_mode,
+        );
+    let mut boot_permission_tiers = if enforce_permissions {
+        Some(
+            load_boot_permission_tiers_with_policy_snapshot(
+                &cfg.lingxi_home,
+                &cwd,
+                cfg.setting_source_scope,
+                cfg.flag_settings.as_ref(),
+                cfg.flag_settings_source.as_deref(),
+                &managed_snapshot,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let boot_additional_working_dirs = if let Some(tiers) = boot_permission_tiers.as_ref() {
+        let mut additional_working_dirs = if cfg.restricted {
+            permission::working_dirs::AdditionalWorkingDirs::new()
+        } else {
+            tiers.additional_working_dirs.clone()
+        };
+        additional_working_dirs.extend_from_source(
+            cfg.add_dir.iter().cloned(),
+            permission::PermissionRuleSource::CliArg,
+        );
+        additional_working_dirs.paths()
+    } else {
+        // With permission enforcement off, settings tiers are not loaded;
+        // retain the existing CLI-only roots.
+        cfg.add_dir.clone()
+    };
+    // Resolve trust before shared SDK/MCP construction so project/local
+    // `proxyAuthHelper` commands receive the same Desktop trust decision as
+    // the rest of this session's workspace-gated services.
+    let proxy_auth_global_config_path = migrations::global_config::global_config_path();
+    let workspace_trusted = resolve_workspace_trust(
+        cfg.host_workspace_trusted,
+        &cwd,
+        proxy_auth_global_config_path.as_deref(),
+    );
+    let proxy_auth_workspace_trust_provider: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let host_trusted = cfg.host_workspace_trusted;
+        let cwd = cwd.clone();
+        let config_path = proxy_auth_global_config_path.clone();
+        Arc::new(move || resolve_workspace_trust(host_trusted, &cwd, config_path.as_deref()))
+    };
+    let proxy_auth_helper_enabled = std::env::var_os("CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER")
+        .is_some_and(|value| !value.is_empty());
+    // Use the exact typed effective carrier and its contributor from the one
+    // settings load used by assembly. The command projection preserves UTF-16
+    // units, including lone surrogates, without a second raw-stack resolution.
+    let proxy_auth_command = if proxy_auth_helper_enabled {
+        effective_settings.as_ref().and_then(|settings| {
+            let typed_command = settings
+                .settings
+                .proxy_auth_helper
+                .as_ref()?
+                .string_units("")?;
+            if typed_command.is_empty() {
+                return None;
+            }
+            let source = settings
+                .effective_for("proxyAuthHelper")?
+                .contributors
+                .last()
+                .copied()?;
+            Some((typed_command, source))
+        })
+    } else {
+        None
+    };
+    let proxy_auth_home_dir = dirs::home_dir().unwrap_or_else(|| cfg.lingxi_home.clone());
+    let proxy_auth_interactive = cfg.session_composition().is_interactive_session();
+    let proxy_auth_helper = if proxy_auth_helper_enabled {
+        use lingxi_core::settings::tracer::Source;
+        let command_utf16 = proxy_auth_command
+            .as_ref()
+            .map(|(command, _)| command.clone())
+            .unwrap_or_default();
+        let source = proxy_auth_command.as_ref().map(|(_, source)| *source);
+        let helper = platform_common::proxy_auth_helper::NativeProxyAuthHelper::new(
+            command_utf16,
+            platform_common::proxy_auth_helper::ProxyAuthHelperConfig {
+                home_dir: Some(proxy_auth_home_dir.clone()),
+                project_dir: Some(cwd.clone()),
+                from_project_or_local: matches!(source, Some(Source::Project | Source::Local)),
+                source_is_person_and_policy: matches!(source, Some(Source::User | Source::Managed)),
+                interactive: proxy_auth_interactive,
+                workspace_trusted,
+            },
+        );
+        helper.set_workspace_trusted_provider(proxy_auth_workspace_trust_provider.clone());
+        helper.warm().await;
+        Some(helper)
+    } else {
+        None
+    };
+    let proxy_auth_helper_transport: Option<
+        Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>,
+    > = proxy_auth_helper
+        .as_ref()
+        .map(|helper| -> Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper> { helper.clone() });
     let vision_delegation_enabled = if cfg.restricted {
         effective_settings
             .as_ref()
@@ -477,6 +1040,8 @@ pub async fn build_with_credential_stack(
         default_model_fallback,
         model_provenance,
         session_model_restriction,
+        main_model_setting,
+        main_model_setting_provenance,
         model_setting_for_spawns,
         model_resolution_context_provider,
         session_auto_mode_provider,
@@ -487,7 +1052,8 @@ pub async fn build_with_credential_stack(
         credential_origin,
         has_oauth_token,
         ..
-    } = resolve_llm_stack_with_credentials(&cfg, shared).await?;
+    } = resolve_llm_stack_with_credentials(&cfg, shared, proxy_auth_helper_transport.clone())
+        .await?;
 
     // Phase 2a CHAINS BRIDGE: translate the assembled `ChainConfig` into main's
     // richer adapter's `fallback_overrides` shape. `assemble` keys each chain by
@@ -587,11 +1153,20 @@ pub async fn build_with_credential_stack(
     .with_fast_policy_source({
         let fast_cfg = cfg.clone();
         Arc::new(move || {
-            let managed: Vec<lingxi_core::settings::SettingsJson> =
-                super::credentials::managed_settings_raw_tiers_sync()
-                    .iter()
-                    .filter_map(|raw| serde_json::from_str(raw).ok())
-                    .collect();
+            let Ok(managed) = super::settings_watch::managed_policy_layers_sync(&fast_cfg) else {
+                return llm_runtime::model::fast_admission::Policy {
+                    policy_fast: Some(false),
+                    allowed_models: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("[]")
+                            .expect("empty allowlist is valid JSON"),
+                    ),
+                    ..Default::default()
+                };
+            };
+            let managed: Vec<lingxi_core::settings::SettingsJson> = managed
+                .iter()
+                .filter_map(|raw| serde_json::from_str(raw).ok())
+                .collect();
             crate::fast_settings::policy(
                 &fast_cfg.lingxi_home,
                 fast_cfg.flag_settings.as_ref(),
@@ -611,12 +1186,12 @@ pub async fn build_with_credential_stack(
     .with_effort_settings_source({
         let effort_cfg = cfg.clone();
         Arc::new(move || {
-            load_effective_settings_for_config(
-                &effort_cfg,
-                &super::credentials::managed_settings_raw_tiers_sync(),
-            )
-            .map(|settings| settings.effort_layers)
-            .unwrap_or_default()
+            let Ok(managed) = super::settings_watch::managed_policy_layers_sync(&effort_cfg) else {
+                return Default::default();
+            };
+            load_effective_settings_for_config(&effort_cfg, &managed)
+                .map(|settings| settings.effort_layers)
+                .unwrap_or_default()
         })
     })
     .with_prompt_cache_ttl_settings_source({
@@ -741,12 +1316,20 @@ pub async fn build_with_credential_stack(
         None
     };
     let mut orch_cfg = OrchestratorConfig::default();
+    orch_cfg.bare = cfg.customization_gates.bare;
+    orch_cfg.model_catalog_restriction =
+        llm_runtime::model::allowlist::catalog_restriction_from_settings(
+            !managed_snapshot.read_failed() && effective_settings.is_some(),
+            effective_settings
+                .as_ref()
+                .and_then(|settings| settings.settings.available_models.clone()),
+        );
     apply_server_fallback_model_policy(
         &mut orch_cfg,
-        &if managed_snapshot.read_failed || effective_settings.is_none() {
+        &if managed_snapshot.read_failed() || effective_settings.is_none() {
             llm_runtime::model::allowlist::PolicySource::Failed
         } else {
-            super::managed_model_policy_source(&managed_settings_for_strict)
+            super::managed_model_policy_source(&managed_snapshot)
         },
         effective_settings
             .as_ref()
@@ -769,8 +1352,9 @@ pub async fn build_with_credential_stack(
     };
     // Claude Code 2.1.245: CLI is `repl_main_thread`, SDK/bridge transport is
     // `sdk`, and print is the explicit headless print mode only.
+    let query_output_style = query_output_style_identity(output_style.as_ref());
     let (query_source, print) = session_composition
-        .query_source_and_print(output_style.as_deref(), cfg.deny_unresolved_ask);
+        .query_source_and_print(query_output_style.as_deref(), cfg.deny_unresolved_ask);
     orch_cfg.query_source = query_source;
     orch_cfg.print = print;
     orch_cfg.is_tty = cfg.is_tty;
@@ -829,6 +1413,9 @@ pub async fn build_with_credential_stack(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = output_style;
+    orch_cfg.language = effective_settings
+        .as_ref()
+        .and_then(|settings| settings.settings.language.clone());
     lingxi_core::host::session_flags::set_show_thinking_summaries(if cfg.restricted {
         effective_settings
             .as_ref()
@@ -1230,7 +1817,7 @@ pub async fn build_with_credential_stack(
         instruction_tiers.push(value);
     }
     instruction_tiers.extend(
-        managed_settings_for_strict
+        managed_policy_layer
             .iter()
             .filter_map(|s| serde_json::from_str(s).ok()),
     );
@@ -1387,6 +1974,8 @@ pub async fn build_with_credential_stack(
     // (updated by `/model` switches / resume) instead of the boot snapshot below.
     let subagent_default_model_selection_provider_cell =
         subagent_spawner_concrete.default_model_selection_provider_handle();
+    let subagent_native_settings_prompt_provider_cell =
+        subagent_spawner_concrete.native_settings_prompt_provider_handle();
     // Box ONCE as the concrete `Arc<PoolSubagentSpawner>` so it can serve as
     // BOTH the one-shot `SubagentSpawner` and the persistent/resume
     // `StreamingSubagentSpawner` (Phase-1 seam) — the LocalAgent handler needs
@@ -1519,7 +2108,7 @@ pub async fn build_with_credential_stack(
     // config `~/.lingxi.json` (mcp_paths[1]); local is keyed by the canonical
     // project key for `cwd`.
     let strict_plugin_policy = Arc::new(plugin::StrictPluginOnlyPolicy::from_settings_tiers(
-        managed_settings_for_strict.iter().map(String::as_str),
+        managed_policy_layer.iter().map(String::as_str),
     ));
     let strict_plugin_only_mcp =
         strict_plugin_policy.is_locked(plugin::PluginComponent::McpServers);
@@ -1591,7 +2180,7 @@ pub async fn build_with_credential_stack(
     {
         ordinary_mcp_policy_sources.push(flag);
     }
-    let managed_mcp_policy_sources: Vec<serde_json::Value> = managed_settings_for_strict
+    let managed_mcp_policy_sources: Vec<serde_json::Value> = managed_policy_layer
         .iter()
         .filter_map(|raw| serde_json::from_str(raw).ok())
         .collect();
@@ -1823,7 +2412,20 @@ pub async fn build_with_credential_stack(
     // (live-client bridge). Unix keeps `PosixMcpTransport`; Windows selects
     // `WindowsMcpTransport`, whose remote IDE connections expose the same
     // shared JSON-RPC handle to the registry.
-    let mcp_transport = new_desktop_mcp_transport();
+    #[cfg(unix)]
+    let mcp_transport: Arc<DesktopMcpTransport> = match proxy_auth_helper_transport.clone() {
+        Some(helper) => {
+            Arc::new(platform_posix::PosixMcpTransport::new().with_proxy_auth_helper(helper))
+        }
+        None => new_desktop_mcp_transport(),
+    };
+    #[cfg(windows)]
+    let mcp_transport: Arc<DesktopMcpTransport> = match proxy_auth_helper_transport.clone() {
+        Some(helper) => {
+            Arc::new(platform_windows::WindowsMcpTransport::new().with_proxy_auth_helper(helper))
+        }
+        None => new_desktop_mcp_transport(),
+    };
     let mcp_services = super::DesktopMcpServices {
         transport: mcp_transport.clone() as Arc<dyn McpTransport>,
         raw_connections: mcp_transport.clone() as Arc<dyn mcp::RawConnectionProvider>,
@@ -1919,7 +2521,7 @@ pub async fn build_with_credential_stack(
     // Policy hooks remain authoritative under strict-plugin-only and safe
     // mode. Bare mode disables hooks entirely.
     if !cfg.customization_gates.bare {
-        for raw in &managed_settings_for_strict {
+        for raw in &managed_policy_layer {
             match hooks::parse_hooks_from_settings_json(
                 raw,
                 hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
@@ -1977,12 +2579,6 @@ pub async fn build_with_credential_stack(
     //   to surface a prompt, so they keep the `NoOpPermissionGate` (always-allow) or
     //   `DenyOnAskGate` (deny-on-ask) inner per `use_noop_permission_gate` /
     //   `deny_unresolved_ask`. Either way deny rules + modes are enforced below.
-    let enforce_permissions = cfg.restricted
-        || should_enforce_permissions(
-            std::env::var("LINGXI_ENFORCE_PERMISSIONS").ok().as_deref(),
-            cfg.use_noop_permission_gate,
-            cfg.permission_mode,
-        );
     // Read(deny) → search-exclude globs (GrepTool.ts:417-427, glob.ts lLa()).
     // Populated inside the enforcement branch below from the boot policy and
     // threaded into the tool ctx so `Grep`/`Glob` skip denied/sensitive paths.
@@ -2015,7 +2611,6 @@ pub async fn build_with_credential_stack(
     // relative) are expanded when they land in `trusted_dirs`. Assigned in BOTH
     // arms below (the full union when enforcing; `--add-dir` only otherwise), so
     // it is always initialized before its later reads.
-    let boot_additional_working_dirs: Vec<std::path::PathBuf>;
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →
         // project → local (3c: settings.local.json read after project so a
@@ -2039,14 +2634,9 @@ pub async fn build_with_credential_stack(
             block_reads_outside_working_directories,
             raw_tiers,
             allow_managed_permission_rules_only,
-        } = load_boot_permission_tiers_with_flag(
-            &cfg.lingxi_home,
-            &cwd,
-            cfg.setting_source_scope,
-            cfg.flag_settings.as_ref(),
-            cfg.flag_settings_source.as_deref(),
-        )
-        .await;
+        } = boot_permission_tiers
+            .take()
+            .expect("permission tiers were loaded before additional-root consumers");
         // (2.1.263 `bs(Rn)`) All three clamp inputs exist here: `ey()` is this
         // tier fold's `disableBypassPermissionsMode == "disable"`, `Rn.restricted`
         // is the `--restricted` bit, and `YYe()` is read ONCE at this edge — never
@@ -2076,10 +2666,12 @@ pub async fn build_with_credential_stack(
             cfg.add_dir.iter().cloned(),
             permission::PermissionRuleSource::CliArg,
         );
-        // Capture the union (settings additionalDirectories + --add-dir) for the
-        // file-tool `trusted_dirs` and MCP `roots/list` source below. These
-        // consumers want the FULL `rb` union, not the read block's narrower set.
-        boot_additional_working_dirs = additional_working_dirs.paths();
+        // This same ordered union was captured before agent/skill discovery.
+        // Keep it aligned with the policy's effective working-directory set.
+        debug_assert_eq!(
+            additional_working_dirs.paths(),
+            boot_additional_working_dirs
+        );
         let rule_count = rules.len();
         // Phase 3a: supply the filesystem roots so file-path CONTENT rules
         // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
@@ -2271,7 +2863,6 @@ pub async fn build_with_credential_stack(
         // loaded here, but the CLI `--add-dir` dirs still widen file-tool access
         // and the MCP roots (claude-code's `additionalWorkingDirectories` are
         // independent of permission mode).
-        boot_additional_working_dirs = cfg.add_dir.clone();
         perms
     };
     // Enforcement-off fallback for the clamp inputs: the settings tiers were not
@@ -2931,6 +3522,8 @@ pub async fn build_with_credential_stack(
     let teammate_tool_wide_deny_cell = teammate_handler.tool_wide_deny_names_handle();
     let teammate_strict_plugin_hooks_cell = teammate_handler.strict_plugin_only_hooks_handle();
     let teammate_system_prompt_renderer_cell = teammate_handler.system_prompt_renderer_handle();
+    let teammate_native_settings_prompt_provider_cell =
+        teammate_handler.native_settings_prompt_provider_handle();
     let _ = teammate_strict_plugin_hooks_cell.set(strict_plugin_only_hooks);
     task_registry_inner.register_handler(
         tasks::TaskType::InProcessTeammate,
@@ -3349,12 +3942,13 @@ pub async fn build_with_credential_stack(
     } else {
         SandboxPlatform::Linux
     };
-    let sandbox_runtime_cfg = {
+    let (sandbox_runtime_cfg, sandbox_raw_settings, sandbox_settings_layers) = {
         let mut tiers: Vec<String> = Vec::new();
-        let flag_settings_raw = cfg
-            .flag_settings
-            .as_ref()
-            .and_then(|settings| serde_json::to_string(settings).ok());
+        let flag_settings_raw = cfg.flag_settings_source.clone().or_else(|| {
+            cfg.flag_settings
+                .as_ref()
+                .and_then(|settings| serde_json::to_string(settings).ok())
+        });
         // Read the USER tier (lingxi_home/settings.json) separately so the
         // source-restricted `allowAppleEvents` resolution can consult it: CC honors
         // allowAppleEvents from user / managed / flag only, NOT project/local.
@@ -3384,35 +3978,62 @@ pub async fn build_with_credential_stack(
         if let Some(raw) = &flag_settings_raw {
             tiers.push(raw.clone());
         }
-        // Managed (policySettings) tier — HIGHEST priority (SETTING_SOURCES:
-        // …→localSettings→flagSettings→policySettings). Appended LAST so the
-        // ascending-priority fold lets a managed `sandbox.*` win over user /
-        // project / local / flagSettings (faithful to
-        // getInitialSettings()/loadSettingsFromDisk).
-        let managed_tiers = crate::desktop::settings_watch::managed_settings_raw_tiers().await;
-        tiers.extend(managed_tiers.iter().cloned());
+        // Feed only the source selector's effective normalized policy. The
+        // raw file tiers and MDM candidate order remain attached to the shared
+        // snapshot; they are not re-folded as ordinary settings sources here.
+        if let Some(managed_policy) = managed_snapshot.effective_json() {
+            tiers.push(managed_policy);
+        }
         let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
+        let raw_env = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        let (include_user, include_project) = if cfg.restricted {
+            (false, false)
+        } else {
+            cfg.setting_source_scope
+        };
+        let raw_stack = lingxi_core::settings::Settings::load_raw_layer_stack_from_user_path(
+            lingxi_core::settings::LoadInputs {
+                env: &raw_env,
+                project_dir: &cwd,
+                defaults: lingxi_core::settings::SettingsJson::default(),
+            },
+            lingxi_core::settings::FileLayerScope {
+                include_user,
+                include_project,
+                include_local: include_project,
+            },
+            lingxi_core::settings::RawSupplementalLayers {
+                cli_layer: flag_settings_raw.as_deref(),
+                managed_policy: Some(&managed_snapshot.selection),
+            },
+            Some(&cfg.lingxi_home.join("settings.json")),
+        )
+        .ok();
+        let raw_sandbox_settings = raw_stack
+            .as_ref()
+            .and_then(|stack| stack.admitted_merged().subprojection("/sandbox").ok());
+        let raw_layers = raw_stack.map_or_else(Vec::new, |stack| stack.layers);
         // allowManagedDomainsOnly / allowManagedReadPathsOnly: resolved from the
         // MANAGED tiers ONLY (per-source), then threaded onto the context so the
         // conversion overrides the merged allowlist when the flag is set.
         let (managed_allowed_domains, managed_read_paths) =
-            managed_only_sandbox_overrides(&managed_tiers, &cwd);
+            managed_only_sandbox_overrides(&managed_policy_layer, &cwd);
         // allowAppleEvents: source-restricted to user / managed / flag (project &
         // local are IGNORED — CC parity @223928133). First-defined wins managed →
         // flag → user; `None` leaves the default `false`.
         let allow_apple_events_override = apple_events_override(
-            &managed_tiers,
+            &managed_policy_layer,
             flag_settings_raw.as_deref(),
             user_settings_raw.as_deref(),
         );
         // strictAllowlist: same source restriction (2.1.219).
         let strict_allowlist_override_v = strict_allowlist_override(
-            &managed_tiers,
+            &managed_policy_layer,
             flag_settings_raw.as_deref(),
             user_settings_raw.as_deref(),
         );
         let ripgrep_override_v = ripgrep_override(
-            &managed_tiers,
+            &managed_policy_layer,
             flag_settings_raw.as_deref(),
             user_settings_raw.as_deref(),
         );
@@ -3451,7 +4072,11 @@ pub async fn build_with_credential_stack(
             ripgrep_override: ripgrep_override_v,
             ..Default::default()
         };
-        sandbox_runtime_config_from_settings_tiers(&refs, &cwd, &ctx)
+        (
+            sandbox_runtime_config_from_settings_tiers(&refs, &cwd, &ctx),
+            raw_sandbox_settings,
+            raw_layers,
+        )
     };
     // Faithful to claude-code `isSandboxingEnabled()` (sandbox-adapter.ts:532):
     // supported-platform AND deps present AND in the `enabledPlatforms` list AND
@@ -3802,7 +4427,7 @@ pub async fn build_with_credential_stack(
         bash_edit_diff: resolve_bash_edit_diff(
             &cfg,
             effective_settings.as_ref(),
-            &managed_settings_for_strict,
+            &managed_policy_layer,
             &main_session_uuid,
         ),
         // Agent execution, name routing and Mod listing share one ordered store.
@@ -3924,6 +4549,7 @@ pub async fn build_with_credential_stack(
         shared_command_registry.clone(),
         cfg.cwd.clone(),
         cfg.lingxi_home.clone(),
+        cfg.add_dir.clone(),
         cfg.customization_gates.safe_mode,
     ));
     // Bind the forked-skill resume gate's skill resolver to the SAME `Arc` that
@@ -3938,6 +4564,10 @@ pub async fn build_with_credential_stack(
     // `getSessionId()`, a per-process session value). Generated once here at build
     // time; format mirrors the engine's `SessionId` Display (`sess:<uuid>`).
     let skill_session_id = lingxi_core::types::SessionId::new().to_string();
+    // Slash dispatch and Skill-tool expansion share Native's per-session
+    // 60-second usage throttle and the same persistent lifetime counters.
+    let skill_usage_session =
+        command_api::skill_usage::SkillUsageSession::new(cfg.lingxi_home.clone());
     let monitor_runtime = repo_root_reloader.clone();
     let skill_invocation_observer: command_api::SkillInvocationObserver = Arc::new(move |skill| {
         let monitor_runtime = monitor_runtime.clone();
@@ -3953,6 +4583,7 @@ pub async fn build_with_credential_stack(
             shared_command_registry.clone(),
             skill_session_id.clone(),
         )
+        .with_skill_usage_session(skill_usage_session.clone())
         .with_invocation_observer(skill_invocation_observer.clone()),
     );
     // G5: fill the subagent spawner's skill-loader cell with a
@@ -4056,6 +4687,163 @@ pub async fn build_with_credential_stack(
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
     });
     let visualization_tool_ctx = cfg.inline_visualization.then(|| tool_ctx.clone());
+    let sandbox_host_facts_provider = {
+        let tool_ctx = tool_ctx.clone();
+        let platform = current_platform.map(|platform| platform.as_str().to_owned());
+        let permission_gate = perms.clone();
+        let raw_sandbox_settings = sandbox_raw_settings.clone();
+        let settings_layers = sandbox_settings_layers.clone();
+        let interactive_session = cfg.session_composition().is_interactive_session();
+        move || {
+            let cwd = tool_ctx.cwd();
+            let runtime =
+                tool_ctx.sandbox_runtime_at(&cwd, sandbox::root::SandboxRootScope::Session);
+            let string_array = |values: &[String], pointer: &str, paths: bool| {
+                runtime_string_array_with_source(
+                    values,
+                    raw_sandbox_settings.as_ref(),
+                    pointer,
+                    &cwd,
+                    paths,
+                )
+            };
+            let source_object = |fields: Vec<(&str, Utf16JsonProjection)>| {
+                Utf16JsonProjection::object(
+                    fields
+                        .into_iter()
+                        .map(|(key, value)| (key.to_owned(), value))
+                        .collect(),
+                )
+                .expect("sandbox prompt config has unique keys")
+            };
+            let filesystem_read = source_object(vec![
+                (
+                    "denyOnly",
+                    string_array(&runtime.filesystem.deny_read, "/filesystem/denyRead", true),
+                ),
+                (
+                    "allowWithinDeny",
+                    string_array(
+                        &runtime.filesystem.allow_read,
+                        "/filesystem/allowRead",
+                        true,
+                    ),
+                ),
+            ]);
+            let filesystem_write = source_object(vec![
+                (
+                    "allowOnly",
+                    string_array(
+                        &runtime.filesystem.allow_write,
+                        "/filesystem/allowWrite",
+                        true,
+                    ),
+                ),
+                (
+                    "denyWithinAllow",
+                    string_array(
+                        &runtime.filesystem.deny_write,
+                        "/filesystem/denyWrite",
+                        true,
+                    ),
+                ),
+            ]);
+            let sandboxing_enabled = tool_ctx.sandbox_available && runtime.enabled;
+            let network_restriction_config = sandboxing_enabled.then(|| {
+                let mut fields = vec![(
+                    "allowedHosts",
+                    string_array(
+                        &runtime.network.allowed_domains,
+                        "/network/allowedDomains",
+                        false,
+                    ),
+                )];
+                if !runtime.network.denied_domains.is_empty() {
+                    fields.push((
+                        "deniedHosts",
+                        string_array(
+                            &runtime.network.denied_domains,
+                            "/network/deniedDomains",
+                            false,
+                        ),
+                    ));
+                }
+                source_object(fields)
+            });
+            let raw_unix_sockets = raw_sandbox_settings
+                .as_ref()
+                .and_then(|settings| settings.subprojection("/network/allowUnixSockets").ok());
+            let allow_unix_sockets = if !runtime.network.allow_unix_sockets.is_empty() {
+                Some(string_array(
+                    &runtime.network.allow_unix_sockets,
+                    "/network/allowUnixSockets",
+                    true,
+                ))
+            } else {
+                raw_unix_sockets
+            };
+            let ignore_violations = raw_sandbox_settings
+                .as_ref()
+                .and_then(|settings| settings.subprojection("/ignoreViolations").ok())
+                .or_else(|| {
+                    if runtime.ignore_violations.is_empty() {
+                        None
+                    } else {
+                        let mut entries = runtime.ignore_violations.iter().collect::<Vec<_>>();
+                        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+                        Some(source_object(
+                            entries
+                                .into_iter()
+                                .map(|(key, values)| {
+                                    (
+                                        key.as_str(),
+                                        Utf16JsonProjection::array(
+                                            values.iter().map(Utf16JsonProjection::from).collect(),
+                                        )
+                                        .expect("ignore violation patterns are strings"),
+                                    )
+                                })
+                                .collect(),
+                        ))
+                    }
+                });
+            let subprocess_scrub = subprocess_env_scrub_enabled();
+            let live_permission_mode = permission_gate.permission_mode();
+            orchestrator::conversation::NativeSandboxHostFacts {
+                sandbox_available: sandboxing_enabled,
+                filesystem_read,
+                filesystem_write,
+                network_restriction_config,
+                allow_unix_sockets,
+                ignore_violations,
+                sandbox_settings: raw_sandbox_settings.clone(),
+                allow_unsandboxed_commands: runtime.are_unsandboxed_commands_allowed(),
+                allow_apple_events: runtime.allow_apple_events,
+                allow_local_binding: runtime.network.allow_local_binding,
+                platform: platform.clone(),
+                auto_mode: live_permission_mode.as_deref() == Some("auto"),
+                filesystem_policy_relaxed: native_filesystem_policy_relaxed(
+                    &settings_layers,
+                    platform.as_deref(),
+                    subprocess_scrub,
+                ),
+                temp_paths: native_temp_paths(),
+                boundary_note_enabled: telemetry::feature_flags::flag_bool(
+                    "tengu_elegant_ocean",
+                    true,
+                ),
+                // This host does not implement `registerCommandNetworkLists`,
+                // so Native's `wge()` feature gate cannot become active here.
+                command_network_lists_offered: false,
+                // Desktop composition creates a main LingXi session. Native's
+                // `qb()` therefore reduces to `!isInteractive()` on this host.
+                sandbox_command_changes_settings: !interactive_session,
+                interactive_session,
+                session_kind_present: std::env::var_os("CLAUDE_CODE_SESSION_KIND").is_some(),
+                settings_layers: settings_layers.clone(),
+            }
+        }
+    };
     let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools_with_fusion_recorder(
         &mut tools_inner,
         tool_ctx,
@@ -4104,12 +4892,11 @@ pub async fn build_with_credential_stack(
         // composition: default → user → project → local → flag → managed.
         // `workflowSizeGuideline` has no environment mapping, so managed is the
         // effective highest source. The default is medium.
-        let managed_workflow_layers: Vec<lingxi_core::settings::SettingsJson> =
-            crate::desktop::settings_watch::managed_settings_raw_tiers()
-                .await
-                .into_iter()
-                .filter_map(|raw| serde_json::from_str(&raw).ok())
-                .collect();
+        let managed_workflow_layers: Vec<lingxi_core::settings::SettingsJson> = managed_snapshot
+            .effective_json()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .into_iter()
+            .collect();
         let (workflow_size_guideline, managed_workflow, default_workflow) =
             resolve_workflow_size_guideline(&cfg, &cwd, &managed_workflow_layers);
         workflow_size_guideline_state =
@@ -4238,6 +5025,20 @@ pub async fn build_with_credential_stack(
     tools_inner.refresh_tool_search_view();
 
     let tools = Arc::new(tools_inner);
+    // Desktop and Headless share this composition root. The main-loop model is
+    // read from the live ToolRegistry so model switches affect the next policy
+    // attachment snapshot. Other Native policy facts remain absent until this
+    // host has an authoritative source for them.
+    let native_policy_host_facts_provider = {
+        let tools = tools.clone();
+        move || {
+            let model = tools.main_loop_model();
+            orchestrator::conversation::NativePolicyHostFacts {
+                simple_system_prompt: Some(tool_api::dh_simple_system_prompt(model.as_deref())),
+                ..Default::default()
+            }
+        }
+    };
     // Oracle `kq` — publish the read-auto-allow probe now that BOTH inputs
     // exist: the policy, and the FINAL tool list. Earlier means an unknown tool
     // list (which the probe answers `false` for); later means after the file
@@ -4534,9 +5335,9 @@ pub async fn build_with_credential_stack(
     let plugin_hook_registry = hook_registry.clone();
     let plugin_agent_catalog = agent_catalog.clone();
     let plugin_mcp_registry = mcp_registry.clone();
-    // `cwd` is moved into the orchestrator below; the plugin bootstrap's
+    // The orchestrator receives a clone of `cwd` below; the plugin bootstrap's
     // sandboxed `DesktopFileSystem` (a Plan-16 dead-code field on `PluginManager`)
-    // needs a workspace root, so snapshot it here.
+    // needs the same workspace root, so snapshot it here.
     let cwd_for_plugins = watch_cwd.clone();
     // #39 UserPromptExpansion: capture the SAME `Arc<HookExecutorImpl>` BEFORE
     // it is moved into the orchestrator, so the slash-command dispatcher (built
@@ -4572,13 +5373,6 @@ pub async fn build_with_credential_stack(
     // restoration. Same shared-`Arc` file target, so the record lands in the SAME
     // `<uuid>.jsonl` the orchestrator appends messages to.
     let main_agent_setting_writer = main_jsonl_writer.clone();
-    // Desktop hosts own their trust decision; CLI callers retain disk/session
-    // trust resolution. This shared value gates cron, task messages, and /goal.
-    let workspace_trusted = resolve_workspace_trust(
-        cfg.host_workspace_trusted,
-        &cwd,
-        migrations::global_config::global_config_path().as_deref(),
-    );
     let goal_hooks_restricted = if cfg.restricted {
         effective_settings
             .as_ref()
@@ -4616,6 +5410,10 @@ pub async fn build_with_credential_stack(
     let instruction_identity = crate::instruction_identity::InstructionIdentity::new(auth.clone());
     let mod_surface_roster =
         Arc::new(orchestrator::mod_surface_roster::ModSurfaceRoster::default());
+    let native_tool_pool_refresh_callback_available = super::native_tool_pool_refresh_callback_for(
+        &orch_cfg.query_source,
+        cfg.native_settings_agent_context,
+    );
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -4625,12 +5423,22 @@ pub async fn build_with_credential_stack(
         perms,
         output,
         memory,
-        cwd,
+        cwd.clone(),
     )
+    .with_main_model_selection(
+        Some(main_model_setting.clone()),
+        main_model_setting_provenance,
+        session_model_restriction.clone(),
+    )
+    .await
     .with_dynamic_workflows_gate(dynamic_workflows_gate)
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())
     .with_instruction_user_email_provider(instruction_identity.clone())
-    .with_mod_surface_roster(mod_surface_roster.clone());
+    .with_mod_surface_roster(mod_surface_roster.clone())
+    .with_native_sandbox_host_facts_provider(sandbox_host_facts_provider)
+    .with_native_policy_host_facts_provider(native_policy_host_facts_provider)
+    .with_native_tool_pool_refresh_callback_available(native_tool_pool_refresh_callback_available)
+    .with_native_settings_agent_context(cfg.native_settings_agent_context);
     let orch_builder = orch_builder.with_workflow_size_guideline(workflow_size_guideline_state);
     // Gap #5: wire the production JSONL writer (constructed just above) so the
     // session is persisted + discoverable by the resume loader.
@@ -4718,15 +5526,20 @@ pub async fn build_with_credential_stack(
         // can discover them. Reads `shared_command_registry` lazily at turn time
         // (populated below at (6), before any turn fires).
         .with_skill_listing({
-            let provider = registry_skill_listing_provider(
+            let provider = registry_skill_listing_provider_for_desktop(
                 shared_command_registry.clone(),
                 read_state_map.clone(),
                 super::code_review_suggestion_provider(cfg.clone(), session_cwd.clone()),
+                cfg.clone(),
+                session_cwd.clone(),
             );
             let child_provider = provider.clone();
             tools.set_bash_precommit_skills_provider(move || {
                 let provider = child_provider.clone();
-                async move { provider.bash_precommit_skills().await }
+                async move {
+                    let snapshot = provider.skill_listing_snapshot().await;
+                    provider.bash_precommit_skills(&snapshot.entries).await
+                }
             });
             provider
         })
@@ -4741,6 +5554,16 @@ pub async fn build_with_credential_stack(
         // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
         .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
             task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+            orchestrator::task_notifications_provider::TaskDeliveryHostFacts {
+                windows_or_wsl: cfg!(windows)
+                    || matches!(
+                        platform_posix::wsl_detect::detect(),
+                        platform_posix::wsl_detect::WslKind::WslOne
+                            | platform_posix::wsl_detect::WslKind::WslTwo
+                    ),
+                strict_tool_result_pairing: false,
+                bare_mode: cfg.customization_gates.bare,
+            },
         )))
         // hook-bg-fields: populate the `Stop` / `SubagentStop` hook payload's
         // `background_tasks` (claude-code `Lic(taskRegistry.all())`) +
@@ -4843,15 +5666,13 @@ pub async fn build_with_credential_stack(
         || is_env_truthy("CLAUDE_CODE_EXPERIMENTAL_SKILL_SEARCH")
         || is_env_truthy("LINGXI_SKILL_SEARCH");
     let orch_builder = if skill_search_on {
-        let source: Arc<dyn skill_api::SkillCandidateSource> = Arc::new(
-            skill_api::RegistryCandidateSource::new(Arc::new(desktop_skill_registry())),
+        let source: Arc<dyn skill::SkillCandidateSource> = Arc::new(
+            skill::RegistryCandidateSource::new(Arc::new(desktop_skill_registry())),
         );
-        orch_builder.with_skill_discovery_prefetch(Arc::new(
-            skill_api::SkillDiscoveryPrefetch::new(
-                source,
-                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
-            ),
-        ))
+        orch_builder.with_skill_discovery_prefetch(Arc::new(skill::SkillDiscoveryPrefetch::new(
+            source,
+            Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+        )))
     } else {
         orch_builder
     };
@@ -4881,6 +5702,12 @@ pub async fn build_with_credential_stack(
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
     let orch = orchestrator::ConversationOrchestrator::into_shared(orch_builder);
+    let native_settings_prompt_provider: Arc<
+        dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider,
+    > = orch.clone();
+    let _ =
+        subagent_native_settings_prompt_provider_cell.set(native_settings_prompt_provider.clone());
+    let _ = teammate_native_settings_prompt_provider_cell.set(native_settings_prompt_provider);
     if cfg.anthropic_client_metadata.is_some() {
         let session_owner = Arc::downgrade(&orch);
         api_service.set_request_session_id_source(Arc::new(move || {
@@ -5145,10 +5972,13 @@ pub async fn build_with_credential_stack(
     // call below moves `connect_chatgpt`).
     let oauth_connect_driver: Arc<dyn command_api::builtins::OAuthConnectDriver> =
         Arc::new(FusionCatalogRefreshingOAuthConnect {
-            inner: Arc::new(crate::desktop::connect::EngineOAuthConnect::new(
-                auth.clone(),
-                connect_chatgpt_inner,
-            )),
+            inner: Arc::new(
+                crate::desktop::connect::EngineOAuthConnect::new(
+                    auth.clone(),
+                    connect_chatgpt_inner,
+                )
+                .with_managed_policy_snapshot_cache(cfg.managed_policy_snapshot_cache.clone()),
+            ),
             refresher: fusion_catalog_refresher.clone(),
         });
     let mut reg = desktop_command_registry(
@@ -5162,6 +5992,7 @@ pub async fn build_with_credential_stack(
         cfg.customization_gates,
         strict_plugin_only_skills,
         &cfg.add_dir,
+        cfg.managed_policy_snapshot_cache.clone(),
         shared_command_registry.clone(),
     )
     .await;
@@ -5365,6 +6196,7 @@ pub async fn build_with_credential_stack(
             &[],
             cfg.restricted,
             cfg.flag_settings.as_ref(),
+            &managed_snapshot,
             &analytics_bus,
         )
         .await;
@@ -5390,12 +6222,16 @@ pub async fn build_with_credential_stack(
         // just field defaults) and injects `LINGXI_PLUGIN_OPTION_*` into plugin
         // hooks. Sensitive values are NOT here — they resolve live from
         // `CredentialManager`.
-        let plugin_configs =
-            load_plugin_configs(&cfg.lingxi_home, cfg.restricted, cfg.flag_settings.as_ref()).await;
-        let blocked_marketplaces = load_blocked_marketplaces().await;
-        let managed_plugin_names = load_managed_plugin_names().await;
-        let managed_mod_seats =
-            managed_mod_seats_from_raw_tiers(managed_settings_for_strict.clone());
+        let plugin_configs = load_plugin_configs(
+            &cfg.lingxi_home,
+            cfg.restricted,
+            cfg.flag_settings.as_ref(),
+            &managed_snapshot,
+        )
+        .await;
+        let blocked_marketplaces = load_blocked_marketplaces(&managed_snapshot);
+        let managed_plugin_names = load_managed_plugin_names(&managed_snapshot);
+        let managed_mod_seats = managed_mod_seats_from_raw_tiers(managed_policy_layer.clone());
         let pm = Arc::new(
             plugin::PluginManager::new(
                 plugins_dir.clone(),
@@ -5421,9 +6257,7 @@ pub async fn build_with_credential_stack(
             .with_safe_mode(cfg.customization_gates.safe_mode)
             .with_workspace_trusted(workspace_trusted)
             .with_mod_hook_policy(mod_disable_all_hooks, mod_managed_only)
-            .with_sec_default_order(sec_default_order_from_raw_tiers(
-                &managed_settings_for_strict,
-            ))
+            .with_sec_default_order(sec_default_order_from_raw_tiers(&managed_policy_layer))
             .with_plugin_workflows(plugin_workflow_registry.clone())
             .with_project_dir(cwd_for_plugins.clone())
             .with_mod_store_root(cfg.lingxi_home.join("store"))
@@ -5466,6 +6300,7 @@ pub async fn build_with_credential_stack(
             inline: inline_plugins,
             restricted: cfg.restricted,
             flag_settings: cfg.flag_settings.clone(),
+            managed_policy_snapshot_cache: managed_policy_snapshot_cache.clone(),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }));
         if inline_plugins && plugin_dir_watch_enabled() {
@@ -5753,7 +6588,7 @@ pub async fn build_with_credential_stack(
             Box::pin(async move { orch.bundled_prompt_model().await.map(Some) })
         }))
         .with_skill_invocation_observer(skill_invocation_observer)
-        .with_skill_usage_home(cfg.lingxi_home.clone())
+        .with_skill_usage_session(skill_usage_session)
         .with_mcp_prompt_resolver(Arc::new(move |connection_id, prompt_name, arguments| {
             let registry = mcp_prompt_registry.clone();
             Box::pin(async move {
@@ -5821,13 +6656,22 @@ pub async fn build_with_credential_stack(
     if session_start.reload_skills {
         let home = dirs::home_dir().unwrap_or_else(|| cfg.lingxi_home.clone());
         let managed_dir = crate::desktop::settings_watch::managed_settings_dir();
+        let additional_skill_dirs = cfg
+            .add_dir
+            .iter()
+            .map(|root| {
+                crate::desktop::permission_config::expand_trusted_dir(root, &cwd, Some(&home))
+                    .join(branding::DOT_DIR)
+                    .join("skills")
+            })
+            .collect();
         let handler = command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
             shared_command_registry.clone(),
             cfg.cwd.clone(),
             cfg.lingxi_home.clone(),
             Some(managed_dir),
             home,
-            Vec::new(),
+            additional_skill_dirs,
             cfg.customization_gates.safe_mode,
         );
         if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
@@ -5889,6 +6733,23 @@ pub async fn build_with_credential_stack(
     let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(watcher_test_support::WatchFs::new(watch_cwd.clone()));
     let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
+    let model_selection_refresher: Arc<dyn settings_watch::MainModelSelectionRefresher> =
+        orch.clone();
+    let native_settings_refresher: Arc<dyn settings_watch::NativeSettingsRefresher> =
+        if let Some(helper) = proxy_auth_helper.as_ref() {
+            Arc::new(DesktopNativeSettingsRefresher {
+                orchestrator: orch.clone(),
+                proxy_auth_helper: helper.clone(),
+                home_dir: proxy_auth_home_dir,
+                project_dir: cwd.clone(),
+                interactive: proxy_auth_interactive,
+                workspace_trusted,
+            })
+        } else {
+            orch.clone()
+        };
+    let model_selection_refresh =
+        settings_watch::MainModelSelectionRefresh::from_config(&cfg, &default_listings);
     let settings_watcher =
         settings_watch::SettingsWatcher::new(&cfg.lingxi_home, &watch_cwd, firer)
             .with_permission_gate(settings_permission_gate)
@@ -5897,6 +6758,9 @@ pub async fn build_with_credential_stack(
                 cfg.flag_settings.is_some(),
                 cfg.flag_settings_source.clone(),
             )
+            .with_main_model_selection_refresh(model_selection_refresh, model_selection_refresher)
+            .with_native_settings_refresher(native_settings_refresher)
+            .with_managed_policy_snapshot_cache(managed_policy_snapshot_cache)
             .spawn(watch_fs)
             .await;
 

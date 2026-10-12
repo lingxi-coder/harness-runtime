@@ -656,7 +656,9 @@ mod tests {
         );
         assert_eq!(
             out.env_warning.as_deref(),
-            Some("MCP_PROTOCOL_NEGOTIATION=nonsense is invalid; expected 'legacy' or 'auto' — ignoring")
+            Some(
+                "MCP_PROTOCOL_NEGOTIATION=nonsense is invalid; expected 'legacy' or 'auto' — ignoring"
+            )
         );
     }
 
@@ -676,7 +678,9 @@ mod tests {
         assert_eq!(out.mode, NegotiationMode::Legacy);
         assert_eq!(
             out.denylist_warning.as_deref(),
-            Some("MCP era negotiation denylist matched blocked.example.com; the legacy handshake applies")
+            Some(
+                "MCP era negotiation denylist matched blocked.example.com; the legacy handshake applies"
+            )
         );
     }
 

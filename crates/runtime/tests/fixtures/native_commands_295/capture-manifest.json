@@ -1,0 +1,83 @@
+{
+  "target": {
+    "native_version": "2.1.295",
+    "native_binary": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "capture": {
+    "output_directory": "acceptance/native-command-skills-295-capture/attempt-01",
+    "max_seconds_per_process": 60,
+    "normal_wait_seconds": 55,
+    "term_grace_seconds": 2,
+    "kill_grace_seconds": 2,
+    "output_format": "json",
+    "launches_per_case": 1,
+    "stop_on_first_incomplete_case": true,
+    "network": "macOS sandbox: outbound denied except the ephemeral 127.0.0.1 loopback fixture listener; inbound denied",
+    "credentials": "synthetic Anthropic key only",
+    "source_replay": "all outbound request bodies, loopback SSE response bodies, stdout/stderr, JSONL, and input files are saved as raw bytes; no canonicalization"
+  },
+  "cases": [
+    {
+      "id": "slash-only",
+      "session_id": "00000000-0000-4000-8000-000000002951",
+      "prompt": "/",
+      "request_body_anchors": ["\"text\":\"/\""],
+      "skill_files": []
+    },
+    {
+      "id": "unknown-slash-command",
+      "session_id": "00000000-0000-4000-8000-000000002952",
+      "prompt": "/__native_unknown_295__ fixed-argument",
+      "request_body_anchors": ["\"text\":\"/__native_unknown_295__ fixed-argument\""],
+      "skill_files": []
+    },
+    {
+      "id": "unicode-skill-name",
+      "session_id": "00000000-0000-4000-8000-000000002953",
+      "prompt": "/skill-🧪-probe",
+      "request_body_anchors": [
+        "\"text\":\"<command-message>skill-🧪-probe</command-message>\\n<command-name>/skill-🧪-probe</command-name>\\n\"",
+        "Return the fixed Skill body for skill-🧪-probe."
+      ],
+      "skill_files": [
+        {
+          "path": "acceptance/fixtures/commands/run/cwd/.claude/skills/skill-🧪-probe/SKILL.md",
+          "sha256": "8b0cb4a4180c9a2f6681a035718a462e8d97acfab63113a77c7d231ffd34151f"
+        }
+      ]
+    },
+    {
+      "id": "punctuation-skill-name",
+      "session_id": "00000000-0000-4000-8000-000000002954",
+      "prompt": "/skill.alpha+beta",
+      "request_body_anchors": [
+        "\"text\":\"<command-message>skill.alpha+beta</command-message>\\n<command-name>/skill.alpha+beta</command-name>\\n\"",
+        "Return the fixed Skill body for skill.alpha+beta."
+      ],
+      "skill_files": [
+        {
+          "path": "acceptance/fixtures/commands/run/cwd/.claude/skills/skill.alpha+beta/SKILL.md",
+          "sha256": "15aec457a133adfe88aaa44eeb01592b33a53c4800adcb251cf8ff962f701071"
+        }
+      ]
+    }
+  ],
+  "comparison_boundaries": {
+    "fixed_raw_fields": [
+      "Native raw request text fragments for prompt/command marker/skill body",
+      "Harness captured outbound message source text",
+      "Persisted user-message source text and unknown-command reminder absence"
+    ],
+    "dynamic_constraints": [
+      "session and message UUIDs",
+      "timestamps",
+      "case-specific temporary skill base directory",
+      "provider system prompt and request metadata"
+    ],
+    "not_claimed": [
+      "whole HTTP request byte equality from the Harness mock-client seam",
+      "Native 2.1.295 parity until this manifest has a completed capture receipt"
+    ]
+  }
+}

@@ -32,7 +32,7 @@ memory = { path = "../memory" }
 # EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetch handle/result types
 # (register-but-disable, default OFF) — the per-turn discovery side-channel
 # armed/consumed by the orchestrator, mirroring the `memory` prefetch trio.
-skill-api = { path = "../skill-api" }
+skill = { path = "../skill" }
 migrations = { path = "../migrations" }
 permission = { path = "../permission" }
 hooks = { path = "../hooks" }

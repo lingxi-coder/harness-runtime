@@ -844,6 +844,12 @@ pub struct TaskNotification {
     pub recipient_agent_id: Option<crate::types::AgentId>,
     /// 9-char task id → `<task-id>`.
     pub task_id: String,
+    /// Source-shaped Native local-shell snapshot, when its effective producer
+    /// policy admitted one. This is independent of the human-readable task
+    /// notification and travels in the existing queued-command ingress
+    /// attachment when that task notification is rendered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_delivery: Option<crate::host::task_delivery::TaskDeliverySnapshot>,
     /// Task type wire string (one of the ten — see [`TaskRecord::task_type`]).
     /// Selects the
     /// per-type notification format (bash / agent / monitor / generic).
@@ -989,6 +995,7 @@ impl Default for TaskNotification {
         Self {
             recipient_agent_id: None,
             task_id: String::new(),
+            task_delivery: None,
             task_type: String::new(),
             status: String::new(),
             description: empty_task_notification_description(),
@@ -2114,10 +2121,13 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// drain is the turn-boundary equivalent of those per-type
     /// `enqueue*Notification` callbacks. A task ALREADY `notified` (e.g. by the
     /// `TaskOutput`/`TaskStop` tool consuming its output) is skipped — no
-    /// duplicate. The default impl returns empty so existing mock handles compile
-    /// unchanged and builds with no registry stay byte-identical (no reminder).
+    /// duplicate. `task_delivery_policy` gates only the optional structured
+    /// Native `taskDelivery` snapshot; it never suppresses the human-readable
+    /// task notification. The default impl returns empty so mock handles can
+    /// omit registry behavior and builds with no registry stay byte-identical.
     async fn take_pending_task_notifications(
         &self,
+        _task_delivery_policy: crate::host::task_delivery::TaskDeliveryPolicy,
     ) -> Result<Vec<TaskNotification>, TaskRegistryError> {
         Ok(Vec::new())
     }
@@ -2171,9 +2181,11 @@ pub trait TaskRegistryHandle: Send + Sync {
     async fn take_pending_task_notifications_for(
         &self,
         recipient: Option<crate::types::AgentId>,
+        task_delivery_policy: crate::host::task_delivery::TaskDeliveryPolicy,
     ) -> Result<Vec<TaskNotification>, TaskRegistryError> {
         if recipient.is_none() {
-            self.take_pending_task_notifications().await
+            self.take_pending_task_notifications(task_delivery_policy)
+                .await
         } else {
             Ok(Vec::new())
         }

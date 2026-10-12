@@ -13,6 +13,7 @@ branding.workspace = true
 base64 = "0.22"
 jsonrpc = { path = "../../jsonrpc" }
 llm-runtime = { path = "../../llm-runtime" }
+lingxi-llm-client.workspace = true
 http-client = { path = "../../http-client" }
 telemetry = { path = "../../telemetry" }
 # `.worktreeinclude` gitignore-style pattern matching (copyWorktreeIncludeFiles
@@ -21,7 +22,6 @@ ignore = "0.4"
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 eventsource-stream = "0.2"
 futures = "0.3"
 futures-util = "0.3"

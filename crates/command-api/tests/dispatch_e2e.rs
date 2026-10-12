@@ -76,6 +76,16 @@ async fn known_command_with_args_ignored_by_stub() {
 }
 
 #[tokio::test]
+async fn native_doctor_dispatches_the_bundled_prompt() {
+    let d = build_dispatcher();
+    let outcome = d.dispatch("/doctor".into()).await;
+    let SlashDispatchResult::RunAsTurn { prompt } = outcome else {
+        panic!("expected /doctor bundled prompt turn, got {outcome:?}");
+    };
+    assert!(prompt.string_at("").unwrap().starts_with("# LingXi Checkup\n"));
+}
+
+#[tokio::test]
 async fn unknown_command_path() {
     let d = build_dispatcher();
     let outcome = d.dispatch("/zzz-fake".into()).await;
@@ -113,7 +123,7 @@ async fn many_dispatches_against_one_registry() {
 async fn concurrent_dispatches_against_one_registry() {
     let d = Arc::new(build_dispatcher());
     let mut handles = vec![];
-    for name in ["agents", "config", "version", "doctor", "hooks", "init"] {
+    for name in ["agents", "config", "version", "login", "hooks", "init"] {
         let dispatcher = d.clone();
         let raw = format!("/{name}");
         let expected = format!("{name}: not implemented in v0.6.0 (M5)");
