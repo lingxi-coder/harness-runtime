@@ -166,7 +166,11 @@ async fn classifier_keeps_each_system_cache_control_without_implicit_prompt_rewr
         }
         let expected: Vec<_> = system_blocks
             .iter()
-            .map(|b| json!({"type":"text","text":b.text,"cache_control":cache}))
+            .map(|b| {
+                let text = String::from_utf16(&b.text.string_units("").unwrap())
+                    .expect("classifier fixture system text contains only Unicode scalars");
+                json!({"type":"text","text":text,"cache_control":cache})
+            })
             .collect();
         let seen = transport.0.lock().unwrap();
         let wire_source = seen.last().unwrap();

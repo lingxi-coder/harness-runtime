@@ -69,14 +69,9 @@ async fn help_dispatch() {
                 branding::DOT_DIR
             );
             assert!(text.contains(agents_description.as_str()));
-            // 80 newlines (header + 79 visible command lines); hidden and
-            // disabled commands remain filtered out. SLASH-06 made `bug`
-            // visible and stopped counting `share` (it is `bug`'s alias);
-            // SLASH-14 then filtered `/version` out — both of its oracle
-            // objects @2.1.238 296268759 are `isEnabled:()=>!1` — SLASH-13
-            // added the ungated `/powerup` object, and cc2.1.269 brought
-            // `/output-style` back.
-            assert_eq!(text.matches('\n').count(), 80);
+            // Fixed 2.1.295 catalog: header plus 75 visible command lines.
+            // Hidden and disabled commands remain filtered out.
+            assert_eq!(text.matches('\n').count(), 76);
         }
         other => panic!("{other:?}"),
     }

@@ -1,3 +1,5 @@
+//! Forked prompt suggestions preserve isolated tool-denial retries and candidate order.
+
 use async_trait::async_trait;
 use lingxi_core::host::SourceToolWireDefinition;
 use lingxi_core::types::{
