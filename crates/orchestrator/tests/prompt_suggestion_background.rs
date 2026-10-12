@@ -30,8 +30,14 @@ fn native_background_classifier_and_redactor_execute_in_quickjs() {
 
 #[test]
 fn background_reply_requires_unchanged_blocked_need_and_epoch_resets() {
-    let mut state = state::BackgroundSuggestionState::default();
-    state.persisted = Some(json!({"tempo":"blocked", "needs":"pick one"}));
+    let mut state = state::BackgroundSuggestionState {
+        session_id: "previous-session".into(),
+        last_message_count: 9,
+        previous_state: "blocked".into(),
+        previous_state_since_ms: 123,
+        persisted: Some(json!({"tempo":"blocked", "needs":"pick one"})),
+        ..Default::default()
+    };
     assert!(!state.record_reply("Use the first option", Some("different")));
     assert!(state.record_reply("Use the first option", Some("pick one")));
     assert!(!state.record_reply("Use the first option", Some("pick one")));
@@ -41,6 +47,10 @@ fn background_reply_requires_unchanged_blocked_need_and_epoch_resets() {
     state.reset();
     assert_ne!(state.epoch, epoch);
     assert!(state.eligible_context().is_none());
+    assert!(state.session_id.is_empty());
+    assert_eq!(state.last_message_count, 0);
+    assert!(state.previous_state.is_empty());
+    assert_eq!(state.previous_state_since_ms, 0);
 }
 
 #[test]
@@ -77,9 +87,9 @@ fn background_pipeline_persists_only_the_classifiers_current_safe_reply() {
 async fn background_pipeline() {
     use async_trait::async_trait;
     use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream};
-    use lingxi_core::types::{ToolUseId, utf16_json::Utf16JsonProjection};
+    use lingxi_core::types::{utf16_json::Utf16JsonProjection, ToolUseId};
     use orchestrator::test_support::{
-        NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+        noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider,
     };
     use orchestrator::test_support_stream::*;
     use orchestrator::{ConversationOrchestrator, OrchestratorConfig};

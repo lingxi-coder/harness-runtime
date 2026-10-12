@@ -3211,7 +3211,7 @@ mod flat_string_mapper_tests {
         )
         .unwrap();
         let mut value = projection.value.clone();
-        value["changed"] = Value::String("plain".to_owned());
+        value["changed"] = serde_json::Value::String("plain".to_owned());
         value.as_object_mut().unwrap().remove("gone");
         projection.rebase_display_value(value.clone()).unwrap();
         assert_eq!(projection.value, value);

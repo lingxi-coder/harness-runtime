@@ -709,7 +709,6 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
             row.rebase_display_value(exact.value.clone())
                 .expect("removing a private carrier preserves native projection");
         }
-        let value = exact.value;
         let ty = row.string_at("/type").unwrap_or("");
         if is_transcript_message_type(ty) {
             let Ok(mut msg) = JsonlMessage::from_projection(&row) else {
