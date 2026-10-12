@@ -29,7 +29,10 @@
 
 use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::re_append::{find_last_typed_field, read_tail};
-use crate::jsonl::reader::{extract_json_string_field, JsonlReader, LoadedTranscript};
+use crate::jsonl::reader::{
+    extract_json_string_field, lines_naming_types, route_line_seq, route_lines,
+    strip_transcript_bom, JsonlReader, LoadedTranscript,
+};
 use crate::jsonl::recovery::{
     append_metadata_descendants, follows_checkpoint, ordered_messages, recover_parallel_results,
 };
@@ -570,6 +573,74 @@ async fn collect_dir(
     Ok(true)
 }
 
+/// Enrich every candidate, several at a time.
+///
+/// Each row is an independent full parse of one transcript, so a project with
+/// many large sessions lists in roughly the time of its largest files rather
+/// than their sum. Rows and errors keep candidate order, exactly as a
+/// sequential scan would report them.
+async fn enrich_candidates(
+    candidates: Vec<CatalogCandidate>,
+    fs: &Arc<dyn FileSystem>,
+    current_is_sdk_entrypoint: bool,
+    target_cwds: &[String],
+    skipped_files: &mut usize,
+) -> Result<Vec<SessionMetadata>, LoaderError> {
+    let parallelism = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .clamp(1, 8);
+    let cache_identity = fs.cache_identity();
+    let total = candidates.len();
+    let mut pending = candidates.into_iter().enumerate();
+    let mut jobs = tokio::task::JoinSet::new();
+    let mut results = Vec::with_capacity(total);
+    loop {
+        while jobs.len() < parallelism {
+            let Some((index, candidate)) = pending.next() else {
+                break;
+            };
+            let fs = Arc::clone(fs);
+            let cache_identity = cache_identity.clone();
+            let target_cwds = target_cwds.to_vec();
+            jobs.spawn(async move {
+                let mut skipped = 0;
+                let row = enrich_candidate(
+                    candidate,
+                    &fs,
+                    cache_identity.as_ref(),
+                    current_is_sdk_entrypoint,
+                    &target_cwds,
+                    &mut skipped,
+                )
+                .await;
+                (index, row, skipped)
+            });
+        }
+        let Some(joined) = jobs.join_next().await else {
+            break;
+        };
+        match joined {
+            Ok(result) => results.push(result),
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => {
+                return Err(LoaderError::Io {
+                    arg: "session catalog".to_string(),
+                    source: std::io::Error::other(error),
+                })
+            }
+        }
+    }
+    results.sort_by_key(|(index, _, _)| *index);
+    let mut rows = Vec::with_capacity(results.len());
+    for (_, row, skipped) in results {
+        *skipped_files += skipped;
+        if let Some(row) = row? {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
 async fn enrich_candidate(
     candidate: CatalogCandidate,
     fs: &Arc<dyn FileSystem>,
@@ -660,9 +731,21 @@ async fn enrich_candidate_uncached(
     // needs to surface a session's stored title — `summaries` (keyed by
     // leafUuid), `custom_titles` + `ai_titles` (keyed by sessionId). See
     // `LoadedTranscript`.
-    let reader = JsonlReader::new(path.clone(), fs.clone());
-    let loaded = match reader.read_routed().await {
+    let content = match fs
+        .read_file(path.to_str().expect("UTF-8 path"), None, None)
+        .await
+    {
+        Ok(read) => read.content,
+        Err(_) => {
+            *skipped_files += 1;
+            return Ok(None);
+        }
+    };
+    // The parse is the whole cost of a row: keep it off the async workers so
+    // concurrent rows (see `enrich_candidates`) parse on separate threads.
+    let loaded = match tokio::task::spawn_blocking(move || route_lines(&content)).await {
         Ok(loaded) => loaded,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
         Err(_) => {
             *skipped_files += 1;
             return Ok(None);
@@ -1142,7 +1225,61 @@ pub async fn list_recent_sessions_with_diagnostics(
     // `git_worktree_paths` already returns empty for git-error / non-repo /
     // single-worktree, so an empty vec is the "behave exactly as before" signal.
     let worktree_paths = git_worktree_paths(cwd);
-    list_recent_sessions_inner_with_diagnostics(lingxi_home, cwd, limit, &fs, &worktree_paths).await
+    list_recent_sessions_inner_with_diagnostics(lingxi_home, cwd, limit, &fs, &worktree_paths, None)
+        .await
+}
+
+/// [`list_recent_sessions_with_diagnostics`] narrowed to one session: the
+/// full catalog's answer with every other row removed.
+///
+/// Candidates are collected exactly as for the full catalog (same project
+/// directories, same worktree union, same filters), but only this session's
+/// transcript is parsed. A host that needs one row before opening a session
+/// therefore no longer waits for every transcript in the project, which took
+/// most of a second once one of them reached tens of megabytes. Only when the
+/// session has no row does the full catalog run: whether that is an empty
+/// answer or an error depends on the other transcripts. `skipped_files`
+/// counts the files this lookup itself skipped.
+pub async fn find_session_with_diagnostics(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<SessionCatalog, LoaderError> {
+    find_session_inner(lingxi_home, cwd, session_id, &fs, &git_worktree_paths(cwd)).await
+}
+
+async fn find_session_inner(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: &Arc<dyn FileSystem>,
+    worktree_paths: &[String],
+) -> Result<SessionCatalog, LoaderError> {
+    if let Ok(found) = list_recent_sessions_inner_with_diagnostics(
+        lingxi_home,
+        cwd,
+        1,
+        fs,
+        worktree_paths,
+        Some(session_id),
+    )
+    .await
+    {
+        // Its row exists, so the full catalog succeeds and lists this row.
+        return Ok(found);
+    }
+    let mut catalog = list_recent_sessions_inner_with_diagnostics(
+        lingxi_home,
+        cwd,
+        usize::MAX,
+        fs,
+        worktree_paths,
+        None,
+    )
+    .await?;
+    catalog.sessions.retain(|row| row.uuid == session_id);
+    Ok(catalog)
 }
 
 /// Worktree-path-injectable core of [`list_recent_sessions`] (so unit tests can
@@ -1156,11 +1293,16 @@ async fn list_recent_sessions_inner(
     fs: &Arc<dyn FileSystem>,
     worktree_paths: &[String],
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
-    Ok(
-        list_recent_sessions_inner_with_diagnostics(lingxi_home, cwd, limit, fs, worktree_paths)
-            .await?
-            .sessions,
+    Ok(list_recent_sessions_inner_with_diagnostics(
+        lingxi_home,
+        cwd,
+        limit,
+        fs,
+        worktree_paths,
+        None,
     )
+    .await?
+    .sessions)
 }
 
 async fn list_recent_sessions_inner_with_diagnostics(
@@ -1169,6 +1311,7 @@ async fn list_recent_sessions_inner_with_diagnostics(
     limit: usize,
     fs: &Arc<dyn FileSystem>,
     worktree_paths: &[String],
+    only_session: Option<Uuid>,
 ) -> Result<SessionCatalog, LoaderError> {
     let mut candidates: Vec<CatalogCandidate> = Vec::new();
     let mut skipped_files = 0;
@@ -1245,26 +1388,21 @@ async fn list_recent_sessions_inner_with_diagnostics(
         }
     }
 
+    if let Some(session_id) = only_session {
+        candidates.retain(|candidate| candidate.uuid == session_id);
+    }
     let current_is_sdk_entrypoint = matches!(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
         Ok("sdk-cli" | "sdk-ts" | "sdk-py")
     );
-    let cache_identity = fs.cache_identity();
-    let mut rows: Vec<SessionMetadata> = Vec::new();
-    for candidate in candidates {
-        if let Some(row) = enrich_candidate(
-            candidate,
-            fs,
-            cache_identity.as_ref(),
-            current_is_sdk_entrypoint,
-            &target_cwds,
-            &mut skipped_files,
-        )
-        .await?
-        {
-            rows.push(row)
-        }
-    }
+    let mut rows = enrich_candidates(
+        candidates,
+        fs,
+        current_is_sdk_entrypoint,
+        &target_cwds,
+        &mut skipped_files,
+    )
+    .await?;
     if worktree_paths.len() > 1 {
         rows = deduplicate_by_session_id(rows);
     }
@@ -1356,6 +1494,20 @@ async fn load_session_entries_from_path(
     arg: String,
     fs: Arc<dyn FileSystem>,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
+    let loaded = read_routed_session(path, arg, fs).await?;
+    if loaded.messages_in_order.is_empty() {
+        return Err(LoaderError::EmptyDirectory);
+    }
+    Ok(loaded.messages_in_order)
+}
+
+/// Route one session transcript: [`LoaderError::SessionNotFound`] when the
+/// file is missing, [`LoaderError::Io`] when it cannot be read.
+async fn read_routed_session(
+    path: PathBuf,
+    arg: String,
+    fs: Arc<dyn FileSystem>,
+) -> Result<LoadedTranscript, LoaderError> {
     match tokio::fs::metadata(&path).await {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1373,10 +1525,7 @@ async fn load_session_entries_from_path(
         arg: arg.clone(),
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
     })?;
-    if loaded.messages_in_order.is_empty() {
-        return Err(LoaderError::EmptyDirectory);
-    }
-    Ok(loaded.messages_in_order)
+    Ok(loaded)
 }
 
 /// Load a session by UUID from the same worktree-aware corpus used by
@@ -1411,6 +1560,29 @@ pub async fn load_session_entries_across_worktrees(
     let worktree_paths = git_worktree_paths(cwd);
     load_session_entries_across_worktrees_inner(lingxi_home, cwd, session_id, fs, &worktree_paths)
         .await
+}
+
+/// Route the transcript the worktree-aware resume loaders select, once.
+///
+/// [`load_session_across_worktrees`], [`load_session_entries_across_worktrees`]
+/// and [`read_agent_resume_state`] each select and read that file again; a
+/// resume that needs all three derives them from this one read, which also
+/// keeps them on one revision of the file. A missing file is
+/// [`LoaderError::SessionNotFound`]; callers apply their own emptiness check.
+pub async fn load_routed_session_across_worktrees(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<LoadedTranscript, LoaderError> {
+    let worktree_paths = git_worktree_paths(cwd);
+    let arg = session_id.to_string();
+    let path = if worktree_paths.len() <= 1 {
+        session_path(lingxi_home, cwd, &arg)
+    } else {
+        select_session_path_across_worktrees(lingxi_home, cwd, session_id, &worktree_paths).await?
+    };
+    read_routed_session(path, arg, fs).await
 }
 
 /// Resolve the transcript path selected by the worktree-aware resume loader.
@@ -1559,23 +1731,7 @@ async fn load_session_from_path(
     arg: String,
     fs: Arc<dyn FileSystem>,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
-    match tokio::fs::metadata(&path).await {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(LoaderError::SessionNotFound { arg });
-        }
-        Err(source) => {
-            return Err(LoaderError::Io {
-                arg: path.display().to_string(),
-                source,
-            });
-        }
-    }
-    let reader = JsonlReader::new(path, fs);
-    let loaded = reader.read_routed().await.map_err(|e| LoaderError::Io {
-        arg: arg.clone(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
-    })?;
+    let loaded = read_routed_session(path, arg.clone(), fs).await?;
 
     let (chain, _tip_session_id) = build_conversation_chain(&loaded, &arg);
     if chain.is_empty() {
@@ -1634,11 +1790,47 @@ pub async fn read_agent_resume_state(
     {
         return (None, None);
     }
-    let reader = JsonlReader::new(transcript_path.to_path_buf(), fs);
-    let Ok(loaded) = reader.read_routed().await else {
+    let Some(content) = read_transcript_content(transcript_path, fs).await else {
         return (None, None);
     };
-    agent_resume_state_from_loaded(&loaded, session_id)
+    agent_resume_state_from_content(&content, session_id)
+}
+
+/// [`agent_resume_state_from_loaded`] over raw transcript text, routing only
+/// the `agent-setting` rows that feed it (see [`route_rows_of_types`]).
+#[must_use]
+pub fn agent_resume_state_from_content(
+    content: &str,
+    session_id: &str,
+) -> (Option<String>, Option<Value>) {
+    agent_resume_state_from_loaded(
+        &route_rows_of_types(content, &["agent-setting"]),
+        session_id,
+    )
+}
+
+/// Route only the rows that can be one of `types`.
+///
+/// Restore readers that consult one side map (agent settings, worktree
+/// state) use this instead of a full [`route_lines`]: each of those rows is
+/// routed independently of every other row, so the map comes out identical
+/// while a long transcript's message rows are never parsed (see
+/// [`lines_naming_types`] for why no row of these types is skipped).
+#[must_use]
+pub fn route_rows_of_types(content: &str, types: &[&str]) -> LoadedTranscript {
+    route_line_seq(lines_naming_types(strip_transcript_bom(content), types))
+}
+
+/// The whole transcript text, as [`JsonlReader::read_routed`] reads it.
+async fn read_transcript_content(
+    transcript_path: &Path,
+    fs: Arc<dyn FileSystem>,
+) -> Option<String> {
+    let path = transcript_path.to_str().expect("UTF-8 path");
+    fs.read_file(path, None, None)
+        .await
+        .ok()
+        .map(|read| read.content)
 }
 
 /// Read the same verified agent metadata from an already captured transcript.
@@ -1711,8 +1903,15 @@ pub async fn read_worktree_state(
     {
         return None;
     }
-    let reader = JsonlReader::new(transcript_path.to_path_buf(), fs);
-    let loaded = reader.read_routed().await.ok()?;
+    let content = read_transcript_content(transcript_path, fs).await?;
+    worktree_state_from_content(&content, session_id)
+}
+
+/// [`read_worktree_state`] over raw transcript text, routing only the
+/// `worktree-state` rows (see [`route_rows_of_types`]).
+#[must_use]
+pub fn worktree_state_from_content(content: &str, session_id: &str) -> Option<Value> {
+    let loaded = route_rows_of_types(content, &["worktree-state"]);
     match loaded.worktree_states.get(session_id) {
         // An active worktree session (a JSON object); a cleared record is `null`.
         Some(v) if !v.is_null() => Some(v.clone()),
@@ -3304,6 +3503,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_session_returns_the_catalog_row_without_its_siblings() {
+        let (temp, lingxi_home, cwd, dir) = setup();
+        let base = SystemTime::now();
+        let older = write_session(&dir, &cwd, "older", base, false, None);
+        let newer = write_session(
+            &dir,
+            &cwd,
+            "newer",
+            base + std::time::Duration::from_secs(5),
+            false,
+            None,
+        );
+        let fs = make_fs(temp.path());
+        let full = list_recent_sessions_inner(&lingxi_home, &cwd, 5, &fs, &[])
+            .await
+            .expect("list");
+        assert_eq!(full.len(), 2);
+
+        for id in [older, newer] {
+            let found = find_session_inner(&lingxi_home, &cwd, id, &fs, &[])
+                .await
+                .expect("find");
+            let expected = full.iter().find(|row| row.uuid == id).expect("listed");
+            assert_eq!(found.sessions.len(), 1);
+            assert_eq!(found.sessions[0].uuid, expected.uuid);
+            assert_eq!(found.sessions[0].title, expected.title);
+            assert_eq!(found.sessions[0].message_count, expected.message_count);
+            assert_eq!(found.sessions[0].path, expected.path);
+        }
+
+        // A session without a row answers as the full catalog does: an empty
+        // listing while other sessions are readable, even when the session
+        // itself is a skipped, unreadable transcript...
+        let corrupt = Uuid::new_v4();
+        std::fs::write(
+            dir.join(format!("{corrupt}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"{corrupt}\",\"cwd\":\"{cwd}\",\"uuid\":\n"
+            ),
+        )
+        .unwrap();
+        for id in [corrupt, Uuid::new_v4()] {
+            let found = find_session_inner(&lingxi_home, &cwd, id, &fs, &[])
+                .await
+                .expect("other sessions are readable");
+            assert!(found.sessions.is_empty());
+        }
+        // ...and the catalog's own error once nothing is readable.
+        std::fs::remove_file(dir.join(format!("{older}.jsonl"))).unwrap();
+        std::fs::remove_file(dir.join(format!("{newer}.jsonl"))).unwrap();
+        let full =
+            list_recent_sessions_inner_with_diagnostics(&lingxi_home, &cwd, 5, &fs, &[], None)
+                .await;
+        let found = find_session_inner(&lingxi_home, &cwd, Uuid::new_v4(), &fs, &[]).await;
+        assert!(matches!(full, Err(LoaderError::Io { .. })));
+        assert!(matches!(found, Err(LoaderError::Io { .. })));
+    }
+
+    #[tokio::test]
     async fn relocated_tail_overrides_colliding_first_line_cwd() {
         let (temp, lingxi_home, cwd, dir) = setup();
         let id = Uuid::new_v4();
@@ -3767,5 +4025,39 @@ mod tests {
             vec![3, 2],
             "newest first, then truncated to the limit"
         );
+    }
+
+    /// The restore readers route only the rows that can carry their type, so
+    /// they must agree with a full route, even when a writer escapes a type.
+    #[test]
+    fn typed_row_routing_matches_a_full_route_with_escaped_types() {
+        let content = [
+            "\u{FEFF}{\"type\":\"agent-setting\",\"agentSetting\":\"bom\",\"sessionId\":\"b\"}",
+            r#"{"type":"user","uuid":"u1","sessionId":"s","message":{"content":"agent-setting"}}"#,
+            r#"{"type":"agent-setting","agentSetting":"first","sessionId":"s"}"#,
+            r#"{"type":"worktree-state","worktreeSession":{"worktreePath":"/a"},"sessionId":"s"}"#,
+            r#"{"type":"user","uuid":"u2","sessionId":"s","message":{"content":"\u001b[31mred"}}"#,
+            r#"{"type":"agent\u002Dsetting","agentSetting":"escaped","sessionId":"s"}"#,
+            r#"{"t\u0079pe":"agent-setting","agentSetting":"key","sessionId":"k"}"#,
+            "\u{FEFF}{\"type\":\"agent-setting\",\"agentSetting\":\"inner-bom\",\"sessionId\":\"i\"}",
+            "{\"type\":\"agent-setting\",\"agentSetting\":\"crlf\",\"sessionId\":\"c\"}\r",
+            "not json",
+            "{\"type\":\"worktree\\u002dstate\",\"worktreeSession\":null,\"sessionId\":\"s\"}\r",
+        ]
+        .join("\n");
+        let full = route_lines(&content);
+        let agents = route_rows_of_types(&content, &["agent-setting"]);
+        assert_eq!(agents.agent_settings, full.agent_settings);
+        assert_eq!(agents.agent_snapshots, full.agent_snapshots);
+        assert_eq!(agents.agent_settings["s"], json!("escaped"));
+        assert_eq!(agents.agent_settings["b"], json!("bom"));
+        assert_eq!(agents.agent_settings["c"], json!("crlf"));
+        assert!(
+            !agents.agent_settings.contains_key("i"),
+            "only the file's leading BOM is stripped"
+        );
+        let worktrees = route_rows_of_types(&content, &["worktree-state"]);
+        assert_eq!(worktrees.worktree_states, full.worktree_states);
+        assert_eq!(worktrees.worktree_states["s"], Value::Null);
     }
 }

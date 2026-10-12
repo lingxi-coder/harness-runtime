@@ -241,17 +241,29 @@ impl Utf16JsonProjection {
     /// this method is for coercion/schema transformations of the same input.
     pub fn rebase_display_value(&mut self, value: Value) -> Result<(), Utf16JsonProjectionError> {
         self.validate()?;
-        let mut projection = self.clone();
-        projection
+        // Only the sidecars carry over; the old tree is replaced, never copied.
+        let strings = self
             .strings
-            .retain(|string| self.value.pointer(&string.pointer) == value.pointer(&string.pointer));
-        projection.keys.retain(|key| {
-            value
-                .pointer(&key.pointer)
-                .and_then(Value::as_object)
-                .is_some_and(|object| object.contains_key(&key.placeholder))
-        });
-        projection.value = value;
+            .iter()
+            .filter(|string| self.value.pointer(&string.pointer) == value.pointer(&string.pointer))
+            .cloned()
+            .collect();
+        let keys = self
+            .keys
+            .iter()
+            .filter(|key| {
+                value
+                    .pointer(&key.pointer)
+                    .and_then(Value::as_object)
+                    .is_some_and(|object| object.contains_key(&key.placeholder))
+            })
+            .cloned()
+            .collect();
+        let projection = Self {
+            value,
+            strings,
+            keys,
+        };
         projection.validate()?;
         *self = projection;
         Ok(())
@@ -338,7 +350,11 @@ impl Utf16JsonProjection {
                 return Err(Utf16JsonProjectionError::InvalidKeyPointer);
             }
         }
-        validate_exact_key_uniqueness(&self.value, &self.keys, "")?;
+        // Without placeholders every property is a native key, and distinct
+        // map keys always encode to distinct UTF-16 names.
+        if !self.keys.is_empty() {
+            validate_exact_key_uniqueness(&self.value, &self.keys, "")?;
+        }
         Ok(())
     }
 
@@ -1615,6 +1631,34 @@ mod tests {
 
         let malformed = format!("{}\"\\ud800\"{}false", "[".repeat(384), "]".repeat(384));
         assert!(Utf16JsonProjection::parse(&malformed).is_err());
+    }
+
+    #[test]
+    fn rebase_keeps_only_the_sidecars_the_new_tree_still_holds() {
+        let mut projection = Utf16JsonProjection::parse(
+            r#"{"kept":"\ud800","changed":"\ud801","gone":{"\ud802":1}}"#,
+        )
+        .unwrap();
+        let mut value = projection.value.clone();
+        value["changed"] = Value::String("plain".to_owned());
+        value.as_object_mut().unwrap().remove("gone");
+        projection.rebase_display_value(value.clone()).unwrap();
+        assert_eq!(projection.value, value);
+        assert_eq!(projection.string_units("/kept"), Some(vec![0xd800]));
+        assert!(projection.keys.is_empty());
+        assert_eq!(
+            projection.to_json_string().unwrap(),
+            r#"{"kept":"\ud800","changed":"plain"}"#
+        );
+
+        let mut plain = Utf16JsonProjection::plain(serde_json::json!({"a":{"b":[1,2]}}));
+        plain
+            .rebase_display_value(serde_json::json!({"a":{"b":[3]}}))
+            .unwrap();
+        assert_eq!(
+            plain,
+            Utf16JsonProjection::plain(serde_json::json!({"a":{"b":[3]}}))
+        );
     }
 }
 

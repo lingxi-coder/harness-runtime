@@ -8,6 +8,7 @@ pub mod reqwest_http;
 mod tls_config;
 
 pub use reqwest_http::ReqwestHttp;
+pub use tls_config::prewarm_native_roots;
 
 mod monitor_websocket;
 

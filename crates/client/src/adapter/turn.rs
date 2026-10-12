@@ -94,19 +94,37 @@ pub fn lower_content_block(block: &ContentBlock) -> Option<MessageBlockDto> {
 /// N+1, never in the same message. `tui/src/replay.rs` keeps the same
 /// side-table for the same reason.
 #[derive(Debug, Default)]
-pub struct ToolUseIndex(std::collections::HashMap<String, (String, serde_json::Value)>);
+pub struct ToolUseIndex {
+    calls: std::collections::HashMap<String, (String, serde_json::Value)>,
+    prepared: crate::adapter::tool_display::PreparedDiffs,
+}
 
 impl ToolUseIndex {
+    /// An index for replaying a transcript whose `(tool, input)` calls are
+    /// all known up front: their result diffs are computed in parallel now
+    /// instead of one by one as each `ToolResult` lowers.
+    #[must_use]
+    pub fn for_replay<'a>(
+        calls: impl IntoIterator<Item = (&'a str, &'a serde_json::Value)>,
+    ) -> Self {
+        Self {
+            calls: std::collections::HashMap::new(),
+            prepared: crate::adapter::tool_display::PreparedDiffs::compute(calls),
+        }
+    }
+
     /// Record a `ToolUse` so a later `ToolResult` can be paired with it.
     pub fn record(&mut self, id: &str, tool: &str, input: &serde_json::Value) {
-        self.0
+        self.calls
             .insert(id.to_string(), (tool.to_string(), input.clone()));
     }
 
     /// The `(tool, input)` recorded for `id`, if its call was seen.
     #[must_use]
     pub fn get(&self, id: &str) -> Option<(&str, &serde_json::Value)> {
-        self.0.get(id).map(|(tool, input)| (tool.as_str(), input))
+        self.calls
+            .get(id)
+            .map(|(tool, input)| (tool.as_str(), input))
     }
 }
 
@@ -173,12 +191,15 @@ pub fn lower_content_block_with(
                 old_string,
                 new_string,
                 file_path,
-                display: Some(crate::adapter::tool_display::lower_tool_result_display(
-                    &tool,
-                    input,
-                    &result,
-                    is_error.unwrap_or(false),
-                )),
+                display: Some(
+                    crate::adapter::tool_display::lower_tool_result_display_prepared(
+                        &tool,
+                        input,
+                        &result,
+                        is_error.unwrap_or(false),
+                        Some(&index.prepared),
+                    ),
+                ),
             })
         }
         // No `MessageBlockDto::Image`/`Document` — image and document input are

@@ -378,14 +378,23 @@ impl JsonlReader {
 /// step is the only one that lands.
 #[must_use]
 pub fn route_lines(content: &str) -> LoadedTranscript {
+    route_line_seq(strip_transcript_bom(content).lines())
+}
+
+/// A transcript body without its leading UTF-8 BOM (claude-code json.ts
+/// parseJSONLBuffer: `if(buf[0]===0xef&&buf[1]===0xbb&&buf[2]===0xbf) start=3`,
+/// confirmed live in v2.1.193). Rust `str::trim()` does NOT treat U+FEFF as
+/// whitespace, so without this the BOM survives onto line 1 and
+/// `serde_json::from_str` rejects it → the first message is silently dropped.
+pub(crate) fn strip_transcript_bom(content: &str) -> &str {
+    content.strip_prefix('\u{FEFF}').unwrap_or(content)
+}
+
+/// [`route_lines`] over some of a transcript's lines: each line exactly as
+/// [`str::lines`] yields it from the BOM-stripped body, in file order.
+pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> LoadedTranscript {
     let mut out = LoadedTranscript::default();
-    // Strip a leading UTF-8 BOM before splitting (claude-code json.ts
-    // parseJSONLBuffer: `if(buf[0]===0xef&&buf[1]===0xbb&&buf[2]===0xbf) start=3`,
-    // confirmed live in v2.1.193). Rust `str::trim()` does NOT treat U+FEFF as
-    // whitespace, so without this the BOM survives onto line 1 and
-    // `serde_json::from_str` rejects it → the first message is silently dropped.
-    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
-    for line in content.lines() {
+    for line in lines {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -395,7 +404,19 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
             out.malformed_line_count += 1;
             continue;
         };
-        let mut exact = crate::jsonl::exact_json::ExactJsonValue { value: projection.value.clone(), utf16_overrides: projection.string_overrides() };
+        // A line without lone-surrogate escapes (nearly every line) parses to
+        // a plain projection that is never attached below: take its tree
+        // instead of copying it, and skip the rebase, which has nothing to
+        // carry over.
+        let plain = projection.strings.is_empty() && projection.keys.is_empty();
+        let mut exact = crate::jsonl::exact_json::ExactJsonValue {
+            value: if plain {
+                std::mem::take(&mut projection.value)
+            } else {
+                projection.value.clone()
+            },
+            utf16_overrides: projection.string_overrides(),
+        };
         // Never adopt a caller-supplied private carrier from an outward row.
         // Only the native JSON escapes establish these exact code units.
         if let Some(object) = exact.value.as_object_mut() {
@@ -408,7 +429,11 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
                     .strip_prefix(&private_pointer)
                     .is_some_and(|tail| tail.starts_with('/'))
         });
-        projection.rebase_display_value(exact.value.clone()).expect("removing a private carrier preserves native projection");
+        if !plain {
+            projection
+                .rebase_display_value(exact.value.clone())
+                .expect("removing a private carrier preserves native projection");
+        }
         let value = exact.value;
         let ty = value.get("type").and_then(Value::as_str).unwrap_or("");
         if is_transcript_message_type(ty) {
@@ -672,6 +697,71 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
     out
 }
 
+/// The lines of `content` that can be a JSON row whose `type` is one of
+/// `types`, each exactly as [`str::lines`] yields it, in file order.
+///
+/// A row spells its type value literally (`"agent-setting"`) unless it writes
+/// some character of it as a `\uXXXX` escape: type names hold no character
+/// with a short escape (`\"`, `\n`, …). So such a row contains the quoted
+/// name or a `\u` escape of one of the name's characters, and one pass over
+/// the whole body finds every candidate without parsing anything. A line that
+/// matches by accident (a message quoting the name, an escaped backslash
+/// before `u0061`) is kept, harmlessly: the caller still checks the parsed
+/// type.
+pub(crate) fn lines_naming_types<'a>(content: &'a str, types: &[&str]) -> Vec<&'a str> {
+    let bytes = content.as_bytes();
+    let mut starts = Vec::new();
+    for ty in types {
+        let quoted = format!("\"{ty}\"");
+        mark_line_starts(
+            bytes,
+            memchr::memmem::find_iter(bytes, quoted.as_bytes()),
+            &mut starts,
+        );
+    }
+    let units = types
+        .iter()
+        .flat_map(|ty| ty.encode_utf16())
+        .collect::<Vec<_>>();
+    let escapes = memchr::memmem::find_iter(bytes, b"\\u").filter(|at| {
+        bytes
+            .get(at + 2..at + 6)
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+            .is_some_and(|unit| units.contains(&unit))
+    });
+    mark_line_starts(bytes, escapes, &mut starts);
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+        .into_iter()
+        .map(|start| {
+            let rest = &content[start..];
+            match memchr::memchr(b'\n', rest.as_bytes()) {
+                // `str::lines` drops the `\n`, then one `\r` before it; a last
+                // line without `\n` keeps its `\r`.
+                Some(end) => rest[..end].strip_suffix('\r').unwrap_or(&rest[..end]),
+                None => rest,
+            }
+        })
+        .collect()
+}
+
+/// Push the start of each line holding one of `matches` (ascending byte
+/// offsets), once per line, scanning each byte at most once.
+fn mark_line_starts(bytes: &[u8], matches: impl Iterator<Item = usize>, starts: &mut Vec<usize>) {
+    let mut next_line = 0;
+    for at in matches {
+        if at < next_line {
+            continue;
+        }
+        let start =
+            memchr::memrchr(b'\n', &bytes[next_line..at]).map_or(next_line, |i| next_line + i + 1);
+        starts.push(start);
+        next_line = memchr::memchr(b'\n', &bytes[at..]).map_or(bytes.len(), |i| at + i + 1);
+    }
+}
+
 /// Claude 2.1.245's `/^[\x21-\x7e]*$/` ATIS validator.
 #[must_use]
 pub(crate) fn is_valid_atis_latch(value: &str) -> bool {
@@ -723,4 +813,62 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every line whose parsed `type` is a wanted one comes back, as the same
+    /// `str::lines` slice and in file order, however its type is spelled.
+    #[test]
+    fn typed_line_scan_keeps_every_row_of_the_types_in_order() {
+        let types = ["agent-setting", "worktree-state"];
+        let content = [
+            r#"{"type":"agent-setting","sessionId":"a"}"#,
+            "",
+            r#"{"type":"user","message":{"content":"\u001b[1m bold \u001b[0m"}}"#,
+            r#"{"type":"worktree\u002Dstate","sessionId":"b"}"#,
+            r#"{"type":"\u0061gent-setting","sessionId":"c"}"#,
+            "{\"type\":\"agent-setting\",\"sessionId\":\"d\"}\r",
+            r#"{"type":"user","message":{"content":"mentions \"agent-setting\""}}"#,
+            r#"{"t\u0079pe":"worktree-state","sessionId":"e"}"#,
+            r#"{"type":"assistant","message":{"content":"C:\\users"}}"#,
+            "{\"type\":\"worktree-state\",\"sessionId\":\"f\"}\r",
+        ]
+        .join("\n");
+        let scanned = lines_naming_types(&content, &types);
+        let lines = content.lines().collect::<Vec<_>>();
+        let positions = scanned
+            .iter()
+            .map(|line| {
+                lines
+                    .iter()
+                    .position(|candidate| std::ptr::eq(*candidate, *line))
+                    .expect("a scanned line is one of `str::lines`")
+            })
+            .collect::<Vec<_>>();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        for (index, line) in lines.iter().enumerate() {
+            let ty = serde_json::from_str::<Value>(line.trim())
+                .ok()
+                .and_then(|row| row.get("type").and_then(Value::as_str).map(str::to_owned));
+            if ty.is_some_and(|ty| types.contains(&ty.as_str())) {
+                assert!(
+                    positions.contains(&index),
+                    "row {index} was skipped: {line}"
+                );
+            }
+        }
+        assert!(
+            !positions.contains(&2),
+            "an escape of no type character is not a candidate"
+        );
+        assert!(!positions.contains(&8));
+        assert_eq!(
+            scanned.last(),
+            Some(&"{\"type\":\"worktree-state\",\"sessionId\":\"f\"}\r")
+        );
+        assert!(lines_naming_types("", &types).is_empty());
+    }
 }

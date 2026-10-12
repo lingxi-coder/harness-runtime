@@ -2311,6 +2311,8 @@ pub struct DesktopRuntime {
     /// Startup producers withheld until a cold-resume host has mounted history
     /// and initialized its output/control transport.
     deferred_startup: tokio::sync::Mutex<Option<DeferredDesktopStartup>>,
+    /// Background startup MCP progress; see [`Self::watch_mcp_startup`].
+    mcp_startup: tokio::sync::watch::Receiver<McpStartupProgress>,
     fork_writer: Option<Arc<session::JsonlWriter>>,
     pending_fork_history: tokio::sync::Mutex<Option<PendingForkHistory>>,
     /// Catalog notifications owned by this credential scope.
@@ -2658,6 +2660,17 @@ impl DesktopRuntime {
             .await;
         }
         activate_startup_producers(&self.orchestrator, &startup.async_hook_responses).await;
+    }
+
+    /// Startup MCP progress for hosts that open the session while startup
+    /// servers connect ([`DesktopConfig::connect_mcp_in_background`]).
+    ///
+    /// The value changes after the live tool and prompt catalogs absorbed
+    /// each settled server, so a host can re-publish its MCP listings then.
+    /// Foreground builds report zero pending servers and never change.
+    #[must_use]
+    pub fn watch_mcp_startup(&self) -> tokio::sync::watch::Receiver<McpStartupProgress> {
+        self.mcp_startup.clone()
     }
 
     /// The names of every tool this build registered, by value.
@@ -5648,6 +5661,7 @@ mod assembly;
 mod configuration;
 mod credentials;
 mod fusion_services;
+mod mcp_startup;
 mod mod_commands;
 mod mod_settings;
 mod mod_tool_invoker;
@@ -5706,6 +5720,7 @@ use fusion_services::FusionCatalogRefreshingCopilotConnect;
 use fusion_services::FusionCatalogRefreshingCredentialWriter;
 use fusion_services::FusionCatalogRefreshingOAuthConnect;
 pub use fusion_services::FusionCatalogRegistry;
+pub use mcp_startup::McpStartupProgress;
 pub use orchestrator::config::ModRenderSurface;
 use permission_config::append_mcp_permission_rules;
 use permission_config::append_restricted_builtin_denies;

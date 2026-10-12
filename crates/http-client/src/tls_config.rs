@@ -196,15 +196,7 @@ impl TlsSettings {
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         }
         if sources.contains(&CertSource::System) {
-            let loaded = rustls_native_certs::load_native_certs();
-            if !loaded.errors.is_empty() {
-                tracing::warn!(
-                    "CA certs: {} system root(s) failed to load: {:?}",
-                    loaded.errors.len(),
-                    loaded.errors
-                );
-            }
-            let (added, ignored) = roots.add_parsable_certificates(loaded.certs);
+            let (added, ignored) = roots.add_parsable_certificates(native_roots().iter().cloned());
             tracing::debug!(
                 "CA certs: Loaded {added} system CA certificates for WebSocket ({ignored} ignored)"
             );
@@ -375,20 +367,42 @@ fn decrypt_key_if_needed(key_pem: String, passphrase: Option<&str>) -> Option<St
     }
 }
 
+/// The host OS trust store, loaded once per process (`zz` is memoized too).
+///
+/// Reading the platform store costs ~100 ms on macOS, and session assembly
+/// builds several HTTP and WebSocket clients; each used to pay it again.
+fn native_roots() -> &'static [rustls::pki_types::CertificateDer<'static>] {
+    static ROOTS: std::sync::OnceLock<Vec<rustls::pki_types::CertificateDer<'static>>> =
+        std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let loaded = rustls_native_certs::load_native_certs();
+        if !loaded.errors.is_empty() {
+            tracing::warn!(
+                "CA certs: {} system root(s) failed to load: {:?}",
+                loaded.errors.len(),
+                loaded.errors
+            );
+        }
+        loaded.certs
+    })
+}
+
+/// Load the host OS trust store on a background thread so the first client
+/// build finds it ready. Hosts call this at process start; it is idempotent.
+pub fn prewarm_native_roots() {
+    let _ = std::thread::Builder::new()
+        .name("native-roots".into())
+        .spawn(|| {
+            native_roots();
+        });
+}
+
 /// Add the host OS trust store to the builder (`zz` `system` source).
 fn add_system_roots(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    let loaded = rustls_native_certs::load_native_certs();
-    if !loaded.errors.is_empty() {
-        tracing::warn!(
-            "CA certs: {} system root(s) failed to load: {:?}",
-            loaded.errors.len(),
-            loaded.errors
-        );
-    }
     let mut count = 0usize;
-    for der in loaded.certs {
+    for der in native_roots() {
         // Ignore individual malformed roots; a partial system store is fine.
-        if let Ok(cert) = reqwest::Certificate::from_der(&der) {
+        if let Ok(cert) = reqwest::Certificate::from_der(der) {
             builder = builder.add_root_certificate(cert);
             count += 1;
         }

@@ -601,12 +601,14 @@ impl LiveSessionDir {
                 continue;
             };
             rec.pid = pid;
-            if !self.record_is_live(&rec) {
-                continue;
-            }
             out.push(rec);
         }
-        Ok(out)
+        let live = self.records_live(&out.iter().collect::<Vec<_>>());
+        Ok(out
+            .into_iter()
+            .zip(live)
+            .filter_map(|(rec, live)| live.then_some(rec))
+            .collect())
     }
 
     /// Exact unique name match among live sessions, excluding `self_session_id`.
@@ -782,6 +784,7 @@ impl LiveSessionDir {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
         };
+        let mut scanned = Vec::new();
         for ent in rd.flatten() {
             let path = ent.path();
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -803,9 +806,18 @@ impl LiveSessionDir {
                     record.pid = pid;
                     record
                 });
-            let stale = record
-                .as_ref()
-                .map_or_else(|| !pid_alive(pid), |record| !self.record_is_live(record));
+            scanned.push((pid, path, record));
+        }
+        let records = scanned
+            .iter()
+            .filter_map(|(_, _, record)| record.as_ref())
+            .collect::<Vec<_>>();
+        let mut live = self.records_live(&records).into_iter();
+        for (pid, path, record) in scanned {
+            let stale = match record {
+                Some(_) => !live.next().expect("one liveness flag per record"),
+                None => !pid_alive(pid),
+            };
             if stale {
                 let Ok(_record_lock) = self.lock_record(pid) else {
                     continue;
@@ -934,6 +946,71 @@ impl LiveSessionDir {
 
     fn idle_subscription_path(&self, session_id: &str) -> PathBuf {
         self.root.join(format!("{session_id}.idle-notify.jsonl"))
+    }
+
+    /// [`Self::record_is_live`] for every record of one scan, in order.
+    ///
+    /// The start-identity probes run side by side, each on its own `ps` as in
+    /// the single check: one `ps` per pid is a few milliseconds on macOS, while
+    /// a `ps` given several pids walks the whole process table (~30 ms).
+    fn records_live(&self, records: &[&LiveSessionRecord]) -> Vec<bool> {
+        if !self.check_liveness {
+            return vec![true; records.len()];
+        }
+        let alive = records
+            .iter()
+            .map(|record| pid_alive(record.pid))
+            .collect::<Vec<_>>();
+        let probed = records
+            .iter()
+            .zip(&alive)
+            .filter(|(record, alive)| **alive && record.proc_start.is_some())
+            .count();
+        let identities = if probed <= 1 {
+            records
+                .iter()
+                .zip(&alive)
+                .map(|(record, alive)| {
+                    (*alive && record.proc_start.is_some())
+                        .then(|| process_start_identity(record.pid))
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            std::thread::scope(|scope| {
+                let probes = records
+                    .iter()
+                    .zip(&alive)
+                    .map(|(record, alive)| {
+                        (*alive && record.proc_start.is_some())
+                            .then(|| scope.spawn(|| process_start_identity(record.pid)))
+                    })
+                    .collect::<Vec<_>>();
+                probes
+                    .into_iter()
+                    .map(|probe| {
+                        probe.and_then(|probe| {
+                            probe
+                                .join()
+                                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                        })
+                    })
+                    .collect()
+            })
+        };
+        records
+            .iter()
+            .zip(alive)
+            .zip(identities)
+            .map(|((record, alive), actual)| {
+                // Exactly `record_is_live`: a definite start-time mismatch
+                // proves PID reuse; no identity keeps the legacy check.
+                alive
+                    && record.proc_start.as_deref().is_none_or(|expected| {
+                        actual.as_deref().is_none_or(|actual| actual == expected)
+                    })
+            })
+            .collect()
     }
 
     fn record_is_live(&self, record: &LiveSessionRecord) -> bool {
@@ -1617,7 +1694,17 @@ fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    #[cfg(unix)]
+    // `kill -0 <pid>` as the syscall instead of a spawned command: it succeeds
+    // only when the signal could be delivered, so EPERM reads as dead exactly
+    // as the command's exit status did. Other Unix targets keep the command.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        i32::try_from(pid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+    }
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
     {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -3041,6 +3128,39 @@ mod tests {
         assert_eq!(
             record.messaging_socket_path.as_deref(),
             Some("/tmp/session.sock")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_scan_reports_exactly_what_each_single_check_reports() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        child.wait().unwrap();
+        let own = std::process::id();
+        let own_start = process_start_identity(own).expect("own start identity");
+        let record = |pid: u32, proc_start: Option<&str>| -> LiveSessionRecord {
+            serde_json::from_value(json!({"pid": pid, "procStart": proc_start})).unwrap()
+        };
+        let records = [
+            record(own, Some(&own_start)),
+            record(own, Some("Thu Jan  1 00:00:00 1970")),
+            record(own, None),
+            record(child.id(), Some(&own_start)),
+            record(child.id(), None),
+            record(1, Some("Thu Jan  1 00:00:00 1970")),
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let live = LiveSessionDir::at_live(directory.path());
+        let scanned = live.records_live(&records.iter().collect::<Vec<_>>());
+        let single = records
+            .iter()
+            .map(|record| live.record_is_live(record))
+            .collect::<Vec<_>>();
+        assert_eq!(scanned, single);
+        assert_eq!(scanned[..4], [true, false, true, false]);
+        assert_eq!(
+            LiveSessionDir::at(directory.path()).records_live(&records.iter().collect::<Vec<_>>()),
+            vec![true; records.len()]
         );
     }
 }

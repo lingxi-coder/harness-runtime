@@ -287,6 +287,12 @@ pub struct DesktopConfig {
         Option<llm_runtime::auth::anthropic::environment::EnvironmentLookup>,
     /// Restore the mounted session before the host fires startup lifecycle hooks.
     pub defer_session_start: bool,
+    /// Open the session while its startup MCP servers connect (Claude Code's
+    /// interactive behavior): each server is published as pending, its tools
+    /// join the live tool list once it connects, and `WaitForMcpServers` lets
+    /// the model wait out one it needs. Print and headless hosts keep `false`,
+    /// so their first turn sees every startup server.
+    pub connect_mcp_in_background: bool,
     /// Host package identity used by `/version`.
     pub build_info: command_api::builtins::BuildInfo,
     /// Whether this runtime owns versioned automation dispatch. CLI defaults to
@@ -922,6 +928,7 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("oauth_environment_lookup", &self.oauth_environment_lookup)
             .field("defer_session_start", &self.defer_session_start)
+            .field("connect_mcp_in_background", &self.connect_mcp_in_background)
             .field("build_info", &self.build_info)
             .field(
                 "enable_automation_scheduler",
@@ -1097,6 +1104,7 @@ impl Default for DesktopConfig {
             native_thinking_display: None,
             oauth_environment_lookup: None,
             defer_session_start: false,
+            connect_mcp_in_background: false,
             host_workspace_trusted: None,
             mod_render_surface: None,
             inline_visualization: false,

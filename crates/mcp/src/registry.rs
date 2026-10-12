@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 mod authentication;
+mod background_connect;
 mod catalog_refresh;
 mod diagnostics;
 mod discovery_cache;
@@ -575,6 +576,14 @@ pub struct McpRegistry {
     /// connect/connect-agent-scoped attempt so later `with_*` mutations cannot
     /// fork behavior away from already-published connections.
     configuration_frozen: Arc<std::sync::atomic::AtomicBool>,
+    /// While open, [`Self::connect_all`] publishes each server as `Connecting`
+    /// and dials it on its own task instead of holding the caller. Interactive
+    /// hosts open it around session assembly; see
+    /// [`Self::begin_background_connects`].
+    background_connects: Arc<StdMutex<background_connect::BackgroundConnects>>,
+    /// Background dials still running, for hosts that re-publish the live
+    /// catalog as each startup server settles.
+    background_inflight: Arc<tokio::sync::watch::Sender<usize>>,
     #[cfg(test)]
     pause_after_initial_client_miss: Option<Arc<TestPauseHook>>,
     #[cfg(test)]
@@ -704,6 +713,8 @@ impl McpRegistry {
             cached_discovery_contexts: Arc::clone(&self.cached_discovery_contexts),
             prompt_predecessors: Arc::clone(&self.prompt_predecessors),
             configuration_frozen: Arc::clone(&self.configuration_frozen),
+            background_connects: Arc::clone(&self.background_connects),
+            background_inflight: Arc::clone(&self.background_inflight),
             #[cfg(test)]
             pause_after_initial_client_miss: self.pause_after_initial_client_miss.clone(),
             #[cfg(test)]
@@ -743,6 +754,8 @@ impl McpRegistry {
             cached_discovery_contexts: Arc::new(RwLock::new(HashMap::new())),
             prompt_predecessors: Arc::new(RwLock::new(HashMap::new())),
             configuration_frozen: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            background_connects: Arc::default(),
+            background_inflight: Arc::new(tokio::sync::watch::Sender::new(0)),
             #[cfg(test)]
             pause_after_initial_client_miss: None,
             #[cfg(test)]
@@ -3405,36 +3418,28 @@ impl McpRegistry {
     /// One server's failure never aborts the batch; per-server failures are
     /// logged via `tracing::warn!`. Returns the per-server outcome in the same
     /// order as `configs`.
+    ///
+    /// While the background-connect window is open
+    /// ([`Self::begin_background_connects`]) the servers are recorded and
+    /// dialed on detached tasks instead, and the returned list is empty.
     pub async fn connect_all(
         &self,
         configs: Vec<McpServerConfig>,
     ) -> Vec<(String, Result<McpConnectionId, McpError>)> {
         use futures_util::future::join_all;
+        if self.background_connects_open() {
+            // Nothing has settled yet: outcomes surface through the
+            // connection states and `watch_background_connects`.
+            self.connect_all_in_background(configs).await;
+            return Vec::new();
+        }
         self.freeze_configuration();
         let futs = configs.into_iter().map(|config| async move {
             let name = config.name.clone();
             let lifecycle = self.lifecycle_lock(&name);
             let _guard = lifecycle.lock().await;
             if config.disabled {
-                let mut conns = self.connections.write().await;
-                match conns.get(&name) {
-                    Some(McpConnectionState::Connected { .. })
-                    | Some(McpConnectionState::Cached { .. })
-                    | Some(McpConnectionState::HealthChecking { .. })
-                    | Some(McpConnectionState::Connecting { .. })
-                    | Some(McpConnectionState::AwaitingOAuth { .. })
-                    | Some(McpConnectionState::NeedsAuth { .. })
-                    | Some(McpConnectionState::Reconnecting { .. }) => {}
-                    _ => {
-                        conns.insert(
-                            name.clone(),
-                            McpConnectionState::Disconnected {
-                                config,
-                                last_error: None,
-                            },
-                        );
-                    }
-                }
+                Self::record_disabled_server(&mut *self.connections.write().await, config);
                 tracing::debug!(server = %name, "skipping disabled MCP server");
                 return None;
             }
@@ -3446,6 +3451,32 @@ impl McpRegistry {
             Some((name, result))
         });
         join_all(futs).await.into_iter().flatten().collect()
+    }
+
+    /// Record a disabled server as `Disconnected` unless a live or in-flight
+    /// state already owns its entry.
+    fn record_disabled_server(
+        conns: &mut HashMap<String, McpConnectionState>,
+        config: McpServerConfig,
+    ) {
+        match conns.get(&config.name) {
+            Some(McpConnectionState::Connected { .. })
+            | Some(McpConnectionState::Cached { .. })
+            | Some(McpConnectionState::HealthChecking { .. })
+            | Some(McpConnectionState::Connecting { .. })
+            | Some(McpConnectionState::AwaitingOAuth { .. })
+            | Some(McpConnectionState::NeedsAuth { .. })
+            | Some(McpConnectionState::Reconnecting { .. }) => {}
+            _ => {
+                conns.insert(
+                    config.name.clone(),
+                    McpConnectionState::Disconnected {
+                        config,
+                        last_error: None,
+                    },
+                );
+            }
+        }
     }
 
     /// Background reconnect/backoff loop (claude-code `reconnectWithBackoff`).

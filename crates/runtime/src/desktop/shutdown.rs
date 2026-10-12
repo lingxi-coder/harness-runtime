@@ -129,6 +129,10 @@ pub struct DesktopSessionLifecycle {
     pub(super) orchestrator: Arc<ConversationOrchestrator>,
     pub(super) mcp_reconnect_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(super) mcp_catalog_refresh_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Folds background startup dials into the live catalogs; `None` when the
+    /// host connects startup servers in the foreground.
+    pub(super) mcp_startup_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub(super) mcp_registry: Arc<mcp::McpRegistry>,
     pub(super) task_registry: Arc<tasks::registry::TaskRegistry>,
     pub(super) command_registry: Arc<RwLock<CommandRegistry>>,
     pub(super) subagent_spawner: Arc<agent::handle::PoolSubagentSpawner>,
@@ -232,6 +236,11 @@ impl DesktopSessionLifecycle {
             refresh.abort();
             let _ = refresh.await;
         }
+        if let Some(startup) = self.mcp_startup_task.lock().await.take() {
+            startup.abort();
+            let _ = startup.await;
+        }
+        self.mcp_registry.abort_background_connects();
         match tokio::time::timeout_at(
             stage(std::time::Duration::from_secs(2)),
             self.task_registry.shutdown_background_tasks(),
