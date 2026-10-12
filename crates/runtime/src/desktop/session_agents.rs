@@ -90,9 +90,17 @@ pub fn first_corrupt_transcript_line(raw: &[u8]) -> Option<usize> {
             }
             let valid = serde_json::from_slice::<serde_json::Value>(line)
                 .ok()
-                .and_then(|value| value.get("message").cloned())
-                .and_then(|message| serde_json::from_value::<ConversationMessage>(message).ok())
-                .is_some();
+                .is_some_and(|value| match value.get("message") {
+                    // A typed announcement without a model projection
+                    // persists only its attachment payload.
+                    Some(serde_json::Value::Null) => {
+                        value.get("type").and_then(serde_json::Value::as_str) == Some("attachment")
+                    }
+                    Some(message) => {
+                        serde_json::from_value::<ConversationMessage>(message.clone()).is_ok()
+                    }
+                    None => false,
+                });
             (!valid).then_some(index + 1)
         })
 }
@@ -1144,6 +1152,28 @@ mod tests {
         assert_eq!(
             first_corrupt_transcript_line(format!("{valid}\nnot-json").as_bytes()),
             None,
+        );
+    }
+
+    #[test]
+    fn transcript_validation_accepts_attachment_rows_without_a_message() {
+        let message =
+            ConversationMessage::user(lingxi_core::types::MessageId::new(), "hello".to_string());
+        let valid = serde_json::json!({"message": message}).to_string();
+        let announcement = serde_json::json!({
+            "type": "attachment",
+            "message": null,
+            "attachment": {"type": "session_context"},
+        })
+        .to_string();
+        let raw = format!("{valid}\n{announcement}\n{valid}\n");
+        assert_eq!(first_corrupt_transcript_line(raw.as_bytes()), None);
+        assert_eq!(parse_transcript_messages(raw.as_bytes()).len(), 2);
+
+        let untyped = serde_json::json!({"message": null}).to_string();
+        assert_eq!(
+            first_corrupt_transcript_line(format!("{valid}\n{untyped}\n").as_bytes()),
+            Some(2),
         );
     }
 
