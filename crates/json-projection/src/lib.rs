@@ -3088,7 +3088,7 @@ mod utf16_document_tests {
         frame
             .set_pointer("/count", Utf16JsonProjection::plain(serde_json::json!(2)))
             .unwrap();
-        assert_eq!(frame.value["count"], 2);
+        assert_eq!(frame.value["count"].as_f64(), Some(2.0));
         assert_eq!(
             frame.string_units("/nested/text"),
             Some("source-".encode_utf16().chain([0xd800]).collect())

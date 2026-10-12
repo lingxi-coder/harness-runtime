@@ -1171,12 +1171,19 @@ pub(crate) fn project_model_response(
     clear_host_projection_fields(&mut metadata)?;
     // A collected fallback response has the same request-local identity as a
     // streamed response. A body-supplied namespace cannot author this value.
-    upstream_metadata(&mut metadata).remove("http_request_id");
+    remove_upstream_metadata_field(&mut metadata, "http_request_id")?;
     if let Some(request_id) = request_id.as_ref() {
-        upstream_metadata(&mut metadata)
-            .insert("http_request_id".into(), request_id.clone().into());
+        set_upstream_metadata_field(
+            &mut metadata,
+            "http_request_id",
+            &serialized_payload(request_id)?,
+        )?;
     }
-    upstream_metadata(&mut metadata).insert("non_streaming_response".into(), true.into());
+    set_upstream_metadata_field(
+        &mut metadata,
+        "non_streaming_response",
+        &serialized_payload(&true)?,
+    )?;
     let native_stop_details = decoded
         .anthropic_stop_details()
         .map(stop_details)
