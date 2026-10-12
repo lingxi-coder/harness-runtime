@@ -481,6 +481,7 @@ impl ReplayedSession {
                     .is_some_and(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
         });
         lingxi_core::host::ResumeRuntimeSnapshot {
+            api_error_message_ids: prompt_suggestion_api_error_ids(&self.messages),
             current_usage: self.runtime_metadata.current_usage,
             main_loop_latest_assistant_usage: self
                 .runtime_metadata
@@ -543,6 +544,15 @@ impl ReplayedSession {
             context_rendering_hint: self.runtime_metadata.context_rendering_hint,
         }
     }
+}
+
+fn prompt_suggestion_api_error_ids(messages: &[JsonlMessage]) -> Vec<MessageId> {
+    messages.iter().filter(|row| row.message_type == "assistant"
+        && row.extra.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true))
+        .filter_map(|row| row.message.get("id").and_then(Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .or_else(|| Uuid::parse_str(&row.uuid).ok()))
+        .map(MessageId::from_uuid).collect()
 }
 
 /// Runtime state recoverable from a persisted JSONL transcript.
@@ -3148,6 +3158,7 @@ impl ConversationOrchestrator {
             memory,
             cwd,
         );
+        orch.restore_prompt_suggestion_api_errors(prompt_suggestion_api_error_ids(&replayed.messages));
         // A transcript-inherited effort must remain inheritable if this
         // runtime later hot-resumes another session. Only the caller's
         // pre-resume launch choice pins the value.

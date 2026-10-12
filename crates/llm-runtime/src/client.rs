@@ -574,6 +574,50 @@ impl ModelRuntime {
         }
     }
 
+    /// Capture redacted classifier route facts from the same exact profile and
+    /// credential resolver as provider requests. No secret leaves this method.
+    pub async fn classifier_model_route_facts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError> {
+        use crate::model::classifier_model_policy::ClassifierModelRouteFacts;
+        use lingxi_llm_client::providers::anthropic::system_prompt::{
+            classifier_native_api_key, classifier_native_base_url,
+        };
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let provider = match entry.provider_id {
+            ProviderId::AnthropicFirstParty => Some("firstParty"),
+            ProviderId::BedrockClaude => Some("bedrock"),
+            ProviderId::VertexClaude => Some("vertex"),
+            ProviderId::FoundryClaude => Some("foundry"),
+            _ => None,
+        }
+        .map(str::to_owned);
+        let mut facts = ClassifierModelRouteFacts {
+            provider,
+            native_base_url: classifier_native_base_url(&entry.base_url),
+            native_api_key: false,
+        };
+        if entry.auth == AuthStrategy::ApiKey && facts.provider.as_deref() == Some("firstParty") {
+            let source = self.credential_source(model, profile).await?;
+            if source != crate::CredentialSource::OAuth {
+                facts.native_api_key = self
+                    .load_credential(entry, &route.profile_name)
+                    .await?
+                    .is_some_and(|credential| match credential {
+                        Credential::ApiKey(key) => classifier_native_api_key(&key),
+                        _ => false,
+                    });
+            }
+        }
+        Ok(facts)
+    }
+
     /// Resolve the selected main route plus an optional same-profile vision delegate.
     pub fn resolve_media_route(
         &self,
@@ -951,20 +995,9 @@ impl ModelRuntime {
                         lingxi_llm_client::protocol::CachePosition::System { .. }
                     )
                 });
-            let prefixed_system = context.native_system_prefix.as_ref().map(|(prefix, attribution)| {
-                if request.execution.anthropic_request_kind == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main {
-                    lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_system_prefix(context.system.as_ref(), prefix, attribution, &entry.profile)
-                } else {
-                    lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_attribution(context.system.as_ref(), prefix, attribution, &entry.profile)
-                }
-            });
-            if let Some(system) = prefixed_system.as_ref().or(context.system.as_ref()) {
-                let projection = project_system_prompt(
-                    system,
-                    Some(&entry.profile),
-                    &request.input.model,
-                    effective_protocol,
-                    cache_policy,
+            if request.execution.classifier_system_blocks {
+                let projection = lingxi_llm_client::providers::anthropic::system_prompt::project_classifier_system_blocks(
+                    &request.input.system, Some(&entry.profile), effective_protocol, cache_policy,
                 );
                 request_for_encoding.input.system =
                     projection.iter().map(|item| item.block.clone()).collect();
@@ -973,16 +1006,63 @@ impl ModelRuntime {
                         .into_iter()
                         .filter_map(|item| item.cache_breakpoint),
                 );
+            } else {
+                let prefixed_system = context.native_system_prefix.as_ref().map(|(prefix, attribution)| {
+                    if request.execution.anthropic_request_kind == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main {
+                        lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_system_prefix(context.system.as_ref(), prefix, attribution, &entry.profile)
+                    } else {
+                        lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_attribution(context.system.as_ref(), prefix, attribution, &entry.profile)
+                    }
+                });
+                if let Some(system) = prefixed_system.as_ref().or(context.system.as_ref()) {
+                    let projection = project_system_prompt(
+                        system,
+                        Some(&entry.profile),
+                        &request.input.model,
+                        effective_protocol,
+                        cache_policy,
+                    );
+                    request_for_encoding.input.system =
+                        projection.iter().map(|item| item.block.clone()).collect();
+                    request_for_encoding.input.prompt_cache.breakpoints.extend(
+                        projection
+                            .into_iter()
+                            .filter_map(|item| item.cache_breakpoint),
+                    );
+                }
             }
             let caching_enabled =
                 lingxi_llm_client::providers::anthropic::system_prompt::prompt_caching_enabled(
                     &request.input.model,
                     effective_protocol,
                 );
-            lingxi_llm_client::providers::anthropic::system_prompt::apply_last_message_breakpoint(
-                &mut request_for_encoding.input,
-                caching_enabled,
-            );
+            if request.execution.query_source.as_deref() == Some("prompt_suggestion") {
+                use lingxi_llm_client::providers::anthropic::system_prompt::ForkMessageCachePolicy;
+                let fork_point = request.execution.fork_point_message_id.and_then(|id| {
+                    request
+                        .execution
+                        .request_message_source_indices
+                        .get(&id)
+                        .copied()
+                });
+                let policy = ForkMessageCachePolicy::for_profile(
+                    &entry.profile,
+                    context.policy.gate(),
+                    fork_point,
+                    telemetry::feature_flags::flag_bool("tengu_basalt_spur", false),
+                    telemetry::feature_flags::flag_bool("tengu_basalt_scarp", false),
+                );
+                lingxi_llm_client::providers::anthropic::system_prompt::apply_fork_message_breakpoints(
+                    &mut request_for_encoding.input,
+                    caching_enabled,
+                    policy,
+                );
+            } else if !request.execution.classifier_system_blocks {
+                lingxi_llm_client::providers::anthropic::system_prompt::apply_last_message_breakpoint(
+                    &mut request_for_encoding.input,
+                    caching_enabled,
+                );
+            }
             prepared_prompt_cache = Some(PreparedPromptCacheContext {
                 scope: prompt_cache_scope.clone(),
                 account_epoch,
@@ -1154,6 +1234,7 @@ impl ModelRuntime {
                 .execution
                 .native_anthropic_request_context
                 .clone(),
+            classifier_system_blocks: request.execution.classifier_system_blocks,
             stream_fallback: request.execution.stream_fallback,
             extra_body,
             effort_policy,
@@ -1782,6 +1863,7 @@ pub struct PreparedLlmCall {
         Option<lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy>,
     pub(crate) effort_policy:
         Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicEffortPolicy>,
+    pub(crate) classifier_system_blocks: bool,
     pub(crate) anthropic_request_kind:
         lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
     pub(crate) native_anthropic_request_context:

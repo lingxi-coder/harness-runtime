@@ -136,6 +136,13 @@ impl HeadlessOptions {
                 "Error: --replay-user-messages requires both --input-format=stream-json and --output-format=stream-json.",
             );
         }
+        if self.prompt_suggestions
+            && !(self.explicit_print && self.output_format == OutputFormat::StreamJson)
+        {
+            return Some(
+                "Error: --prompt-suggestions requires --print and --output-format=stream-json (prompt_suggestion messages are only surfaced in stream-json output).",
+            );
+        }
         if self.include_partial_messages
             && !(self.explicit_print && self.output_format == OutputFormat::StreamJson)
         {

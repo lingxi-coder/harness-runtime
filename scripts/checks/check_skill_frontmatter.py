@@ -6,9 +6,8 @@
 
 ## 为什么这是一道门而不是一次人工检查
 
-写这个门之前，我已经**手工抓到三次** description 超限：batch 3 的
-`local-app-data`（193）和 `local-app-background`（185），batch 4 的
-`template-selection`（181）。三次都是在内容 agent 报告「全部 ≤180」之后
+写这个门之前，我已经**手工抓到三次** description 超限（量出来是 193、185
+和 181 列）。三次都是在内容 agent 报告「全部 ≤180」之后
 我自己重新量出来的——agent 不是在撒谎，是它用 `len()` 量的。
 
 **`len()` 和显示列宽只在纯 ASCII 下相等。** 一条 179 个字符的中文 description
@@ -44,8 +43,8 @@ from pathlib import Path
 MAX_DESCRIPTION_COLUMNS = 180
 
 # 门要扫的 skill 根目录，相对仓库根。
-# The Local App plugin's skills and agents are checked in the Local App repository; the device skills
-# below are the host's own.
+# The Local App plugin's skills are checked in their own repository; the device skills below are the
+# host's own.
 SKILL_ROOTS = [
     "crates/runtime/src/mobile/device_skills",
 ]
@@ -56,7 +55,7 @@ SKILL_ROOTS = [
 AGENT_ROOTS = []
 
 # Prose that asserts a tool does not exist. Matched per SENTENCE against the
-# agent's own granted tool names, so "no `LocalAppActOnUi` — that is operator's
+# agent's own granted tool names, so "no `WebFetch` — that is another agent's
 # job" (a scope statement about a tool the agent was NOT granted) does not trip
 # it; only "<granted tool> ... has no backing Host tool" does.
 DENIES_EXISTENCE = re.compile(

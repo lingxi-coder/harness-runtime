@@ -20,20 +20,14 @@ LEAVES = {"app", "example"}
 # concrete `tool-shell` would defeat the whole composition-root design.
 API_CRATES = {"tool-api", "command-api"}
 
-# Who may name the crates published from the local-app-builder repository, by NAME. Rules written for workspace
-# members cannot see an edge onto a crate that lives in another repository; this table does not care where a crate
-# lives. The engine uses only the shared primitives (device API, MCP wire types, rooted filesystem) and only where
-# listed here. Local App is an externally installed plugin, so the crates that implement it (`local-apps`,
-# `local-app-builder-{contracts,plugin,service}`) may not be named by anything in this workspace.
-LOCAL_APP_PRIMITIVES = {"device-api", "mcp-wire", "rooted-fs"}
-LOCAL_APP_CRATES = LOCAL_APP_PRIMITIVES | {
-    "local-app-builder-contracts", "local-app-builder-plugin", "local-app-builder-service", "local-apps",
-}
-LOCAL_APP_CONSUMERS = {
-    "core": LOCAL_APP_PRIMITIVES,  # re-exports the shared device/MCP/fs primitives only
-    "mcp": {"mcp-wire"},
-    "harness-runtime": LOCAL_APP_PRIMITIVES,  # the composition root: MCP wire types and the rooted filesystem
-}
+# Leaf libraries: they depend on nothing in the workspace but each other, so anything can name a camera, an MCP wire
+# type or the rooted filesystem without compiling the engine. `core` re-exports them.
+LEAF_LIBRARIES = {"device-api", "json-projection", "mcp-wire", "rooted-fs"}
+
+# The crates that implemented Local App when it was a host feature, matched by NAME because an old git revision of
+# the local-app-builder repository still resolves. That repository now ships only a plugin (skills and templates);
+# nothing here may bring one of these crates back.
+LOCAL_APP_CRATES = {"local-app-builder-contracts", "local-app-builder-plugin", "local-app-builder-service", "local-apps"}
 
 # The SDK assembles existing components; components must never reach back into
 # its product profiles or depend on a concrete UI to describe an interaction.
@@ -45,9 +39,7 @@ HARNESS_COMPONENT_CRATES = {"llm-runtime", "harness-runtime", "tool-api", "permi
 # pinned to the JSON projection layer; it must not gain an MCP client or other
 # domain dependency.
 SHARED_WIRE_CONTRACTS = {"mcp-wire": {"json-projection"}}
-CORE_FOUNDATION_DEPS = {"branding", "jsonrpc", "json-projection"} | set(
-    SHARED_WIRE_CONTRACTS
-)
+CORE_FOUNDATION_DEPS = {"branding", "jsonrpc"} | LEAF_LIBRARIES
 
 # class -> forbidden dependee classes.
 #
@@ -139,8 +131,8 @@ def main():
                 continue
             # json-projection is the dependency-neutral exact-UTF-16 JSON
             # carrier re-exported by core's public source-preserving types.
-            # Keep this as a narrow foundation exception; other core edges
-            # remain forbidden here.
+            # The leaf contracts and device primitives are the foundation
+            # edges; domain crates remain forbidden here.
             if n == "core" and d not in CORE_FOUNDATION_DEPS:
                 violations.append(
                     "core depends on %s — shared contracts must stay below domain and telemetry crates" % d
@@ -178,16 +170,22 @@ def main():
                     "%s (%s) depends on %s (%s) — forbidden by §8.1" % (n, c, d, dc)
                 )
 
+    for n in sorted(LEAF_LIBRARIES & set(pkgs)):
+        outside = [d for d in ws_deps(pkgs[n]) if d not in LEAF_LIBRARIES]
+        if outside:
+            violations.append(
+                "%s depends on %s — a leaf library may depend only on the other leaf libraries"
+                % (n, ", ".join(outside))
+            )
+
     for n in sorted(pkgs):
         if n in EXEMPT:
             continue
-        allowed = LOCAL_APP_CONSUMERS.get(n, set())
         for dep in pkgs[n]["dependencies"]:
-            if dep["name"] in LOCAL_APP_CRATES and dep["name"] not in allowed:
+            if dep["name"] in LOCAL_APP_CRATES:
                 violations.append(
-                    "%s depends on %s — only %s may name the local-app-builder crates%s"
-                    % (n, dep["name"], ", ".join(sorted(LOCAL_APP_CONSUMERS)),
-                       "" if not allowed else " (and %s may name only %s)" % (n, ", ".join(sorted(allowed))))
+                    "%s depends on %s — the Local App implementation crates are gone; nothing may name one"
+                    % (n, dep["name"])
                 )
 
     for root_name in sorted(HARNESS_COMPONENT_CRATES):

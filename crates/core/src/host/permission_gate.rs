@@ -1033,6 +1033,9 @@ pub enum HandoffReview {
 
 #[async_trait]
 pub trait PermissionGate: Send + Sync {
+    /// Whether an interactive permission request is awaiting a user decision.
+    async fn has_pending_request(&self) -> bool { false }
+
     /// Authorize a tool call by `name` with `input`.
     ///
     /// Implementations may consult policy rules, prompt the user, or run

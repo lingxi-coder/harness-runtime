@@ -842,6 +842,8 @@ impl ProviderRegion {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsJson {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_suggestion_enabled: Option<bool>,
     /// Native Fast mode default and session-only opt-in policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_mode: Option<bool>,

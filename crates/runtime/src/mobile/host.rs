@@ -4048,6 +4048,48 @@ impl MobileEngineHandle {
         // behind that lock turns the native sheet's submit spinner into a
         // deadlock. Resolve these commands before serializing session state.
         match command {
+            ClientCommand::UpdatePromptSuggestionContext {
+                session_id,
+                focus,
+                input_empty,
+                pending_permission,
+                elicitation_active,
+            } => self
+                .inner
+                .orchestrator
+                .update_prompt_suggestion_context(
+                    lingxi_core::host::orchestrator::PromptSuggestionContext {
+                        session_id,
+                        focus,
+                        input_empty,
+                        pending_permission,
+                        elicitation_active,
+                    },
+                )
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                }),
+            ClientCommand::RecordPromptSuggestionSubmission { text } => self
+                .inner
+                .orchestrator
+                .record_prompt_suggestion_submission(&text)
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                }),
+            ClientCommand::PromptSuggestionFeedback {
+                session_id,
+                uuid,
+                action,
+            } => self
+                .inner
+                .orchestrator
+                .prompt_suggestion_feedback(&session_id, &uuid, &action)
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                }),
             ClientCommand::AnswerAskUserQuestion {
                 request_id,
                 answers,
@@ -4255,6 +4297,11 @@ impl MobileEngineHandle {
                 turn_id,
                 visualization_context,
             } => {
+                let _ = self
+                    .inner
+                    .orchestrator
+                    .record_prompt_suggestion_submission(&text)
+                    .await;
                 let root_session = self
                     .inner
                     .active_session_uuid
@@ -4764,6 +4811,13 @@ impl MobileEngineHandle {
             // message), so a typed `/loop` actually schedules + executes.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
                 let raw_source = raw.into_projection();
+                if let Some(raw_text) = raw_source.string_at("") {
+                    let _ = self
+                        .inner
+                        .orchestrator
+                        .record_prompt_suggestion_submission(raw_text)
+                        .await;
+                }
                 if self.inner.session_mode == session::jsonl::SessionMode::Chat {
                     let allowed =
                         if let Some(parsed) = command_api::parse_slash_command(&raw_source) {

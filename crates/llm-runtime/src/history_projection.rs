@@ -1169,6 +1169,14 @@ pub(crate) fn project_model_response(
 ) -> Result<HistoryResponse, LlmError> {
     clear_computer_binding(&mut metadata)?;
     clear_host_projection_fields(&mut metadata)?;
+    // A collected fallback response has the same request-local identity as a
+    // streamed response. A body-supplied namespace cannot author this value.
+    upstream_metadata(&mut metadata).remove("http_request_id");
+    if let Some(request_id) = request_id.as_ref() {
+        upstream_metadata(&mut metadata)
+            .insert("http_request_id".into(), request_id.clone().into());
+    }
+    upstream_metadata(&mut metadata).insert("non_streaming_response".into(), true.into());
     let native_stop_details = decoded
         .anthropic_stop_details()
         .map(stop_details)

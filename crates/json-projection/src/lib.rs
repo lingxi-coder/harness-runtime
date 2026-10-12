@@ -1,18 +1,19 @@
 //! Flat JSON values with exact JavaScript UTF-16 strings and property names.
 //!
-//! Nodes refer to child indices in one arena. The carrier never owns a
-//! recursive JSON tree, so clone, serialization, deserialization, and drop do
-//! not recurse with JSON depth. The serde DTO is the flat `{ root, nodes }`
-//! representation; `to_json_string` is the source-neutral JavaScript JSON
-//! stringification operation used by callers that need JSON text.
+//! Source values refer to child indices in one flat arena. A replacement-safe
+//! `serde_json::Value` mirror supports current Rust consumers, while exact
+//! strings, property names, object order, and JavaScript number formatting
+//! remain in the flat arena. Flat-carrier clone, parse, and serialization do
+//! not recurse with JSON depth; the serde DTO is `{ root, nodes }` and
+//! `to_json_string` is the source-authoritative JSON text operation.
 
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 /// A flat JSON value that retains exact JavaScript UTF-16 string and property-name units.
 ///
 /// Rust-facing display strings remain valid UTF-8 and may use replacement characters for
@@ -21,6 +22,33 @@ use thiserror::Error;
 pub struct Utf16JsonProjection {
     root: usize,
     nodes: Vec<JsonNode>,
+    /// Replacement-safe serde display tree for current Rust consumers.
+    ///
+    /// The flat arena remains the source of truth for exact UTF-16 strings,
+    /// object order, and JavaScript number stringification. This mirror uses
+    /// U+FFFD for lone surrogates in values and unique placeholders for lone
+    /// surrogate keys; callers transforming it must use
+    /// [`Self::rebase_display_value`] to retain unchanged exact source text.
+    #[serde(skip)]
+    pub value: Value,
+}
+
+impl Drop for Utf16JsonProjection {
+    fn drop(&mut self) {
+        let display = std::mem::replace(&mut self.value, Value::Null);
+        drop_value_iteratively(display);
+    }
+}
+
+impl Clone for Utf16JsonProjection {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            nodes: self.nodes.clone(),
+            value: display_value(&self.nodes, self.root)
+                .expect("a validated projection has a display value"),
+        }
+    }
 }
 
 /// Raw JSON member adapters for DTOs that carry an arbitrary flat projection.
@@ -159,11 +187,15 @@ impl<'de> Deserialize<'de> for Utf16JsonProjection {
         }
 
         let flat = FlatProjection::deserialize(deserializer)?;
-        let projection = Self {
+        let mut projection = Self {
             root: flat.root,
             nodes: flat.nodes,
+            value: Value::Null,
         };
         projection.validate().map_err(serde::de::Error::custom)?;
+        projection
+            .refresh_display_value()
+            .map_err(serde::de::Error::custom)?;
         Ok(projection)
     }
 }
@@ -176,6 +208,19 @@ impl Utf16JsonProjection {
         let mut builder = Utf16JsonBuilder::new();
         let root = builder.import_serde_value(value)?;
         builder.finish(root)
+    }
+
+    /// Construct an ordinary JSON projection from a serde display value.
+    ///
+    /// This is an explicit interoperability boundary. The resulting flat
+    /// carrier becomes authoritative; exact source strings cannot be inferred
+    /// from a lossy `Value`.
+    #[must_use]
+    pub fn plain(value: Value) -> Self {
+        let projection =
+            Self::from_serde_value(&value).expect("serde JSON values fit the projection carrier");
+        drop_value_iteratively(value);
+        projection
     }
 
     /// Parse JSON text while retaining every JavaScript UTF-16 string and key.
@@ -266,6 +311,95 @@ impl Utf16JsonProjection {
         let mut builder = Utf16JsonBuilder::new();
         let root = builder.push_string_units(code_units);
         builder.finish(root)
+    }
+
+    /// Rebase a display-tree transformation while retaining exact UTF-16 units
+    /// at unchanged string leaves and keys still present in the transformed
+    /// tree.
+    ///
+    /// This method is for typed transformations of the same source value. A
+    /// replacement from a new rich source should replace the whole carrier.
+    pub fn rebase_display_value(&mut self, value: Value) -> Result<(), Utf16JsonProjectionError> {
+        self.validate()?;
+        enum Task<'a> {
+            Visit(&'a Value, String),
+            Array(usize),
+            Object(Vec<Vec<u16>>),
+        }
+
+        let mut builder = Utf16JsonBuilder::new();
+        let mut pending = vec![Task::Visit(&value, String::new())];
+        let mut completed = Vec::new();
+        while let Some(task) = pending.pop() {
+            match task {
+                Task::Visit(Value::Array(items), pointer) => {
+                    pending.push(Task::Array(items.len()));
+                    pending.extend(items.iter().enumerate().rev().map(|(index, child)| {
+                        Task::Visit(child, join_pointer(&pointer, &index.to_string()))
+                    }));
+                }
+                Task::Visit(Value::Object(object), pointer) => {
+                    let old_entries = value_at_pointer(&self.nodes, self.root, &pointer)
+                        .and_then(|id| self.nodes.get(id))
+                        .and_then(|node| match node {
+                            JsonNode::Object(entries) => Some(entries.as_slice()),
+                            _ => None,
+                        });
+                    let keys = object
+                        .keys()
+                        .map(|key| {
+                            old_entries
+                                .and_then(|entries| {
+                                    entries.iter().find(|entry| entry.display == *key)
+                                })
+                                .map(|entry| entry.code_units.clone())
+                                .unwrap_or_else(|| key.encode_utf16().collect())
+                        })
+                        .collect();
+                    pending.push(Task::Object(keys));
+                    pending.extend(
+                        object
+                            .iter()
+                            .rev()
+                            .map(|(key, child)| Task::Visit(child, join_pointer(&pointer, key))),
+                    );
+                }
+                Task::Visit(Value::String(text), pointer) => {
+                    let unchanged = value_at_pointer(&self.nodes, self.root, &pointer)
+                        .and_then(|id| self.nodes.get(id))
+                        .and_then(|node| match node {
+                            JsonNode::String {
+                                display,
+                                code_units,
+                            } if display == text => Some(code_units.clone()),
+                            _ => None,
+                        });
+                    completed.push(match unchanged {
+                        Some(units) => builder.push_string_units(units),
+                        None => builder.push_string(text),
+                    });
+                }
+                Task::Visit(value, _) => completed.push(builder.import_serde_value(value)?),
+                Task::Array(length) => {
+                    let children = completed.split_off(completed.len() - length);
+                    completed.push(builder.push_array(children)?);
+                }
+                Task::Object(keys) => {
+                    let children = completed.split_off(completed.len() - keys.len());
+                    completed
+                        .push(builder.push_object_units(keys.into_iter().zip(children).collect())?);
+                }
+            }
+        }
+        let root = completed
+            .pop()
+            .ok_or(Utf16JsonProjectionError::InvalidProjection(
+                "display-value rebase produced no root node",
+            ))?;
+        let rebased = builder.finish(root)?;
+        drop_value_iteratively(value);
+        *self = rebased;
+        Ok(())
     }
 
     /// Replace JSON string values in one iterative traversal. Object keys
@@ -513,6 +647,7 @@ impl Utf16JsonProjection {
         *display = String::from_utf16_lossy(code_units);
         target.clear();
         target.extend_from_slice(code_units);
+        self.refresh_display_value()?;
         self.validate()
     }
 
@@ -715,6 +850,18 @@ impl Utf16JsonProjection {
         )
     }
 
+    /// Replace an existing pointer subtree with another exact projection.
+    ///
+    /// This current host API shares the transactional source-preserving
+    /// implementation used by [`Self::replace_pointer_projection`].
+    pub fn set_pointer(
+        &mut self,
+        pointer: &str,
+        child: Self,
+    ) -> Result<(), Utf16JsonProjectionError> {
+        self.replace_pointer_projection(pointer, child)
+    }
+
     /// UTF-16-unit form of [`Self::replace_pointer_projection`], for property
     /// names that cannot be represented by a Rust `str`.
     pub fn replace_pointer_projection_units(
@@ -901,7 +1048,26 @@ impl Utf16JsonProjection {
                 entries[index].display = replacement;
             }
         }
+        self.refresh_display_value()?;
         self.validate()
+    }
+
+    fn refresh_display_value(&mut self) -> Result<(), Utf16JsonProjectionError> {
+        let display = display_value(&self.nodes, self.root)?;
+        let previous = std::mem::replace(&mut self.value, display);
+        drop_value_iteratively(previous);
+        Ok(())
+    }
+}
+
+fn drop_value_iteratively(root: Value) {
+    let mut pending = vec![root];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(mut items) => pending.append(&mut items),
+            Value::Object(object) => pending.extend(object.into_iter().map(|(_, value)| value)),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
     }
 }
 
@@ -1818,12 +1984,95 @@ fn compact_nodes(
         };
         compacted.push(node);
     }
+    let value = display_value(&compacted, remap[root])?;
     let projection = Utf16JsonProjection {
         root: remap[root],
         nodes: compacted,
+        value,
     };
     projection.validate()?;
     Ok(projection)
+}
+
+fn display_value(nodes: &[JsonNode], root: usize) -> Result<Value, Utf16JsonProjectionError> {
+    enum Task {
+        Visit(usize),
+        Array(usize),
+        Object(Vec<String>),
+    }
+
+    if root >= nodes.len() {
+        return Err(Utf16JsonProjectionError::InvalidProjection(
+            "root node is outside the arena",
+        ));
+    }
+    let mut pending = vec![Task::Visit(root)];
+    let mut completed = Vec::<Value>::new();
+    while let Some(task) = pending.pop() {
+        match task {
+            Task::Visit(id) => {
+                match nodes
+                    .get(id)
+                    .ok_or(Utf16JsonProjectionError::InvalidProjection(
+                        "child node is outside the arena",
+                    ))? {
+                    JsonNode::Null => completed.push(Value::Null),
+                    JsonNode::Bool(value) => completed.push(Value::Bool(*value)),
+                    JsonNode::Number(bits) => {
+                        let number = f64::from_bits(*bits);
+                        completed.push(
+                            serde_json::Number::from_f64(number).map_or(Value::Null, Value::Number),
+                        );
+                    }
+                    JsonNode::String { display, .. } => {
+                        completed.push(Value::String(display.clone()));
+                    }
+                    JsonNode::Array(items) => {
+                        pending.push(Task::Array(items.len()));
+                        pending.extend(items.iter().rev().copied().map(Task::Visit));
+                    }
+                    JsonNode::Object(entries) => {
+                        pending.push(Task::Object(
+                            entries.iter().map(|entry| entry.display.clone()).collect(),
+                        ));
+                        pending.extend(entries.iter().rev().map(|entry| Task::Visit(entry.value)));
+                    }
+                }
+            }
+            Task::Array(length) => {
+                if completed.len() < length {
+                    return Err(Utf16JsonProjectionError::InvalidProjection(
+                        "display array stack underflow",
+                    ));
+                }
+                let items = completed.split_off(completed.len() - length);
+                completed.push(Value::Array(items));
+            }
+            Task::Object(keys) => {
+                if completed.len() < keys.len() {
+                    return Err(Utf16JsonProjectionError::InvalidProjection(
+                        "display object stack underflow",
+                    ));
+                }
+                let children = completed.split_off(completed.len() - keys.len());
+                let mut object = Map::new();
+                for (key, child) in keys.into_iter().zip(children) {
+                    object.insert(key, child);
+                }
+                completed.push(Value::Object(object));
+            }
+        }
+    }
+    if completed.len() != 1 {
+        return Err(Utf16JsonProjectionError::InvalidProjection(
+            "display projection did not produce one root value",
+        ));
+    }
+    Ok(completed.pop().expect("one completed root value"))
+}
+
+fn join_pointer(parent: &str, token: &str) -> String {
+    format!("{parent}/{}", token.replace('~', "~0").replace('/', "~1"))
 }
 
 fn value_at_pointer(nodes: &[JsonNode], root: usize, pointer: &str) -> Option<usize> {
@@ -2829,6 +3078,49 @@ mod utf16_document_tests {
         let source = cloned.to_json_string().unwrap();
         assert!(source.contains("\\udfff"));
         drop(cloned);
+    }
+
+    #[test]
+    fn current_display_apis_do_not_replace_the_exact_flat_source() {
+        let mut frame =
+            Utf16JsonProjection::parse(r#"{"count":1,"nested":{"text":"source-\ud800"}}"#).unwrap();
+        assert_eq!(frame.value["nested"]["text"], "source-�");
+        frame
+            .set_pointer("/count", Utf16JsonProjection::plain(serde_json::json!(2)))
+            .unwrap();
+        assert_eq!(frame.value["count"], 2);
+        assert_eq!(
+            frame.string_units("/nested/text"),
+            Some("source-".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            frame.to_json_string().unwrap(),
+            r#"{"count":2,"nested":{"text":"source-\ud800"}}"#
+        );
+    }
+
+    #[test]
+    fn display_rebase_keeps_unchanged_surrogate_keys_and_values() {
+        let mut projection =
+            Utf16JsonProjection::parse(r#"{"\ud800":"value-\ud801","keep":"same"}"#).unwrap();
+        let mut changed = projection.value.clone();
+        changed["keep"] = serde_json::json!("updated");
+        projection.rebase_display_value(changed).unwrap();
+
+        assert_eq!(
+            projection.to_json_string().unwrap(),
+            r#"{"\ud800":"value-\ud801","keep":"updated"}"#
+        );
+        assert_eq!(
+            projection.string_units("/keep"),
+            Some("updated".encode_utf16().collect())
+        );
+    }
+
+    #[test]
+    fn plain_display_ingress_still_uses_javascript_number_stringification() {
+        let projection = Utf16JsonProjection::plain(serde_json::json!(9_007_199_254_740_993_u64));
+        assert_eq!(projection.to_json_string().unwrap(), "9007199254740992");
     }
 }
 

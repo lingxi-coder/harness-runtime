@@ -838,7 +838,21 @@ define_client_command! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         offer_bypass: Option<bool>,
     },
-
+    /// Ephemeral composer observations; independent of the native SDK stream.
+    UpdatePromptSuggestionContext {
+        session_id: String,
+        focus: String,
+        input_empty: bool,
+        pending_permission: bool,
+        elicitation_active: bool,
+    },
+    PromptSuggestionFeedback {
+        session_id: String,
+        uuid: String,
+        action: String,
+    },
+    /// Admission of a command executed entirely by the attached frontend.
+    RecordPromptSuggestionSubmission { text: String },
 }
 
 impl From<ClientCommandWire> for ClientCommand {
@@ -1151,6 +1165,31 @@ impl From<ClientCommandWire> for ClientCommand {
                 level,
                 offer_bypass,
             },
+            ClientCommandWire::UpdatePromptSuggestionContext {
+                session_id,
+                focus,
+                input_empty,
+                pending_permission,
+                elicitation_active,
+            } => Self::UpdatePromptSuggestionContext {
+                session_id,
+                focus,
+                input_empty,
+                pending_permission,
+                elicitation_active,
+            },
+            ClientCommandWire::PromptSuggestionFeedback {
+                session_id,
+                uuid,
+                action,
+            } => Self::PromptSuggestionFeedback {
+                session_id,
+                uuid,
+                action,
+            },
+            ClientCommandWire::RecordPromptSuggestionSubmission { text } => {
+                Self::RecordPromptSuggestionSubmission { text }
+            }
         }
     }
 }

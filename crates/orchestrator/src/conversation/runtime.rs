@@ -369,6 +369,9 @@ pub struct TurnExecutionMetrics {
     pub ttft_ms: Option<u64>,
     /// Actual terminal reason emitted by the driver; absent if it emitted none.
     pub stop_reason: Option<String>,
+    /// Provider message stop reason, independent of the driver's termination
+    /// (for example StructuredOutput completes while the model says tool_use).
+    pub model_stop_reason: Option<String>,
     /// HTTP status retained from the typed provider error, absent for local errors.
     pub api_error_status: Option<u16>,
     /// Inner stop reason of the final synthetic API-error assistant, if any.
@@ -593,6 +596,19 @@ impl ConversationOrchestrator {
         }
     }
 
+    pub(super) fn note_turn_model_stop_reason(&self, reason: Option<&str>) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.model_stop_reason = reason.map(str::to_owned);
+        }
+    }
+
     pub(crate) fn note_turn_api_error_stop_reason(&self, reason: Option<&str>) {
         if let Some(active) = self
             .prompt_runtime
@@ -655,6 +671,10 @@ impl ConversationOrchestrator {
 
 pub(crate) struct PromptRuntime {
     pub(crate) turn_execution_metrics: std::sync::Mutex<TurnExecutionMetricsState>,
+    pub(crate) suggestion_background:
+        std::sync::Mutex<super::prompt_suggestion_background::state::BackgroundSuggestionState>,
+    pub(crate) suggestion_cancel: std::sync::Mutex<Option<CancellationToken>>,
+    pub(crate) suggestion: std::sync::Mutex<super::prompt_suggestion::SuggestionRuntime>,
     /// Frozen gitStatus probe + rendered attachment for this conversation.
     /// Claude documents gitStatus as a start-of-conversation snapshot that does
     /// not update, including after a worktree/session-cwd swap.
@@ -955,6 +975,9 @@ impl PromptRuntime {
     pub(crate) fn new() -> Self {
         Self {
             turn_execution_metrics: std::sync::Mutex::new(TurnExecutionMetricsState::default()),
+            suggestion_background: std::sync::Mutex::new(Default::default()),
+            suggestion_cancel: std::sync::Mutex::new(None),
+            suggestion: std::sync::Mutex::new(Default::default()),
             git_status_snapshot: Mutex::new(None),
             mod_prompt_sections: Mutex::new(ModPromptSectionCache::default()),
             mod_prompt_context: Mutex::new(ModPromptContextCache::default()),

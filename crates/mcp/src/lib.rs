@@ -141,8 +141,7 @@ pub use mcp_output_storage::{
 };
 pub use raw_conn::RawConnectionProvider;
 pub use registry::{
-    ConversationExport, ManagedServer, ManagedServerPolicy, McpCatalogChanged, McpCatalogKind,
-    McpRegistry, McpToolOutputSchemaParserHandle, ServerExposure,
+    McpCatalogChanged, McpCatalogKind, McpRegistry, McpToolOutputSchemaParserHandle,
 };
 pub use server_gate::{
     apply_project_server_gate, is_builtin_computer_use, mcp_server_is_disabled, McpPolicyContext,

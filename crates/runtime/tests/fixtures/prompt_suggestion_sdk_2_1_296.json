@@ -1,0 +1,1387 @@
+{
+  "version": "2.1.296",
+  "binarySha256": "c9b5341637becbd423ddffc5b254afb645682a3868cb708bbc6cc0e7bb419937",
+  "controllerOffset": 221993721,
+  "controllerSha256": "3e555cccb2fea841cc151ba8f6f11108ea387a8ec130af2b840d29003daf8766",
+  "settleTimeoutMs": 30000,
+  "serializerOffset": 216161616,
+  "serializerSha256": "4a23782cd9e9f773974d43996edc646ae88c66c99098f9195cf10392cfa939b7",
+  "feedbackOffset": 203682307,
+  "cases": [
+    {
+      "name": "accepted-case-insensitive",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "time",
+          "now": 1123
+        },
+        {
+          "op": "command",
+          "content": "RUN THE TESTS",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "accepted",
+              "prompt_id": "user_intent",
+              "generationRequestId": "req-1",
+              "timeToAcceptMs": 123,
+              "similarity": 1
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "ignored-utf16-length",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "😀 run",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "time",
+          "now": 1100
+        },
+        {
+          "op": "command",
+          "content": "😀",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"😀 run\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "ignored",
+              "prompt_id": "user_intent",
+              "generationRequestId": "req-1",
+              "timeToIgnoreMs": 100,
+              "similarity": 0.33
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "first-text-block-only",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "command",
+          "content": [
+            {
+              "type": "image"
+            },
+            {
+              "type": "text",
+              "text": "run the tests"
+            },
+            {
+              "type": "text",
+              "text": "extra"
+            }
+          ],
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "accepted",
+              "prompt_id": "user_intent",
+              "generationRequestId": "req-1",
+              "timeToAcceptMs": 0,
+              "similarity": 1
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "no-text-clears-attribution",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "command",
+          "content": [
+            {
+              "type": "image"
+            }
+          ],
+          "shouldQuery": true,
+          "mode": "prompt"
+        },
+        {
+          "op": "command",
+          "content": "run the tests",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "local-command-does-not-cancel",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "command",
+          "content": "/compact",
+          "shouldQuery": false,
+          "mode": "prompt"
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "command",
+          "content": "run the tests",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "accepted",
+              "prompt_id": "user_intent",
+              "generationRequestId": "req-1",
+              "timeToAcceptMs": 0,
+              "similarity": 1
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "new-prompt-aborts-generation",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "command",
+          "content": "another query",
+          "shouldQuery": true,
+          "mode": "prompt"
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "nonprompt-retains-attribution",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "command",
+          "content": "notification",
+          "shouldQuery": true,
+          "mode": "notification"
+        },
+        {
+          "op": "command",
+          "content": "run the tests",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "accepted",
+              "prompt_id": "user_intent",
+              "generationRequestId": "req-1",
+              "timeToAcceptMs": 0,
+              "similarity": 1
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "later-generation-wins",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "obsolete",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-2",
+          "index": 1
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 2,
+        "aborted": [
+          true,
+          false
+        ]
+      }
+    },
+    {
+      "name": "disabled-after-result-keeps-inflight",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "enabled",
+          "value": false
+        },
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "environment-false",
+      "environmentDisabled": true,
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [],
+        "generations": 0,
+        "aborted": []
+      }
+    },
+    {
+      "name": "disabled-option",
+      "enabled": false,
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [],
+        "generations": 0,
+        "aborted": []
+      }
+    },
+    {
+      "name": "shutdown",
+      "shuttingDown": true,
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [],
+        "generations": 0,
+        "aborted": []
+      }
+    },
+    {
+      "name": "nonquery-result",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": false
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [],
+        "generations": 0,
+        "aborted": []
+      }
+    },
+    {
+      "name": "pause-rollout-off",
+      "actions": [
+        {
+          "op": "pause",
+          "value": true
+        },
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "pause-rollout-on",
+      "sable": true,
+      "actions": [
+        {
+          "op": "pause",
+          "value": true
+        },
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "pause",
+          "value": false
+        },
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "suppressed",
+              "reason": "host_paused",
+              "prompt_id": "user_intent"
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "pause-does-not-abort-inflight",
+      "sable": true,
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "pause",
+          "value": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "paused-next-result-aborts-inflight",
+      "sable": true,
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "pause",
+          "value": true
+        },
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "suppressed",
+              "reason": "host_paused",
+              "prompt_id": "user_intent"
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "negative-clock-clamps",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "time",
+          "now": 10
+        },
+        {
+          "op": "command",
+          "content": "run the tests",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "accepted",
+              "prompt_id": "user_intent",
+              "generationRequestId": "req-1",
+              "timeToAcceptMs": 0,
+              "similarity": 1
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "empty-request-id-omitted",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "",
+          "index": 0
+        },
+        {
+          "op": "command",
+          "content": "run the tests",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "accepted",
+              "prompt_id": "user_intent",
+              "timeToAcceptMs": 0,
+              "similarity": 1
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "held-release-clock",
+      "holdsResults": true,
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "time",
+          "now": 1200
+        },
+        {
+          "op": "release"
+        },
+        {
+          "op": "time",
+          "now": 1245
+        },
+        {
+          "op": "command",
+          "content": "run the tests",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "accepted",
+              "prompt_id": "user_intent",
+              "generationRequestId": "req-1",
+              "timeToAcceptMs": 45,
+              "similarity": 1
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "held-new-prompt-discards",
+      "holdsResults": true,
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "command",
+          "content": "other",
+          "shouldQuery": true,
+          "mode": "prompt"
+        },
+        {
+          "op": "release"
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "discard-clears-attribution",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "discard"
+        },
+        {
+          "op": "command",
+          "content": "run the tests",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "discard-aborts",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "discard"
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "empty-generation",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "empty": true,
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "literal-line-separators",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "go now please",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "command",
+          "content": "go now please",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"go\\u2028now\\u2029please\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "accepted",
+              "prompt_id": "user_intent",
+              "generationRequestId": "req-1",
+              "timeToAcceptMs": 0,
+              "similarity": 1
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "json-string-escapes",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "say \"next\" \\ path",
+          "requestId": "req-1",
+          "index": 0
+        },
+        {
+          "op": "command",
+          "content": "say \"next\" \\ path",
+          "shouldQuery": true,
+          "mode": "prompt"
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"say \\\"next\\\" \\\\ path\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "accepted",
+              "prompt_id": "user_intent",
+              "generationRequestId": "req-1",
+              "timeToAcceptMs": 0,
+              "similarity": 1
+            }
+          }
+        ],
+        "generations": 1,
+        "aborted": [
+          true
+        ]
+      }
+    },
+    {
+      "name": "origin-scheduled-false",
+      "sable": false,
+      "origin": "scheduled",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-scheduled-true",
+      "sable": true,
+      "origin": "scheduled",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "suppressed",
+              "reason": "not_user_started",
+              "prompt_id": "user_intent"
+            }
+          }
+        ],
+        "generations": 0,
+        "aborted": []
+      }
+    },
+    {
+      "name": "origin-task_notification-false",
+      "sable": false,
+      "origin": "task_notification",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-task_notification-true",
+      "sable": true,
+      "origin": "task_notification",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "suppressed",
+              "reason": "not_user_started",
+              "prompt_id": "user_intent"
+            }
+          }
+        ],
+        "generations": 0,
+        "aborted": []
+      }
+    },
+    {
+      "name": "origin-auto_continuation-false",
+      "sable": false,
+      "origin": "auto_continuation",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-auto_continuation-true",
+      "sable": true,
+      "origin": "auto_continuation",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "suppressed",
+              "reason": "not_user_started",
+              "prompt_id": "user_intent"
+            }
+          }
+        ],
+        "generations": 0,
+        "aborted": []
+      }
+    },
+    {
+      "name": "origin-host_synthetic-false",
+      "sable": false,
+      "origin": "host_synthetic",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-host_synthetic-true",
+      "sable": true,
+      "origin": "host_synthetic",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "suppressed",
+              "reason": "not_user_started",
+              "prompt_id": "user_intent"
+            }
+          }
+        ],
+        "generations": 0,
+        "aborted": []
+      }
+    },
+    {
+      "name": "origin-system-false",
+      "sable": false,
+      "origin": "system",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-system-true",
+      "sable": true,
+      "origin": "system",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        }
+      ],
+      "expected": {
+        "frames": [],
+        "events": [
+          {
+            "name": "tengu_prompt_suggestion",
+            "payload": {
+              "source": "sdk",
+              "outcome": "suppressed",
+              "reason": "not_user_started",
+              "prompt_id": "user_intent"
+            }
+          }
+        ],
+        "generations": 0,
+        "aborted": []
+      }
+    },
+    {
+      "name": "origin-user-false",
+      "sable": false,
+      "origin": "user",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-user-true",
+      "sable": true,
+      "origin": "user",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-sdk-false",
+      "sable": false,
+      "origin": "sdk",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-sdk-true",
+      "sable": true,
+      "origin": "sdk",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-empty-false",
+      "sable": false,
+      "origin": "",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    },
+    {
+      "name": "origin-empty-true",
+      "sable": true,
+      "origin": "",
+      "actions": [
+        {
+          "op": "after",
+          "shouldQuery": true
+        },
+        {
+          "op": "generated",
+          "suggestion": "run the tests",
+          "requestId": "req-1",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "frames": [
+          "{\"type\":\"prompt_suggestion\",\"suggestion\":\"run the tests\",\"uuid\":\"frame-1\",\"session_id\":\"session-fixture\"}\n"
+        ],
+        "events": [],
+        "generations": 1,
+        "aborted": [
+          false
+        ]
+      }
+    }
+  ]
+}

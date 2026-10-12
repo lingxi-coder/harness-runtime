@@ -1608,11 +1608,12 @@ dependencies = [
 [[package]]
 name = "device-api"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=0b93d07d3194c867b2d9849056bb0bd0c1032c87#0b93d07d3194c867b2d9849056bb0bd0c1032c87"
 dependencies = [
  "async-trait",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 
@@ -3780,7 +3781,6 @@ dependencies = [
  "futures-util",
  "indexmap",
  "jsonrpc",
- "mcp-wire",
  "migrations",
  "rand 0.9.4",
  "regex",
@@ -5877,11 +5877,11 @@ dependencies = [
 [[package]]
 name = "rooted-fs"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=0b93d07d3194c867b2d9849056bb0bd0c1032c87#0b93d07d3194c867b2d9849056bb0bd0c1032c87"
 dependencies = [
  "fs2",
  "rustix 0.38.44",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "uuid",
 ]

@@ -795,6 +795,16 @@ define_client_event! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<crate::protocol::message::VisualizationRefDto>,
     },
+    PromptSuggestion {
+        suggestion: String,
+        uuid: String,
+        session_id: String,
+    },
+    /// Composer state for attached hosts; never emitted on the native SDK stream.
+    PromptSuggestionState {
+        enabled: bool,
+        notice: Option<String>,
+    },
 }
 
 impl From<ClientEventWire> for ClientEvent {

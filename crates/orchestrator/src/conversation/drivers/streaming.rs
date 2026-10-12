@@ -2033,6 +2033,7 @@ impl StreamingTurnDriver<'_> {
                 let mut stream_decision;
                 let mut stream_retry;
                 let mut stream_failed_long;
+                let mut websocket_lost;
                 let pump_outcome: Result<
                     (
                         crate::streaming_loop::PumpedTurn,
@@ -2152,6 +2153,16 @@ impl StreamingTurnDriver<'_> {
                             });
                         }
                     }
+                    // A WebSocket the server closed under the response keeps
+                    // Codex's retry budget after the native one is spent. Only
+                    // thinking can have streamed, so no tool has started.
+                    websocket_lost = matches!(
+                        &observed_pump,
+                        Err(failure)
+                            if crate::streaming_loop::is_websocket_connection_lost(&failure.error)
+                                && !failure.real_content_started
+                                && failure.partial.stop_reason.is_none()
+                    );
                     match observed_pump {
                         Ok(p) => break Ok(p),
                         Err(mut f)
@@ -2166,6 +2177,11 @@ impl StreamingTurnDriver<'_> {
                                         < crate::streaming_loop::mid_stream_retry_cap(
                                             &f.error,
                                         )
+                                    && retry_scope.take_stream_retry())
+                                || (stream_decision.is_some()
+                                    && websocket_lost
+                                    && mid_stream_retries
+                                        < crate::streaming_loop::WEBSOCKET_STREAM_MAX_RETRIES
                                     && retry_scope.take_stream_retry()) =>
                         {
                             f.partial_close.close(orch.output.as_ref()).await;
@@ -2175,6 +2191,13 @@ impl StreamingTurnDriver<'_> {
                             mid_stream_retries += 1;
                             // Exponential backoff + jitter (binary `sle`).
                             let delay = match stream_retry {
+                                // Codex's ladder for a closed WebSocket: 200ms, doubling.
+                                _ if websocket_lost => llm_runtime::model::retry::jittered_delay(
+                                    llm_runtime::model::retry::scaled_base_delay_ms(
+                                        mid_stream_retries - 1,
+                                        Some(crate::streaming_loop::WEBSOCKET_STREAM_RETRY_BASE_MS),
+                                    ),
+                                ),
                                 Some((llm_runtime::model::stream_recovery::Cause::Stalled, _)) => {
                                     std::time::Duration::ZERO
                                 }
@@ -2200,6 +2223,7 @@ impl StreamingTurnDriver<'_> {
                             tokio::time::sleep(delay).await;
                             tracing::warn!(
                                 attempt = mid_stream_retries,
+                                error = %f.error,
                                 "mid-response transient stream error — retrying streaming request"
                             );
                             // Re-snapshot history (+ additional context) for
@@ -2954,6 +2978,7 @@ impl StreamingTurnDriver<'_> {
         // assistant row and retains its identity, so this is also the ID sent
         // by the final `MessageIdentity` and persisted below.
         let assistant_msg = pumped_assistant_message(&pumped, assistant_id);
+        orch.note_turn_model_stop_reason(pumped.stop_reason.as_deref());
         let publication_fence = exec.publication_fence();
         let publication_guard = orch
             .prompt_runtime

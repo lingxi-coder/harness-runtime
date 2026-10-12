@@ -1,4 +1,4 @@
-use super::suggestions::StreamFileSuggestionIndex;
+use super::suggestions::{SdkPromptSuggestions, StreamFileSuggestionIndex};
 use crate::headless::stream_json_input::ControlPlaneWriter;
 use crate::headless::HeadlessRuntime as Runtime;
 use lingxi_core::host::OrchestratorHandle;
@@ -71,8 +71,8 @@ pub(super) fn resolve_set_model_target(field: Option<JsonValueView<'_>>) -> SetM
             None => return SetModelTarget::Reject,
         },
     };
-    // CC: `or.trim().toLowerCase() === "default"` — trimmed, case-insensitive.
-    if requested.trim().to_lowercase() == "default" {
+    // CC: `or.trim().toLowerCase() === "default"` — JS whitespace, case-insensitive.
+    if lingxi_core::host::effort::trim_js_whitespace(requested).to_lowercase() == "default" {
         SetModelTarget::Default
     } else {
         // CC: `vr = Jr ? SE() : or` — the RAW requested string (untrimmed).
@@ -107,6 +107,7 @@ pub(super) async fn dispatch_control_request(
     init_fast_mode_state: &'static str,
     init_fast_mode_disabled_reason: Option<&'static str>,
     file_suggestions: &StreamFileSuggestionIndex,
+    prompt_suggestions: &Arc<SdkPromptSuggestions>,
     host: &dyn crate::headless::host::HeadlessHostServices,
     auxiliary_tasks: &Arc<super::PrintAuxTaskGroup>,
     execution_errors: &Arc<std::sync::Mutex<Vec<String>>>,
@@ -133,6 +134,12 @@ pub(super) async fn dispatch_control_request(
             orchestrator.apply_native_proactivity_initialize(
                 field("proactivity").and_then(JsonValueView::as_bool),
                 field("reinitialize").and_then(JsonValueView::as_bool) == Some(true),
+            );
+            prompt_suggestions.initialize(
+                field("promptSuggestions").and_then(JsonValueView::as_bool),
+                host.environment_variable("CLAUDE_CODE_ENTRYPOINT")
+                    .as_deref()
+                    == Some("remote_cowork"),
             );
             let mut payload = initialize_response_payload(
                 init_commands,
@@ -172,6 +179,15 @@ pub(super) async fn dispatch_control_request(
                 auxiliary_tasks.push(tokio::spawn(async move {
                     orchestrator.connect_sdk_mcp_servers(configs).await;
                 }));
+            }
+        }
+        "set_prompt_suggestions_paused" => {
+            match crate::headless::sdk_prompt_suggestions::parse_paused(field("paused")) {
+                Ok(paused) => {
+                    prompt_suggestions.set_paused(paused);
+                    writer.reply_success(request_id, None);
+                }
+                Err(error) => writer.reply_error(request_id, &error),
             }
         }
         "interrupt" => {
@@ -219,6 +235,7 @@ pub(super) async fn dispatch_control_request(
                 return writer.finish();
             }
             let stopped = control_plane.cancel_active_turn().await;
+            prompt_suggestions.discard();
             let _ = cancel_tx.send(stopped);
             if cancel_queued {
                 let cancelled = lifecycle.queued.cancel_all_queued();
@@ -882,6 +899,7 @@ pub(super) async fn dispatch_control_request(
             }
         }
         "end_session" => {
+            prompt_suggestions.discard();
             // Cancel the actual owner too: idle notification turns do not use
             // the normal input turn's watch bridge.
             control_plane.shutdown("Session ended").await;

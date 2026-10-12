@@ -120,6 +120,15 @@ pub trait OrchestratorApiClient: Send + Sync {
         Ok(llm_runtime::CredentialSource::Unknown)
     }
 
+    /// Redacted native classifier model gates for the exact selected route.
+    async fn classifier_model_route_facts(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<llm_runtime::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError> {
+        Ok(Default::default())
+    }
+
     /// Provider wire chosen by the host route, independent of model name guesses.
     fn native_computer_provider(
         &self,
@@ -1874,6 +1883,10 @@ mod mod_projects_consent;
 mod mod_session_measure_sampler;
 #[path = "conversation/model.rs"]
 mod model_impl;
+#[path = "conversation/prompt_suggestion.rs"]
+mod prompt_suggestion;
+#[path = "conversation/prompt_suggestion_background.rs"]
+mod prompt_suggestion_background;
 #[path = "conversation/model_reminders.rs"]
 mod model_reminders_impl;
 #[path = "conversation/native_classifier_context.rs"]

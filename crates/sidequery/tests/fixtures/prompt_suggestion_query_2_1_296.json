@@ -1,0 +1,926 @@
+{
+  "pinGateCases": [
+    {
+      "provider": "firstParty",
+      "disabled": false,
+      "hipaa": false,
+      "expected": true
+    },
+    {
+      "provider": "firstParty",
+      "disabled": false,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "firstParty",
+      "disabled": true,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "firstParty",
+      "disabled": true,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "anthropicAws",
+      "disabled": false,
+      "hipaa": false,
+      "expected": true
+    },
+    {
+      "provider": "anthropicAws",
+      "disabled": false,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "anthropicAws",
+      "disabled": true,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "anthropicAws",
+      "disabled": true,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "anthropicGoogleCloud",
+      "disabled": false,
+      "hipaa": false,
+      "expected": true
+    },
+    {
+      "provider": "anthropicGoogleCloud",
+      "disabled": false,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "anthropicGoogleCloud",
+      "disabled": true,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "anthropicGoogleCloud",
+      "disabled": true,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "foundry",
+      "disabled": false,
+      "hipaa": false,
+      "expected": true
+    },
+    {
+      "provider": "foundry",
+      "disabled": false,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "foundry",
+      "disabled": true,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "foundry",
+      "disabled": true,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "bedrock",
+      "disabled": false,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "bedrock",
+      "disabled": false,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "bedrock",
+      "disabled": true,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "bedrock",
+      "disabled": true,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "vertex",
+      "disabled": false,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "vertex",
+      "disabled": false,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "vertex",
+      "disabled": true,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "vertex",
+      "disabled": true,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "mantle",
+      "disabled": false,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "mantle",
+      "disabled": false,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "mantle",
+      "disabled": true,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "mantle",
+      "disabled": true,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "custom",
+      "disabled": false,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "custom",
+      "disabled": false,
+      "hipaa": true,
+      "expected": false
+    },
+    {
+      "provider": "custom",
+      "disabled": true,
+      "hipaa": false,
+      "expected": false
+    },
+    {
+      "provider": "custom",
+      "disabled": true,
+      "hipaa": true,
+      "expected": false
+    }
+  ],
+  "version": "2.1.296",
+  "binary_sha256": "c9b5341637becbd423ddffc5b254afb645682a3868cb708bbc6cc0e7bb419937",
+  "queryResult": {
+    "candidates": [
+      "first candidate",
+      "second candidate"
+    ],
+    "generationRequestId": "req_http_first"
+  },
+  "denial": {
+    "behavior": "deny",
+    "message": "No tools needed for suggestion",
+    "decisionReason": {
+      "type": "other",
+      "reason": "suggestion only"
+    }
+  },
+  "maxTurns": 50,
+  "cacheCases": [
+    {
+      "roles": [
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ]
+      ],
+      "markerIndices": []
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ]
+      ],
+      "markerIndices": [
+        1
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "thinking"
+        ],
+        [
+          "text"
+        ]
+      ],
+      "markerIndices": [
+        1
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "markerIndices": [
+        1
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text",
+          "thinking"
+        ],
+        [
+          "text"
+        ]
+      ],
+      "markerIndices": [
+        0
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "empty_text"
+        ],
+        [
+          "text"
+        ]
+      ],
+      "markerIndices": [
+        0
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "whitespace_text"
+        ],
+        [
+          "text"
+        ]
+      ],
+      "markerIndices": [
+        1
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": false,
+      "stepBack": false,
+      "parent": 0,
+      "markerIndices": [
+        3
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": false,
+      "stepBack": false,
+      "parent": 1,
+      "markerIndices": [
+        3
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": false,
+      "stepBack": false,
+      "parent": 2,
+      "markerIndices": [
+        3
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": false,
+      "stepBack": false,
+      "parent": 3,
+      "markerIndices": [
+        3
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": false,
+      "stepBack": true,
+      "parent": 0,
+      "markerIndices": [
+        3
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": false,
+      "stepBack": true,
+      "parent": 1,
+      "markerIndices": [
+        3
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": false,
+      "stepBack": true,
+      "parent": 2,
+      "markerIndices": [
+        3
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": false,
+      "stepBack": true,
+      "parent": 3,
+      "markerIndices": [
+        3
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": true,
+      "stepBack": false,
+      "parent": 0,
+      "markerIndices": [
+        3,
+        0
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": true,
+      "stepBack": false,
+      "parent": 1,
+      "markerIndices": [
+        3,
+        1
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": true,
+      "stepBack": false,
+      "parent": 2,
+      "markerIndices": [
+        3,
+        2
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": true,
+      "stepBack": false,
+      "parent": 3,
+      "markerIndices": [
+        3
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": true,
+      "stepBack": true,
+      "parent": 0,
+      "markerIndices": [
+        3,
+        0
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": true,
+      "stepBack": true,
+      "parent": 1,
+      "markerIndices": [
+        3,
+        1
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": true,
+      "stepBack": true,
+      "parent": 2,
+      "markerIndices": [
+        3,
+        2
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "tool_use"
+        ],
+        [
+          "tool_result"
+        ]
+      ],
+      "pin": true,
+      "stepBack": true,
+      "parent": 3,
+      "markerIndices": [
+        3,
+        2
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ]
+      ],
+      "pin": true,
+      "stepBack": false,
+      "parent": 1,
+      "markerIndices": [
+        1
+      ]
+    },
+    {
+      "roles": [
+        "user",
+        "assistant",
+        "user"
+      ],
+      "blocks": [
+        [
+          "text"
+        ],
+        [
+          "text"
+        ],
+        [
+          "text"
+        ]
+      ],
+      "pin": true,
+      "stepBack": true,
+      "parent": 1,
+      "markerIndices": [
+        1,
+        0
+      ]
+    }
+  ]
+}

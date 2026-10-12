@@ -1760,6 +1760,28 @@ impl ApiService {
         self.client.credential_source(model, profile).await
     }
 
+    /// Resolve classifier model gates while fencing credential reads against
+    /// the same host account generation used by prompt-cache preparation.
+    pub async fn classifier_model_route_facts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError> {
+        for _ in 0..2 {
+            let epoch = self.prompt_cache_overage.account_epoch();
+            let facts = self
+                .client
+                .classifier_model_route_facts(model, profile)
+                .await?;
+            if epoch == self.prompt_cache_overage.account_epoch() {
+                return Ok(facts);
+            }
+        }
+        Err(LlmError::Authentication {
+            message: "account changed while resolving classifier model route".into(),
+        })
+    }
+
     /// Native first-party route identity, without credential or network work.
     pub fn is_first_party_route(
         &self,
@@ -2308,7 +2330,8 @@ impl ApiService {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = thinking;
     }
 
-    fn thinking(&self) -> crate::model::thinking::ThinkingConfig {
+    /// Snapshot the live session policy for a fork that inherits its parent.
+    pub fn thinking(&self) -> crate::model::thinking::ThinkingConfig {
         *self
             .thinking
             .read()
@@ -2611,6 +2634,379 @@ impl ApiService {
                 task_deliveries,
             )
         })
+    }
+
+    fn build_main_request(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        stream: bool,
+        max_tokens: Option<u32>,
+        skip_global_cache_for_system_prompt: bool,
+        query_source: PromptCacheQuerySource<'_>,
+    ) -> Result<LlmRequest, LlmError> {
+        // Pre-wire pipeline (claude-code order): strip_excess_media →
+        // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
+        // (SEND-time repair of orphaned/missing/duplicate tool_use↔tool_result on
+        // resumed/interrupted transcripts; strict no-op on a clean turn).
+        // Session-scoped tool-search gate (Claude Code `$U()`), published by the
+        // orchestrator. NOT inferred from whether THIS request's toolset carries
+        // a `ToolSearch` declaration: `$U()` reads only the session mode +
+        // provider, and the branch site `if(!$U())W=j6s(W);else W=xPy(W,a)` runs
+        // for main-loop AND side-query requests alike. A side query assembled
+        // with an empty toolset (compaction summarizer, recap) in a
+        // tool-search-enabled session must therefore still take the ENABLED
+        // branch — emitting "[…tools no longer available]" rather than the
+        // disabled branch's "[…tool search not enabled]". The request's `tools`
+        // remain the availability set (`a`) below.
+        let native_system_prefix = self
+            .native_system_prefix
+            .as_ref()
+            .filter(|_| self.client.native_api_system_route(model, profile))
+            .map(|prefix| {
+                use lingxi_llm_client::providers::anthropic::system_prompt::{
+                    NativePromptAttribution, PromptText,
+                };
+                let first = msgs
+                    .iter()
+                    .find_map(|message| match message {
+                        ConversationMessage::User {
+                            content,
+                            is_meta: false,
+                            ..
+                        } => Some(content),
+                        _ => None,
+                    })
+                    .and_then(|content| {
+                        content.iter().find(|block| block.visible_text().is_some())
+                    });
+                let first_user_text = first
+                    .map(|block| match block.visible_text_utf16_units() {
+                        Some(units) => PromptText::from_utf16(units.to_vec()),
+                        None => PromptText::from_string(block.visible_text().unwrap_or_default()),
+                    })
+                    .unwrap_or_else(|| PromptText::from_string(""));
+                (
+                    prefix.clone(),
+                    NativePromptAttribution {
+                        first_user_text,
+                        is_subagent: lingxi_core::host::session_flags::current_request_is_subagent(
+                        ),
+                        workload: self.ua.workload.clone(),
+                        previous_request_id: None,
+                        prompt_id: None,
+                        turn_origin: None,
+                        turn_position: None,
+                    },
+                )
+            });
+        let mut msgs = msgs;
+        let thinking_source_message_ids: Vec<_> = msgs
+            .iter()
+            .filter_map(|message| {
+                if let ConversationMessage::Assistant { id, content, .. } = message {
+                    content
+                        .iter()
+                        .any(|block| {
+                            matches!(
+                                block,
+                                lingxi_core::types::ContentBlock::Thinking { .. }
+                                    | lingxi_core::types::ContentBlock::RedactedThinking { .. }
+                            )
+                        })
+                        .then_some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let thinking_recovery_scope = self.thinking_recovery_scope();
+        thinking_recovery_scope.capture(&thinking_source_message_ids);
+        if !crate::model::thinking_signature::thinking_must_round_trip(model, profile) {
+            crate::model::thinking_signature::strip_marked_conversation_thinking(
+                &mut msgs,
+                &thinking_recovery_scope.messages(),
+            );
+        }
+        if !self.client.native_api_system_route(model, profile) {
+            for message in &mut msgs {
+                if let ConversationMessage::User {
+                    api_message_override,
+                    ..
+                } = message
+                {
+                    *api_message_override = None;
+                }
+            }
+        }
+        let mut per_message_effort = false;
+        if self.anthropic_client_metadata.is_some() {
+            let mut admitted = LlmRequest::new(model);
+            admitted.profile = profile.map(str::to_owned);
+            admitted.execution.resolve_native_effort = true;
+            self.refresh_effort_settings(&mut admitted);
+            if let Ok(effort) = MOD_REQUEST_EFFORT.try_with(Clone::clone) {
+                admitted.set_effort(Some(effort))?;
+            }
+            if let Some(effort) = self
+                .client
+                .native_per_turn_effort_policy(&admitted)?
+                .and_then(|policy| policy.value)
+                .and_then(|value| value.as_str().map(str::to_owned))
+            {
+                per_message_effort = true;
+                msgs = lingxi_core::types::project_per_turn_effort(msgs, &effort);
+            }
+        }
+        if !per_message_effort {
+            msgs.retain_mut(|message| {
+                if let ConversationMessage::System {
+                    api_system: Some(payload),
+                    ..
+                } = message
+                {
+                    payload.output_config = None;
+                    return !payload.content.is_empty();
+                }
+                if let ConversationMessage::User {
+                    api_message_override: Some(payload),
+                    ..
+                } = message
+                {
+                    payload.output_config = None;
+                }
+                true
+            });
+        }
+        let tool_search_enabled = lingxi_core::host::session_flags::tool_search_enabled();
+        let available_tool_names: std::collections::HashSet<String> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect();
+        let messages = ensure_tool_result_pairing_with_sources(
+            normalize_messages_for_api_with_tool_search_and_sources(
+                strip_excess_media_with_sources(
+                    ConversationMessagesWithSources::new(msgs),
+                    MAX_MEDIA_PER_REQUEST,
+                ),
+                tool_search_enabled,
+                Some(&available_tool_names),
+            ),
+        );
+        let request_message_source_ids = messages.contributing_message_ids();
+        let request_message_source_indices = messages
+            .block_sources
+            .iter()
+            .enumerate()
+            .flat_map(|(index, blocks)| blocks.iter().flatten().map(move |id| (*id, index)))
+            .collect();
+        let mut messages = to_llm_messages(messages.messages)?;
+        let tool_decls = to_tool_declarations(tools)?;
+
+        let mut req = LlmRequest::new(model);
+        req.execution.request_message_source_ids = request_message_source_ids;
+        req.execution.request_message_source_indices = request_message_source_indices;
+        req.execution.refusal_fallback_context =
+            lingxi_core::host::refusal_driver::current_fallback_target();
+        if let Some(p) = profile {
+            req = req.with_profile(p);
+        }
+
+        use lingxi_llm_client::providers::anthropic::system_prompt as prompt_cache;
+        let family = self
+            .client
+            .protocol_for_model(model, profile)
+            .ok()
+            .unwrap_or(lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages);
+        let cache_policy = prompt_cache::CachePolicy::from_process(
+            lingxi_core::host::compliance_taints::is_tainted("hipaa"),
+            agent_prompt_cache_ttl_override(),
+            skip_global_cache_for_system_prompt,
+            query_source,
+            self.prompt_cache_ttl_settings_source
+                .as_ref()
+                .map(|source| sdk_prompt_cache_ttl_settings(source()))
+                .unwrap_or_default(),
+            self.prompt_cache_ttl_inputs(),
+        );
+        let enable_caching = prompt_cache::prompt_caching_enabled(model, family);
+        let prompt_cache_overage = self.prompt_cache_overage.clone();
+        let prompt_cache_epoch = prompt_cache_overage.clone();
+        req.execution.prompt_cache = Some(crate::PromptCacheRequestContext {
+            system: system.cloned(),
+            native_system_prefix,
+            policy: cache_policy,
+            current_account_epoch: Arc::new(move || prompt_cache_epoch.account_epoch()),
+            native_bare_mode: native_prompt_cache_bare_mode(),
+            native_unix_socket: native_anthropic_unix_socket_enabled(),
+            overage_for_scope: Arc::new(move |scope, account_epoch| {
+                prompt_cache_overage.is_using_overage(scope, account_epoch)
+            }),
+            pending_overage: Arc::new(Mutex::new(None)),
+        });
+        req.execution.thinking_source_message_ids = thinking_source_message_ids;
+        req.execution.thinking_recovery_scope = Some(thinking_recovery_scope);
+
+        // 1P experimental cache-editing pass (claude.ts addCacheBreakpoints,
+        // 3108-3208). Gated behind `useCachedMC` (`should_use_cache_editing`):
+        // when OFF (the default), this is a no-op and the request is
+        // byte-identical to the pre-feature path. When ARMED it (a) re-inserts
+        // previously-pinned cache_edits at their original positions, (b) inserts
+        // the new cache_edits into the last user message, and (c) stamps
+        // `cache_reference` onto every tool_result strictly before the last
+        // cache_control marker — all with cross-block delete-ref dedup.
+        if self.should_use_cache_editing() {
+            apply_cache_editing(
+                &mut messages,
+                enable_caching,
+                &self.cache_editing_inputs.new_edits,
+                &self.cache_editing_inputs.pinned,
+            );
+        }
+
+        let (input, overrides) =
+            crate::convert::history_input(model, &messages, &[], &tool_decls, family)?;
+        req.input = input;
+        // Preserve the semantic prompt for token bounds and pure request
+        // inspection. Preparation replaces this projection after capturing
+        // the actual credential and current account's TTL/overage state.
+        if let (Some(system), Some(context)) = (system, req.execution.prompt_cache.as_ref()) {
+            let selected_profile = self.client.prompt_cache_profile(model, profile);
+            let projection = prompt_cache::project_system_prompt(
+                system,
+                selected_profile.as_ref(),
+                model,
+                family,
+                context.policy.clone(),
+            );
+            req.input.system = projection.iter().map(|item| item.block.clone()).collect();
+            req.input.prompt_cache.breakpoints.extend(
+                projection
+                    .into_iter()
+                    .filter_map(|item| item.cache_breakpoint),
+            );
+        }
+        req.execution.input_protocol = Some(family);
+        req.execution.message_json_string_overrides = overrides;
+        prompt_cache::apply_last_message_breakpoint(&mut req.input, enable_caching);
+        crate::computer::apply_request_projection(&mut req)?;
+        // No tool-array breakpoint (matches TS baseline).
+        // Forced tool choice (e.g. `--json-schema` → `StructuredOutput`). Unset
+        // for every normal turn, so the request carries no `tool_choice` and the
+        // model chooses freely — byte-identical to the pre-feature request.
+        if let Some(choice) = &self.forced_tool_choice {
+            req.set_tool_choice(Some(choice.clone()));
+        }
+        if req.input.model.contains("deepseek") || req.profile.as_deref() == Some("deepseek") {
+            tracing::debug!(
+                event = "build_request",
+                model = %req.input.model,
+                profile = req.profile.as_deref().unwrap_or("<none>"),
+                messages = messages.len(),
+                tools = req.input.tools.len(),
+                forced_tool_choice = self.forced_tool_choice.is_some(),
+                active_tool_choice = ?req.input.tool_choice,
+                stream = req.stream,
+            );
+        }
+        req.stream = stream;
+
+        // max_tokens (DIV-3): an explicit escalation wins; ordinary turns use a
+        // model-aware request default. Catalog `limit.output` is a hard ceiling,
+        // not a request default (notably OpenRouter GLM Free advertises 230.4k
+        // output inside a 256k total context window).
+        let requested_max_tokens = max_tokens.unwrap_or_else(|| {
+            u32::try_from(crate::model::context_window::default_output_tokens_for_model(model))
+                .unwrap_or(u32::MAX)
+        });
+        req.input.max_tokens = Some(
+            crate::model::context_window::known_output_token_limit_for_model(model)
+                .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX))
+                .map_or(requested_max_tokens, |limit| {
+                    requested_max_tokens.min(limit)
+                }),
+        );
+
+        // Bound max_tokens so input + output fit the model's context window.
+        // Even a safe ordinary output default may not fit beside a long prompt;
+        // reserve the structured input estimate (system + messages + tools)
+        // plus provider-formatting headroom. Claude models (output << context)
+        // are unaffected unless the input is near-full.
+        let context_window =
+            crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas);
+        let input_est = crate::model::count_tokens::approximate_tokens(&req);
+        if let Some(mt) = req.input.max_tokens {
+            let bounded = bound_output_to_context(mt, context_window, input_est);
+            if bounded == 0 {
+                return Err(LlmError::ContextOverflow {
+                    token_gap: input_est.saturating_sub(context_window),
+                });
+            }
+            req.input.max_tokens = Some(bounded);
+        }
+
+        // thinking (DIV-1) + temperature (DIV-4), mirroring claude.ts:1596-1630
+        // and claude.ts:1693. Computed AFTER max_tokens is known (the fixed-
+        // budget cap clamps to max_tokens-1).
+        {
+            use crate::model::thinking::{model_sends_temperature, session_thinking_active};
+
+            let thinking = self.thinking();
+            if self.anthropic_client_metadata.is_some() {
+                req.execution.resolve_native_effort = true;
+                req.execution.anthropic_context_management = Some(
+                    lingxi_llm_client::providers::anthropic::request_policy::AnthropicContextManagement {
+                        has_thinking: !matches!(thinking, crate::model::thinking::ThinkingConfig::Disabled)
+                            && !crate::model::thinking::is_thinking_env_disabled("LINGXI_DISABLE_THINKING"),
+                        tool_clearing:None,
+                    }
+                );
+                req.execution.native_thinking_display = self.native_thinking_display.clone();
+            }
+            let has_thinking = session_thinking_active(thinking);
+
+            // The claude/non-claude branch, the env kill switches and the
+            // budget clamp live in `model::thinking::reasoning_for_request` —
+            // the SAME session-config resolution the compaction side-query
+            // path inherits (cc 2.1.198). Behavior is byte-identical to the
+            // previous inline block.
+            req.set_reasoning(crate::model::thinking::reasoning_for_request(
+                thinking,
+                model,
+                req.input.max_tokens,
+            ));
+
+            // temperature:1 ONLY when thinking is disabled AND the model is in the
+            // `rhn` temperature-gate set (binary @205866168:
+            // `!xs && rhn(u) ? temperatureOverride ?? 1 : void 0`). The default
+            // opus-4-8 (and 4-7/fable-5/mythos-5/unknowns) are NOT in `rhn` → the
+            // field is omitted. The Anthropic codec emits temperature on Some only.
+            req.input.temperature = if !has_thinking
+                && !matches!(thinking, crate::model::thinking::ThinkingConfig::Automatic)
+                && model_sends_temperature(model)
+            {
+                Some(1.0)
+            } else {
+                None
+            };
+        }
+
+        // metadata.user_id (DIV-2): claude-code always sends it. `None` (no
+        // identity wired) omits the object — byte-identical to the prior request.
+        req.input.metadata = self
+            .request_metadata
+            .as_ref()
+            .map(|m| serde_json::json!({"user_id":m.user_id}))
+            .unwrap_or(serde_json::Value::Null);
+
+        if let Ok(effort) = MOD_REQUEST_EFFORT.try_with(Clone::clone) {
+            req.set_effort(Some(effort))?;
+        }
+        Ok(req)
     }
 
     fn log_deepseek_prepared_request(model: &str, prepared: &crate::PreparedLlmCall, stream: bool) {
@@ -3655,6 +4051,9 @@ impl ApiService {
         });
         lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy {
             request_kind: prepared.anthropic_request_kind,
+            plain_text_message_content: prepared.classifier_system_blocks,
+            explicit_empty_tools: prepared.anthropic_request_kind
+                == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
             extra_body,
             body_betas,
             effort: prepared.effort_policy.clone(),
@@ -5868,6 +6267,17 @@ impl ApiService {
         req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         req.execution.query_source = query_source.map(str::to_string);
         self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+        if query_source == Some("agent_classifier") {
+            // Native yF only sends an explicitly supplied temperature and
+            // preserves thinking:false as a disabled protocol block.
+            req.input.temperature = temperature;
+            if req.execution.side_thinking_disabled {
+                req.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+                    mode: Some(lingxi_llm_client::protocol::ThinkingMode::Disabled),
+                    ..Default::default()
+                });
+            }
+        }
         req.set_effort(effort)?;
         Ok(req)
     }
@@ -6390,12 +6800,19 @@ impl ApiService {
         let mut dispatch =
             DispatchHeaderState::for_query_source(req.execution.query_source.as_deref());
         dispatch.context_hint_beta = req.execution.context_hint_beta;
-        // The conversation's WebSocket belongs to its main turn; every other
-        // stream may run while that turn is still streaming.
-        let main_conversation = matches!(
-            query_source_category(req.execution.query_source.as_deref()),
-            None | Some(QuerySourceCategory::Main)
-        );
+        // The conversation's WebSocket belongs to its main turn. Every other
+        // stream may run while that turn is still streaming, including a
+        // subagent that carries no source label. The orchestrator's streaming
+        // turn (`stream_with_system_prompt`) names its source only to the
+        // prompt-cache policy, so read it there when the request has no label;
+        // a subagent request records none in either place.
+        let source = req.execution.query_source.as_deref().or_else(|| {
+            req.execution
+                .prompt_cache
+                .as_ref()
+                .and_then(|cache| cache.policy.query_source.as_deref())
+        });
+        let main_conversation = query_source_category(source) == Some(QuerySourceCategory::Main);
 
         loop {
             // Prepare so we can inject headers, then call execute_stream via
@@ -6975,9 +7392,26 @@ impl ApiService {
                         prepared.prompt_cache.as_ref(),
                     );
                     *self.last_retry_count.lock().unwrap() = retry_scope.retry_count();
+                    let response_metadata =
+                        lingxi_llm_client::providers::response_headers::stream_metadata_for_route(
+                            crate::upstream::family(&prepared.route.protocol),
+                            crate::execution::response_provider_id(
+                                &prepared.route.resolved_route.provider_id,
+                            ),
+                            &response_headers
+                                .iter()
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect::<Vec<_>>(),
+                        );
+                    let response_metadata = lingxi_llm_client::protocol::JsonPayload::parse(
+                        &response_metadata.to_string(),
+                    )
+                    .map_err(|error| LlmError::InvalidRequest {
+                        message: error.to_string(),
+                    })?;
                     let mut decoder = crate::history_projection::HistoryProjector::projection(
                         crate::upstream::family(&prepared.route.protocol),
-                        crate::stream_provider_metadata_from_headers(&response_headers),
+                        response_metadata,
                     )?;
                     if let Some(binding) = prepared.computer_binding.as_ref() {
                         crate::history_projection::attach_computer_binding(

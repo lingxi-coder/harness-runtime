@@ -43,13 +43,11 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use suggestions::{
-    emit_prompt_suggestion_if_enabled, spawn_prompt_suggestion_if_enabled,
-    StreamFileSuggestionIndex,
-};
+use suggestions::{SdkPromptSuggestions, StreamFileSuggestionIndex};
 mod control;
 mod fusion;
 mod lifecycle;
+mod result_holding;
 mod suggestions;
 
 fn init_host_metadata(runtime: &Runtime) -> StreamJsonInitHostMetadata {
@@ -174,10 +172,15 @@ fn js_to_fixed_2(value: f64) -> String {
 }
 
 /// Per-print transport state shared by user queries and task-notification
-/// queries. It publishes owner snapshots and never drives model execution.
+/// queries. It publishes owner snapshots before starting an isolated SDK
+/// prompt suggestion from the completed query cache.
 struct NativeQueryResultPublisher<'a> {
     runtime: &'a Runtime,
-    stream: &'a StreamJsonStream,
+    stream: &'a Arc<StreamJsonStream>,
+    prompt_suggestions: Arc<SdkPromptSuggestions>,
+    suggestion_turn_origin: Option<&'static str>,
+    input_status: Option<tokio::sync::watch::Receiver<StdinReaderStatus>>,
+    result_hold: result_holding::SdkResultHold,
     max_budget_usd: Option<f64>,
     fast_mode_state: &'a str,
     fast_mode_disabled_reason: Option<&'a str>,
@@ -188,6 +191,45 @@ struct NativeQueryResultPublisher<'a> {
 }
 
 impl NativeQueryResultPublisher<'_> {
+    async fn should_hold_results(&mut self) -> bool {
+        let input_closed = self
+            .input_status
+            .as_ref()
+            .is_none_or(|status| !matches!(*status.borrow(), StdinReaderStatus::Reading));
+        let tasks = lingxi_core::host::task_registry::TaskRegistryHandle::list(
+            self.runtime.task_registry.as_ref(),
+            Default::default(),
+        )
+        .await
+        .unwrap_or_default();
+        self.result_hold
+            .should_hold(input_closed, &tasks, suggestions::now_ms())
+    }
+
+    async fn release_held_results(&mut self, stopping: bool) {
+        let cost = self.runtime.orchestrator.snapshot_cost().await;
+        let model = self
+            .runtime
+            .orchestrator
+            .session()
+            .lock()
+            .await
+            .model
+            .clone();
+        self.stream.refresh_held_result_totals(
+            &cost,
+            &model,
+            self.betas,
+            self.runtime
+                .agent_session_statistics()
+                .await
+                .map(|stats| serde_json::to_value(stats).expect("agent statistics")),
+        );
+        self.stream.release_sdk_results(stopping);
+        self.prompt_suggestions.emit_pending(self.stream);
+        let _ = self.stream.flush().await;
+    }
+
     fn begin_query(&mut self) {
         self.last_error_published = false;
         self.last_result_failed = false;
@@ -198,10 +240,13 @@ impl NativeQueryResultPublisher<'_> {
     }
 
     async fn begin_notification_query(&mut self) {
+        self.prompt_suggestions
+            .on_command(self.runtime, true, None)
+            .await;
+        self.suggestion_turn_origin = Some("task_notification");
         self.begin_query();
         let _ = self.stream.begin_request_markers(None, Vec::new(), false);
         self.stream.emit_init().await;
-        self.stream.emit_status().await;
     }
 
     async fn publish(
@@ -246,6 +291,17 @@ impl NativeQueryResultPublisher<'_> {
             .await
             .model
             .clone();
+        let hold_results = self.should_hold_results().await;
+        self.stream.hold_sdk_results(hold_results);
+        self.stream.refresh_held_result_totals(
+            &cost,
+            &model,
+            self.betas,
+            self.runtime
+                .agent_session_statistics()
+                .await
+                .map(|stats| serde_json::to_value(stats).expect("agent statistics")),
+        );
         set_result_position(self.runtime, self.stream, queued, self.next_index).await;
         self.last_result_failed = result.is_err()
             || self
@@ -300,9 +356,12 @@ impl NativeQueryResultPublisher<'_> {
             }
         }
         self.next_index = self.next_index.saturating_add(1);
-        // Stream-json must be observable before waiting for a delegated task.
-        // Buffered JSON modes keep their final publication boundary unchanged.
+        // Flush ordinary frames now; a result retained for delegated work stays
+        // behind the SDK publication boundary with its pending suggestion.
         let _ = self.stream.flush().await;
+        self.prompt_suggestions
+            .after_result(self.runtime, self.stream, self.suggestion_turn_origin)
+            .await;
     }
 }
 
@@ -605,7 +664,7 @@ async fn run_stream_json_print_inner(
         let session_handle = runtime.orchestrator.session();
         let session = session_handle.lock().await;
         (
-            session.session_id.to_string(),
+            session.session_id.as_uuid().to_string(),
             session.model.clone(),
             session.model_profile.clone(),
         )
@@ -737,8 +796,7 @@ async fn run_stream_json_print_inner(
     stream.emit_init().await;
     runtime.activate_deferred_startup().await;
 
-    // ② system/status frame (status: "requesting")
-    stream.emit_status().await;
+    // Native 2.1.293 does not publish a requesting status before model input.
 
     // ③ Run the turn — streaming callbacks (emit_text / emit_tool_call /
     //    emit_message_start / emit_message_boundary) fire on the stream.
@@ -804,9 +862,14 @@ async fn run_stream_json_print_inner(
             .await
         };
     let betas = argv.betas.clone().unwrap_or_default();
+    let prompt_suggestions = SdkPromptSuggestions::new(argv.prompt_suggestions_enabled());
     let mut publisher = NativeQueryResultPublisher {
         runtime,
         stream: &stream,
+        prompt_suggestions: prompt_suggestions.clone(),
+        suggestion_turn_origin: None,
+        input_status: None,
+        result_hold: Default::default(),
         max_budget_usd: argv.max_budget_usd,
         fast_mode_state,
         fast_mode_disabled_reason,
@@ -815,23 +878,30 @@ async fn run_stream_json_print_inner(
         last_error_published: false,
         last_result_failed: false,
     };
-    // Native publishes the parent result while delegated work may still be
-    // running. Each notification query below owns a separate later result.
+    // Native holds closed-input results while delegated agents/workflows or
+    // their completion notifications remain; suggestions share this boundary.
     publisher.publish(&turn_result, 0).await;
     if publisher.last_result_failed {
+        prompt_suggestions.discard();
         stop_print_tasks(runtime).await;
+        publisher.release_held_results(true).await;
+        prompt_suggestions.settle().await;
         return exit_codes::RUNTIME_ERROR;
     }
-    emit_prompt_suggestion_if_enabled(argv, runtime, &stream).await;
-    match wind_down_print_tasks(
+    let wind_down = wind_down_print_tasks(
         runtime,
         argv.max_budget_usd,
         runtime.shutdown.child_token(),
         None,
         Some(&mut publisher),
     )
-    .await
-    {
+    .await;
+    publisher
+        .release_held_results(wind_down.is_err() || runtime.shutdown.is_cancelled())
+        .await;
+    prompt_suggestions.settle().await;
+    prompt_suggestions.emit_pending(&stream);
+    match wind_down {
         Ok(()) if !publisher.last_result_failed => exit_codes::SUCCESS,
         Ok(()) => exit_codes::RUNTIME_ERROR,
         Err(_) => exit_codes::RUNTIME_ERROR,
@@ -893,7 +963,7 @@ async fn run_stream_json_input_loop_inner(
         let session_handle = runtime.orchestrator.session();
         let session = session_handle.lock().await;
         (
-            session.session_id.to_string(),
+            session.session_id.as_uuid().to_string(),
             session.model.clone(),
             session.model_profile.clone(),
         )
@@ -1161,9 +1231,15 @@ async fn run_stream_json_input_loop_inner(
     let ctrl_services = runtime.services.clone();
     let ctrl_execution_errors = runtime.execution_errors.clone();
     let ctrl_auxiliary_tasks = auxiliary_tasks.clone();
+    let prompt_suggestions = SdkPromptSuggestions::new(argv.prompt_suggestions_enabled());
+    let ctrl_prompt_suggestions = prompt_suggestions.clone();
     auxiliary_tasks.push(tokio::spawn(async move {
         while let Some(frame) = control_req_rx.recv().await {
             match frame {
+                StdinControlFrame::UserInputStarted => {
+                    ctrl_prompt_suggestions.input_started();
+                    continue;
+                }
                 StdinControlFrame::UpdateEnvironmentVariables(values) => {
                     if let Err(error) = ctrl_services.update_environment_variables(values) {
                         ctrl_execution_errors
@@ -1202,6 +1278,7 @@ async fn run_stream_json_input_loop_inner(
                         fast_mode_state,
                         fast_mode_disabled_reason,
                         &ctrl_file_suggestions,
+                        &ctrl_prompt_suggestions,
                         ctrl_services.as_ref(),
                         &ctrl_auxiliary_tasks,
                         &ctrl_execution_errors,
@@ -1231,6 +1308,10 @@ async fn run_stream_json_input_loop_inner(
     let mut publisher = NativeQueryResultPublisher {
         runtime,
         stream: &stream,
+        prompt_suggestions: prompt_suggestions.clone(),
+        suggestion_turn_origin: None,
+        input_status: Some(reader_status.clone()),
+        result_hold: Default::default(),
         max_budget_usd: argv.max_budget_usd,
         fast_mode_state,
         fast_mode_disabled_reason,
@@ -1239,10 +1320,6 @@ async fn run_stream_json_input_loop_inner(
         last_error_published: false,
         last_result_failed: false,
     };
-    let mut prompt_suggestion_task: Option<(
-        tokio_util::sync::CancellationToken,
-        tokio::task::JoinHandle<()>,
-    )> = None;
     // Per-toolUseID orphaned-permission dedup (twin of claude-code's
     // `handledOrphanedToolUseIds` Set, print.ts:2766/5272/5287): each DISTINCT
     // unresolved tool_use recovers once; a same-id re-delivery is skipped. NOT a
@@ -1414,14 +1491,18 @@ async fn run_stream_json_input_loop_inner(
         // query loop. Only a genuinely new query aborts the prior suggestion
         // and makes this a non-empty session.
         had_any_turn = true;
-        if let Some((cancel, _)) = prompt_suggestion_task.take() {
-            cancel.cancel();
-        }
+        prompt_suggestions
+            .on_command(
+                runtime,
+                compact_command_instructions(&prompt).is_none(),
+                Some(&turn.content),
+            )
+            .await;
+        publisher.suggestion_turn_origin = None;
 
         if !emitted_initial_conversation_frames && compact_command_instructions(&prompt).is_none() {
             stream.emit_init().await;
             runtime.activate_deferred_startup().await;
-            stream.emit_status().await;
             emitted_initial_conversation_frames = true;
         }
 
@@ -1593,11 +1674,6 @@ async fn run_stream_json_input_loop_inner(
         }
         match turn_result {
             Ok(_) => {
-                // The SDK starts generation after queuing every successful
-                // result. A later user turn aborts this task when dequeued;
-                // starting even when input is already queued preserves that
-                // timing and its suppression telemetry.
-                prompt_suggestion_task = spawn_prompt_suggestion_if_enabled(argv, runtime, &stream);
                 // Reset the cancel signal for the next turn.
                 let _ = cancel_tx.send(false);
                 last_turn_err = None;
@@ -1615,6 +1691,7 @@ async fn run_stream_json_input_loop_inner(
         last_turn_err = Some(orchestrator::OrchestratorError::Internal(error.to_string()));
     }
     if explicit_end_session || last_turn_err.is_some() {
+        prompt_suggestions.discard();
         stop_print_tasks(runtime).await;
     } else {
         let shutdown = runtime.shutdown.child_token();
@@ -1640,6 +1717,15 @@ async fn run_stream_json_input_loop_inner(
         }
     }
 
+    publisher
+        .release_held_results(
+            explicit_end_session || last_turn_err.is_some() || runtime.shutdown.is_cancelled(),
+        )
+        .await;
+    // Native HS.settle runs before auxiliary/control-owner teardown.
+    prompt_suggestions.settle().await;
+    prompt_suggestions.emit_pending(&stream);
+
     input_rx.close().await;
     reader.stop();
     let _ = reader.join().await;
@@ -1663,16 +1749,6 @@ async fn run_stream_json_input_loop_inner(
             last_turn_err.get_or_insert_with(|| {
                 orchestrator::OrchestratorError::Internal(error.to_string())
             });
-        }
-    }
-
-    if let Some((cancel, mut handle)) = prompt_suggestion_task.take() {
-        if tokio::time::timeout(std::time::Duration::from_secs(30), &mut handle)
-            .await
-            .is_err()
-        {
-            cancel.cancel();
-            handle.abort();
         }
     }
 
@@ -2144,6 +2220,10 @@ mod native_proactivity_control_tests;
 #[path = "run/native_commands_295_replay_test.rs"]
 mod native_commands_295_replay_tests;
 
+#[cfg(test)]
+#[path = "run/prompt_suggestion_tests.rs"]
+mod prompt_suggestion_tests;
+
 async fn set_result_position(
     runtime: &Runtime,
     stream: &StreamJsonStream,
@@ -2165,7 +2245,7 @@ async fn set_result_position(
             num_turns: metrics.as_ref().map(|value| u64::from(value.num_turns)),
             api_error_status: metrics.as_ref().and_then(|value| value.api_error_status),
             stop_reason: api_error_stop_reason
-                .or_else(|| metrics.and_then(|value| value.stop_reason)),
+                .or_else(|| metrics.and_then(|value| value.model_stop_reason)),
             subagent_stats: subagent_stats.map(|stats| {
                 serde_json::to_value(stats).expect("agent statistics are JSON scalars")
             }),
@@ -2239,9 +2319,14 @@ mod result_publication_tests {
             tokio::io::sink(),
         )));
         let runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
+        assert_eq!(runtime.agent_session_statistics().await.unwrap().spawned, 0);
         let mut publisher = NativeQueryResultPublisher {
             runtime: &runtime,
             stream: &stream,
+            prompt_suggestions: SdkPromptSuggestions::new(false),
+            suggestion_turn_origin: None,
+            input_status: None,
+            result_hold: Default::default(),
             max_budget_usd: None,
             fast_mode_state: "off",
             fast_mode_disabled_reason: None,
@@ -2292,6 +2377,10 @@ mod result_publication_tests {
         let mut publisher = NativeQueryResultPublisher {
             runtime: &runtime,
             stream: &stream,
+            prompt_suggestions: SdkPromptSuggestions::new(false),
+            suggestion_turn_origin: None,
+            input_status: None,
+            result_hold: Default::default(),
             max_budget_usd: None,
             fast_mode_state: "off",
             fast_mode_disabled_reason: None,

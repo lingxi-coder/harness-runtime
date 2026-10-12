@@ -1,70 +1,387 @@
-use crate::headless::config::HeadlessOptions as Argv;
+use crate::headless::sdk_prompt_suggestions::{
+    AfterResult, SdkPromptSuggestionState, SDK_SUGGESTION_SETTLE_TIMEOUT_MS,
+};
 use crate::headless::stream_json::StreamJsonStream;
 use crate::headless::HeadlessRuntime as Runtime;
+use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
-pub(super) async fn emit_prompt_suggestion_if_enabled(
-    argv: &Argv,
-    runtime: &Runtime,
-    stream: &Arc<StreamJsonStream>,
-) {
-    if !argv.prompt_suggestions_enabled() {
-        return;
+/// Session-owned counterpart of native `HS`. A new input cancels speculation;
+/// the 30-second bound applies only when the SDK input stream settles.
+pub(super) struct SdkPromptSuggestions {
+    state: Mutex<SdkSuggestionRuntimeState>,
+}
+
+struct SdkSuggestionRuntimeState {
+    machine: SdkPromptSuggestionState,
+    inflight: Option<(CancellationToken, tokio::task::JoinHandle<()>)>,
+}
+
+impl SdkPromptSuggestions {
+    pub(super) fn new(enabled: bool) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(SdkSuggestionRuntimeState {
+                machine: SdkPromptSuggestionState::new(enabled),
+                inflight: None,
+            }),
+        })
     }
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let mut handle = tokio::spawn(generate_and_emit_prompt_suggestion(
-        runtime.orchestrator.clone(),
-        stream.clone(),
-        cancel.clone(),
-    ));
-    if tokio::time::timeout(std::time::Duration::from_secs(30), &mut handle)
-        .await
-        .is_err()
-    {
-        cancel.cancel();
-        handle.abort();
+
+    pub(super) fn initialize(&self, requested: Option<bool>, remote_cowork: bool) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .machine
+            .initialize(requested, remote_cowork);
+    }
+
+    pub(super) fn set_paused(&self, paused: bool) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .machine
+            .set_paused(paused);
+    }
+
+    pub(super) fn input_started(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .machine
+            .input_started();
+    }
+
+    pub(super) async fn on_command(
+        &self,
+        runtime: &Runtime,
+        should_query: bool,
+        prompt_content: Option<&Value>,
+    ) {
+        if !should_query {
+            return;
+        }
+        let feedback = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((cancel, _)) = state.inflight.as_ref() {
+                cancel.cancel();
+            }
+            state
+                .machine
+                .on_command(should_query, prompt_content, now_ms())
+        };
+        if let Some(payload) = feedback {
+            runtime
+                .orchestrator
+                .record_prompt_suggestion_event(payload)
+                .await;
+        }
+    }
+
+    pub(super) async fn after_result(
+        self: &Arc<Self>,
+        runtime: &Runtime,
+        stream: &Arc<StreamJsonStream>,
+        turn_origin: Option<&str>,
+    ) {
+        let environment_disabled =
+            orchestrator::ConversationOrchestrator::prompt_suggestion_environment_override(
+                runtime
+                    .services
+                    .environment_variable("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION")
+                    .as_deref(),
+            ) == Some(false);
+        let latest_origin = runtime.orchestrator.latest_prompt_suggestion_turn_origin();
+        let turn_origin = latest_origin.as_deref().or(turn_origin);
+        let action = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let action = state.machine.after_result(
+                true,
+                runtime.shutdown.is_cancelled(),
+                environment_disabled,
+                telemetry::feature_flags::flag_bool("tengu_chomp_sable", false),
+                turn_origin,
+            );
+            if action == AfterResult::Disabled {
+                return;
+            }
+            if let Some((cancel, _)) = state.inflight.as_ref() {
+                cancel.cancel();
+            }
+            if let AfterResult::Generate(generation) = action {
+                let cancel = runtime.shutdown.child_token();
+                let query_cancel = cancel.clone();
+                let owner = Arc::clone(self);
+                let orchestrator = Arc::clone(&runtime.orchestrator);
+                let stream = Arc::clone(stream);
+                let handle = tokio::spawn(async move {
+                    let result = match orchestrator
+                        .generate_prompt_suggestion_query(query_cancel.clone())
+                        .await
+                    {
+                        Ok(Some(result)) => result,
+                        Ok(None) => return,
+                        Err(error) => {
+                            tracing::debug!(%error, "SDK prompt suggestion generation failed");
+                            return;
+                        }
+                    };
+                    let session_id = stream.session_id_handle().lock().await.clone();
+                    owner.place_generated(generation, result, &stream, &session_id, &query_cancel);
+                });
+                state.inflight = Some((cancel, handle));
+            }
+            action
+        };
+        if let AfterResult::Suppressed(reason) = action {
+            runtime.orchestrator.record_prompt_suggestion_event(json!({"source":"sdk","outcome":"suppressed","reason":reason,"prompt_id":"user_intent"})).await;
+        }
+    }
+
+    fn place_generated(
+        &self,
+        generation: u64,
+        result: lingxi_core::host::PromptSuggestionResult,
+        stream: &StreamJsonStream,
+        session_id: &str,
+        cancel: &CancellationToken,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cancel.is_cancelled() {
+            return;
+        }
+        let frame = state.machine.generated(
+            generation,
+            result.suggestion,
+            result.generation_request_id,
+            &uuid::Uuid::new_v4().to_string(),
+            session_id,
+            now_ms(),
+            stream.holds_print_results(),
+        );
+        // Placement and invalidation share one lock, like the native JS loop.
+        if let Some(frame) = frame {
+            stream.emit_prompt_suggestion_frame(&frame);
+        }
+    }
+
+    pub(super) fn emit_pending(&self, stream: &StreamJsonStream) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(frame) = state.machine.emit_pending(now_ms()) {
+            stream.emit_prompt_suggestion_frame(&frame);
+        }
+    }
+
+    pub(super) fn discard(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((cancel, _)) = state.inflight.as_ref() {
+            cancel.cancel();
+        }
+        state.machine.discard();
+    }
+
+    pub(super) async fn settle(&self) {
+        let task = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .inflight
+            .take();
+        if let Some((cancel, mut handle)) = task {
+            if tokio::time::timeout(
+                std::time::Duration::from_millis(SDK_SUGGESTION_SETTLE_TIMEOUT_MS),
+                &mut handle,
+            )
+            .await
+            .is_err()
+            {
+                cancel.cancel();
+                let _ = handle.await;
+            }
+            cancel.cancel();
+        }
     }
 }
 
-pub(super) async fn generate_and_emit_prompt_suggestion(
-    orchestrator: Arc<orchestrator::ConversationOrchestrator>,
-    stream: Arc<StreamJsonStream>,
-    cancel: tokio_util::sync::CancellationToken,
-) {
-    let Ok(suggestion) = orchestrator
-        .generate_prompt_suggestion_query(cancel.clone())
-        .await
-    else {
-        return;
-    };
-    if cancel.is_cancelled() {
-        return;
-    }
-    let Some(suggestion) = suggestion else {
-        return;
-    };
-    stream.emit_prompt_suggestion(&suggestion).await;
+pub(super) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
-pub(super) fn spawn_prompt_suggestion_if_enabled(
-    argv: &Argv,
-    runtime: &Runtime,
-    stream: &Arc<StreamJsonStream>,
-) -> Option<(
-    tokio_util::sync::CancellationToken,
-    tokio::task::JoinHandle<()>,
-)> {
-    if !argv.prompt_suggestions_enabled() {
-        return None;
+#[cfg(test)]
+mod sdk_controller_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sdk_suggestion_follows_held_result_after_live_task_notification_is_consumed() {
+        use super::super::{tests::fixture_runtime, NativeQueryResultPublisher};
+        use tokio::io::AsyncBufReadExt;
+        let root = tempfile::tempdir().unwrap();
+        let (output, reader) = tokio::io::duplex(65536);
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        let stream = Arc::new(StreamJsonStream::new_placeholder(
+            crate::headless::io::Output::new(output),
+        ));
+        let runtime = fixture_runtime(stream.clone(), root.path()).await;
+        let task = runtime
+            .task_registry
+            .create(
+                tasks::TaskType::LocalAgent,
+                tasks::task_trait::TaskSpawnInput::LocalAgent {
+                    agent_id: lingxi_core::types::AgentId::new(),
+                    subagent_type: "test".into(),
+                    prompt: "test".into(),
+                    is_backgrounded: true,
+                    tool_use_id: None,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
+                    creator_agent_id: None,
+                    spawn_request: None,
+                    inheritance: None,
+                },
+                "held result fixture".into(),
+            )
+            .await
+            .unwrap();
+        let owner = SdkPromptSuggestions::new(false);
+        let mut publisher = NativeQueryResultPublisher {
+            runtime: &runtime,
+            stream: &stream,
+            prompt_suggestions: owner.clone(),
+            suggestion_turn_origin: None,
+            input_status: None,
+            result_hold: Default::default(),
+            max_budget_usd: None,
+            fast_mode_state: "off",
+            fast_mode_disabled_reason: None,
+            betas: &[],
+            next_index: 0,
+            last_error_published: false,
+            last_result_failed: false,
+        };
+        publisher
+            .publish(&Ok(orchestrator::TurnOutcome::EndTurn), 0)
+            .await;
+        assert!(
+            stream.holds_print_results(),
+            "the real pending background task holds the SDK result"
+        );
+        // Supply the completed isolated provider result at the same placement
+        // seam used by the real worker; model generation is independently
+        // exercised by orchestrator/sidequery fixture transports.
+        let generation = {
+            let mut state = owner.state.lock().unwrap();
+            state.machine.enabled = true;
+            let AfterResult::Generate(generation) =
+                state.machine.after_result(true, false, false, false, None)
+            else {
+                panic!("generation");
+            };
+            generation
+        };
+        owner.place_generated(
+            generation,
+            lingxi_core::host::PromptSuggestionResult {
+                suggestion: "run the tests".into(),
+                generation_request_id: Some("request-fixture".into()),
+            },
+            &stream,
+            "session-fixture",
+            &CancellationToken::new(),
+        );
+        stream.flush().await.unwrap();
+        // The real registry publishes task_started independently of the held
+        // query result. That lifecycle frame must remain visible to the SDK.
+        let started: Value = serde_json::from_str(
+            &tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(started["type"], "system");
+        assert_eq!(started["subtype"], "task_started");
+        assert_eq!(started["task_id"], task);
+        let escaped = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            lines.next_line(),
+        )
+        .await;
+        assert!(escaped.is_err(), "neither the result nor its suggestion escapes the hold: {escaped:?}");
+        runtime
+            .task_registry
+            .set_status(&task, tasks::TaskStatus::Completed)
+            .await
+            .unwrap();
+        assert!(
+            publisher.should_hold_results().await,
+            "terminal completion is held until notification consumption"
+        );
+        runtime.task_registry.mark_notified(&task).await.unwrap();
+        assert!(!publisher.should_hold_results().await);
+        publisher.release_held_results(false).await;
+        let result: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let suggestion: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(result["type"], "result");
+        assert_eq!(suggestion["type"], "prompt_suggestion");
+        assert_eq!(suggestion["suggestion"], "run the tests");
+        assert!(suggestion.get("generationRequestId").is_none());
+        assert!(!stream.holds_print_results());
+        stream.finish().await.unwrap();
+        assert!(
+            runtime
+                .session_lifecycle
+                .shutdown_and_drain()
+                .await
+                .complete
+        );
     }
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let handle = tokio::spawn(generate_and_emit_prompt_suggestion(
-        runtime.orchestrator.clone(),
-        stream.clone(),
-        cancel.clone(),
-    ));
-    Some((cancel, handle))
+
+    #[tokio::test(start_paused = true)]
+    async fn sdk_suggestion_timeout_starts_only_when_input_settles() {
+        let owner = SdkPromptSuggestions::new(true);
+        let cancel = CancellationToken::new();
+        let query_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            query_cancel.cancelled().await;
+        });
+        owner.state.lock().unwrap().inflight = Some((cancel.clone(), handle));
+        tokio::time::advance(std::time::Duration::from_secs(90)).await;
+        assert!(
+            !cancel.is_cancelled(),
+            "background speculation has no per-query 30-second timer"
+        );
+        let settling = tokio::spawn(async move {
+            owner.settle().await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(29_999)).await;
+        assert!(!cancel.is_cancelled());
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        settling.await.unwrap();
+        assert!(cancel.is_cancelled());
+    }
 }
 
 pub(super) const FILE_SUGGESTION_LIMIT: usize = 15;

@@ -446,6 +446,11 @@ G1	crates/runtime/src/desktop/tests/managed_otel_env_tests.rs	LINGXI
 G1	crates/runtime/src/desktop/tests/tests.rs	LINGXI
 G1	crates/runtime/src/desktop/tests/tests.rs	LingXi
 G1	crates/runtime/src/desktop/tests/tests.rs	\.lingxi
+G1	crates/runtime/src/headless/control_plane.rs	\.lingxi
+G1	crates/runtime/src/headless/permission_prompt_notify.rs	LINGXI
+G1	crates/runtime/src/headless/run.rs	LINGXI
+G1	crates/runtime/src/headless/run/control.rs	LINGXI
+G1	crates/runtime/src/headless/stream_json.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/assembly.rs	LINGXI
 G1	crates/runtime/src/mobile/host/automation.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs	\.lingxi
@@ -924,6 +929,8 @@ G3	crates/runtime/src/desktop/tests/bash_edit_diff_wiring_tests.rs	.lingxi
 G3	crates/runtime/src/desktop/tests/tests.rs	.lingxi
 G3	crates/runtime/src/desktop/tests/tests.rs	.lingxi-plugin
 G3	crates/runtime/src/desktop/tests/tests.rs	LINGXI.md
+G3	crates/runtime/src/headless/control_plane.rs	.lingxi
+G3	crates/runtime/src/headless/stream_json.rs	.lingxi
 G3	crates/runtime/src/mobile/host/automation.rs	.lingxi
 G3	crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs	.lingxi
 G3	crates/runtime/src/mobile/host/tests/cron_automation_tests.rs	.lingxi

@@ -33,9 +33,11 @@ class DependencyRules(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("core depends on the Harness composition root", result.stderr)
 
-    def test_core_may_name_the_shared_primitives(self):
-        result = self.run_gate({"core": "crates/core"},
-                               {"core": ["mcp-wire", "rooted-fs", "device-api"]})
+    LEAVES = {name: f"crates/{name}" for name in ("device-api", "json-projection", "mcp-wire", "rooted-fs")}
+
+    def test_core_may_name_the_leaf_libraries(self):
+        result = self.run_gate({"core": "crates/core", **self.LEAVES},
+                               {"core": ["mcp-wire", "rooted-fs", "device-api", "json-projection"]})
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_core_may_reexport_mcp_wire_but_not_depend_on_mcp_domain(self):
@@ -75,38 +77,44 @@ class DependencyRules(unittest.TestCase):
             domain.stderr,
         )
 
-    def test_nothing_may_name_the_crates_that_implement_local_app(self):
+    def test_any_crate_may_name_a_leaf_library(self):
+        for consumer, crate in (("permission", "rooted-fs"), ("jsonrpc", "json-projection"),
+                                ("harness-runtime", "mcp-wire"), ("tool-mobile", "device-api")):
+            with self.subTest(consumer=consumer, crate=crate):
+                result = self.run_gate({consumer: f"crates/{consumer}", **self.LEAVES}, {consumer: [crate]})
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_leaf_library_names_only_the_other_leaf_libraries(self):
+        ok = self.run_gate({**self.LEAVES}, {"mcp-wire": ["json-projection"]})
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        result = self.run_gate({"core": "crates/core", **self.LEAVES}, {"mcp-wire": ["json-projection", "core"]})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("mcp-wire depends on core — a leaf library may depend only on the other leaf libraries",
+                      result.stderr)
+
+    def test_nothing_may_name_the_crates_that_implemented_local_app(self):
+        # The crates are not in `paths`: an old git revision would bring them in from outside the workspace,
+        # where the member-based rules cannot see the edge. This rule matches by name.
         for consumer in ("core", "harness-runtime", "platform-android"):
             for crate in ("local-apps", "local-app-builder-service", "local-app-builder-plugin",
                           "local-app-builder-contracts"):
                 with self.subTest(consumer=consumer, crate=crate):
                     result = self.run_gate({consumer: f"crates/{consumer}"}, {consumer: [crate]})
                     self.assertEqual(result.returncode, 1)
-                    self.assertIn(f"{consumer} depends on {crate} — only", result.stderr)
-
-    def test_no_other_engine_crate_may_name_the_primitives(self):
-        for engine in ("permission", "client", "lsp", "session", "tasks", "agent", "workflow"):
-            with self.subTest(engine=engine):
-                for contract in ("rooted-fs", "mcp-wire"):
-                    with self.subTest(engine=engine, contract=contract):
-                        result = self.run_gate(
-                            {engine: f"crates/{engine}"}, {engine: [contract]}
-                        )
-                        self.assertEqual(result.returncode, 1)
-                        self.assertIn(f"{engine} depends on {contract} — only", result.stderr)
-
-    def test_the_consumers_the_table_lists_are_let_through(self):
-        for consumer, crate in (("mcp", "mcp-wire"), ("harness-runtime", "rooted-fs"), ("harness-runtime", "mcp-wire")):
-            with self.subTest(consumer=consumer, crate=crate):
-                result = self.run_gate({consumer: f"crates/{consumer}"}, {consumer: [crate]})
-                self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(
+                        f"{consumer} depends on {crate} — the Local App implementation crates are gone",
+                        result.stderr,
+                    )
 
     def test_the_rule_by_name_holds_when_the_crates_are_not_workspace_members(self):
         # The project's crates are not in `paths`: the member-based rules cannot see these edges, this one can.
         result = self.run_gate({"core": "crates/core", "mcp": "crates/mcp"},
                                {"core": ["local-app-builder-service"], "mcp": ["mcp-wire"]})
         self.assertEqual(result.returncode, 1)
-        self.assertIn("core depends on local-app-builder-service — only", result.stderr)
+        self.assertIn(
+            "core depends on local-app-builder-service — the Local App implementation crates are gone",
+            result.stderr,
+        )
         self.assertNotIn("mcp depends on", result.stderr)
 
     def test_shared_core_cannot_depend_on_telemetry(self):

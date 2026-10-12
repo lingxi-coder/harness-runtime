@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # The SDK's release-archive verification, driven through this repository's delegates: a rootfs digest that is
 # not committed or does not match must be rejected, and the SDK's real arm64 candidate inventory must validate.
-# (The Local App runtime-seed supply-chain suite lives with the Local App: its `scripts/tests/`.)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

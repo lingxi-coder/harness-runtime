@@ -1,6 +1,6 @@
 # Mobile platform tools and skills
 
-Android and iOS expose native device operations directly to the model through the ordinary tool registry. A conversation does not need a Local App, an app ID, or a capability manifest to use them. The native Swift/Kotlin adapters remain the implementation boundary and retain OS permission checks.
+Android and iOS expose native device operations directly to the model through the ordinary tool registry. The native Swift/Kotlin adapters remain the implementation boundary and retain OS permission checks.
 
 | Tool | Operation | Input |
 | --- | --- | --- |
@@ -28,8 +28,6 @@ The three bundled skills `mobile-device`, `mobile-media` and `mobile-personal-co
 - Camera output uses the runtime image-result contract, so subsequent model input includes the actual bounded image. The shared JPEG fallback samples during decoding before allocating full-resolution pixels and normalizes EXIF rotation/mirroring before re-encoding. Returned dimensions describe the delivered image; orientation-normalized original dimensions remain in resize metadata. Progressive JPEG coefficient storage remains subject to the decode memory budget.
 - Android calendar and contacts request runtime permission only when invoked from a foreground host. A denied or unavailable permission does not become an empty successful query.
 
-## Local Apps and packaging
-
-Generated Local App pages retain their own manifest declarations, app-scoped permission grants and `window.lingxi.v2` bridge. Those isolate untrusted page code and are separate from the direct model tool API.
+## Packaging
 
 The product consumes Harness through a canonical Git URL and immutable revision. Rebuilding Android/iOS against the updated revision is required to ship these changes; changing a sibling checkout alone does not update an installed app. FFI callback signatures are unchanged.

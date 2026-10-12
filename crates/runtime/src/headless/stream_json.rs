@@ -380,6 +380,51 @@ fn verbose_json_keeps_frame(line: &str) -> bool {
     }
 }
 
+fn refresh_result_projection(
+    frame: &mut Utf16JsonProjection,
+    totals: &Value,
+) -> Result<(), std::io::Error> {
+    let monotonic_cost = totals["total_cost_usd"].as_f64().unwrap_or_default()
+        >= frame.number_at("/total_cost_usd").unwrap_or_default();
+    for key in [
+        "total_cost_usd",
+        "duration_api_ms",
+        "modelUsage",
+        "subagent_stats",
+        "safety_stops",
+    ] {
+        let Some(value) = totals.get(key) else {
+            continue;
+        };
+        if !matches!(key, "subagent_stats" | "safety_stops") && !monotonic_cost {
+            continue;
+        }
+        if key == "duration_api_ms" && frame.number_at("/duration_api_ms") == Some(0.0) {
+            continue;
+        }
+        let mut value =
+            Utf16JsonProjection::from_serde_value(value).map_err(std::io::Error::other)?;
+        if key == "safety_stops" {
+            let Some(previous) = projected_u64(frame, "/safety_stops") else {
+                continue;
+            };
+            let Some(current) = value.number_at("").and_then(finite_u64) else {
+                continue;
+            };
+            value = Utf16JsonProjection::from_serde_value(&json!(previous.max(current)))
+                .map_err(std::io::Error::other)?;
+        }
+        frame.set_field(key, value).map_err(std::io::Error::other)?;
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct SdkHeldResults {
+    hold: bool,
+    frames: Vec<Utf16JsonProjection>,
+}
+
 struct PrintFrameBuffer {
     conversation: Vec<String>,
     results: Vec<String>,
@@ -426,41 +471,7 @@ impl PrintFrameBuffer {
             return Ok(raw.to_owned());
         };
         let mut frame = Utf16JsonProjection::parse(raw).map_err(std::io::Error::other)?;
-        let monotonic_cost = totals["total_cost_usd"].as_f64().unwrap_or_default()
-            >= frame.number_at("/total_cost_usd").unwrap_or_default();
-        for key in [
-            "total_cost_usd",
-            "duration_api_ms",
-            "modelUsage",
-            "subagent_stats",
-            "safety_stops",
-        ] {
-            let Some(value) = totals.get(key) else {
-                continue;
-            };
-            if !matches!(key, "subagent_stats" | "safety_stops") && !monotonic_cost {
-                continue;
-            }
-            if key == "duration_api_ms" && frame.number_at("/duration_api_ms") == Some(0.0) {
-                continue;
-            }
-            let mut value =
-                Utf16JsonProjection::from_serde_value(value).map_err(std::io::Error::other)?;
-            if key == "safety_stops" {
-                let Some(previous) = projected_u64(&frame, "/safety_stops") else {
-                    continue;
-                };
-                let Some(current) = value.number_at("") else {
-                    continue;
-                };
-                let Some(current) = finite_u64(current) else {
-                    continue;
-                };
-                value = Utf16JsonProjection::from_serde_value(&json!(previous.max(current)))
-                    .map_err(std::io::Error::other)?;
-            }
-            frame.set_field(key, value).map_err(std::io::Error::other)?;
-        }
+        refresh_result_projection(&mut frame, totals)?;
         frame.to_json_string().map_err(std::io::Error::other)
     }
 
@@ -962,6 +973,7 @@ pub struct StreamJsonStream {
     last_result_text: Mutex<Utf16JsonProjection>,
     structured_output: Mutex<Option<Utf16JsonProjection>>,
     result_metadata: Mutex<StreamJsonResultMetadata>,
+    sdk_held_results: StdMutex<SdkHeldResults>,
     text_limits: PrintTextLimits,
     response_timing: StdMutex<QueryResponseTiming>,
     request_markers: StdMutex<RequestMarkers>,
@@ -1037,6 +1049,7 @@ impl StreamJsonStream {
             last_result_text: Mutex::new(Utf16JsonProjection::from("")),
             structured_output: Mutex::new(None),
             result_metadata: Mutex::new(StreamJsonResultMetadata::default()),
+            sdk_held_results: StdMutex::new(SdkHeldResults::default()),
             text_limits: PrintTextLimits::default(),
             response_timing: StdMutex::new(QueryResponseTiming::default()),
             request_markers: StdMutex::new(RequestMarkers::default()),
@@ -1132,9 +1145,6 @@ impl StreamJsonStream {
         betas: &[String],
         subagent_stats: Option<Value>,
     ) {
-        if self.output_mode == StreamJsonOutputMode::Ndjson {
-            return;
-        }
         let mut totals = json!({
             "total_cost_usd": cost.total_usd,
             "duration_api_ms": u64::try_from(cost.api_duration.as_millis()).unwrap_or(u64::MAX),
@@ -1145,6 +1155,20 @@ impl StreamJsonStream {
         }
         if let Some(stops) = cost.safety_stops {
             totals["safety_stops"] = json!(stops);
+        }
+        {
+            let mut held = self
+                .sdk_held_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for frame in &mut held.frames {
+                if let Err(error) = refresh_result_projection(frame, &totals) {
+                    self.abort_delivery(format!("invalid held SDK result totals: {error}"));
+                }
+            }
+        }
+        if self.output_mode == StreamJsonOutputMode::Ndjson {
+            return;
         }
         if self
             .out_tx
@@ -1472,6 +1496,57 @@ impl StreamJsonStream {
         let uuid = uuid::Uuid::new_v4().to_string();
         let frame = Self::build_prompt_suggestion_frame(&session_id, suggestion, &uuid);
         self.enqueue(&frame);
+    }
+
+    pub(crate) fn holds_print_results(&self) -> bool {
+        self.output_mode != StreamJsonOutputMode::Ndjson
+            || !self
+                .sdk_held_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .frames
+                .is_empty()
+    }
+
+    pub(crate) fn hold_sdk_results(&self, hold: bool) {
+        self.sdk_held_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hold = hold;
+    }
+
+    pub(crate) fn release_sdk_results(&self, stopping: bool) {
+        let mut held = self
+            .sdk_held_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.hold = false;
+        for mut frame in held.frames.drain(..) {
+            if stopping
+                && frame
+                    .value
+                    .get("queued_turn_count")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|count| count > 0)
+            {
+                if let Err(error) =
+                    frame.set_pointer("/queued_turn_count", Utf16JsonProjection::plain(json!(0)))
+                {
+                    self.abort_delivery(format!("invalid held SDK result position: {error}"));
+                    continue;
+                }
+            }
+            match serialize_projected_ndjson_line(&frame) {
+                Ok(line) => self.enqueue_line(line, false),
+                Err(error) => self.abort_delivery(format!("invalid held SDK result: {error}")),
+            }
+        }
+    }
+
+    pub(crate) fn emit_prompt_suggestion_frame(&self, frame: &Value) {
+        if !self.suppress_frames {
+            self.enqueue(frame);
+        }
     }
 
     /// Emit the `system/status` frame (status: "requesting"). Called just
@@ -2035,6 +2110,20 @@ impl StreamJsonStream {
             }
         }
         drop(markers);
+        let held_frames = {
+            let mut held = self
+                .sdk_held_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if held.hold {
+                held.frames.push(projection);
+                return;
+            }
+            std::mem::take(&mut held.frames)
+        };
+        for previous in held_frames {
+            self.enqueue_projected(&previous);
+        }
         self.enqueue_projected(&projection);
     }
 
@@ -3734,6 +3823,7 @@ mod canonical_model_tests {
     #[test]
     fn canonical_model_collapses_provider_spellings() {
         for (raw, want) in [
+            ("claude-sonnet-5-5", "claude-sonnet-5-5"),
             ("claude-opus-4-7", "claude-opus-4-7"),
             ("claude-opus-4-7-20251101", "claude-opus-4-7"),
             ("us.anthropic.claude-opus-4-7-v1:0", "claude-opus-4-7"),
