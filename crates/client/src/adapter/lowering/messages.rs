@@ -385,7 +385,20 @@ fn lower_transcript_inner(
     let mut transcript = Vec::with_capacity(history.len());
     // ONE index for the WHOLE transcript: a `ToolUse` in assistant message N
     // pairs with its `ToolResult` in user message N+1.
-    let mut tool_uses = crate::adapter::turn::ToolUseIndex::default();
+    let mut tool_uses =
+        crate::adapter::turn::ToolUseIndex::for_replay(history.iter().flat_map(|message| {
+            let content = match message {
+                ConversationMessage::User { content, .. }
+                | ConversationMessage::Assistant { content, .. } => content.as_slice(),
+                ConversationMessage::System { .. } => &[],
+            };
+            content.iter().filter_map(|block| match block {
+                lingxi_core::types::ContentBlock::ToolUse { name, input, .. } => {
+                    Some((name.as_str(), input))
+                }
+                _ => None,
+            })
+        }));
     let mut pending_loop_companion: Option<Vec<u16>> = None;
     for message in history {
         if let Some(expected) = pending_loop_companion.take() {

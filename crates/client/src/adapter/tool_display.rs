@@ -198,6 +198,111 @@ pub fn plan_from_tool_call(tool: &str, input: &serde_json::Value) -> Option<Vec<
         .then(|| lower_plan_tasks(&td::plan::plan_tasks_from_todowrite_input(input)))
 }
 
+/// The wire diff of one call's diff inputs (see
+/// [`crate::presentation::tool_display::diff_inputs_for`]), capped at
+/// [`diff::MAX_WIRE_DIFF_ROWS`]; `None` when the inputs produce no rows.
+#[must_use]
+pub fn wire_diff(old: &str, new: &str, file_path: Option<&str>) -> Option<StructuredDiffDto> {
+    wire_diff_with(old, new, file_path, None)
+}
+
+fn wire_diff_with(
+    old: &str,
+    new: &str,
+    file_path: Option<&str>,
+    memo: Option<&diff::SegmentMemo>,
+) -> Option<StructuredDiffDto> {
+    let structured = match memo {
+        Some(memo) => {
+            diff::structured_diff_memoized(old, new, file_path, diff::MAX_WIRE_DIFF_ROWS, memo)
+        }
+        None => diff::structured_diff(
+            old,
+            new,
+            file_path,
+            ThemeName::default(),
+            diff::MAX_WIRE_DIFF_ROWS,
+        ),
+    };
+    (!structured.rows.is_empty()).then(|| lower_structured_diff(&structured, file_path))
+}
+
+/// The inputs of [`wire_diff`]: old text, new text, file path.
+type DiffInputs = (String, String, Option<String>);
+
+/// Wire diffs computed ahead of a transcript replay.
+///
+/// Every diff row is syntax highlighted, which made the diffs nearly all of a
+/// long session's resume (seconds for a few hundred edits). A replay knows
+/// every call up front, so it computes them on several threads first. Entries
+/// are keyed by the exact [`wire_diff`] inputs, so a lookup can only return
+/// the diff the call would have computed itself.
+#[derive(Debug, Default)]
+pub struct PreparedDiffs(std::collections::HashMap<DiffInputs, Option<StructuredDiffDto>>);
+
+impl PreparedDiffs {
+    /// Compute the wire diff of each distinct `(tool, input)` call.
+    pub fn compute<'a>(calls: impl IntoIterator<Item = (&'a str, &'a serde_json::Value)>) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        let jobs: Vec<DiffInputs> = calls
+            .into_iter()
+            .filter_map(|(tool, input)| diff_inputs(tool, input))
+            .filter(|inputs| seen.insert(inputs.clone()))
+            .collect();
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .clamp(1, 8)
+            .min(jobs.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let memo = diff::SegmentMemo::new(ThemeName::default());
+        let work = || {
+            let mut done = Vec::new();
+            loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((old, new, path)) = jobs.get(index) else {
+                    return done;
+                };
+                done.push((
+                    index,
+                    wire_diff_with(old, new, path.as_deref(), Some(&memo)),
+                ));
+            }
+        };
+        let mut diffs: Vec<Option<StructuredDiffDto>> = vec![None; jobs.len()];
+        if workers <= 1 {
+            for (index, diff) in work() {
+                diffs[index] = diff;
+            }
+        } else {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..workers).map(|_| scope.spawn(work)).collect();
+                for handle in handles {
+                    let done = handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                    for (index, diff) in done {
+                        diffs[index] = diff;
+                    }
+                }
+            });
+        }
+        Self(jobs.into_iter().zip(diffs).collect())
+    }
+
+    fn get(&self, inputs: &DiffInputs) -> Option<Option<StructuredDiffDto>> {
+        self.0.get(inputs).cloned()
+    }
+}
+
+/// A call's diff inputs, or `None` when the tool shows no diff.
+fn diff_inputs(tool: &str, input: &serde_json::Value) -> Option<DiffInputs> {
+    let (old, new, file_path) = crate::presentation::tool_display::diff_inputs_for(tool, input);
+    if old.is_none() && new.is_none() {
+        return None;
+    }
+    Some((old.unwrap_or_default(), new.unwrap_or_default(), file_path))
+}
+
 /// Derive the complete `⎿` display block for one completed tool call.
 ///
 /// The ONE function both the live event and the resumed scrollback call, so
@@ -209,26 +314,31 @@ pub fn lower_tool_result_display(
     result: &serde_json::Value,
     is_error: bool,
 ) -> ToolResultDisplayDto {
+    lower_tool_result_display_prepared(tool, input, result, is_error, None)
+}
+
+/// [`lower_tool_result_display`], taking the diff from `prepared` when a
+/// replay already computed it.
+#[must_use]
+pub fn lower_tool_result_display_prepared(
+    tool: &str,
+    input: Option<&serde_json::Value>,
+    result: &serde_json::Value,
+    is_error: bool,
+    prepared: Option<&PreparedDiffs>,
+) -> ToolResultDisplayDto {
     let headline = td::result::result_headline_parts(tool, input, result, is_error);
 
     // The diff comes from the call input, which is what the terminal renders
     // too, so the headline and the diff always describe the same comparison.
     let diff = input.and_then(|input| {
-        let (old, new, file_path) = crate::presentation::tool_display::diff_inputs_for(tool, input);
-        if old.is_none() && new.is_none() {
-            return None;
-        }
-        let old = old.unwrap_or_default();
-        let new = new.unwrap_or_default();
-        let structured = diff::structured_diff(
-            &old,
-            &new,
-            file_path.as_deref(),
-            ThemeName::default(),
-            diff::MAX_WIRE_DIFF_ROWS,
-        );
-        (!structured.rows.is_empty())
-            .then(|| lower_structured_diff(&structured, file_path.as_deref()))
+        let inputs = diff_inputs(tool, input)?;
+        prepared
+            .and_then(|prepared| prepared.get(&inputs))
+            .unwrap_or_else(|| {
+                let (old, new, file_path) = &inputs;
+                wire_diff(old, new, file_path.as_deref())
+            })
     });
 
     let clamped = td::result::result_body(tool, result).map(|body| td::result::clamp_body(&body));
@@ -281,6 +391,52 @@ mod tests {
         assert_eq!(sub.prefix, "$");
         assert_eq!(sub.text, "cargo test");
         assert_eq!(header.icon, Some(ToolIconDto::Terminal));
+    }
+
+    #[test]
+    fn prepared_replay_diffs_equal_the_per_call_derivation() {
+        let shared: String = (0..60)
+            .map(|n| format!("let value_{n} = compute({n});\n"))
+            .collect();
+        let calls = [
+            (
+                "Edit",
+                json!({"file_path": "src/lib.rs", "old_string": "fn a() {}\nfn b() {}", "new_string": "fn a() {}\nfn c() {}"}),
+            ),
+            (
+                "Write",
+                json!({"file_path": "src/big.rs", "content": shared.repeat(10)}),
+            ),
+            (
+                "Write",
+                json!({"file_path": "src/again.rs", "content": shared}),
+            ),
+            (
+                "Edit",
+                json!({"file_path": "notes.md", "old_string": "# Title\nold line", "new_string": "# Title\nnew line"}),
+            ),
+            (
+                "Edit",
+                json!({"file_path": "src/lib.rs", "old_string": "fn a() {}\nfn b() {}", "new_string": "fn a() {}\nfn c() {}"}),
+            ),
+            ("Read", json!({"file_path": "src/lib.rs"})),
+        ];
+        let prepared = PreparedDiffs::compute(calls.iter().map(|(tool, input)| (*tool, input)));
+        for (tool, input) in &calls {
+            let direct = lower_tool_result_display(tool, Some(input), &json!("ok"), false);
+            let replayed = lower_tool_result_display_prepared(
+                tool,
+                Some(input),
+                &json!("ok"),
+                false,
+                Some(&prepared),
+            );
+            assert_eq!(replayed, direct, "{tool} {input}");
+        }
+        let big = lower_tool_result_display("Write", Some(&calls[1].1), &json!("ok"), false);
+        let diff = big.diff.expect("a write has a diff");
+        assert_eq!(diff.rows.len(), diff::MAX_WIRE_DIFF_ROWS);
+        assert_eq!(diff.truncated_rows as usize, 600 - diff::MAX_WIRE_DIFF_ROWS);
     }
 
     #[test]

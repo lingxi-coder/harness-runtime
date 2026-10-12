@@ -3203,4 +3203,32 @@ mod flat_string_mapper_tests {
         assert_eq!(calls, 4096);
         assert!(result.semantically_eq(&template));
     }
+
+    #[test]
+    fn rebase_keeps_only_the_sidecars_the_new_tree_still_holds() {
+        let mut projection = Utf16JsonProjection::parse(
+            r#"{"kept":"\ud800","changed":"\ud801","gone":{"\ud802":1}}"#,
+        )
+        .unwrap();
+        let mut value = projection.value.clone();
+        value["changed"] = Value::String("plain".to_owned());
+        value.as_object_mut().unwrap().remove("gone");
+        projection.rebase_display_value(value.clone()).unwrap();
+        assert_eq!(projection.value, value);
+        assert_eq!(projection.string_units("/kept"), Some(vec![0xd800]));
+        projection.validate().unwrap();
+        assert_eq!(
+            projection.to_json_string().unwrap(),
+            r#"{"kept":"\ud800","changed":"plain"}"#
+        );
+
+        let mut plain = Utf16JsonProjection::plain(serde_json::json!({"a":{"b":[1,2]}}));
+        plain
+            .rebase_display_value(serde_json::json!({"a":{"b":[3]}}))
+            .unwrap();
+        assert_eq!(
+            plain,
+            Utf16JsonProjection::plain(serde_json::json!({"a":{"b":[3]}}))
+        );
+    }
 }

@@ -292,7 +292,63 @@ pub struct StructuredDiff {
 /// class is looked up per span from [`syntax::classify_line`]. Deriving the
 /// class this way — attach, never re-split — is what guarantees the terminal
 /// output is untouched by the addition of classes.
-fn content_segments(text: &str, lang: Option<&str>, theme: ThemeName) -> Vec<CodeSegment> {
+/// Highlighted segments of diff lines, shared by every diff of one transcript
+/// replay.
+///
+/// A long session shows the same lines again and again (each edit's context
+/// rows, a file written more than once), and every distinct line costs two
+/// syntect parses. Diffs computed in parallel also share the syntax set's
+/// regex cache pools, so highlighting each line once cuts the contention
+/// between threads as well as the work.
+pub struct SegmentMemo {
+    theme: ThemeName,
+    segments:
+        std::sync::Mutex<std::collections::HashMap<(Option<String>, String), Vec<CodeSegment>>>,
+}
+
+impl SegmentMemo {
+    /// An empty memo for diffs themed by `theme`.
+    #[must_use]
+    pub fn new(theme: ThemeName) -> Self {
+        Self {
+            theme,
+            segments: std::sync::Mutex::default(),
+        }
+    }
+
+    fn segments(&self, text: &str, lang: Option<&str>) -> Vec<CodeSegment> {
+        let key = (lang.map(str::to_owned), text.to_owned());
+        let cached = self
+            .segments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        if let Some(segments) = cached {
+            return segments;
+        }
+        let segments = highlighted_segments(text, lang, self.theme);
+        self.segments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, segments.clone());
+        segments
+    }
+}
+
+fn content_segments(
+    text: &str,
+    lang: Option<&str>,
+    theme: ThemeName,
+    memo: Option<&SegmentMemo>,
+) -> Vec<CodeSegment> {
+    match memo {
+        Some(memo) if memo.theme == theme => memo.segments(text, lang),
+        _ => highlighted_segments(text, lang, theme),
+    }
+}
+
+fn highlighted_segments(text: &str, lang: Option<&str>, theme: ThemeName) -> Vec<CodeSegment> {
     let highlighted = syntax::highlight(text, lang, theme);
     let Some(first) = highlighted.into_iter().next() else {
         // Empty line — still emit one (empty) run so the row colors fully.
@@ -392,6 +448,7 @@ fn plain_structured_row(
     hunk: usize,
     lang: Option<&str>,
     theme: ThemeName,
+    memo: Option<&SegmentMemo>,
 ) -> StructuredDiffRow {
     // (diff-01) Removed lines render as PLAINTEXT in claude-code (no syntax
     // highlight) — only the red bg decoration marks them. Added/context lines
@@ -399,7 +456,7 @@ fn plain_structured_row(
     let segments = if row.kind == LineKind::Remove {
         vec![CodeSegment::plain(row.text.clone(), remove_text_fg(theme))]
     } else {
-        content_segments(&row.text, lang, theme)
+        content_segments(&row.text, lang, theme, memo)
     };
     StructuredDiffRow {
         kind: row.kind,
@@ -575,6 +632,30 @@ pub fn structured_diff(
     theme: ThemeName,
     max_rows: usize,
 ) -> StructuredDiff {
+    structured_diff_with(old, new, path, theme, max_rows, None)
+}
+
+/// [`structured_diff`] themed by `memo`'s theme, taking each line's
+/// highlighted segments from `memo`.
+#[must_use]
+pub fn structured_diff_memoized(
+    old: &str,
+    new: &str,
+    path: Option<&str>,
+    max_rows: usize,
+    memo: &SegmentMemo,
+) -> StructuredDiff {
+    structured_diff_with(old, new, path, memo.theme, max_rows, Some(memo))
+}
+
+fn structured_diff_with(
+    old: &str,
+    new: &str,
+    path: Option<&str>,
+    theme: ThemeName,
+    max_rows: usize,
+    memo: Option<&SegmentMemo>,
+) -> StructuredDiff {
     let hunks = grouped_hunks(old, new);
     if hunks.is_empty() {
         return StructuredDiff::default();
@@ -611,7 +692,9 @@ pub fn structured_diff(
             truncated = true;
             break 'hunks;
         }
-        for row in derive_rows(&hunk_rows, hunk, language.as_deref(), theme) {
+        // One row past the cap is enough to know the diff was truncated.
+        let limit = max_rows.saturating_sub(rows.len()) + 1;
+        for row in derive_rows(&hunk_rows, hunk, language.as_deref(), theme, limit, memo) {
             if rows.len() >= max_rows {
                 truncated = true;
                 break 'hunks;
@@ -713,15 +796,21 @@ fn pad_line_to_width(line: &mut StyledLine, width: usize, bg: StyleColor) {
 /// Derive a slice of one hunk's diff rows into structured rows, pairing
 /// adjacent remove→add runs for word-level diffing (claude-code
 /// `processAdjacentLines`).
+///
+/// Stops once `limit` rows exist: every row is syntax highlighted, and a large
+/// `Write` would otherwise highlight thousands of rows only for the caller to
+/// cap them. Rows never depend on later ones, so the prefix is unchanged.
 fn derive_rows(
     rows: &[DiffRow],
     hunk: usize,
     lang: Option<&str>,
     theme: ThemeName,
+    limit: usize,
+    memo: Option<&SegmentMemo>,
 ) -> Vec<StructuredDiffRow> {
     let mut out = Vec::new();
     let mut i = 0;
-    while i < rows.len() {
+    while i < rows.len() && out.len() < limit {
         if rows[i].kind == LineKind::Remove {
             // Collect the contiguous remove run, then the contiguous add run.
             let rem_start = i;
@@ -740,6 +829,9 @@ fn derive_rows(
             // unpaired surplus on either side falls back to whole-line.
             let pairs = removes.len().min(adds.len());
             for k in 0..pairs {
+                if out.len() >= limit {
+                    return out;
+                }
                 let rem = &removes[k];
                 let add = &adds[k];
                 if let (Some(rem_segments), Some(add_segments)) = (
@@ -750,18 +842,18 @@ fn derive_rows(
                     out.push(word_structured_row(add, hunk, add_segments));
                 } else {
                     // Too dissimilar — whole-line coloring for both.
-                    out.push(plain_structured_row(rem, hunk, lang, theme));
-                    out.push(plain_structured_row(add, hunk, lang, theme));
+                    out.push(plain_structured_row(rem, hunk, lang, theme, memo));
+                    out.push(plain_structured_row(add, hunk, lang, theme, memo));
                 }
             }
-            for rem in &removes[pairs..] {
-                out.push(plain_structured_row(rem, hunk, lang, theme));
-            }
-            for add in &adds[pairs..] {
-                out.push(plain_structured_row(add, hunk, lang, theme));
+            for row in removes[pairs..].iter().chain(&adds[pairs..]) {
+                if out.len() >= limit {
+                    return out;
+                }
+                out.push(plain_structured_row(row, hunk, lang, theme, memo));
             }
         } else {
-            out.push(plain_structured_row(&rows[i], hunk, lang, theme));
+            out.push(plain_structured_row(&rows[i], hunk, lang, theme, memo));
             i += 1;
         }
     }

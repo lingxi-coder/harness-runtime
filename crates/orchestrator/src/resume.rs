@@ -38,10 +38,7 @@ use lingxi_core::SessionState;
 use llm_runtime::services::sdk::protocol::JsonPayload;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use session::jsonl::{
-    load_session_across_worktrees, load_session_entries_across_worktrees, JsonlMessage,
-    JsonlWriter, LoaderError,
-};
+use session::jsonl::{JsonlMessage, JsonlWriter, LoaderError};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -608,11 +605,18 @@ pub async fn replay_session_state(
     fs: Arc<dyn FileSystem>,
 ) -> Result<ReplayedSession, ResumeError> {
     let sid_str = session_id.to_string();
-    let transcript_path =
-        session::jsonl::resolve_session_path_across_worktrees(lingxi_home, cwd, session_id).await?;
-    let messages = load_session_across_worktrees(lingxi_home, cwd, session_id, fs.clone()).await?;
-    let transcript_entries =
-        load_session_entries_across_worktrees(lingxi_home, cwd, session_id, fs.clone()).await?;
+    // One routed read yields the resumable chain, every entry, and the agent
+    // state, each exactly as its own loader derives it from that file.
+    let loaded =
+        session::jsonl::load_routed_session_across_worktrees(lingxi_home, cwd, session_id, fs)
+            .await?;
+    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid_str);
+    if messages.is_empty() {
+        return Err(session::jsonl::LoaderError::EmptyDirectory.into());
+    }
+    let (agent_type, agent_definition) =
+        session::jsonl::loader::agent_resume_state_from_loaded(&loaded, &sid_str);
+    let transcript_entries = loaded.messages_in_order;
     let (state, last_uuid, mut runtime_metadata) = build_state_from_jsonl(session_id, &messages);
     let display_entries = transcript_entries
         .iter()
@@ -620,8 +624,6 @@ pub async fn replay_session_state(
         .cloned()
         .collect::<Vec<_>>();
     let (display_state, _, _) = build_state_from_jsonl(session_id, &display_entries);
-    let (agent_type, agent_definition) =
-        session::jsonl::read_agent_resume_state(&transcript_path, fs, &sid_str).await;
     runtime_metadata.main_thread_agent_type = agent_type;
     runtime_metadata.main_thread_agent_definition = agent_definition;
     runtime_metadata.deferred_tools = deferred_tool_replays_from_messages(&transcript_entries);

@@ -11,7 +11,7 @@ use lingxi_core::host::rooted_fs::{
 use lingxi_core::host::FsError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -431,23 +431,19 @@ pub(crate) fn bootstrap_at(
     let mut entries = Vec::new();
     let mut next_message_index = 0u64;
     let mut seen_uuids = HashSet::new();
-    if let Some(file) = transcript {
-        for line in BufReader::new(file).lines() {
-            let line = line.map_err(|error| FsError::Io(error.to_string()))?;
-            let Ok(exact) = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&line)
-            else {
-                continue;
-            };
-            if let Some(uuid) = exact.string_at("/uuid") {
-                if !uuid.is_empty() && seen_uuids.insert(uuid.to_owned()) {
-                    entries.push(IdentityLogEntry::Append {
-                        uuid: uuid.to_string(),
-                        message_index: next_message_index,
-                    });
-                    next_message_index = next_message_index
-                        .checked_add(1)
-                        .ok_or_else(|| FsError::Io("session message index exhausted".into()))?;
-                }
+    if let Some(mut file) = transcript {
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        for uuid in outer_uuids(&content).into_iter().flatten() {
+            if !uuid.is_empty() && seen_uuids.insert(uuid.clone()) {
+                entries.push(IdentityLogEntry::Append {
+                    uuid,
+                    message_index: next_message_index,
+                });
+                next_message_index = next_message_index
+                    .checked_add(1)
+                    .ok_or_else(|| FsError::Io("session message index exhausted".into()))?;
             }
         }
     }
@@ -503,7 +499,7 @@ pub(crate) fn read_snapshot_at(
         .file_name()
         .map(PathBuf::from)
         .ok_or_else(|| FsError::Io("transcript has no filename".into()))?;
-    let transcript = match open_read_file_pinned(root, &transcript_relative, Some(identity)) {
+    let mut transcript = match open_read_file_pinned(root, &transcript_relative, Some(identity)) {
         Ok(file) => file,
         Err(FsError::NotFound(_)) => {
             return Ok(SessionMessageIdentitySnapshot {
@@ -513,20 +509,53 @@ pub(crate) fn read_snapshot_at(
         }
         Err(error) => return Err(error),
     };
-    let mut present = std::collections::HashSet::new();
-    for line in BufReader::new(transcript).lines() {
-        let line = line.map_err(|error| FsError::Io(error.to_string()))?;
-        if let Ok(exact) = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&line) {
-            if let Some(uuid) = exact.string_at("/uuid") {
-                present.insert(uuid.to_string());
-            }
-        }
-    }
+    let mut content = String::new();
+    transcript
+        .read_to_string(&mut content)
+        .map_err(|error| FsError::Io(error.to_string()))?;
+    let present = outer_uuids(&content)
+        .into_iter()
+        .flatten()
+        .collect::<HashSet<_>>();
     cache
         .snapshot
         .by_uuid
         .retain(|uuid, _| present.contains(uuid));
     Ok(cache.snapshot)
+}
+
+/// The outer `uuid` of each transcript line, in file order: `None` for a line
+/// that does not parse or has no string `uuid`. Lines parse independently,
+/// so a long transcript is split across a few threads.
+fn outer_uuids(content: &str) -> Vec<Option<String>> {
+    fn outer_uuid(line: &str) -> Option<String> {
+        let exact = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line).ok()?;
+        exact.string_at("/uuid").map(str::to_owned)
+    }
+    let lines = content.lines().collect::<Vec<_>>();
+    // About one thread per MiB, so a short transcript stays on this thread.
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(8)
+        .min(content.len() >> 20)
+        .max(1);
+    if workers == 1 {
+        return lines.into_iter().map(outer_uuid).collect();
+    }
+    let chunk = lines.len().div_ceil(workers).max(1);
+    std::thread::scope(|scope| {
+        let parts = lines
+            .chunks(chunk)
+            .map(|part| scope.spawn(move || part.iter().map(|line| outer_uuid(line)).collect()))
+            .collect::<Vec<std::thread::ScopedJoinHandle<'_, Vec<_>>>>();
+        parts
+            .into_iter()
+            .flat_map(|part| {
+                part.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -653,5 +682,32 @@ mod tests {
         assert_eq!(cold.by_uuid.len(), 1);
         assert_eq!(cold.by_uuid["retained"], 0);
         assert_eq!(cold.next_message_index, 2);
+    }
+    #[test]
+    fn long_transcript_keeps_file_order_across_parse_threads() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("native.jsonl");
+        let padding = "x".repeat(4096);
+        let mut source = String::new();
+        for row in 0..2000 {
+            source.push_str(&match row % 4 {
+                0 => format!("{{\"uuid\":\"row-{row}\",\"pad\":\"{padding}\"}}\n"),
+                1 => format!("{{\"uuid\":\"row-{}\",\"pad\":\"\\ud800\"}}\r\n", row - 1),
+                2 => format!("{{\"uuid\":{row},\"pad\":\"{padding}\"}}\n"),
+                _ => "invalid json\n".to_owned(),
+            });
+        }
+        assert!(source.len() >= 2 << 20, "long enough to split");
+        std::fs::write(&path, &source).unwrap();
+        let identity = lingxi_core::host::rooted_fs::root_identity(root).unwrap();
+        let store = super::IdentityLogStore::default();
+        let bootstrapped = super::bootstrap_at(&store, &path, root, &identity).unwrap();
+        assert_eq!(bootstrapped.next_message_index, 500);
+        for (index, row) in (0..2000).step_by(4).enumerate() {
+            assert_eq!(bootstrapped.by_uuid[&format!("row-{row}")], index as u64);
+        }
+        let cold = super::read_snapshot_at(&path, root, &identity).unwrap();
+        assert_eq!(cold, bootstrapped);
     }
 }

@@ -6387,6 +6387,7 @@ dependencies = [
  "chrono",
  "core",
  "filetime",
+ "memchr",
  "once_cell",
  "platform-posix",
  "pretty_assertions",

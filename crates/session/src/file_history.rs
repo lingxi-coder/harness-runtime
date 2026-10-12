@@ -710,7 +710,9 @@ pub fn snapshot_line_json(session_id: &str, record: &SnapshotRecord) -> serde_js
 #[must_use]
 pub fn parse_snapshot_records(content: &str) -> Vec<SnapshotRecord> {
     let mut out = Vec::new();
-    for line in content.lines() {
+    // Snapshot rows are a small fraction of a long transcript: parse only the
+    // lines that can be one.
+    for line in crate::jsonl::reader::lines_naming_types(content, &["file-history-snapshot"]) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -1110,6 +1112,30 @@ mod tests {
         assert!(
             !first_backup_path.exists(),
             "pruning the first snapshot should delete its unreferenced backup"
+        );
+    }
+
+    #[test]
+    fn snapshot_rows_parse_even_when_the_type_is_escaped() {
+        let (first, second) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let content = [
+            format!(
+                r#"{{"type":"file-history-snapshot","messageId":"{first}","trackedFileBackups":{{"a.rs":{{"backupFileName":"a@v1","version":1}}}}}}"#
+            ),
+            r#"{"type":"user","message":{"content":"file-history-snapshot"}}"#.to_owned(),
+            format!(
+                r#"{{"type":"file\u002dhistory-snapshot","messageId":"{second}","trackedFileBackups":{{}}}}"#
+            ),
+        ]
+        .join("\n");
+        let records = parse_snapshot_records(&content);
+        let ids = records.iter().map(|r| r.message_id).collect::<Vec<_>>();
+        assert_eq!(ids, vec![first, second]);
+        assert_eq!(
+            records[0].tracked_file_backups["a.rs"]
+                .backup_file_name
+                .as_deref(),
+            Some("a@v1")
         );
     }
 }

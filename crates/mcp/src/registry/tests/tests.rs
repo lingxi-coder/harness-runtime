@@ -10883,3 +10883,85 @@ async fn xaa_provider_discovery_failure_emits_oauth_flow_failure() {
     );
     assert_eq!(event.payload["idTokenCacheHit"], serde_json::json!(true));
 }
+
+/// While the background window is open, `connect_all` publishes each enabled
+/// server as pending and returns at once; the detached dial settles it, and
+/// once the window closes `connect_all` dials in the foreground again.
+#[tokio::test]
+async fn background_connect_window_publishes_pending_servers_and_dials_them_detached() {
+    let mock = Arc::new(BridgeMock::new(&["read"]));
+    let registry = Arc::new(McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock as Arc<dyn RawConnectionProvider>,
+    ));
+    let mut inflight = registry.watch_background_connects();
+    registry.begin_background_connects();
+    let outcomes = registry
+        .connect_all(vec![
+            cfg("srv"),
+            McpServerConfig {
+                disabled: true,
+                ..cfg("off")
+            },
+        ])
+        .await;
+    assert!(outcomes.is_empty(), "nothing has settled yet");
+    {
+        // The single-threaded test runtime has not polled the dial yet.
+        let connections = registry.connections.try_read().expect("no writer");
+        assert!(matches!(
+            connections.get("srv"),
+            Some(McpConnectionState::Connecting { .. })
+        ));
+        assert!(matches!(
+            connections.get("off"),
+            Some(McpConnectionState::Disconnected {
+                last_error: None,
+                ..
+            })
+        ));
+    }
+    assert_eq!(*inflight.borrow_and_update(), 1);
+    registry.end_background_connects();
+
+    while *inflight.borrow_and_update() != 0 {
+        inflight.changed().await.expect("registry alive");
+    }
+    assert!(matches!(
+        registry.connections.read().await.get("srv"),
+        Some(McpConnectionState::Connected { .. })
+    ));
+    let outcomes = registry.connect_all(vec![cfg("later")]).await;
+    assert_eq!(outcomes.len(), 1, "a closed window dials in the foreground");
+    assert!(outcomes[0].1.is_ok());
+}
+
+/// Shutdown aborts dials still waiting to run, and each one releases its
+/// in-flight slot so a watcher never waits on a dial that no longer exists.
+#[tokio::test]
+async fn aborted_background_connects_release_their_inflight_slots() {
+    let mock = Arc::new(BridgeMock::new(&["read"]));
+    let registry = Arc::new(McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock as Arc<dyn RawConnectionProvider>,
+    ));
+    let mut inflight = registry.watch_background_connects();
+    registry.begin_background_connects();
+    registry.connect_all(vec![cfg("srv")]).await;
+    let lifecycle = registry.lifecycle_lock("srv");
+    let held = lifecycle.lock().await;
+    assert_eq!(*inflight.borrow_and_update(), 1);
+
+    registry.abort_background_connects();
+    while *inflight.borrow_and_update() != 0 {
+        inflight.changed().await.expect("registry alive");
+    }
+    drop(held);
+    assert!(
+        !matches!(
+            registry.connections.read().await.get("srv"),
+            Some(McpConnectionState::Connected { .. })
+        ),
+        "an aborted dial never connects"
+    );
+}

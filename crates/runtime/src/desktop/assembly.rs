@@ -36,23 +36,23 @@ use super::{
     build_shared_credential_stack_for_config, capture_legacy_opening_balance, cron_command,
     cron_management, cron_native, cron_scheduler_enabled, current_uid, desktop_command_registry,
     desktop_fusion_attempts, desktop_fusion_executor, desktop_skill_registry, discover_plugin_set,
-    emit_mcp_servers_inventory, emit_mcp_tools_commands_loaded, ephemeral_session_home,
-    expand_trusted_dir, file_changed_watch, fork_resume, fusion_command, fusion_recorder,
-    is_env_truthy, job_dir_from_env, lingxi_temp_dir, load_ask_user_question_timeout,
-    load_blocked_marketplaces, load_boot_permission_tiers_with_policy_snapshot,
-    load_effective_settings_for_config, load_managed_plugin_names,
-    load_merged_agent_push_notif_enabled, load_merged_allow_managed_hooks_only,
-    load_merged_attribution, load_merged_bash_output_max_chars, load_merged_disable_all_hooks,
-    load_merged_hooks_restricted, load_merged_http_hook_policy, load_merged_output_style,
-    load_merged_settings, load_merged_show_thinking_summaries,
-    load_merged_skip_web_fetch_preflight, load_merged_task_output_max_chars,
-    load_merged_vision_delegation_enabled, load_merged_workflow_keyword_trigger_enabled,
-    load_plugin_configs, managed_mod_seats_from_raw_tiers, managed_only_sandbox_overrides,
-    mcp_on_authorization_url, mcp_servers_inventory_payload, mcp_tools_commands_loaded_payload,
+    emit_mcp_servers_inventory, ephemeral_session_home, expand_trusted_dir, file_changed_watch,
+    fork_resume, fusion_command, fusion_recorder, is_env_truthy, job_dir_from_env, lingxi_temp_dir,
+    load_ask_user_question_timeout, load_blocked_marketplaces,
+    load_boot_permission_tiers_with_policy_snapshot, load_effective_settings_for_config,
+    load_managed_plugin_names, load_merged_agent_push_notif_enabled,
+    load_merged_allow_managed_hooks_only, load_merged_attribution,
+    load_merged_bash_output_max_chars, load_merged_disable_all_hooks, load_merged_hooks_restricted,
+    load_merged_http_hook_policy, load_merged_output_style, load_merged_settings,
+    load_merged_show_thinking_summaries, load_merged_skip_web_fetch_preflight,
+    load_merged_task_output_max_chars, load_merged_vision_delegation_enabled,
+    load_merged_workflow_keyword_trigger_enabled, load_plugin_configs,
+    managed_mod_seats_from_raw_tiers, managed_only_sandbox_overrides, mcp_on_authorization_url,
+    mcp_servers_inventory_payload, mcp_tools_commands_loaded_payload,
     merge_agent_frontmatter_mcp_servers, merge_cli_flag_agents, new_desktop_mcp_transport,
     new_live_sandbox_runner_with_permission_gate, pane_teammate, platform_in_enabled_list,
     plugin_dir_watch_enabled, register_desktop_tools_with_fusion_recorder,
-    registered_mcp_tool_count, registry_skill_listing_provider_for_desktop, resolve_bash_edit_diff,
+    registry_skill_listing_provider_for_desktop, resolve_bash_edit_diff,
     resolve_llm_stack_with_credentials, resolve_memory_feature_gates,
     resolve_workflow_session_enabled, resolve_workflow_size_guideline, ripgrep_override,
     sandbox_auto_allow_from_settings_tiers, sandbox_runtime_config_from_settings_tiers,
@@ -2307,9 +2307,8 @@ pub async fn build_with_credential_stack(
                 .session_resume_snapshot
                 .as_ref()
                 .expect("checked resume snapshot");
-            let loaded = session::jsonl::route_lines(&snapshot.content);
-            let (persisted, definition) = session::jsonl::loader::agent_resume_state_from_loaded(
-                &loaded,
+            let (persisted, definition) = session::jsonl::loader::agent_resume_state_from_content(
+                &snapshot.content,
                 &snapshot.source_session_id,
             );
             (
@@ -3181,6 +3180,16 @@ pub async fn build_with_credential_stack(
         .with_additional_roots(mcp_additional_roots),
     );
     hook_mcp_invoker.bind(mcp_registry.clone());
+    // Interactive hosts open the session while startup servers dial. Until the
+    // window closes after assembly, every `connect_all` (the configured servers
+    // below, enabled plugins' servers at `pm.enable`) publishes each server as
+    // pending and dials it on a detached task; the startup watcher spawned
+    // after assembly folds each settled server into the live tool and prompt
+    // catalogs, and `WaitForMcpServers` covers the model meanwhile.
+    let startup_dials_guard = cfg.connect_mcp_in_background.then(|| {
+        mcp_registry.begin_background_connects();
+        super::mcp_startup::StartupDialsGuard::new(mcp_registry.clone())
+    });
     // Subscribe before connecting: a server is allowed to invalidate a catalog
     // immediately after initialization, before the shared ToolRegistry exists.
     // Tokio's broadcast receiver retains those early notifications until the
@@ -4255,7 +4264,7 @@ pub async fn build_with_credential_stack(
         let restore_fs: Arc<dyn lingxi_core::host::FileSystem> =
             Arc::new(DesktopFileSystem::new(cwd.clone()));
         let worktree_state = if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
-            session::jsonl::route_lines(&snapshot.content)
+            session::jsonl::loader::route_rows_of_types(&snapshot.content, &["worktree-state"])
                 .worktree_states
                 .get(&snapshot.source_session_id)
                 .cloned()
@@ -6334,19 +6343,16 @@ pub async fn build_with_credential_stack(
 
     // Oracle `Pd` reports the completed discovery round once. Re-snapshot
     // after plugin materialization so enabled plugin MCP tools/prompts are not
-    // omitted from the one startup event.
-    let loaded_mcp_tools =
-        tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await;
-    let loaded_mcp_prompt_commands =
-        command_api::mcp_prompts::mcp_prompt_commands(&mcp_registry.connected_prompts().await);
-    emit_mcp_tools_commands_loaded(
-        analytics_bus.as_ref(),
-        &mcp_tools_commands_loaded_payload(
-            registered_mcp_tool_count(&loaded_mcp_tools),
-            &loaded_mcp_prompt_commands,
-        ),
-    )
-    .await;
+    // omitted from the one startup event. Background dials have not settled
+    // yet; the startup watcher reports the round when they have.
+    if !cfg.connect_mcp_in_background {
+        super::mcp_startup::report_mcp_tools_commands_loaded(
+            &mcp_registry,
+            mcp_tool_ctx.clone(),
+            analytics_bus.as_ref(),
+        )
+        .await;
+    }
     repo_root_reloader
         .set_plugin_runtime(plugin_runtime.clone())
         .await;
@@ -6864,6 +6870,23 @@ pub async fn build_with_credential_stack(
             )))
             .await;
     }
+    // Assembly is complete: later `connect_all` calls (reloads, deferred SDK
+    // servers) dial in the foreground again, and the lifecycle owns the dials
+    // still running.
+    let (mcp_startup_progress, mcp_startup) =
+        tokio::sync::watch::channel(super::McpStartupProgress::default());
+    let mcp_startup_task = startup_dials_guard.map(|guard| {
+        mcp_registry.end_background_connects();
+        guard.disarm();
+        super::mcp_startup::spawn_startup_watcher(
+            &mcp_registry,
+            runtime_tools.clone(),
+            mcp_tool_ctx.clone(),
+            shared_command_registry.clone(),
+            analytics_bus.clone(),
+            mcp_startup_progress,
+        )
+    });
     let session_lifecycle = Arc::new(DesktopSessionLifecycle {
         ephemeral_home: ephemeral_home.clone(),
         settings_watcher: settings_watcher.clone(),
@@ -6872,6 +6895,8 @@ pub async fn build_with_credential_stack(
         orchestrator: orch.clone(),
         mcp_reconnect_task: tokio::sync::Mutex::new(Some(mcp_reconnect_task)),
         mcp_catalog_refresh_task: tokio::sync::Mutex::new(Some(mcp_catalog_refresh_task)),
+        mcp_startup_task: tokio::sync::Mutex::new(mcp_startup_task),
+        mcp_registry: mcp_registry.clone(),
         task_registry: task_registry.clone(),
         command_registry: shared_command_registry.clone(),
         subagent_spawner: lifecycle_subagent_spawner,
@@ -6899,6 +6924,7 @@ pub async fn build_with_credential_stack(
 
     Ok(DesktopRuntime {
         deferred_startup: tokio::sync::Mutex::new(deferred_startup),
+        mcp_startup,
         fork_writer: cfg.session_persistence.then_some(main_agent_setting_writer),
         pending_fork_history: tokio::sync::Mutex::new(None),
         catalog_registry,

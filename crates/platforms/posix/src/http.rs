@@ -13,3 +13,7 @@
 /// Type alias to the shared [`http_client::ReqwestHttp`]; preserves
 /// the `platform_posix::PosixHttp` path that desktop callers and tests use.
 pub use http_client::ReqwestHttp as PosixHttp;
+
+/// Load the OS trust store on a background thread at process start, so the
+/// first HTTP client a desktop build constructs finds it ready.
+pub use http_client::prewarm_native_roots;
