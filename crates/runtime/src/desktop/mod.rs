@@ -6126,7 +6126,9 @@ use permission_config::current_uid;
 use permission_config::current_uid;
 use permission_config::expand_trusted_dir;
 use permission_config::lingxi_temp_dir;
+#[cfg(test)]
 use permission_config::load_boot_permission_tiers_with_flag;
+use permission_config::load_boot_permission_tiers_with_policy_snapshot;
 pub use permission_config::managed_force_login_org_pin;
 pub use permission_config::managed_model_allowlist;
 use permission_config::managed_model_policy_source;

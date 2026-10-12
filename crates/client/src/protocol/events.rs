@@ -1338,6 +1338,18 @@ impl From<ClientEventWire> for ClientEvent {
             ClientEventWire::VisualizationBlock { status, reference } => {
                 Self::VisualizationBlock { status, reference }
             }
+            ClientEventWire::PromptSuggestion {
+                suggestion,
+                uuid,
+                session_id,
+            } => Self::PromptSuggestion {
+                suggestion,
+                uuid,
+                session_id,
+            },
+            ClientEventWire::PromptSuggestionState { enabled, notice } => {
+                Self::PromptSuggestionState { enabled, notice }
+            }
         }
     }
 }

@@ -165,6 +165,7 @@ pub(crate) fn prompt_suggestion_suppression_reason(suggestion: &str) -> Option<&
     None
 }
 
+#[cfg(test)]
 pub(crate) fn parse_prompt_suggestion_response(raw: &str) -> Option<String> {
     let suggestion = normalize_prompt_suggestion_response(raw);
     prompt_suggestion_suppression_reason(&suggestion)
@@ -252,6 +253,7 @@ fn native_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
     regex::Regex::new(&pattern)
 }
 
+#[cfg(test)]
 pub(crate) fn prompt_suggestion_cache_is_cold(input: u64, output: u64, creation: u64) -> bool {
     input.saturating_add(output).saturating_add(creation) > 10_000
 }

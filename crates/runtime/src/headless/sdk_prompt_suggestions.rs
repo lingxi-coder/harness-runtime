@@ -1,5 +1,6 @@
 //! Claude Code 2.1.296 `HS` SDK suggestion state. The wire frame is deliberately
 //! separate from its private generation request ID and acceptance timestamp.
+use lingxi_core::types::utf16_json::JsonValueView;
 use serde_json::{json, Map, Value};
 
 pub(crate) const SDK_SUGGESTION_SETTLE_TIMEOUT_MS: u64 = 30_000;
@@ -219,18 +220,18 @@ fn feedback(last: &EmittedSuggestion, input: &str, now: u64) -> Value {
 }
 
 /// Exact first Zod issue used by the native control handler.
-pub(crate) fn parse_paused(value: Option<&Value>) -> Result<bool, String> {
-    if let Some(Value::Bool(paused)) = value {
-        return Ok(*paused);
+pub(crate) fn parse_paused(value: Option<JsonValueView<'_>>) -> Result<bool, String> {
+    if let Some(paused) = value.and_then(JsonValueView::as_bool) {
+        return Ok(paused);
     }
     let received = match value {
         None => "undefined",
-        Some(Value::Null) => "null",
-        Some(Value::String(_)) => "string",
-        Some(Value::Number(_)) => "number",
-        Some(Value::Array(_)) => "array",
-        Some(Value::Object(_)) => "object",
-        Some(Value::Bool(_)) => unreachable!(),
+        Some(value) if value.is_null() => "null",
+        Some(value) if value.code_units().is_some() => "string",
+        Some(value) if value.as_number().is_some() => "number",
+        Some(value) if value.array_len().is_some() => "array",
+        Some(value) if value.object_entries().is_some() => "object",
+        Some(_) => unreachable!("boolean values returned above"),
     };
     Err(format!("Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received {received}"))
 }

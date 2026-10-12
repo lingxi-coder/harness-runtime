@@ -674,7 +674,7 @@ pub(crate) struct PromptRuntime {
     pub(crate) suggestion_background:
         std::sync::Mutex<super::prompt_suggestion_background::state::BackgroundSuggestionState>,
     pub(crate) suggestion_cancel: std::sync::Mutex<Option<CancellationToken>>,
-    pub(crate) suggestion: std::sync::Mutex<super::prompt_suggestion::SuggestionRuntime>,
+    pub(super) suggestion: std::sync::Mutex<super::prompt_suggestion::SuggestionRuntime>,
     /// Frozen gitStatus probe + rendered attachment for this conversation.
     /// Claude documents gitStatus as a start-of-conversation snapshot that does
     /// not update, including after a worktree/session-cwd swap.

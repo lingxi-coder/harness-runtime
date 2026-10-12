@@ -211,6 +211,11 @@ use crate::mobile::{
 pub struct MobileRuntime {
     /// Product region captured with the running model client.
     pub provider_region: llm_runtime::Region,
+    /// Shared settings baseline used by both the Mod reader and the public
+    /// settings context attached to the engine handle.
+    pub(super) settings_active:
+        Arc<std::sync::RwLock<std::collections::BTreeMap<String, serde_json::Value>>>,
+    pub(super) settings_managed: std::collections::BTreeMap<String, serde_json::Value>,
     pub(super) audio_services: llm_runtime::services::ProviderServices,
     pub(super) audio_credential_ids: std::collections::BTreeMap<String, String>,
     /// Only interactive hosts inherit device-owned permission preferences.
@@ -4297,11 +4302,13 @@ impl MobileEngineHandle {
                 turn_id,
                 visualization_context,
             } => {
-                let _ = self
-                    .inner
-                    .orchestrator
-                    .record_prompt_suggestion_submission(&text)
-                    .await;
+                if let Ok(text) = String::from_utf16(&text.code_units) {
+                    let _ = self
+                        .inner
+                        .orchestrator
+                        .record_prompt_suggestion_submission(&text)
+                        .await;
+                }
                 let root_session = self
                     .inner
                     .active_session_uuid
@@ -4810,14 +4817,14 @@ impl MobileEngineHandle {
             // `SendPrompt` (claude-code injects the expanded prompt as the user
             // message), so a typed `/loop` actually schedules + executes.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
-                let raw_source = raw.into_projection();
-                if let Some(raw_text) = raw_source.string_at("") {
+                if let Ok(raw_text) = String::from_utf16(&raw.code_units) {
                     let _ = self
                         .inner
                         .orchestrator
-                        .record_prompt_suggestion_submission(raw_text)
+                        .record_prompt_suggestion_submission(&raw_text)
                         .await;
                 }
+                let raw_source = raw.into_projection();
                 if self.inner.session_mode == session::jsonl::SessionMode::Chat {
                     let allowed =
                         if let Some(parsed) = command_api::parse_slash_command(&raw_source) {

@@ -2273,6 +2273,24 @@ pub(super) async fn build_mobile_inner_with_ask(
         .with_model_derived_threshold(),
     );
 
+    let mod_settings_reader_paths = ::configuration_admin::settings_bridge::SettingsPaths {
+        lingxi_home: cfg.lingxi_home.clone(),
+        project_dir: cwd.clone(),
+    };
+    // Mobile currently has no managed-settings tier; this is the same empty
+    // overlay previously exposed by its SettingsContext, shared with the Mod
+    // reader rather than implying a separate policy source.
+    let mod_settings_managed = std::collections::BTreeMap::new();
+    let mut mod_settings_active = ::configuration_admin::settings_bridge::active_settings_baseline(
+        &mod_settings_reader_paths,
+        &mod_settings_managed,
+    );
+    mod_settings_active.insert(
+        "providerRegion".into(),
+        serde_json::to_value(provider_region).expect("region serializes"),
+    );
+    let mod_settings_active = Arc::new(std::sync::RwLock::new(mod_settings_active));
+
     let mut orch_inner = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -2285,9 +2303,13 @@ pub(super) async fn build_mobile_inner_with_ask(
         // `cwd` is reused below by the batch-8 registration, so clone here.
         cwd.clone(),
     )
-    .with_mod_settings_reader(Arc::new(super::settings_commands::MobileModSettingsReader::new(
-        cfg.lingxi_home.clone(), cwd.clone(),
-    )))
+    .with_mod_settings_reader(Arc::new(
+        super::settings_commands::MobileModSettingsReader::new(
+            mod_settings_reader_paths,
+            mod_settings_active.clone(),
+            mod_settings_managed.clone(),
+        ),
+    ))
     .with_hook_agent_inheritance(parked_agent_restore_inheritance.clone())
     .with_dynamic_workflows_gate(dynamic_workflows_gate)
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())
@@ -2699,6 +2721,8 @@ pub(super) async fn build_mobile_inner_with_ask(
 
     Ok(MobileRuntime {
         provider_region,
+        settings_active: mod_settings_active,
+        settings_managed: mod_settings_managed,
         audio_services,
         audio_credential_ids,
         interactive_launch,
@@ -3209,17 +3233,10 @@ pub fn build_mobile_engine_inner(
         lingxi_home: lingxi_home.clone(),
         project_dir: std::path::PathBuf::from(&session_cwd),
     };
-    let managed = std::collections::BTreeMap::new();
-    let mut active =
-        ::configuration_admin::settings_bridge::active_settings_baseline(&settings_paths, &managed);
-    active.insert(
-        "providerRegion".into(),
-        serde_json::to_value(inner.provider_region).expect("region serializes"),
-    );
     let settings = Some(::configuration_admin::settings_bridge::SettingsContext {
         paths: settings_paths,
-        active: Arc::new(std::sync::RwLock::new(active)),
-        managed,
+        active: inner.settings_active.clone(),
+        managed: inner.settings_managed.clone(),
     });
     let handle = Arc::new(MobileEngineHandle {
         session_cron,

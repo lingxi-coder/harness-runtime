@@ -310,15 +310,6 @@ impl Presentation {
         matches!(self, Self::Shown { .. } | Self::Accepted { .. })
     }
 
-    pub(crate) fn text(&self) -> Option<&str> {
-        match self {
-            Self::Empty => None,
-            Self::Generated { text, .. }
-            | Self::Shown { text, .. }
-            | Self::Accepted { text, .. } => Some(text),
-        }
-    }
-
     pub(crate) fn mark_shown(&mut self, now_ms: f64) {
         if let Self::Generated {
             text,

@@ -122,17 +122,36 @@ fn initialize_and_remote_reattach_match_native_opt_in_policy() {
 
 #[test]
 fn pause_validation_matches_native_no_provider_control_capture() {
+    fn parse_raw(value: Option<&str>) -> Result<bool, String> {
+        let Some(value) = value else {
+            return parse_paused(None);
+        };
+        let frame = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&format!(
+            "{{\"paused\":{value}}}"
+        ))
+        .unwrap();
+        parse_paused(frame.get_property("paused"))
+    }
+
     for (value, received) in [
         (None, "undefined"),
-        (Some(Value::Null), "null"),
-        (Some(json!("yes")), "string"),
-        (Some(json!(0)), "number"),
-        (Some(json!([])), "array"),
-        (Some(json!({})), "object"),
+        (Some("null"), "null"),
+        (Some("\"yes\""), "string"),
+        (Some("0"), "number"),
+        (Some("[]"), "array"),
+        (Some("{}"), "object"),
     ] {
-        assert_eq!(parse_paused(value.as_ref()).unwrap_err(),
+        assert_eq!(parse_raw(value).unwrap_err(),
             format!("Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received {received}"));
     }
-    assert_eq!(parse_paused(Some(&json!(true))), Ok(true));
-    assert_eq!(parse_paused(Some(&json!(false))), Ok(false));
+    assert_eq!(parse_raw(Some("true")), Ok(true));
+    assert_eq!(parse_raw(Some("false")), Ok(false));
+
+    let isolated_surrogate =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"{"paused":"\ud800"}"#)
+            .unwrap();
+    assert_eq!(
+        parse_paused(isolated_surrogate.get_property("paused")).unwrap_err(),
+        "Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received string"
+    );
 }

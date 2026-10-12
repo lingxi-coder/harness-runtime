@@ -21,6 +21,10 @@ fn setting_string(source: &Utf16JsonProjection, pointer: &str) -> Option<String>
     String::from_utf16(&source.string_units(pointer)?).ok()
 }
 
+fn setting_bool(source: &Utf16JsonProjection, pointer: &str) -> Option<bool> {
+    source.at_pointer(pointer).and_then(|value| value.as_bool())
+}
+
 fn setting_array(source: &Utf16JsonProjection, pointer: &str) -> Option<Utf16JsonProjection> {
     if source.at_pointer(pointer).is_none() {
         return None;

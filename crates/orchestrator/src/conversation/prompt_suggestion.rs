@@ -559,12 +559,12 @@ impl ConversationOrchestrator {
         let env = Self::suggestion_env();
         let enabled = if sdk {
             self.initialize_prompt_suggestions().await;
+            let settings = self.suggestion_settings().await;
             controls::explicit_enablement(
                 env,
-                self.suggestion_settings()
-                    .await
-                    .get("promptSuggestionEnabled")
-                    .and_then(Value::as_bool),
+                settings
+                    .at_pointer("/promptSuggestionEnabled")
+                    .and_then(|value| value.as_bool()),
             )
         } else {
             self.initialize_prompt_suggestions().await
@@ -734,8 +734,8 @@ impl ConversationOrchestrator {
             || self
                 .suggestion_settings()
                 .await
-                .get("disableAllHooks")
-                .and_then(Value::as_bool)
+                .at_pointer("/disableAllHooks")
+                .and_then(|value| value.as_bool())
                 == Some(true)
         {
             return;
