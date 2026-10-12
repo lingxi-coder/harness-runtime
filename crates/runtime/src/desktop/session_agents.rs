@@ -98,7 +98,19 @@ pub fn first_corrupt_transcript_line(raw: &[u8]) -> Option<usize> {
             if line.is_empty() {
                 return None;
             }
-            let valid = transcript_message(line).is_some();
+            let valid = transcript_message(line).is_some()
+                || std::str::from_utf8(line)
+                    .ok()
+                    .and_then(|source| Utf16JsonProjection::parse(source).ok())
+                    .is_some_and(|row| {
+                        // A typed announcement without a model projection
+                        // persists only its attachment payload. Keep source
+                        // UTF-16 intact when validating that record too.
+                        row.string_at("/type") == Some("attachment")
+                            && row
+                                .get_property("message")
+                                .is_some_and(|value| value.is_null())
+                    });
             (!valid).then_some(index + 1)
         })
 }
@@ -1193,6 +1205,28 @@ mod tests {
         assert_eq!(
             first_corrupt_transcript_line(format!("{valid}\nnot-json").as_bytes()),
             None,
+        );
+    }
+
+    #[test]
+    fn transcript_validation_accepts_attachment_rows_without_a_message() {
+        let message =
+            ConversationMessage::user(lingxi_core::types::MessageId::new(), "hello".to_string());
+        let valid = serde_json::json!({"message": message}).to_string();
+        let announcement = serde_json::json!({
+            "type": "attachment",
+            "message": null,
+            "attachment": {"type": "session_context"},
+        })
+        .to_string();
+        let raw = format!("{valid}\n{announcement}\n{valid}\n");
+        assert_eq!(first_corrupt_transcript_line(raw.as_bytes()), None);
+        assert_eq!(parse_transcript_messages(raw.as_bytes()).len(), 2);
+
+        let untyped = serde_json::json!({"message": null}).to_string();
+        assert_eq!(
+            first_corrupt_transcript_line(format!("{valid}\n{untyped}\n").as_bytes()),
+            Some(2),
         );
     }
 
