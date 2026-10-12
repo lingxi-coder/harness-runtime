@@ -3902,7 +3902,6 @@ mod session_sidecar_tests {
         copy_then_cleanup_with, move_session_sidecar_best_effort, parse_prompt_suggestion_response,
         SidecarCopyError,
     };
-    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
     #[test]
     fn occupied_sidecar_destination_is_quarantined_while_source_moves_as_a_unit() {

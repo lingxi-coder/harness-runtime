@@ -168,6 +168,7 @@ pub struct HeadlessExit {
 pub(crate) struct HeadlessRuntime {
     inner: crate::desktop::DesktopRuntime,
     pub(crate) services: Arc<dyn HeadlessHostServices>,
+    prompt_suggestions: Arc<run::suggestions::SdkPromptSuggestions>,
     native_catalog_user_agent: Option<llm_runtime::model::user_agent::UserAgentEnv>,
     pub(crate) output: io::Output,
     pub(crate) stdout: io::Output,
@@ -678,6 +679,9 @@ async fn run_owned(
     let runtime = Arc::new(HeadlessRuntime {
         inner,
         services,
+        prompt_suggestions: run::suggestions::SdkPromptSuggestions::new(
+            options.prompt_suggestions_enabled(),
+        ),
         native_catalog_user_agent: native_catalog_user_agent.clone(),
         output: io.stderr.clone(),
         stdout: io.stdout.clone(),

@@ -184,14 +184,12 @@ impl client::adapter::PermissionRequestSink for NoopPermissionSink {
 fn sandbox_config(audio: Option<DesktopAudio>) -> (tempfile::TempDir, DesktopConfig) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
-    let cfg = DesktopConfig {
-        cwd: cwd.clone(),
-        lingxi_home: cwd.join(".lingxi"),
-        isolated_credential_storage: true,
-        session_persistence: false,
-        audio,
-        ..DesktopConfig::default()
-    };
+    let mut cfg = DesktopConfig::default();
+    cfg.cwd = cwd.clone();
+    cfg.lingxi_home = cwd.join(".lingxi");
+    cfg.isolated_credential_storage = true;
+    cfg.session_persistence = false;
+    cfg.audio = audio;
     (tmp, cfg)
 }
 

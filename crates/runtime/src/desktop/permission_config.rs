@@ -826,7 +826,7 @@ pub async fn managed_model_allowlist(
 /// highest-priority tier that sets it wins. `Unset` when no policy pins login
 /// (the common case: login stays unrestricted). Read fresh at each login so a
 /// mid-session managed-settings edit takes effect on the next sign-in.
-pub async fn managed_force_login_org_pin(
+pub(super) async fn managed_force_login_org_pin(
     cache: &crate::desktop::settings_watch::ManagedPolicySnapshotCache,
 ) -> lingxi_core::settings::enterprise::ForceLoginOrgPin {
     let Some(managed) = cache.snapshot() else {

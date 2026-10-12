@@ -1,3 +1,5 @@
+//! Native prompt-suggestion classifier model-policy oracle tests.
+
 use llm_runtime::model::classifier_model_policy::*;
 use std::collections::BTreeMap;
 

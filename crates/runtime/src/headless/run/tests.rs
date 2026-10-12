@@ -1054,14 +1054,12 @@ pub(super) async fn fixture_runtime(
     let project = root.join("project");
     std::fs::create_dir_all(&project).unwrap();
     let services = Arc::new(FixtureHost);
-    let mut config = crate::desktop::DesktopConfig {
-        lingxi_home: root.join("home"),
-        cwd: project,
-        isolated_credential_storage: true,
-        use_noop_permission_gate: true,
-        composition: Some(crate::desktop::DesktopSessionComposition::HeadlessCli),
-        ..Default::default()
-    };
+    let mut config = crate::desktop::DesktopConfig::default();
+    config.lingxi_home = root.join("home");
+    config.cwd = project;
+    config.isolated_credential_storage = true;
+    config.use_noop_permission_gate = true;
+    config.composition = Some(crate::desktop::DesktopSessionComposition::HeadlessCli);
     crate::headless::host::configure_desktop_request_state(
         &mut config,
         services.as_ref(),
@@ -1089,6 +1087,7 @@ pub(super) async fn fixture_runtime(
     Runtime {
         inner,
         services,
+        prompt_suggestions: super::SdkPromptSuggestions::new(false),
         native_catalog_user_agent,
         output: crate::headless::io::Output::new(tokio::io::sink()),
         stdout: crate::headless::io::Output::new(tokio::io::sink()),

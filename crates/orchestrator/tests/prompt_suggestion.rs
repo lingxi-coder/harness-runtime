@@ -36,7 +36,7 @@ fn prompt_suggestion_matches_native_296_bytes_and_filters() {
 }
 
 use async_trait::async_trait;
-use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream, ToolResultProjection};
+use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream};
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ToolUseId};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, NoOpPermissionGate, StaticMemoryProvider,
@@ -55,22 +55,15 @@ struct SuggestionOutput {
 }
 #[async_trait]
 impl OutputStream for SuggestionOutput {
-    async fn emit_text(&self, _: &str, _: Option<&[u16]>) {}
-    async fn emit_tool_call(
-        &self,
-        _: &ToolUseId,
-        _: &str,
-        _: &serde_json::Value,
-        _: Option<&Utf16JsonProjection>,
-    ) {
-    }
+    async fn emit_text(&self, _: &Utf16JsonProjection) {}
+    async fn emit_tool_call(&self, _: &ToolUseId, _: &str, _: &Utf16JsonProjection) {}
     async fn emit_tool_result(
         &self,
         _: &ToolUseId,
         _: &str,
-        _: &str,
-        _: &serde_json::Value,
-        _: Option<&ToolResultProjection>,
+        _: &Utf16JsonProjection,
+        _: &Utf16JsonProjection,
+        _: Option<&Utf16JsonProjection>,
     ) {
     }
     async fn emit_end_turn(&self, _: &str, _: &CostSnapshot) {
@@ -199,10 +192,15 @@ async fn post_turn_suggestion_is_nonblocking_uses_parent_prefix_and_never_change
         assert_eq!(req.query_source, sidequery::QuerySource::PromptSuggestion);
         assert_eq!(req.model, "claude-sonnet-4-6");
         assert_eq!(
-            req.system_prompt.as_deref(),
-            Some(cached.system_prompt.as_ref())
+            req.system_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_units("")),
+            cached.system_prompt.string_units("")
         );
-        assert_eq!(req.tools, cached.tools);
+        assert_eq!(
+            req.tools,
+            llm_runtime::convert::to_tool_declarations(cached.tools.clone()).unwrap()
+        );
         assert_eq!(req.effort, cached.effort);
         assert_eq!(
             req.max_tokens,

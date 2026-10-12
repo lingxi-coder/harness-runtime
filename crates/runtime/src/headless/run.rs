@@ -48,7 +48,7 @@ mod control;
 mod fusion;
 mod lifecycle;
 mod result_holding;
-mod suggestions;
+pub(super) mod suggestions;
 
 fn init_host_metadata(runtime: &Runtime) -> StreamJsonInitHostMetadata {
     let present = |name: &str| {
@@ -862,7 +862,7 @@ async fn run_stream_json_print_inner(
             .await
         };
     let betas = argv.betas.clone().unwrap_or_default();
-    let prompt_suggestions = SdkPromptSuggestions::new(argv.prompt_suggestions_enabled());
+    let prompt_suggestions = runtime.prompt_suggestions.clone();
     let mut publisher = NativeQueryResultPublisher {
         runtime,
         stream: &stream,
@@ -1231,7 +1231,7 @@ async fn run_stream_json_input_loop_inner(
     let ctrl_services = runtime.services.clone();
     let ctrl_execution_errors = runtime.execution_errors.clone();
     let ctrl_auxiliary_tasks = auxiliary_tasks.clone();
-    let prompt_suggestions = SdkPromptSuggestions::new(argv.prompt_suggestions_enabled());
+    let prompt_suggestions = runtime.prompt_suggestions.clone();
     let ctrl_prompt_suggestions = prompt_suggestions.clone();
     auxiliary_tasks.push(tokio::spawn(async move {
         while let Some(frame) = control_req_rx.recv().await {

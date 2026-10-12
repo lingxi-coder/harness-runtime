@@ -414,11 +414,9 @@ mod tests {
         String,
     ) {
         let root = tempfile::tempdir().unwrap();
-        let config = DesktopConfig {
-            cwd: root.path().join("project"),
-            lingxi_home: root.path().join("home"),
-            ..DesktopConfig::default()
-        };
+        let mut config = DesktopConfig::default();
+        config.cwd = root.path().join("project");
+        config.lingxi_home = root.path().join("home");
         tokio::fs::create_dir_all(&config.cwd).await.unwrap();
         let source_id = Uuid::new_v4();
         let path = session::jsonl::session_path(
@@ -506,11 +504,9 @@ mod tests {
     #[tokio::test]
     async fn missing_resume_does_not_create_a_session() {
         let root = tempfile::tempdir().unwrap();
-        let mut config = DesktopConfig {
-            cwd: root.path().join("project"),
-            lingxi_home: root.path().join("home"),
-            ..DesktopConfig::default()
-        };
+        let mut config = DesktopConfig::default();
+        config.cwd = root.path().join("project");
+        config.lingxi_home = root.path().join("home");
         std::fs::create_dir_all(&config.cwd).unwrap();
         let id = Uuid::new_v4();
         let error = prepare(
@@ -532,11 +528,9 @@ mod tests {
 
     #[test]
     fn explicit_composition_does_not_follow_gate_shape() {
-        let config = DesktopConfig {
-            composition: Some(crate::desktop::DesktopSessionComposition::HeadlessCli),
-            use_noop_permission_gate: false,
-            ..DesktopConfig::default()
-        };
+        let mut config = DesktopConfig::default();
+        config.composition = Some(crate::desktop::DesktopSessionComposition::HeadlessCli);
+        config.use_noop_permission_gate = false;
         assert_eq!(
             config.session_composition(),
             crate::desktop::DesktopSessionComposition::HeadlessCli

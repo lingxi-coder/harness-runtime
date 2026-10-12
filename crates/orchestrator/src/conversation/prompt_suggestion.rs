@@ -934,3 +934,28 @@ impl ConversationOrchestrator {
         }
     }
 }
+
+#[cfg(test)]
+mod native_cache_cold_fixture_tests {
+    #[test]
+    fn cache_cold_matches_native_296_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/prompt_suggestion_2_1_296.json"
+        ))
+        .expect("Native prompt-suggestion fixture is valid JSON");
+        for case in fixture["coldCases"]
+            .as_array()
+            .expect("fixture contains cache-cold cases")
+        {
+            assert_eq!(
+                super::filter::prompt_suggestion_cache_is_cold(
+                    case["input"].as_u64().expect("input token count"),
+                    case["output"].as_u64().expect("output token count"),
+                    case["write"].as_u64().expect("cache-write token count"),
+                ),
+                case["expected"].is_string(),
+                "{case}"
+            );
+        }
+    }
+}

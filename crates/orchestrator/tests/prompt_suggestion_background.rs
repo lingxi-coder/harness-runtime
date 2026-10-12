@@ -76,7 +76,7 @@ fn background_pipeline_persists_only_the_classifiers_current_safe_reply() {
 
 async fn background_pipeline() {
     use async_trait::async_trait;
-    use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream, ToolResultProjection};
+    use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream};
     use lingxi_core::types::{ToolUseId, utf16_json::Utf16JsonProjection};
     use orchestrator::test_support::{
         NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
@@ -92,22 +92,15 @@ async fn background_pipeline() {
     }
     #[async_trait]
     impl OutputStream for Output {
-        async fn emit_text(&self, _: &str, _: Option<&[u16]>) {}
-        async fn emit_tool_call(
-            &self,
-            _: &ToolUseId,
-            _: &str,
-            _: &serde_json::Value,
-            _: Option<&Utf16JsonProjection>,
-        ) {
-        }
+        async fn emit_text(&self, _: &Utf16JsonProjection) {}
+        async fn emit_tool_call(&self, _: &ToolUseId, _: &str, _: &Utf16JsonProjection) {}
         async fn emit_tool_result(
             &self,
             _: &ToolUseId,
             _: &str,
-            _: &str,
-            _: &serde_json::Value,
-            _: Option<&ToolResultProjection>,
+            _: &Utf16JsonProjection,
+            _: &Utf16JsonProjection,
+            _: Option<&Utf16JsonProjection>,
         ) {
         }
         async fn emit_end_turn(&self, _: &str, _: &CostSnapshot) {}
@@ -180,9 +173,9 @@ async fn background_pipeline() {
     impl hooks::mods::ModSettingsReader for Settings {
         async fn read(
             &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, hooks::mods::ModError> {
-            Ok(self.0.lock().unwrap().clone())
+            _: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+            Ok(Utf16JsonProjection::plain(self.0.lock().unwrap().clone()))
         }
     }
     struct Client {
@@ -202,8 +195,10 @@ async fn background_pipeline() {
                     .system_blocks
                     .expect("classifier must retain explicit native system blocks");
                 assert_eq!(
-                    blocks[0].text,
-                    include_str!("../src/conversation/prompt_suggestion_classifier_prompt.txt")
+                    blocks[0].text.string_at(""),
+                    Some(include_str!(
+                        "../src/conversation/prompt_suggestion_classifier_prompt.txt"
+                    ))
                 );
                 assert_eq!(request.profile.as_deref(), Some("native-profile"));
                 assert!(request.system_prompt.is_none());
@@ -230,7 +225,12 @@ async fn background_pipeline() {
             } else {
                 self.query(request).await?
             };
-            let text = response.text.clone().unwrap_or_default();
+            let text = response
+                .text
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .unwrap_or_default()
+                .to_owned();
             Ok(sidequery::ForkedSideQueryResponse {
                 response,
                 assistant_content: vec![],

@@ -72,88 +72,88 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
     std::fs::create_dir_all(&lingxi_home).expect("mkdir .lingxi");
     std::fs::write(lingxi_home.join("settings.json"), settings_json).expect("write settings.json");
 
-    let cfg = DesktopConfig {
-        build_info: harness_runtime::desktop::BuildInfo::default(),
-        enable_automation_scheduler: true,
-        host_workspace_trusted: None,
-        mod_render_surface: None,
-        inline_visualization: false,
-        // Sandboxed boot: inherit no machine credentials, so the
-        // assertions do not depend on the developer's env/keychain.
-        isolated_credential_storage: true,
-        credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::PlainTextFixture,
-        api_base: "https://api.anthropic.com".to_string(),
-        anthropic_client_metadata: None,
-        api_key: String::new(),
-        api_key_source: llm_runtime::CredentialSource::Configured,
-        api_key_helper: None,
-        // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
-        // FD-inherited key.
-        managed_oauth_only: false,
-        anthropic_key_fd_present: false,
-        cwd: cwd.clone(),
-        lingxi_home,
-        default_model: "claude-sonnet-4-20250514".to_string(),
-        // Deterministic across host machines: a dev keychain with real provider
-        // keys must not trigger the connected-provider fallback mid-test.
-        default_model_explicit: true,
-        recent_models: Vec::new(),
-        fallback_model: None,
-        custom_betas: Vec::new(),
-        flag_settings: None,
-        provider_profiles: None,
-        routing: None,
-        mcp_paths: vec![cwd.join(".mcp.json")],
-        use_noop_permission_gate: true,
-        deny_unresolved_ask: false,
-        is_tty: false,
-        injected_permission_gate: None,
-        injected_plugin_secrets: Default::default(),
-        ask_user_question_tx: None,
-        computer_access_tx: None,
-        session_agent_observer: None,
-        audio: None,
-        session_started_as_coordinator: false,
-        initial_teammate_team_name: None,
-        memory_provider: None,
-        permission_mode: permission::PermissionMode::Default,
-        permission_mode_cli: None,
-        permission_mode_preference: None,
-        permission_mode_cli_explicit: false,
-        allow_dangerously_skip_permissions: false,
-        connect_prompt: None,
-        max_turns: None,
-        plan_mode_instructions: None,
-        max_budget_usd: None,
-        json_schema: None,
-        system_prompt_override: None,
-        append_system_prompt: None,
-        session_id_override: None,
-        session_writer_lease: None,
-        session_skill_allowlist: None,
-        disable_slash_commands: false,
-        add_dir: Vec::new(),
-        cli_mcp_servers: Vec::new(),
-        strict_mcp_config: false,
-        restricted: false,
-        restricted_tools: None,
-        exclude_dynamic_system_prompt_sections: false,
-        setting_source_scope: (true, true),
-        customization_gates: harness_runtime::desktop::CustomizationGates::default(),
-        session_persistence: true,
-        cli_agents_json: None,
-        cli_agent: None,
-        cli_plugin_dirs: Vec::new(),
-        initial_effort: None,
-        plans_directory: None,
-        default_model_env_pinned: false,
-        session_thinking: Default::default(),
-        parent_session_id: None,
-        bg_session_forker: None,
-        worktree_launch: None,
-        tmux_launch: None,
-        ..DesktopConfig::default()
-    };
+    // Sandboxed boot: inherit no machine credentials, so the assertions do
+    // not depend on the developer's env/keychain. Keep the fixture's original
+    // explicit values while allowing DesktopConfig to initialize its private
+    // policy-cache state.
+    let mut cfg = DesktopConfig::default();
+    cfg.build_info = harness_runtime::desktop::BuildInfo::default();
+    cfg.enable_automation_scheduler = true;
+    cfg.host_workspace_trusted = None;
+    cfg.mod_render_surface = None;
+    cfg.inline_visualization = false;
+    cfg.isolated_credential_storage = true;
+    cfg.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::PlainTextFixture;
+    cfg.api_base = "https://api.anthropic.com".to_string();
+    cfg.anthropic_client_metadata = None;
+    cfg.api_key = String::new();
+    cfg.api_key_source = llm_runtime::CredentialSource::Configured;
+    cfg.api_key_helper = None;
+    // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
+    // FD-inherited key.
+    cfg.managed_oauth_only = false;
+    cfg.anthropic_key_fd_present = false;
+    cfg.cwd = cwd.clone();
+    cfg.lingxi_home = lingxi_home;
+    // Deterministic across host machines: a dev keychain with real provider
+    // keys must not trigger the connected-provider fallback mid-test.
+    cfg.default_model = "claude-sonnet-4-20250514".to_string();
+    cfg.default_model_explicit = true;
+    cfg.recent_models = Vec::new();
+    cfg.fallback_model = None;
+    cfg.custom_betas = Vec::new();
+    cfg.flag_settings = None;
+    cfg.provider_profiles = None;
+    cfg.routing = None;
+    cfg.mcp_paths = vec![cwd.join(".mcp.json")];
+    cfg.use_noop_permission_gate = true;
+    cfg.deny_unresolved_ask = false;
+    cfg.is_tty = false;
+    cfg.injected_permission_gate = None;
+    cfg.injected_plugin_secrets = Default::default();
+    cfg.ask_user_question_tx = None;
+    cfg.computer_access_tx = None;
+    cfg.session_agent_observer = None;
+    cfg.audio = None;
+    cfg.session_started_as_coordinator = false;
+    cfg.initial_teammate_team_name = None;
+    cfg.memory_provider = None;
+    cfg.permission_mode = permission::PermissionMode::Default;
+    cfg.permission_mode_cli = None;
+    cfg.permission_mode_preference = None;
+    cfg.permission_mode_cli_explicit = false;
+    cfg.allow_dangerously_skip_permissions = false;
+    cfg.connect_prompt = None;
+    cfg.max_turns = None;
+    cfg.plan_mode_instructions = None;
+    cfg.max_budget_usd = None;
+    cfg.json_schema = None;
+    cfg.system_prompt_override = None;
+    cfg.append_system_prompt = None;
+    cfg.session_id_override = None;
+    cfg.session_writer_lease = None;
+    cfg.session_skill_allowlist = None;
+    cfg.disable_slash_commands = false;
+    cfg.add_dir = Vec::new();
+    cfg.cli_mcp_servers = Vec::new();
+    cfg.strict_mcp_config = false;
+    cfg.restricted = false;
+    cfg.restricted_tools = None;
+    cfg.exclude_dynamic_system_prompt_sections = false;
+    cfg.setting_source_scope = (true, true);
+    cfg.customization_gates = harness_runtime::desktop::CustomizationGates::default();
+    cfg.session_persistence = true;
+    cfg.cli_agents_json = None;
+    cfg.cli_agent = None;
+    cfg.cli_plugin_dirs = Vec::new();
+    cfg.initial_effort = None;
+    cfg.plans_directory = None;
+    cfg.default_model_env_pinned = false;
+    cfg.session_thinking = Default::default();
+    cfg.parent_session_id = None;
+    cfg.bg_session_forker = None;
+    cfg.worktree_launch = None;
+    cfg.tmux_launch = None;
     (tmp, cfg)
 }
 

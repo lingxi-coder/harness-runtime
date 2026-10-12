@@ -853,7 +853,7 @@ impl SettingsPaths {
 /// Incomplete policy selection closes the gate rather than being treated as
 /// absent; otherwise the selector's effective value is authoritative.
 #[must_use]
-pub fn auto_mode_disabled_from_policy(snapshot: &ManagedSettingsSnapshot) -> bool {
+fn auto_mode_disabled_from_policy(snapshot: &ManagedSettingsSnapshot) -> bool {
     if snapshot.read_failed() {
         return true;
     }
@@ -1071,7 +1071,10 @@ impl SettingsWatcher {
     /// session policy snapshot, replacing it after every watched settings
     /// event (including all local PolicySettings and macOS plist paths).
     #[must_use]
-    pub fn with_managed_policy_snapshot_cache(mut self, cache: ManagedPolicySnapshotCache) -> Self {
+    pub(super) fn with_managed_policy_snapshot_cache(
+        mut self,
+        cache: ManagedPolicySnapshotCache,
+    ) -> Self {
         self.managed_policy_snapshot_cache = Some(cache);
         self
     }

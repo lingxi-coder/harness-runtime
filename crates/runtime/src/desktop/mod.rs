@@ -1782,7 +1782,7 @@ fn resolve_workflow_session_enabled(
 /// [`register_core_batch_1`] + [`register_core_batch_2`] overwrite the wired
 /// core handlers with their orchestrator/auth-bound implementations.
 #[must_use]
-pub async fn desktop_command_registry(
+async fn desktop_command_registry(
     handle: Arc<dyn OrchestratorHandle>,
     auth: Arc<dyn AuthHandle>,
     cwd: &std::path::Path,
@@ -4295,18 +4295,18 @@ async fn load_plugin_configs(
     if managed_snapshot.read_failed() {
         return std::collections::HashMap::new();
     }
-    for raw in managed_snapshot.effective_json() {
-        let (Ok(typed), Ok(source)) = (
+    if let Some(raw) = managed_snapshot.effective_json() {
+        if let (Ok(typed), Ok(source)) = (
             serde_json::from_str::<lingxi_core::settings::SettingsJson>(&raw),
             Utf16JsonProjection::parse(&raw),
-        ) else {
-            continue;
-        };
-        if typed.validate().is_ok() {
-            if let Ok(configs) = source.subprojection("/pluginConfigs") {
-                for (plugin, cfg) in plugin::PluginUserConfig::from_plugin_configs_source(&configs)
-                {
-                    merged.insert(plugin, cfg);
+        ) {
+            if typed.validate().is_ok() {
+                if let Ok(configs) = source.subprojection("/pluginConfigs") {
+                    for (plugin, cfg) in
+                        plugin::PluginUserConfig::from_plugin_configs_source(&configs)
+                    {
+                        merged.insert(plugin, cfg);
+                    }
                 }
             }
         }
@@ -4323,20 +4323,18 @@ fn load_managed_plugin_names(
     if managed_snapshot.read_failed() {
         return managed;
     }
-    for raw in managed_snapshot.effective_json() {
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
-        };
-        let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) else {
-            continue;
-        };
-        for (key, value) in map {
-            if !value.as_bool().unwrap_or(false) {
-                continue;
-            }
-            let name = key.split('@').next().unwrap_or(key);
-            if !name.is_empty() {
-                managed.insert(name.to_string());
+    if let Some(raw) = managed_snapshot.effective_json() {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) {
+                for (key, value) in map {
+                    if !value.as_bool().unwrap_or(false) {
+                        continue;
+                    }
+                    let name = key.split('@').next().unwrap_or(key);
+                    if !name.is_empty() {
+                        managed.insert(name.to_string());
+                    }
+                }
             }
         }
     }
@@ -4473,19 +4471,17 @@ fn load_blocked_marketplaces(
     if managed_snapshot.read_failed() {
         return blocked;
     }
-    for raw in managed_snapshot.effective_json() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
-        };
-        let Some(entries) = value.get("blockedMarketplaces").and_then(|v| v.as_array()) else {
-            continue;
-        };
-        blocked = entries
-            .iter()
-            .filter_map(|entry| entry.as_str())
-            .filter(|entry| !entry.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
+    if let Some(raw) = managed_snapshot.effective_json() {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(entries) = value.get("blockedMarketplaces").and_then(|v| v.as_array()) {
+                blocked = entries
+                    .iter()
+                    .filter_map(|entry| entry.as_str())
+                    .filter(|entry| !entry.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+        }
     }
     blocked
 }
@@ -6129,7 +6125,7 @@ use permission_config::lingxi_temp_dir;
 #[cfg(test)]
 use permission_config::load_boot_permission_tiers_with_flag;
 use permission_config::load_boot_permission_tiers_with_policy_snapshot;
-pub use permission_config::managed_force_login_org_pin;
+use permission_config::managed_force_login_org_pin;
 pub use permission_config::managed_model_allowlist;
 use permission_config::managed_model_policy_source;
 use permission_config::managed_model_setting_for_config;

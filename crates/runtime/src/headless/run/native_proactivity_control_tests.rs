@@ -48,6 +48,7 @@ async fn dispatch(
         "off",
         None,
         &StreamFileSuggestionIndex::default(),
+        &runtime.prompt_suggestions,
         runtime.services.as_ref(),
         &Arc::new(super::PrintAuxTaskGroup::default()),
         &Arc::new(std::sync::Mutex::new(Vec::new())),

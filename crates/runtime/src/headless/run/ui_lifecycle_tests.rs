@@ -94,6 +94,7 @@ async fn dispatch(
             "off",
             None,
             &StreamFileSuggestionIndex::default(),
+            &runtime.prompt_suggestions,
             runtime.services.as_ref(),
             owner,
             &runtime.execution_errors,

@@ -254,14 +254,12 @@ mod tests {
                 extra_metadata: None,
             }),
         };
-        let mut config = DesktopConfig {
-            user_agent_environment: Some(llm_runtime::model::user_agent::UserAgentEnv {
-                user_type: Some("ambient-sentinel".into()),
-                entrypoint: Some("ambient-entrypoint".into()),
-                ..Default::default()
-            }),
+        let mut config = DesktopConfig::default();
+        config.user_agent_environment = Some(llm_runtime::model::user_agent::UserAgentEnv {
+            user_type: Some("ambient-sentinel".into()),
+            entrypoint: Some("ambient-entrypoint".into()),
             ..Default::default()
-        };
+        });
         configure_desktop_request_state(&mut config, &host, &Default::default());
         let ua = config.user_agent_environment.as_ref().unwrap();
         assert_eq!(
@@ -356,13 +354,11 @@ mod tests {
             environment: HashMap::new(),
             identity: None,
         };
-        let mut config = DesktopConfig {
-            request_identity: Some(DesktopRequestIdentity {
-                device_id: "prior-install".into(),
-                ..Default::default()
-            }),
+        let mut config = DesktopConfig::default();
+        config.request_identity = Some(DesktopRequestIdentity {
+            device_id: "prior-install".into(),
             ..Default::default()
-        };
+        });
         configure_desktop_request_state(&mut config, &host, &Default::default());
         assert!(config.request_identity.is_none());
         assert_eq!(

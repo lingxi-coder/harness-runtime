@@ -862,14 +862,12 @@ mod tests {
         let root = tempfile::tempdir().expect("isolated desktop root");
         let cwd = root.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        let mut config = DesktopConfig {
-            cwd: cwd.clone(),
-            lingxi_home: root.path().join("home"),
-            isolated_credential_storage: true,
-            use_noop_permission_gate: true,
-            composition: Some(DesktopSessionComposition::HeadlessCli),
-            ..Default::default()
-        };
+        let mut config = DesktopConfig::default();
+        config.cwd = cwd.clone();
+        config.lingxi_home = root.path().join("home");
+        config.isolated_credential_storage = true;
+        config.use_noop_permission_gate = true;
+        config.composition = Some(DesktopSessionComposition::HeadlessCli);
         let prepared = session::prepare(&mut config, &crate::headless::SessionStart::New)
             .await
             .expect("new session preparation");

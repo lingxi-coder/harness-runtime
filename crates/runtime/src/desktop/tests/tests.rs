@@ -3793,7 +3793,7 @@ impl crate::desktop::DesktopDiagnosticSink for RecordingDesktopDiagnostics {
 
 #[tokio::test]
 async fn startup_mcp_warning_uses_only_the_injected_diagnostic_sink() {
-    let (_tmp, cfg) = test_config(true);
+    let (_tmp, mut cfg) = test_config(true);
     cfg.isolated_credential_storage = true;
     cfg.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::PlainTextFixture;
     cfg.defer_session_start = true;
@@ -4184,7 +4184,7 @@ async fn init_git_repo_for_worktree_launch_test(dir: &std::path::Path) {
 #[tokio::test]
 async fn build_constructs_runtime_deterministically() {
     use lingxi_core::host::OrchestratorHandle as _;
-    let (_tmp, mut cfg) = test_config(true);
+    let (_tmp, cfg) = test_config(true);
     let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =

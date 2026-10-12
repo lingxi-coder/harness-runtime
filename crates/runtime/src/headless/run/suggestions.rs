@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Session-owned counterpart of native `HS`. A new input cancels speculation;
 /// the 30-second bound applies only when the SDK input stream settles.
-pub(super) struct SdkPromptSuggestions {
+pub(in crate::headless) struct SdkPromptSuggestions {
     state: Mutex<SdkSuggestionRuntimeState>,
 }
 
@@ -20,7 +20,7 @@ struct SdkSuggestionRuntimeState {
 }
 
 impl SdkPromptSuggestions {
-    pub(super) fn new(enabled: bool) -> Arc<Self> {
+    pub(in crate::headless) fn new(enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(SdkSuggestionRuntimeState {
                 machine: SdkPromptSuggestionState::new(enabled),
@@ -321,12 +321,12 @@ mod sdk_controller_tests {
         assert_eq!(started["type"], "system");
         assert_eq!(started["subtype"], "task_started");
         assert_eq!(started["task_id"], task);
-        let escaped = tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            lines.next_line(),
-        )
-        .await;
-        assert!(escaped.is_err(), "neither the result nor its suggestion escapes the hold: {escaped:?}");
+        let escaped =
+            tokio::time::timeout(std::time::Duration::from_millis(10), lines.next_line()).await;
+        assert!(
+            escaped.is_err(),
+            "neither the result nor its suggestion escapes the hold: {escaped:?}"
+        );
         runtime
             .task_registry
             .set_status(&task, tasks::TaskStatus::Completed)
