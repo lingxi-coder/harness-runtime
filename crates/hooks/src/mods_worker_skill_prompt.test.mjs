@@ -18,6 +18,7 @@ async function startWorker(t) {
   });
 
   const pending = new Map();
+  const pendingCoreEventNames = [];
   const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
     const frame = decodeModsIpcFrame(line);
@@ -28,6 +29,7 @@ async function startWorker(t) {
       return;
     }
     if (frame.kind === 'next') {
+      pendingCoreEventNames.push(frame.event);
       worker.stdin.write(`${encodeModsIpcFrame({
         id: frame.id, kind: 'next.result', callId: frame.callId,
         result: { text: frame.input.text },
@@ -75,7 +77,7 @@ async function startWorker(t) {
     assert.equal(loaded.kind, 'loaded', JSON.stringify(loaded));
   }
 
-  return { load, request };
+  return { load, request, pendingCoreEventNames };
 }
 
 test('skill.prompt uses exact skill matching and preserves UTF-16 source strings', async t => {
@@ -148,7 +150,201 @@ test('skill.prompt materializes inherited and getter text at the worker IPC boun
   }
 });
 
-test('skill.prompt pins skill across next and next.to and rejects malformed result text', async t => {
+test('skill.prompt matches Native check, measure, and final text reads', async t => {
+  const { load, request } = await startWorker(t);
+  await load(String.raw`
+    function resultWithTextReads(readText) {
+      let textReads = 0;
+      const result = Object.create({
+        get text() { textReads++; return readText(textReads); },
+      });
+      Object.defineProperty(result, 'textReads', {
+        enumerable: true,
+        get: () => textReads,
+      });
+      return result;
+    }
+
+    export function register(on) {
+      on('skill.prompt', { skill: 'insights' }, async (_api, event, next) => {
+        if (event.text === 'next-same-getter') return await next(event);
+        if (event.text === 'third-throws') {
+          return resultWithTextReads(reads => {
+            if (reads === 3) throw new Error('third text getter read');
+            return 'rewritten';
+          });
+        }
+        if (event.text === 'third-is-original') {
+          return resultWithTextReads(reads => reads <= 2 ? 'intermediate' : event.text);
+        }
+        if (event.text === 'fourth-is-output') {
+          return resultWithTextReads(reads => reads <= 2 ? 'intermediate'
+            : reads === 3 ? 'comparison' : 'final output');
+        }
+        return { text: event.text };
+      });
+      on('skill.prompt', { skill: 'insights' }, (_api, event) => {
+        if (event.text !== 'next-same-getter') return { text: event.text };
+        return resultWithTextReads(reads => reads === 7 ? 'final output' : 'intermediate');
+      });
+    }
+  `);
+
+  const thirdThrows = await request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'third-throws' },
+  });
+  assert.equal(thirdThrows.kind, 'error', JSON.stringify(thirdThrows));
+  assert.match(thirdThrows.message, /third text getter read/);
+
+  const thirdIsOriginal = await request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'third-is-original' },
+  });
+  assert.equal(thirdIsOriginal.kind, 'result', JSON.stringify(thirdIsOriginal));
+  assert.deepEqual(thirdIsOriginal.result, { textReads: 3, text: 'third-is-original' });
+
+  const fourthIsOutput = await request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'fourth-is-output' },
+  });
+  assert.equal(fourthIsOutput.kind, 'result', JSON.stringify(fourthIsOutput));
+  assert.deepEqual(fourthIsOutput.result, { textReads: 4, text: 'final output' });
+
+  const nextSameGetter = await request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'next-same-getter' },
+  });
+  assert.equal(nextSameGetter.kind, 'result', JSON.stringify(nextSameGetter));
+  assert.deepEqual(nextSameGetter.result, { textReads: 7, text: 'final output' });
+});
+
+test('skill.prompt next preserves Native accessor arguments through normalization and downstream use', async t => {
+  const { load, request } = await startWorker(t);
+  await load(String.raw`
+    let forwardedTextReads = () => 0;
+    function resultFor(text) {
+      const result = { text };
+      Object.defineProperty(result, 'forwardedTextReads', {
+        enumerable: true,
+        get: () => forwardedTextReads(),
+      });
+      return result;
+    }
+
+    export function register(on) {
+      on('skill.prompt', { skill: 'insights' }, async (_api, event, next) => {
+        if (event.text === 'class-forwarded') {
+          let reads = 0;
+          forwardedTextReads = () => reads;
+          const argument = new (class {
+            constructor() { this.skill = event.skill; }
+            get text() { reads++; return 'class-' + reads; }
+          })();
+          return await next(argument);
+        }
+        if (event.text === 'plain-forwarded') {
+          let reads = 0;
+          forwardedTextReads = () => reads;
+          const argument = { skill: event.skill };
+          Object.defineProperty(argument, 'text', {
+            enumerable: true,
+            get() { reads++; return 'plain-' + reads; },
+          });
+          return await next(argument);
+        }
+        return { text: event.text };
+      });
+      on('skill.prompt', { skill: 'insights' }, (_api, event) => {
+        const text = event.text;
+        if (text === 'class-3' || text === 'plain-1') return resultFor(text);
+        return { text };
+      });
+    }
+  `);
+
+  const classGetter = await request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'class-forwarded' },
+  });
+  assert.equal(classGetter.kind, 'result', JSON.stringify(classGetter));
+  assert.deepEqual(classGetter.result, { text: 'class-3', forwardedTextReads: 4 });
+
+  const plainOwnGetter = await request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'plain-forwarded' },
+  });
+  assert.equal(plainOwnGetter.kind, 'result', JSON.stringify(plainOwnGetter));
+  assert.deepEqual(plainOwnGetter.result, { text: 'plain-1', forwardedTextReads: 1 });
+});
+
+test('skill.prompt next and next.to(core) use the Native terminal text-only result', async t => {
+  const source = String.raw`
+    export function register(on) {
+      on('skill.prompt', { skill: 'insights' }, async (_api, event, next) => {
+        if (event.text === 'normal-core') {
+          let reads = 0;
+          const argument = new (class {
+            constructor() { this.skill = event.skill; }
+            get text() { reads++; return 'normal-' + reads; }
+          })();
+          return await next(argument);
+        }
+        if (event.text === 'hop-core') {
+          let reads = 0;
+          const argument = new (class {
+            constructor() { this.skill = event.skill; }
+            get text() { reads++; return 'hop-' + reads; }
+          })();
+          return await next.to(argument, 'core');
+        }
+        return { text: event.text };
+      });
+    }
+  `;
+
+  const normal = await startWorker(t);
+  await normal.load(source, 'user');
+  const normalCore = await normal.request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'normal-core' },
+  });
+  assert.equal(normalCore.kind, 'result', JSON.stringify(normalCore));
+  assert.deepEqual(normalCore.result, { text: 'normal-3' });
+  assert.deepEqual(Object.keys(normalCore.result), ['text']);
+  assert.equal(normal.pendingCoreEventNames.includes('skill.prompt'), false);
+
+  const hop = await startWorker(t);
+  await hop.load(source, 'append');
+  const hopCore = await hop.request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'hop-core' },
+  });
+  assert.equal(hopCore.kind, 'result', JSON.stringify(hopCore));
+  assert.deepEqual(hopCore.result, { text: 'hop-1' });
+  assert.deepEqual(Object.keys(hopCore.result), ['text']);
+  assert.equal(hop.pendingCoreEventNames.includes('skill.prompt'), false);
+});
+
+test('skill.prompt next.to(core) preserves Native null-read and result-shape error order', async t => {
+  const { load, request, pendingCoreEventNames } = await startWorker(t);
+  await load(String.raw`
+    export function register(on) {
+      on('skill.prompt', { skill: 'insights' }, async (_api, event, next) => {
+        if (event.text === 'core-null') return await next.to(null, 'core');
+        if (event.text === 'core-number') return await next.to(42, 'core');
+        return { text: event.text };
+      });
+    }
+  `, 'prepend');
+
+  const nullEvent = await request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'core-null' },
+  });
+  assert.equal(nullEvent.kind, 'error', JSON.stringify(nullEvent));
+  assert.match(nullEvent.message, /TypeError:.*event\.text/);
+
+  const numberEvent = await request({
+    kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text: 'core-number' },
+  });
+  assert.equal(numberEvent.kind, 'error', JSON.stringify(numberEvent));
+  assert.match(numberEvent.message, /core: returned no \{ text \} \(a string\)/);
+  assert.deepEqual(pendingCoreEventNames, []);
+});
+
+test('skill.prompt pins next arguments, follows next.to(core), and rejects malformed result text', async t => {
   const { load, request } = await startWorker(t);
   await load(String.raw`
     export function register(on) {
@@ -168,7 +364,7 @@ test('skill.prompt pins skill across next and next.to and rejects malformed resu
     }
   `, 'prepend');
 
-  for (const [text, expected] of [['next', 'next-pinned'], ['next.to', 'next.to-pinned']]) {
+  for (const [text, expected] of [['next', 'next-pinned'], ['next.to', 'next.to']]) {
     const pinned = await request({
       kind: 'dispatch', event: 'skill.prompt', input: { skill: 'insights', text },
     });

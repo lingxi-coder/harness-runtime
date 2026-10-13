@@ -2,6 +2,7 @@ import { createInterface } from 'node:readline';
 import { resolve, isAbsolute, posix as posixPath, win32 as win32Path } from 'node:path';
 import { SourceTextModule, Script, createContext } from 'node:vm';
 import { randomUUID } from 'node:crypto';
+import { isProxy } from 'node:util/types';
 import { pathToFileURL } from 'node:url';
 import { ClientSurfaceManager } from './mod_ui_client_worker.mjs';
 import { decodeModsIpcFrame, encodeModsIpcFrame } from './mods_ipc_codec.mjs';
@@ -114,11 +115,25 @@ function send(message) {
   process.stdout.write(`${encodeModsIpcFrame(message)}\n`);
 }
 
-function materializeSkillPromptIpcResult(result) {
-  // Native consumes accessible text directly, including prototype getters.
-  // Preserve enumerable fields while preventing JSON hooks from hiding it.
-  if (result === null || typeof result !== 'object' || Array.isArray(result)) return result;
+function measureSkillPromptResult(input, result, downstream) {
+  // Native's skill.prompt site measures text after validating each ordinary
+  // handler result. Keep the property reads and their order before IPC turns
+  // accessors into data properties.
   const text = result.text;
+  const originalText = input.text;
+  const downstreamTexts = downstream.map(answer => answer.text);
+  return typeof text === 'string' && ![originalText, ...downstreamTexts].includes(text)
+    ? text.length : 0;
+}
+
+function materializeSkillPromptIpcResult(result, originalText) {
+  // Native Err compares the hook text with the original body, then reads it
+  // again only when it will emit a replacement body. Snapshot that final
+  // scalar result before JSON IPC erases prototype getters.
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) return result;
+  const comparedText = result.text;
+  if (typeof comparedText !== 'string') return result;
+  const text = comparedText === originalText ? comparedText : result.text;
   if (typeof text !== 'string') return result;
 
   const own = Object.create(null);
@@ -1438,6 +1453,57 @@ function skillPromptForwarded(original, forwarded) {
     && typeof original.skill === 'string' && typeof original.text === 'string'
     && forwarded && typeof forwarded === 'object' && !Array.isArray(forwarded)
     && forwarded.skill === original.skill && typeof forwarded.text === 'string';
+}
+
+function nativeHookPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === null || !isProxy(prototype) && Object.getPrototypeOf(prototype) === null;
+}
+
+function cloneNativeHookArgument(value, copies = new Map()) {
+  if (value === null || typeof value !== 'object') return value;
+  if (copies.has(value)) return copies.get(value);
+  if (Array.isArray(value)) {
+    const copy = [];
+    copies.set(value, copy);
+    for (const item of value) copy.push(cloneNativeHookArgument(item, copies));
+    return copy;
+  }
+  if (!nativeHookPlainObject(value)) return value;
+  const copy = {};
+  copies.set(value, copy);
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(copy, key, {
+      value: cloneNativeHookArgument(value[key], copies),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return copy;
+}
+
+function prepareSkillPromptNextArgument(original, forwarded) {
+  if (forwarded === null || typeof forwarded !== 'object' || Array.isArray(forwarded)) {
+    return undefined;
+  }
+  const argument = Object.is(forwarded, original)
+    ? forwarded : cloneNativeHookArgument(forwarded);
+  const { skill, text } = argument;
+  if (typeof skill !== 'string' || skill !== original.skill || typeof text !== 'string') {
+    return undefined;
+  }
+
+  // Native ht calls checkArgument first, then measureArgument(fe(e.text,t.text)).
+  measureSkillPromptArgument(original, argument);
+  return argument;
+}
+
+function measureSkillPromptArgument(original, argument) {
+  const text = argument.text;
+  const originalText = original.text;
+  return typeof text === 'string' && text !== originalText ? text.length : 0;
 }
 
 function matches(pattern, value, depth = 0) {
@@ -3417,6 +3483,7 @@ async function dispatch(message) {
       : undefined;
     const allHookedBuiltin = message.event === 'command.run'
       && matchingHandlers.length > 0 && matchingHandlers.every(item => item.tier === 'builtin');
+    const nativeSkillPromptTerminalEvents = new Set();
     async function run(index, event, node) {
       if (controller.signal.aborted) throw new Error('dispatch cancelled');
       if (index === handlers.length) {
@@ -3430,7 +3497,9 @@ async function dispatch(message) {
           if (message.event === 'turn.complete' && !turnCompleteForwarded(message.input, event)) {
             throw new Error('turn.complete agentId is pinned and answer must be text');
           }
-          if (message.event === 'skill.prompt' && !skillPromptForwarded(message.input, event)) {
+          if (message.event === 'skill.prompt'
+              && !nativeSkillPromptTerminalEvents.has(event)
+              && !skillPromptForwarded(message.input, event)) {
             throw new Error('skill.prompt needs string skill and text fields');
           }
           if (message.event === 'prompt.submit' && !promptSubmitForwarded(message.input, event)) {
@@ -3608,6 +3677,12 @@ async function dispatch(message) {
                 returned = { handled: true, element: event.element, value: event.value };
               } finally { budget.finish(); }
             }
+          } else if (message.event === 'skill.prompt') {
+            // Native's terminal skill.prompt core handler returns only this projection.
+            returned = { text: event.text };
+            if (!validOperationResult(message.event, event, returned)) {
+              throw new Error('core: returned no { text } (a string)');
+            }
           } else {
             returned = await new Promise((accept, reject) => {
               const callId = nextCallId++;
@@ -3772,8 +3847,13 @@ async function dispatch(message) {
           nextEvent = turnCompleteForwarded(message.input, nextEvent);
           if (nextEvent === undefined) return Promise.reject(new Error('turn.complete agentId is pinned and answer must be text'));
         }
-        if (message.event === 'skill.prompt' && !skillPromptForwarded(event, nextEvent)) {
-          return Promise.reject(new Error('skill.prompt skill name is pinned and text must be text'));
+        if (message.event === 'skill.prompt') {
+          try { nextEvent = prepareSkillPromptNextArgument(event, nextEvent); }
+          catch (error) { return Promise.reject(error); }
+          if (nextEvent === undefined) {
+            return Promise.reject(new Error('skill.prompt skill name is pinned and text must be text'));
+          }
+          nativeSkillPromptTerminalEvents.add(nextEvent);
         }
         return continueBelow(nextEvent, index + 1);
       };
@@ -3861,8 +3941,10 @@ async function dispatch(message) {
           nextEvent = turnCompleteForwarded(message.input, nextEvent);
           if (nextEvent === undefined) return Promise.reject(new Error('turn.complete agentId is pinned and answer must be text'));
         }
-        if (message.event === 'skill.prompt' && !skillPromptForwarded(event, nextEvent)) {
-          return Promise.reject(new Error('skill.prompt skill name is pinned and text must be text'));
+        if (message.event === 'skill.prompt' && target !== 'core') {
+          if (!skillPromptForwarded(event, nextEvent)) {
+            return Promise.reject(new Error('skill.prompt skill name is pinned and text must be text'));
+          }
         }
         if (!['append', 'builtin', 'core'].includes(target)) {
           return Promise.reject(new Error(`${entry.plugin}: next.to names "${String(target)}", which is not a tier a dispatch continues at (append, builtin, core)`));
@@ -3887,6 +3969,10 @@ async function dispatch(message) {
           skipped = skipped.beneath;
           resume++;
         }
+        if (message.event === 'skill.prompt' && target === 'core') {
+          // Native's hop path reaches core without an argument check or measure.
+          nativeSkillPromptTerminalEvents.add(nextEvent);
+        }
         return continueBelow(nextEvent, resume, first, skipped);
       };
       next.event = message.event;
@@ -3909,6 +3995,9 @@ async function dispatch(message) {
         if (projectedAnswer === undefined
             || !validOperationResult(message.event, event, projectedAnswer, downstreamResults)) {
           throw new Error(`${entry.plugin}: returned the wrong shape`);
+        }
+        if (message.event === 'skill.prompt') {
+          measureSkillPromptResult(event, projectedAnswer, downstreamResults);
         }
         returned = message.event === 'prompt.context'
           ? restorePromptContext(projectedAnswer, lastNextResult ?? event)
@@ -3943,6 +4032,9 @@ async function dispatch(message) {
             if (projectedAnswer === undefined
                 || !validOperationResult(message.event, event, projectedAnswer, downstreamResults)) {
               throw new Error(`${entry.plugin}: .catch returned the wrong shape`);
+            }
+            if (message.event === 'skill.prompt') {
+              measureSkillPromptResult(event, projectedAnswer, downstreamResults);
             }
             returned = message.event === 'prompt.context'
               ? restorePromptContext(projectedAnswer, lastNextResult ?? event)
@@ -3993,7 +4085,7 @@ async function dispatch(message) {
       commitUiPressActions(message.input, uiRenderContext.renderRevision, result);
     }
     const ipcResult = message.event === 'skill.prompt'
-      ? materializeSkillPromptIpcResult(result) : result;
+      ? materializeSkillPromptIpcResult(result, message.input?.text) : result;
     send({ id: message.id, kind: 'result', result: ipcResult ?? null, hooked, allHookedBuiltin,
       ...(uiRenderPlugins ? { uiRenderPlugins } : {}),
       ...(uiRenderDurationMs === undefined ? {} : { uiRenderDurationMs }) });

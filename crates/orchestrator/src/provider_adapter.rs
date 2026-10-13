@@ -2155,6 +2155,59 @@ mod tests {
         make_adapter_with_session_tool_choice(transport, None, "claude-sonnet-4-20250514")
     }
 
+    fn make_codex_search_adapter(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
+        use llm_runtime::services::sdk;
+        use serde_json::json;
+
+        let mut profile: ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"open_ai",
+            "profile_name":"codex",
+            "base_url":"https://chatgpt.com/backend-api/codex",
+            "protocol":"open_ai_responses",
+            "auth":"none",
+            "credential":{"type":"none"},
+            "models":[{
+                "display_model":"gpt-search",
+                "request_model":"gpt-search",
+                "billing_model":"gpt-search",
+                "capabilities":{
+                    "streaming":true,"tools":true,"vision":false,"documents":false,
+                    "reasoning":false,"structured_output":false
+                }
+            }]
+        }))
+        .expect("valid Harness provider profile");
+        profile.protocol = ProtocolFamily::OpenAiResponses;
+        let mut wire_profile: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"openai-chatgpt",
+            "profile_name":"codex",
+            "base_url":"https://chatgpt.com/backend-api/codex",
+            "protocol":"open_ai_responses",
+            "auth":"none",
+            "models":[],
+            "extra":{"web_search":"openai_responses"}
+        }))
+        .expect("valid Codex wire profile");
+        wire_profile.regions = sdk::protocol::Region::all();
+        profile.wire_profile = Some(wire_profile);
+        let client = Arc::new(
+            ModelRuntime::from_config(ClientConfig {
+                providers: vec![profile],
+            })
+            .expect("valid Codex model runtime"),
+        );
+        let service = ApiService::new(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        );
+        ProviderApiAdapter::new(Arc::new(service))
+    }
+
     #[test]
     fn main_and_child_refusal_snapshots_share_current_route_facts_without_transport() {
         use lingxi_core::host::refusal_api_text::{
@@ -3610,6 +3663,56 @@ mod tests {
             assert_eq!(result.results.iter().any(|entry| matches!(entry, tool_api::hosted_search::SearchResultEntry::Text(text) if text.string_at("").is_some_and(|text| text.contains("incomplete")))), partial);
         }
     }
+
+    #[tokio::test]
+    async fn hosted_search_codex_preserves_query_source_and_consumes_sdk_payloads() {
+        use serde_json::json;
+        use tool_api::HostedWebSearchClient;
+
+        let transport = FakeTransport::always(ProviderResponse::json(
+            200,
+            json!({
+                "output":"source-backed answer",
+                "results":[{
+                    "type":"text_result",
+                    "title":"A source",
+                    "url":"https://example.test/source"
+                }]
+            }),
+        ));
+        let adapter = make_codex_search_adapter(transport.clone());
+        let request = tool_api::HostedSearchRequest {
+            model: "gpt-search".into(),
+            profile: Some("codex".into()),
+            query: Utf16JsonProjection::parse(r#""A\ud800B""#).unwrap(),
+            allowed_domains: vec![],
+            blocked_domains: vec![],
+        };
+        assert!(adapter.supports_request(&request));
+
+        let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+        let output = adapter.search(request, progress).await.unwrap();
+        assert_eq!(output.searches, 1);
+        assert!(updates.try_recv().is_ok());
+        assert!(updates.try_recv().is_err());
+        assert!(output.results.iter().any(|entry| matches!(entry,
+            tool_api::hosted_search::SearchResultEntry::Text(text)
+                if text.string_at("").as_deref() == Some("source-backed answer"))));
+        assert!(output.results.iter().any(|entry| matches!(entry,
+            tool_api::hosted_search::SearchResultEntry::Hit(value)
+                if value.as_json_source().contains("https://example.test/source"))));
+
+        let requests = transport.seen.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url,
+            "https://chatgpt.com/backend-api/codex/alpha/search"
+        );
+        assert!(requests[0]
+            .body_json
+            .as_json_source()
+            .contains(r#""q":"A\ud800B""#));
+    }
     #[tokio::test]
     async fn hosted_search_gemini_reports_queries_once_per_grounding_snapshot() {
         use llm_runtime::services::sdk;
@@ -3761,25 +3864,30 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             .query
             .string_units("")
             .ok_or_else(|| hosted_search_input_error("web search query must be a JSON string"))?;
-        let mut prompt_units = "Perform a web search for the query: "
-            .encode_utf16()
-            .collect::<Vec<_>>();
-        prompt_units.extend(query_units);
-        let prompt_text = String::from_utf16_lossy(&prompt_units);
+        let codex_standalone_search = self
+            .service
+            .uses_codex_standalone_search(&input.model, input.profile.as_deref());
         let mut request = llm_runtime::LlmRequest::new(input.model);
-        request
-            .input
-            .messages
-            .push(sdk::protocol::ConversationMessage {
-                role: sdk::protocol::MessageRole::User,
-                content: vec![sdk::protocol::ContentBlock::TextJsUtf16 {
-                    text: prompt_text,
-                    utf16_code_units: prompt_units,
-                    thought_signature: None,
-                    citations: None,
-                }],
-                native_options: Vec::new(),
-            });
+        if !codex_standalone_search {
+            let mut prompt_units = "Perform a web search for the query: "
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            prompt_units.extend_from_slice(&query_units);
+            let prompt_text = String::from_utf16_lossy(&prompt_units);
+            request
+                .input
+                .messages
+                .push(sdk::protocol::ConversationMessage {
+                    role: sdk::protocol::MessageRole::User,
+                    content: vec![sdk::protocol::ContentBlock::TextJsUtf16 {
+                        text: prompt_text,
+                        utf16_code_units: prompt_units,
+                        thought_signature: None,
+                        citations: None,
+                    }],
+                    native_options: Vec::new(),
+                });
+        }
         request.profile = input.profile;
         request.input.max_tokens = Some(4096);
         request.execution.query_source = Some("web_search_tool".into());
@@ -3809,15 +3917,14 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                     .hosted_search_max_uses(&request.input.model, request.profile.as_deref()),
             },
         )];
-        if self
-            .service
-            .uses_codex_standalone_search(&request.input.model, request.profile.as_deref())
-        {
+        if codex_standalone_search {
             request.input.native_options.push(
                 sdk::protocol::NativeExtension::from_typed(
                     sdk::providers::openai::codex_search::CodexSearchRequest {
                         id: uuid::Uuid::new_v4().to_string(),
-                        query: input.query,
+                        query: sdk::protocol::JsonPayload::string_from_utf16_code_units(
+                            &query_units,
+                        ),
                     },
                 )
                 .expect("Codex search options are serializable"),
@@ -3831,21 +3938,26 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                 )
                 .await
                 .map_err(hosted_search_error)?;
-            let native = response
+            let search_content = response
                 .content
                 .iter()
-                .map(|block| serde_json::to_value(block).unwrap_or_default())
+                .filter_map(hosted_search_content_source)
                 .collect::<Vec<_>>();
-            let mut results = sdk::hosted_search::parse_response_content(&native);
-            let observations = serde_json::Value::Array(
-                response
-                    .provider_metadata
-                    .pointer("/llm_client/web_search")
-                    .cloned()
-                    .into_iter()
-                    .collect(),
-            );
-            sdk::hosted_search::append_citations(&mut results, Some(&observations));
+            let mut results = sdk::hosted_search::parse_response_content(&search_content);
+            let observations = response
+                .provider_metadata
+                .payload_at("/llm_client/web_search")
+                .filter(sdk::protocol::JsonPayload::is_root_object)
+                .map(|web_search| {
+                    sdk::protocol::JsonPayload::parse(&format!("[{}]", web_search.as_json_source()))
+                        .map_err(|error| {
+                            hosted_search_error(llm_runtime::LlmError::InvalidRequest {
+                                message: error.to_string(),
+                            })
+                        })
+                })
+                .transpose()?;
+            sdk::hosted_search::append_citations(&mut results, observations.as_ref());
             let _ = progress.send(());
             return Ok(tool_api::HostedSearchOutput {
                 results,
