@@ -1084,6 +1084,7 @@ async fn connect_writer_wrapper_refreshes_fusion_catalog_availability_after_a_re
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: false,
     };
     let inner: Arc<dyn ConnectCredentialWriter> = Arc::new(EngineCredentialWriter::new(
@@ -1222,6 +1223,7 @@ async fn oauth_connect_publishes_before_return_and_starts_one_detached_refresh()
         // still the only thing that can satisfy the assertion below.
         anthropic_has_oauth: fusion_route_flag(true),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
     let wrapped = FusionCatalogRefreshingOAuthConnect {
@@ -1299,6 +1301,7 @@ async fn oauth_connect_on_a_cold_api_key_route_requires_restart_without_false_re
             anthropic_has_api_key: fusion_route_flag(false),
             anthropic_has_oauth: fusion_route_flag(false),
             openai_chatgpt_available: fusion_route_flag(false),
+            openai_chatgpt_session_slot: false,
             isolated: true,
         },
     };
@@ -1412,6 +1415,7 @@ async fn a_degraded_reprobe_must_not_erase_known_good_availability() {
         anthropic_has_api_key: fusion_route_flag(true),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
 
@@ -1637,6 +1641,7 @@ async fn process_wide_publication_ignores_unrelated_catalogs() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
 
@@ -1775,6 +1780,7 @@ async fn signing_out_clears_the_anthropic_entry_a_sign_in_published() {
             anthropic_has_api_key: fusion_route_flag(false),
             anthropic_has_oauth: fusion_route_flag(true),
             openai_chatgpt_available: fusion_route_flag(false),
+            openai_chatgpt_session_slot: false,
             isolated: true,
         },
     );
@@ -1820,6 +1826,7 @@ async fn signing_back_in_after_a_logout_restores_anthropic_for_fusion() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(true),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
 
@@ -1870,6 +1877,7 @@ async fn the_login_seam_republishes_the_availability_entry_not_just_the_flag() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
     assert!(
@@ -1911,6 +1919,7 @@ async fn an_api_key_saved_on_an_oauth_route_requires_restart() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(true),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
     assert!(
@@ -1960,6 +1969,7 @@ async fn oauth_logout_does_not_fall_back_to_an_unwired_boot_api_key() {
         anthropic_has_api_key: fusion_route_flag(true),
         anthropic_has_oauth: fusion_route_flag(true),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
 
@@ -2012,6 +2022,7 @@ async fn deleting_the_bare_anthropic_key_id_keeps_anthropic_when_oauth_remains()
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(true),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
 
@@ -2068,6 +2079,7 @@ async fn deleting_a_stored_key_keeps_a_profile_its_env_var_still_backs() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: false,
     };
 
@@ -2111,6 +2123,7 @@ async fn a_full_refresh_cannot_hot_switch_an_oauth_route_to_an_api_key() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(true),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
 
@@ -2170,6 +2183,7 @@ async fn a_removed_chatgpt_credential_is_not_resurrected_by_a_later_write() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(true),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
 
@@ -2189,6 +2203,71 @@ async fn a_removed_chatgpt_credential_is_not_resurrected_by_a_later_write() {
 re-deriving the ChatGPT row from a boot boolean nothing can lower resurrects the entry \
 the delete just cleared"
     );
+}
+
+/// A host-delivered ChatGPT session slot stays the ChatGPT delegate while
+/// sessions come and go, so a session written after a cold boot, or after a
+/// removal, is adopted without a restart. Without a slot the same write on a
+/// cold boot still requires one.
+#[tokio::test]
+async fn a_chatgpt_session_slot_adopts_a_session_written_at_any_time() {
+    let chatgpt_refresher = |session_slot: bool| {
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("openai-chatgpt".to_string(), false)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: vec![provider_config::CredentialSource {
+                provider_id: llm_runtime::ProviderId::OpenAICompatible {
+                    name: "openai-chatgpt".to_string(),
+                },
+                profile_name: "openai-chatgpt".to_string(),
+                credential_id: "openai-chatgpt".to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::OAuth,
+            }],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            openai_chatgpt_session_slot: session_slot,
+            isolated: true,
+        };
+        (availability, refresher)
+    };
+    let chatgpt_row = |availability: &std::sync::RwLock<
+        std::collections::BTreeMap<String, bool>,
+    >| { availability.read().unwrap().get("openai-chatgpt").copied() };
+
+    let (availability, refresher) = chatgpt_refresher(true);
+    assert!(
+        refresher
+            .mark_credential_established("openai-chatgpt")
+            .await
+    );
+    assert_eq!(chatgpt_row(&availability), Some(true));
+    refresher.mark_credential_removed("openai-chatgpt").await;
+    assert_eq!(chatgpt_row(&availability), Some(false));
+    assert!(
+        refresher
+            .mark_credential_established("openai-chatgpt")
+            .await,
+        "a slot-served route adopts a session delivered after a removal"
+    );
+    assert_eq!(chatgpt_row(&availability), Some(true));
+
+    let (availability, refresher) = chatgpt_refresher(false);
+    assert!(
+        !refresher
+            .mark_credential_established("openai-chatgpt")
+            .await,
+        "a boot-fixed ChatGPT route cannot prove a delegate exists on a cold boot"
+    );
+    assert_eq!(chatgpt_row(&availability), Some(false));
 }
 
 /// Round-12 rework, the ambiguity the class sweep turned up: a bare
@@ -2225,6 +2304,7 @@ async fn an_oauth_sign_in_reported_under_the_bare_anthropic_id_raises_no_api_key
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(true),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
 
@@ -2433,6 +2513,7 @@ async fn isolated_refresher_does_not_count_ambient_env_var_credentials() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
     isolated_refresher.refresh().await;
@@ -2463,6 +2544,7 @@ credential — it must reproduce the boot probe's \
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: false,
     };
     non_isolated_refresher.refresh().await;
@@ -5885,6 +5967,7 @@ async fn a_completed_reprobe_re_arms_availability_filtering_after_a_boot_probe_t
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: false,
     };
     refresher.refresh_after_credential_write("openrouter").await;
@@ -5990,6 +6073,7 @@ async fn a_late_write_probe_cannot_resurrect_a_newer_delete() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
 
@@ -6104,6 +6188,7 @@ async fn a_degraded_reprobe_must_not_re_arm_availability_filtering() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: false,
     };
     refresher.refresh().await;
@@ -6238,6 +6323,7 @@ async fn a_frozen_anthropic_boot_boolean_must_not_re_arm_availability_filtering(
         anthropic_has_api_key: fusion_route_flag(true),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
     refresher.refresh().await;
@@ -6361,6 +6447,7 @@ async fn an_env_var_only_row_must_not_re_arm_availability_filtering() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: false,
     };
     refresher.refresh().await;
@@ -6488,6 +6575,7 @@ async fn an_anthropic_only_install_can_still_re_arm_availability_filtering() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(true),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: true,
     };
     refresher
@@ -6610,6 +6698,7 @@ async fn an_all_env_var_install_can_still_re_arm_availability_filtering() {
         anthropic_has_api_key: fusion_route_flag(false),
         anthropic_has_oauth: fusion_route_flag(false),
         openai_chatgpt_available: fusion_route_flag(false),
+        openai_chatgpt_session_slot: false,
         isolated: false,
     };
     refresher.refresh().await;

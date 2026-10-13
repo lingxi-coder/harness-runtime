@@ -167,41 +167,10 @@ impl CredentialProvider for OpenAiOAuthSlot {
 mod tests {
     use super::*;
     use crate::auth::openai::testsupport::{
-        mem_credential_manager, MemStorage, MockHttp, TestClock,
+        mem_credential_manager, MemStorage, MockHttp, ParkedSpawner, TestClock,
     };
-    use async_trait::async_trait;
-    use lingxi_core::host::{BackgroundTaskHandle, RuntimeError};
     use lingxi_core::types::Secret;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime};
-
-    /// Parks the proactive loop so a test observes install and release only.
-    #[derive(Default)]
-    struct ParkedSpawner {
-        next_id: AtomicU64,
-        canceled: std::sync::Mutex<Vec<u64>>,
-    }
-
-    #[async_trait]
-    impl RuntimeSpawner for ParkedSpawner {
-        async fn spawn(
-            &self,
-            name: &str,
-            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<BackgroundTaskHandle, RuntimeError> {
-            Ok(BackgroundTaskHandle {
-                task_name: name.to_string(),
-                task_id: self.next_id.fetch_add(1, Ordering::SeqCst) + 1,
-            })
-        }
-        async fn sleep(&self, _duration: Duration) {
-            std::future::pending::<()>().await;
-        }
-        async fn cancel(&self, handle: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
-            self.canceled.lock().unwrap().push(handle.task_id);
-            Ok(())
-        }
-    }
 
     fn tokens(access: &str) -> secret::credential::OpenAiOAuthTokens {
         secret::credential::OpenAiOAuthTokens {
