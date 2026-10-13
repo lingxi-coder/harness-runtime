@@ -258,6 +258,10 @@ pub struct SharedCredentialStack {
     pub storage: Arc<dyn lingxi_core::host::SecureStorage>,
     /// Canonical provider/OAuth credential manager.
     pub credentials: Arc<CredentialManager>,
+    /// Set by a host that delivers the ChatGPT session itself and moves it
+    /// between its engines at runtime. The stack then serves ChatGPT through
+    /// this slot, including a session found in storage at boot.
+    pub openai_oauth_slot: Option<Arc<openai_oauth::OpenAiOAuthSlot>>,
 }
 
 /// Build the credential stack shared by every desktop-class entrypoint.
@@ -355,6 +359,7 @@ pub async fn build_shared_credential_stack_with_policy(
         clock,
         storage,
         credentials,
+        openai_oauth_slot: None,
     })
 }
 
@@ -438,6 +443,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         clock,
         storage: mcp_oauth_storage,
         credentials,
+        openai_oauth_slot,
     } = shared;
 
     // The packaged Electron parent owns durable plugin-secret persistence in
@@ -858,7 +864,33 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         }
     }
 
-    if openai_chatgpt_delegate.is_none() {
+    // A host that delivers the session keeps it in its slot, whose own spawner
+    // can stop the refresh task when the host moves the session elsewhere.
+    // PAT and external tokens still win over it.
+    let openai_oauth_slot = openai_oauth_slot.filter(|_| openai_chatgpt_delegate.is_none());
+    if let Some(slot) = &openai_oauth_slot {
+        slot.bind(openai_oauth::OpenAiOAuthSlotBinding {
+            config: openai_oauth_cfg.clone(),
+            http: llm_transport.clone(),
+            clock: clock.clone(),
+            bus: Some(Arc::new(telemetry::AnalyticsBus::new())),
+            credentials: Some(credentials.clone()),
+            spawner: Arc::new(PosixRuntime::new()),
+        });
+        match credentials.get_openai_oauth_tokens().await {
+            Ok(Some(tokens)) => {
+                if let Err(e) = slot.install(tokens).await {
+                    tracing::warn!(error = %e, "failed to install the stored OpenAI OAuth session; ChatGPT routing disabled");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read OpenAI OAuth tokens from keychain; the host must deliver a ChatGPT session");
+            }
+        }
+    }
+
+    if openai_chatgpt_delegate.is_none() && openai_oauth_slot.is_none() {
         match credentials.get_openai_oauth_tokens().await {
             Ok(Some(tokens)) => {
                 match openai_oauth::login::init_refresh_driver(
@@ -1092,7 +1124,14 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                 as Arc<dyn llm_runtime::CredentialProvider>);
         }
     }
-    let has_openai_chatgpt = openai_chatgpt_delegate.is_some();
+    // A delivered session counts as connected only while one is installed.
+    let has_openai_chatgpt = match &openai_oauth_slot {
+        Some(slot) => slot.is_active().await,
+        None => openai_chatgpt_delegate.is_some(),
+    };
+    if let Some(slot) = openai_oauth_slot {
+        openai_chatgpt_delegate = Some(slot as Arc<dyn llm_runtime::CredentialProvider>);
+    }
     if let Some(d) = openai_chatgpt_delegate {
         oauth_delegates.insert("openai-chatgpt".to_string(), d);
     }

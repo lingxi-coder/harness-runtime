@@ -15,6 +15,7 @@ pub mod handle;
 pub mod login;
 pub mod pat;
 pub mod refresh;
+pub mod slot;
 
 #[cfg(test)]
 pub(crate) mod testsupport;
@@ -26,3 +27,4 @@ pub use handle::{BrowserOpener, OpenAiAuthError, OpenAiLoginInfo, OpenAiOAuthHan
 pub use login::{init_refresh_driver, OAuthError};
 pub use pat::PatCredentialProvider;
 pub use refresh::{AuthState, RefreshDriver};
+pub use slot::{OpenAiOAuthSlot, OpenAiOAuthSlotBinding};
