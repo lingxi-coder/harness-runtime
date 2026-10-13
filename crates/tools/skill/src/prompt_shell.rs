@@ -1188,10 +1188,8 @@ fn native_is_automount_path(path: &[u16], base: &[u16], home_automount: Option<b
     if path.first() != Some(&(b'/' as u16)) {
         return false;
     }
-    let (base_complete, _) =
-        native_automount_roots(base, home_automount).unwrap_or_else(|| (Vec::new(), Vec::new()));
-    let (complete, partial) =
-        native_automount_roots(path, home_automount).unwrap_or_else(|| (Vec::new(), Vec::new()));
+    let (base_complete, _) = native_automount_roots(base, home_automount);
+    let (complete, partial) = native_automount_roots(path, home_automount);
     if complete.is_empty() && partial.is_empty() {
         return false;
     }

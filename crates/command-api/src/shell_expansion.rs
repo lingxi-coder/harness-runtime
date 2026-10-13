@@ -309,7 +309,6 @@ pub async fn execute_shell_commands_in_prompt(
             // FIFO; only the subsequent I/O completion order is nondeterministic.
             let mut run = runner.run(&command.command, shell);
             let first_poll = std::future::poll_fn(|cx| {
-                use std::future::Future as _;
                 match run.as_mut().poll(cx) {
                     std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
                     std::task::Poll::Pending => std::task::Poll::Ready(None),
