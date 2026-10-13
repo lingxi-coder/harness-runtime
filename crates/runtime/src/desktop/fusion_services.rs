@@ -258,10 +258,10 @@ pub struct FusionCatalogRefresher {
     pub(super) anthropic_has_api_key: Arc<std::sync::atomic::AtomicBool>,
     pub(super) anthropic_has_oauth: Arc<std::sync::atomic::AtomicBool>,
     pub(super) openai_chatgpt_available: Arc<std::sync::atomic::AtomicBool>,
-    /// Whether ChatGPT is served through a host-delivered session slot
-    /// (`SharedCredentialStack::openai_oauth_slot`). The slot stays the
-    /// ChatGPT delegate while sessions come and go, so this route adopts a
-    /// session written at any time, including one written after a removal.
+    /// Whether ChatGPT is served from a host's session
+    /// (`SharedCredentialStack::openai_host_session`). That session stays the
+    /// ChatGPT delegate while tokens come and go, so this route adopts a
+    /// token served at any time, including one served after a removal.
     pub(super) openai_chatgpt_session_slot: bool,
     // Round-4 review finding (isolation boundary): mirrors the boot probe's
     // `cfg.isolated_credential_storage` (see `resolve_llm_stack`'s call to

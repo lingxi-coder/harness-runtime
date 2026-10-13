@@ -258,11 +258,11 @@ pub struct SharedCredentialStack {
     pub storage: Arc<dyn lingxi_core::host::SecureStorage>,
     /// Canonical provider/OAuth credential manager.
     pub credentials: Arc<CredentialManager>,
-    /// Set by a host that delivers the ChatGPT session itself and moves it
-    /// between its engines at runtime. The stack then serves ChatGPT only
-    /// through this slot: a session found in storage at boot is ignored,
-    /// because another engine may be refreshing it.
-    pub openai_oauth_slot: Option<Arc<openai_oauth::OpenAiOAuthSlot>>,
+    /// Set by a host that keeps the ChatGPT session fresh itself and serves
+    /// its engines only access tokens. The stack then serves ChatGPT only
+    /// from this session and never refreshes it: a session found in storage
+    /// at boot is ignored, because the host is its one refresher.
+    pub openai_host_session: Option<Arc<openai_oauth::HostSession>>,
 }
 
 /// Build the credential stack shared by every desktop-class entrypoint.
@@ -360,7 +360,7 @@ pub async fn build_shared_credential_stack_with_policy(
         clock,
         storage,
         credentials,
-        openai_oauth_slot: None,
+        openai_host_session: None,
     })
 }
 
@@ -444,7 +444,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         clock,
         storage: mcp_oauth_storage,
         credentials,
-        openai_oauth_slot,
+        openai_host_session,
     } = shared;
 
     // The packaged Electron parent owns durable plugin-secret persistence in
@@ -820,6 +820,15 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .with_clock(clock.clone()),
     );
 
+    // Other processes on this home (another CLI, say) store the same OAuth
+    // sessions; each refresh happens behind one lock file, and a session
+    // another process already rotated is adopted rather than refreshed again.
+    let oauth_refresh_lock: Arc<dyn llm_runtime::auth::token_manager::SharedRefreshLock> =
+        Arc::new(super::oauth_refresh_lock::OAuthRefreshLockFile::new(&cfg.lingxi_home));
+    if let Some(state) = &oauth_auth_state {
+        state.share_refresh_across_processes(oauth_refresh_lock.clone());
+    }
+
     // (3.2a-pre) P3 enterprise precedence for the openai-chatgpt credential:
     // PAT env  >  external-tokens env  >  OAuth login session. First hit wins.
     let mut openai_chatgpt_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = None;
@@ -865,24 +874,12 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         }
     }
 
-    // A host that delivers the session keeps it in its slot, whose own spawner
-    // can stop the refresh task when the host moves the session elsewhere.
-    // Only the host fills the slot, so a stored session is never refreshed
-    // here behind the engine that holds it. PAT and external tokens still win.
-    let openai_oauth_slot = openai_oauth_slot.filter(|_| openai_chatgpt_delegate.is_none());
-    if let Some(slot) = &openai_oauth_slot {
-        slot.bind(openai_oauth::OpenAiOAuthSlotBinding {
-            config: openai_oauth_cfg.clone(),
-            http: llm_transport.clone(),
-            clock: clock.clone(),
-            bus: Some(Arc::new(telemetry::AnalyticsBus::new())),
-            credentials: Some(credentials.clone()),
-            spawner: Arc::new(PosixRuntime::new()),
-        });
-        openai_oauth_handle.serve_sessions_through(slot.clone());
-    }
+    // A host that refreshes the session itself serves only its access
+    // tokens, so a stored session is never refreshed here behind that host.
+    // PAT and external tokens still win.
+    let openai_host_session = openai_host_session.filter(|_| openai_chatgpt_delegate.is_none());
 
-    if openai_chatgpt_delegate.is_none() && openai_oauth_slot.is_none() {
+    if openai_chatgpt_delegate.is_none() && openai_host_session.is_none() {
         match credentials.get_openai_oauth_tokens().await {
             Ok(Some(tokens)) => {
                 match openai_oauth::login::init_refresh_driver(
@@ -902,6 +899,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                 .await
                 {
                     Ok(state) => {
+                        state.share_refresh_across_processes(oauth_refresh_lock.clone());
                         openai_oauth_state = Some(state);
                     }
                     Err(e) => {
@@ -1116,14 +1114,14 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                 as Arc<dyn llm_runtime::CredentialProvider>);
         }
     }
-    // A delivered session counts as connected only while one is installed.
-    let has_openai_chatgpt = match &openai_oauth_slot {
-        Some(slot) => slot.is_active().await,
+    // A host's session counts as connected only while it serves a token.
+    let has_openai_chatgpt = match &openai_host_session {
+        Some(session) => session.is_active(),
         None => openai_chatgpt_delegate.is_some(),
     };
-    let openai_chatgpt_session_slot = openai_oauth_slot.is_some();
-    if let Some(slot) = openai_oauth_slot {
-        openai_chatgpt_delegate = Some(slot as Arc<dyn llm_runtime::CredentialProvider>);
+    let openai_chatgpt_session_slot = openai_host_session.is_some();
+    if let Some(session) = openai_host_session {
+        openai_chatgpt_delegate = Some(session as Arc<dyn llm_runtime::CredentialProvider>);
     }
     if let Some(d) = openai_chatgpt_delegate {
         oauth_delegates.insert("openai-chatgpt".to_string(), d);

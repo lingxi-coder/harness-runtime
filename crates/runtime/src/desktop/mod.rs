@@ -40,6 +40,7 @@ mod connect;
 mod cron_command;
 pub mod cron_management;
 mod cron_native;
+mod oauth_refresh_lock;
 pub mod file_changed_watch;
 pub mod fork_resume;
 #[cfg(test)]

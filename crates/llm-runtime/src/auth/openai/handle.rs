@@ -26,11 +26,10 @@
 use crate::auth::openai::callback::{CallbackError, CallbackListener};
 use crate::auth::openai::device_code;
 use crate::auth::openai::login::{exchange_error, into_login_tokens};
-use crate::auth::openai::slot::OpenAiOAuthSlot;
 use lingxi_core::host::Clock;
 use lingxi_llm_client::auth::oauth::openai::{self as sdk, OpenAiOAuthConfig};
 use lingxi_llm_client::Transport;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
@@ -91,9 +90,6 @@ pub struct OpenAiOAuthHandle {
     clock: Arc<dyn Clock>,
     credentials: Arc<secret::CredentialManager>,
     browser_open: BrowserOpener,
-    /// Serves the sessions this handle signs in, when the engine's ChatGPT
-    /// route is a host-delivered session slot.
-    session_slot: OnceLock<Arc<OpenAiOAuthSlot>>,
 }
 
 impl OpenAiOAuthHandle {
@@ -110,7 +106,6 @@ impl OpenAiOAuthHandle {
             clock: Arc::new(RealClock),
             credentials,
             browser_open: Arc::new(real_browser_open),
-            session_slot: OnceLock::new(),
         }
     }
 
@@ -118,30 +113,6 @@ impl OpenAiOAuthHandle {
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
         self
-    }
-
-    /// Serve every session this handle signs in through `slot`, and empty the
-    /// slot on logout, so an engine whose ChatGPT route is a session slot uses
-    /// the account it just connected. The first slot wins.
-    pub fn serve_sessions_through(&self, slot: Arc<OpenAiOAuthSlot>) {
-        let _ = self.session_slot.set(slot);
-    }
-
-    /// Hand the session just persisted to the session slot, if one serves
-    /// this handle.
-    async fn serve_stored_session(&self) -> Result<(), OpenAiAuthError> {
-        let Some(slot) = self.session_slot.get() else {
-            return Ok(());
-        };
-        let tokens = self
-            .credentials
-            .get_openai_oauth_tokens()
-            .await
-            .map_err(|e| OpenAiAuthError::ServerError(format!("read tokens: {e}")))?
-            .ok_or_else(|| OpenAiAuthError::ServerError("persisted session vanished".into()))?;
-        slot.install(tokens)
-            .await
-            .map_err(|e| OpenAiAuthError::ServerError(format!("serve session: {e}")))
     }
 
     /// Override the browser opener (tests inject a no-op so the flow runs
@@ -204,7 +175,6 @@ impl OpenAiOAuthHandle {
             )
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
-        self.serve_stored_session().await?;
         let api_key = self
             .mint_api_key_best_effort(tokens.id_token.as_deref())
             .await;
@@ -336,7 +306,6 @@ impl OpenAiOAuthHandle {
             )
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
-        self.serve_stored_session().await?;
 
         // (8) Mint an API key via RFC-8693 token exchange and persist it under
         // credential id "chatgpt", best-effort.
@@ -390,7 +359,6 @@ impl OpenAiOAuthHandle {
             )
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
-        self.serve_stored_session().await?;
 
         let api_key = self
             .mint_api_key_best_effort(tokens.id_token.as_deref())
@@ -435,11 +403,6 @@ impl OpenAiOAuthHandle {
 
     /// Clear all persisted `OpenAI` OAuth credentials. Idempotent.
     pub async fn logout(&self) -> Result<(), OpenAiAuthError> {
-        // Release first: a rotation in flight persists before the slot lets
-        // go, and the delete below must come after it.
-        if let Some(slot) = self.session_slot.get() {
-            slot.release().await;
-        }
         self.credentials
             .delete_openai_oauth_tokens()
             .await
@@ -491,7 +454,7 @@ fn real_browser_open(url: &str) -> Result<(), OpenAiAuthError> {
 mod tests {
     use super::*;
     use crate::auth::openai::testsupport::{
-        mem_credential_manager, port_guard, Canned, MemStorage, MockHttp, ParkedSpawner, TestClock,
+        mem_credential_manager, port_guard, Canned, MemStorage, MockHttp, TestClock,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -753,35 +716,6 @@ mod tests {
 
         // Idempotent second logout.
         handle.logout().await.expect("second logout ok");
-    }
-
-    /// An engine whose ChatGPT route is a session slot serves the account it
-    /// just connected, and logout empties the slot.
-    #[tokio::test]
-    async fn a_session_slot_serves_the_signed_in_session_until_logout() {
-        let _g = port_guard().await;
-        let (handle, _storage, _) = handle_for_login();
-        let slot = Arc::new(OpenAiOAuthSlot::new());
-        slot.bind(crate::auth::openai::OpenAiOAuthSlotBinding {
-            config: lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig::default(),
-            http: MockHttp::new(vec![]) as Arc<dyn lingxi_llm_client::Transport>,
-            clock: TestClock::new(1_000) as Arc<dyn Clock>,
-            bus: None,
-            credentials: Some(handle.credentials.clone()),
-            spawner: Arc::new(ParkedSpawner::default()),
-        });
-        handle.serve_sessions_through(slot.clone());
-
-        handle.login().await.expect("login ok");
-        let scope = crate::CredentialScope::new(crate::ProviderId::OpenAI, "chatgpt");
-        assert!(matches!(
-            crate::CredentialProvider::load(slot.as_ref(), &scope).await,
-            Ok(crate::Credential::ChatGptOAuth { access_token, .. }) if access_token == "sk-test-key"
-        ));
-
-        handle.logout().await.expect("logout ok");
-        assert!(!slot.is_active().await);
-        assert!(handle.current_user().await.is_none());
     }
 
     #[tokio::test]
