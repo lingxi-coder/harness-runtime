@@ -264,6 +264,11 @@ pub struct FusionCatalogRefresher {
     pub(super) anthropic_has_api_key: Arc<std::sync::atomic::AtomicBool>,
     pub(super) anthropic_has_oauth: Arc<std::sync::atomic::AtomicBool>,
     pub(super) openai_chatgpt_available: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether ChatGPT is served through a host-delivered session slot
+    /// (`SharedCredentialStack::openai_oauth_slot`). The slot stays the
+    /// ChatGPT delegate while sessions come and go, so this route adopts a
+    /// session written at any time, including one written after a removal.
+    pub(super) openai_chatgpt_session_slot: bool,
     // Round-4 review finding (isolation boundary): mirrors the boot probe's
     // `cfg.isolated_credential_storage` (see `resolve_llm_stack`'s call to
     // `compute_availability_with_isolation` above) so a mid-session refresh
@@ -306,6 +311,7 @@ impl FusionCatalogRefresher {
             anthropic_has_api_key: fusion_route_flag(false),
             anthropic_has_oauth: fusion_route_flag(false),
             openai_chatgpt_available: fusion_route_flag(false),
+            openai_chatgpt_session_slot: false,
             isolated: true,
             // This constructor is for callers OUTSIDE the composition root,
             // which hold the shared availability map but not the model
@@ -414,14 +420,17 @@ impl FusionCatalogRefresher {
             // alone does not prove MultiCredentialProvider received a live
             // delegate. The flag is deliberately conservative: after a
             // removal, a new login requires restart rather than claiming a
-            // delegate this catalog cannot prove is still usable.
+            // delegate this catalog cannot prove is still usable. A session
+            // slot is that proof: it stays the delegate across removals.
             "chatgpt" | "openai-chatgpt" => self
                 .credential_sources
                 .iter()
                 .any(|source| source.profile_name == "openai-chatgpt")
                 .then(|| {
-                    self.openai_chatgpt_available
-                        .load(std::sync::atomic::Ordering::Relaxed)
+                    (self.openai_chatgpt_session_slot
+                        || self
+                            .openai_chatgpt_available
+                            .load(std::sync::atomic::Ordering::Relaxed))
                         && self.credential_sources.iter().any(|source| {
                             source.profile_name == "openai-chatgpt"
                                 && source.credential_id == "openai-chatgpt"

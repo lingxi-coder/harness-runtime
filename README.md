@@ -17,7 +17,7 @@ cd harness-runtime
 cargo check --locked -p harness-runtime
 ```
 
-两个仓库需并排放置。从仓库根运行 Cargo 命令；根 workspace 的 `[patch]` 会将固定的 `lingxi-llm-client` Git 依赖指向同级目录 `../llm-client` 的源码。
+相邻 checkout 便于联合开发，但当前根 workspace 没有选择 `../llm-client` 的 SDK path patch；普通 Cargo 构建仍使用声明的固定 Git revision。工作树联合验证需要消费者显式设置完整本地依赖 overlay，并核对 Cargo metadata；根 patch 不传播到下游。
 
 ## 在宿主项目中接入
 
@@ -132,10 +132,14 @@ cargo test --locked --workspace --all-features --no-fail-fast
 
 这些命令分别检查最小、桌面、移动绑定组合、workspace 测试和仓库门禁；原生设备、完整产品打包与签名需在宿主项目中另行验证。迁移时已完成的验证及已知限制见 [验证记录](docs/migration/validation.md)。
 
-修改 `../llm-client` 时，根 workspace 构建会立即使用这些改动；SDK 自身的测试需要单独运行：
+修改相邻 `../llm-client` 不会自动替换本仓库的固定依赖；需显式本地 overlay 后验证集成，SDK 自身测试仍需单独运行：
 
 ```sh
 cargo test --manifest-path ../llm-client/Cargo.toml --locked
 ```
 
 发布联合修改时，先在 SDK 仓库验证、提交并推送，再更新本仓库根 `[workspace.dependencies]` 固定 revision 和 `Cargo.lock`。具体流程见 [联合开发](docs/llm-client-upgrade.md#联合开发)。迁移来源可查阅 [来源清单](docs/migration/source-manifest.json)。
+
+## 完整技术手册
+
+系统机制与联合接入说明由 LingXi 双语技术手册统一维护。多仓本地入口为相邻 `lingxi-app/docs/technical/zh/README.md`；官网入口为 [Harness 文档](https://lingxios.net/docs/harness)。官网发布版本可能落后于本地工作树，请核对页面基线。

@@ -263,8 +263,9 @@ pub struct SharedCredentialStack {
     /// Canonical provider/OAuth credential manager.
     pub credentials: Arc<CredentialManager>,
     /// Set by a host that delivers the ChatGPT session itself and moves it
-    /// between its engines at runtime. The stack then serves ChatGPT through
-    /// this slot, including a session found in storage at boot.
+    /// between its engines at runtime. The stack then serves ChatGPT only
+    /// through this slot: a session found in storage at boot is ignored,
+    /// because another engine may be refreshing it.
     pub openai_oauth_slot: Option<Arc<openai_oauth::OpenAiOAuthSlot>>,
 }
 
@@ -870,7 +871,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
 
     // A host that delivers the session keeps it in its slot, whose own spawner
     // can stop the refresh task when the host moves the session elsewhere.
-    // PAT and external tokens still win over it.
+    // Only the host fills the slot, so a stored session is never refreshed
+    // here behind the engine that holds it. PAT and external tokens still win.
     let openai_oauth_slot = openai_oauth_slot.filter(|_| openai_chatgpt_delegate.is_none());
     if let Some(slot) = &openai_oauth_slot {
         slot.bind(openai_oauth::OpenAiOAuthSlotBinding {
@@ -881,17 +883,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             credentials: Some(credentials.clone()),
             spawner: Arc::new(PosixRuntime::new()),
         });
-        match credentials.get_openai_oauth_tokens().await {
-            Ok(Some(tokens)) => {
-                if let Err(e) = slot.install(tokens).await {
-                    tracing::warn!(error = %e, "failed to install the stored OpenAI OAuth session; ChatGPT routing disabled");
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "could not read OpenAI OAuth tokens from keychain; the host must deliver a ChatGPT session");
-            }
-        }
+        openai_oauth_handle.serve_sessions_through(slot.clone());
     }
 
     if openai_chatgpt_delegate.is_none() && openai_oauth_slot.is_none() {
@@ -1132,6 +1124,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         Some(slot) => slot.is_active().await,
         None => openai_chatgpt_delegate.is_some(),
     };
+    let openai_chatgpt_session_slot = openai_oauth_slot.is_some();
     if let Some(slot) = openai_oauth_slot {
         openai_chatgpt_delegate = Some(slot as Arc<dyn llm_runtime::CredentialProvider>);
     }
@@ -1510,6 +1503,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         anthropic_has_api_key: fusion_route_flag(has_api_key),
         anthropic_has_oauth: fusion_route_flag(has_oauth),
         openai_chatgpt_available: fusion_route_flag(has_openai_chatgpt),
+        openai_chatgpt_session_slot,
         // Round-4 review finding: a refresh must reproduce the boot probe
         // exactly, including the isolation boundary — otherwise an isolated
         // boot's first `/connect` replaces the whole availability map with

@@ -7,24 +7,17 @@
 
 ## 联合开发
 
-开发阶段直接使用与本仓库并排的 `../llm-client` checkout：根 `Cargo.toml` 通过
-`[patch."https://github.com/lingxi-coder/llm-client.git"]` 指向它，SDK 不在 runtime workspace 内，
-保留自己的 lockfile。根 `[workspace.dependencies]` 保留 canonical Git URL 与完整提交，供
-`llm-runtime`、`http-client` 及下游消费；Cargo 不会继承依赖仓库根的 patch，下游若也需要联调，
-应在自己的 workspace 根配置 patch。
+相邻 `../llm-client` checkout 便于联合开发，但当前根 `Cargo.toml` 没有选择它的 SDK path patch。普通构建仍使用 `[workspace.dependencies]` 中 canonical Git URL 的固定 revision。SDK 不属于 runtime workspace，并保留自己的锁文件。
+
+当前工作树接入与完整可复制的消费者 overlay 由 LingXi 技术手册统一维护：本地入口为相邻 `lingxi-app/docs/technical/zh/development-workflow.md` 和 `harness.md`。消费者显式 patch LLM、Mobile Linux 及相关共享包后，必须用 Cargo metadata 核对实际来源；Cargo 不会继承依赖仓库根的 patch。
 
 ```sh
-# 新 checkout：两个仓库并排放置
-git clone git@github.com-lingxi-coder:lingxi-coder/llm-client.git
-git clone git@github.com-lingxi-coder:lingxi-coder/harness-runtime.git
-cd harness-runtime
-
-# SDK 回归与 runtime 集成分别验证
+# SDK 回归单独运行；该命令不自动将 SDK 替换到 Harness 构建
 cargo test --manifest-path ../llm-client/Cargo.toml --locked
+# 默认运行时检查仍使用锁定依赖；工作树联调应运行手册的隔离消费者验证
 cargo test --locked -p llm-runtime --all-features
 ```
 
-修改 `../llm-client` 会立即进入根 workspace 的构建，无需复制源码或导入 Cargo 缓存。
 协议、请求编码、HTTP/WebSocket 传输和提供方服务的缺陷应在 SDK 中修复，
 runtime 负责宿主凭证、权限、工具执行和费用结算，并保留相应集成回归。
 
@@ -35,7 +28,7 @@ runtime 负责宿主凭证、权限、工具执行和费用结算，并保留相
 3. 在本仓库提交固定依赖和必要的 runtime 修改。
 
 CI 通过 `.github/actions/llm-client` 把固定 revision 检出到 `../llm-client`，
-因此构建的是本仓库锁定的 SDK 提交。新增 SDK 修复必须先发布，本仓库只记录已可获取的提交。
+该相邻 checkout 用于独立 SDK 检查；Cargo 本身仍按清单/锁文件解析固定来源，除非消费者显式设置 patch。新增 SDK 修复必须先发布，本仓库只记录已可获取的提交。
 
 ## 会话请求
 
