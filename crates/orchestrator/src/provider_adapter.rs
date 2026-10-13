@@ -400,8 +400,11 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         &self,
         model: &str,
         profile: Option<&str>,
-    ) -> Result<llm_runtime::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError> {
-        self.service.classifier_model_route_facts(model, profile).await
+    ) -> Result<llm_runtime::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError>
+    {
+        self.service
+            .classifier_model_route_facts(model, profile)
+            .await
     }
 
     fn native_computer_provider(

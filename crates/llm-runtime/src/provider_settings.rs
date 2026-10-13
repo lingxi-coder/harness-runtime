@@ -612,6 +612,7 @@ fn parse_flat_provider(
     let mut models = parse_models(
         obj.get("models"),
         name,
+        kind,
         options.models_required,
         strict,
         &mut warnings,
@@ -747,6 +748,7 @@ fn required_non_empty_string(
 fn parse_models(
     value: Option<&Value>,
     provider_name: &str,
+    provider_kind: ProviderKind,
     models_required: bool,
     strict: bool,
     warnings: &mut Vec<String>,
@@ -780,7 +782,7 @@ fn parse_models(
 
     let mut parsed = Vec::with_capacity(models.len());
     for model in models {
-        match parse_model_entry(provider_name, model) {
+        match parse_model_entry(provider_name, provider_kind, model) {
             Ok(profile) => parsed.push(profile),
             Err(message) if strict => return Err(message),
             Err(message) => warnings.push(format!("{message}; skipped")),
@@ -796,7 +798,11 @@ fn parse_models(
     Ok(parsed)
 }
 
-fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile, String> {
+fn parse_model_entry(
+    provider_name: &str,
+    provider_kind: ProviderKind,
+    value: &Value,
+) -> Result<ModelProfile, String> {
     match value {
         Value::String(id) => Ok(ModelProfile {
             display_model: id.clone(),
@@ -804,7 +810,7 @@ fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile,
             billing_model: id.clone(),
             aliases: Vec::new(),
             description: None,
-            metadata: Default::default(),
+            metadata: native_provider_model_metadata(provider_kind, id).unwrap_or_default(),
             capabilities: permissive_caps(),
         }),
         Value::Object(obj) => {
@@ -828,7 +834,9 @@ fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile,
                 .map_err(|error| {
                     format!("provider {provider_name:?}: model {id:?} metadata is invalid: {error}")
                 })?
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    native_provider_model_metadata(provider_kind, id).unwrap_or_default()
+                });
             Ok(ModelProfile {
                 display_model: id.to_string(),
                 request_model: id.to_string(),
@@ -843,6 +851,23 @@ fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile,
             "provider {provider_name:?}: model entry is not a string or object"
         )),
     }
+}
+
+/// Native 2.1.295 has provider-specific model ids for the provider-level Opus
+/// defaults. Preserve their shared Claude metadata when a user configures one
+/// of those exact ids, without inventing models absent from that provider's
+/// explicit `models` list.
+fn native_provider_model_metadata(
+    provider_kind: ProviderKind,
+    request_model: &str,
+) -> Option<lingxi_core::host::ModelMetadata> {
+    let canonical = match (provider_kind, request_model) {
+        (ProviderKind::BedrockClaude, "us.anthropic.claude-opus-5-5")
+        | (ProviderKind::VertexClaude, "claude-opus-5-5") => "claude-opus-5-5",
+        (ProviderKind::FoundryClaude, "claude-opus-4-6") => "claude-opus-4-6",
+        _ => return None,
+    };
+    Some(anthropic_metadata(canonical))
 }
 
 fn permissive_caps() -> Capabilities {
@@ -1052,6 +1077,7 @@ fn anthropic_metadata(model: &str) -> lingxi_core::host::ModelMetadata {
     let rates = match model {
         "claude-sonnet-5" => Some((2.0, 10.0, 0.2, 2.5)),
         "claude-opus-5" => Some((5.0, 25.0, 0.5, 6.25)),
+        "claude-opus-5-5" => Some((4.0, 20.0, 0.2, 5.0)),
         "claude-fable-5-1" | "claude-mythos-5-1" => Some((10.0, 50.0, 0.25, 12.5)),
         "claude-haiku-4-5" => Some((1.0, 5.0, 0.1, 1.25)),
         "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => Some((5.0, 25.0, 0.5, 6.25)),
@@ -1065,7 +1091,11 @@ fn anthropic_metadata(model: &str) -> lingxi_core::host::ModelMetadata {
         max_output_tokens: Some(
             if matches!(
                 model,
-                "claude-fable-5-1" | "claude-mythos-5-1" | "claude-opus-5" | "claude-sonnet-5"
+                "claude-fable-5-1"
+                    | "claude-mythos-5-1"
+                    | "claude-opus-5"
+                    | "claude-opus-5-5"
+                    | "claude-sonnet-5"
             ) {
                 128_000
             } else if model == "claude-haiku-4-5" {
@@ -1177,6 +1207,8 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
         // but absent from this port entirely, so it never reached the /model
         // picker or any of the model-gated paths below.
         model("claude-opus-5", "claude-opus-5", &[], true),
+        // Native 2.1.295 `opus55` is the first-party Opus family default.
+        model("claude-opus-5-5", "claude-opus-5-5", &[], true),
         model(
             "claude-haiku-4-20250307",
             "claude-haiku-4",
@@ -1304,8 +1336,22 @@ mod tests {
 
     /// The current catalog carries Mythos 5.1 immediately after Fable 5.1.
     #[test]
-    fn anthropic_catalog_uses_fable_and_mythos_5_1() {
+    fn anthropic_catalog_uses_fable_mythos_and_native_opus_5_5() {
         let profiles = anthropic_model_profiles();
+        let opus = profiles
+            .iter()
+            .find(|p| p.display_model == "claude-opus-5-5")
+            .expect("native Opus 5.5 model present in catalog");
+        assert_eq!(opus.request_model, "claude-opus-5-5");
+        assert_eq!(opus.billing_model, "claude-opus-5-5");
+        assert_eq!(opus.metadata.context_window_tokens, Some(1_000_000));
+        assert_eq!(opus.metadata.max_output_tokens, Some(128_000));
+        let opus_pricing = opus.metadata.pricing.as_ref().expect("official pricing");
+        assert_eq!(opus_pricing.input_per_million, Some(4.0));
+        assert_eq!(opus_pricing.output_per_million, Some(20.0));
+        assert_eq!(opus_pricing.cache_read_per_million, Some(0.2));
+        assert_eq!(opus_pricing.cache_write_per_million, Some(5.0));
+
         let fable = profiles
             .iter()
             .find(|p| p.display_model == "claude-fable-5-1")
@@ -1335,6 +1381,91 @@ mod tests {
             .position(|p| p.display_model == "claude-mythos-5-1")
             .expect("mythos-5.1 present");
         assert_eq!(mythos_idx, fable_idx + 1);
+    }
+
+    #[test]
+    fn native_provider_opus_defaults_keep_exact_request_ids_and_model_metadata() {
+        let providers = BTreeMap::from([
+            (
+                "bedrock".to_string(),
+                json!({
+                    "type": "bedrock-claude",
+                    "region": "us-east-1",
+                    "models": [{"id": "us.anthropic.claude-opus-5-5"}]
+                }),
+            ),
+            (
+                "foundry".to_string(),
+                json!({
+                    "type": "foundry-claude",
+                    "baseUrl": "https://example.invalid",
+                    "models": [{"id": "claude-opus-4-6"}]
+                }),
+            ),
+            (
+                "vertex".to_string(),
+                json!({
+                    "type": "vertex-claude",
+                    "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1",
+                    "models": [{"id": "claude-opus-5-5"}]
+                }),
+            ),
+        ]);
+        let parsed = parse_provider_profiles_strict(
+            &providers,
+            ProviderParseOptions {
+                credential_mode: ProviderCredentialMode::DeferredStatic,
+                models_required: true,
+            },
+        )
+        .expect("Native provider-specific Opus ids parse as configured request models");
+
+        for (profile_name, provider_id, request_model, context_window, input_price) in [
+            (
+                "bedrock",
+                ProviderId::BedrockClaude,
+                "us.anthropic.claude-opus-5-5",
+                1_000_000,
+                4.0,
+            ),
+            (
+                "vertex",
+                ProviderId::VertexClaude,
+                "claude-opus-5-5",
+                1_000_000,
+                4.0,
+            ),
+            (
+                "foundry",
+                ProviderId::FoundryClaude,
+                "claude-opus-4-6",
+                200_000,
+                5.0,
+            ),
+        ] {
+            let profile = parsed
+                .iter()
+                .find(|parsed| parsed.profile.profile_name == profile_name)
+                .expect("configured provider profile");
+            assert_eq!(profile.profile.provider_id, provider_id);
+            let model = profile
+                .profile
+                .models
+                .first()
+                .expect("configured model is retained");
+            assert_eq!(model.display_model, request_model);
+            assert_eq!(model.request_model, request_model);
+            assert_eq!(model.metadata.context_window_tokens, Some(context_window));
+            assert_eq!(model.metadata.max_output_tokens, Some(128_000));
+            assert_eq!(
+                model
+                    .metadata
+                    .pricing
+                    .as_ref()
+                    .and_then(|pricing| pricing.input_per_million),
+                Some(input_price)
+            );
+        }
     }
 
     /// WP11: `anthropic_model_profiles()` previously hard-coded
@@ -1809,8 +1940,8 @@ mod tests {
         );
 
         assert_eq!(profile.profile_name, "anthropic");
-        // Fifteen first-party entries, including current Fable/Mythos 5.1.
-        assert_eq!(profile.models.len(), 15);
+        // Sixteen first-party entries, including current Opus 5.5/Fable/Mythos 5.1.
+        assert_eq!(profile.models.len(), 16);
         assert!(profile
             .models
             .iter()

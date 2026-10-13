@@ -3316,8 +3316,10 @@ message with multiple tool uses so they run concurrently."
                     continue;
                 };
                 let normalized_server = mcp::normalization::normalize_name_for_mcp(server_name);
-                if !configs.contains_key(&normalized_server) {
-                    configs.insert(normalized_server, registry.get_config(server_name).await);
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    configs.entry(normalized_server)
+                {
+                    entry.insert(registry.get_config(server_name).await);
                 }
             }
         }

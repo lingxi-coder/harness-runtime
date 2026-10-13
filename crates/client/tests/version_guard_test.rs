@@ -323,9 +323,15 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::PromptSuggestion.suggestion", "String");
     put("ClientEvent::PromptSuggestion.uuid", "String");
     put("ClientEvent::PromptSuggestion.session_id", "String");
-    put("ClientEvent::PromptSuggestionState", "prompt_suggestion_state");
+    put(
+        "ClientEvent::PromptSuggestionState",
+        "prompt_suggestion_state",
+    );
     put("ClientEvent::PromptSuggestionState.enabled", "bool");
-    put("ClientEvent::PromptSuggestionState.notice", "Option<String>");
+    put(
+        "ClientEvent::PromptSuggestionState.notice",
+        "Option<String>",
+    );
     put("ClientEvent::UiInvalidate", "ui_invalidate");
     put("ClientEvent::UiInvalidate.instances_json", "Option<String>");
     put("ClientEvent::UiInvalidate.uuid", "String");
@@ -1121,16 +1127,46 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::UiSelect", "ui_select");
     put("ClientCommand::UiSelect.request_id", "String");
     put("ClientCommand::UiSelect.request_json", "String");
-    put("ClientCommand::UpdatePromptSuggestionContext", "update_prompt_suggestion_context");
-    put("ClientCommand::UpdatePromptSuggestionContext.session_id", "String");
-    put("ClientCommand::UpdatePromptSuggestionContext.focus", "String");
-    put("ClientCommand::UpdatePromptSuggestionContext.input_empty", "bool");
-    put("ClientCommand::UpdatePromptSuggestionContext.pending_permission", "bool");
-    put("ClientCommand::UpdatePromptSuggestionContext.elicitation_active", "bool");
-    put("ClientCommand::RecordPromptSuggestionSubmission", "record_prompt_suggestion_submission");
-    put("ClientCommand::RecordPromptSuggestionSubmission.text", "String");
-    put("ClientCommand::PromptSuggestionFeedback", "prompt_suggestion_feedback");
-    put("ClientCommand::PromptSuggestionFeedback.session_id", "String");
+    put(
+        "ClientCommand::UpdatePromptSuggestionContext",
+        "update_prompt_suggestion_context",
+    );
+    put(
+        "ClientCommand::UpdatePromptSuggestionContext.session_id",
+        "String",
+    );
+    put(
+        "ClientCommand::UpdatePromptSuggestionContext.focus",
+        "String",
+    );
+    put(
+        "ClientCommand::UpdatePromptSuggestionContext.input_empty",
+        "bool",
+    );
+    put(
+        "ClientCommand::UpdatePromptSuggestionContext.pending_permission",
+        "bool",
+    );
+    put(
+        "ClientCommand::UpdatePromptSuggestionContext.elicitation_active",
+        "bool",
+    );
+    put(
+        "ClientCommand::RecordPromptSuggestionSubmission",
+        "record_prompt_suggestion_submission",
+    );
+    put(
+        "ClientCommand::RecordPromptSuggestionSubmission.text",
+        "String",
+    );
+    put(
+        "ClientCommand::PromptSuggestionFeedback",
+        "prompt_suggestion_feedback",
+    );
+    put(
+        "ClientCommand::PromptSuggestionFeedback.session_id",
+        "String",
+    );
     put("ClientCommand::PromptSuggestionFeedback.uuid", "String");
     put("ClientCommand::PromptSuggestionFeedback.action", "String");
     put("ClientCommand::UiClientOperation", "ui_client_operation");
@@ -2285,8 +2321,15 @@ fn contract_index_covers_every_dto() {
             runtime_id: String::new(),
             frame_json: String::new(),
         },
-        ClientEvent::PromptSuggestion { suggestion: String::new(), uuid: String::new(), session_id: String::new() },
-        ClientEvent::PromptSuggestionState { enabled: true, notice: None },
+        ClientEvent::PromptSuggestion {
+            suggestion: String::new(),
+            uuid: String::new(),
+            session_id: String::new(),
+        },
+        ClientEvent::PromptSuggestionState {
+            enabled: true,
+            notice: None,
+        },
         ClientEvent::UiInvalidate {
             instances_json: None,
             uuid: String::new(),
@@ -2693,12 +2736,19 @@ fn contract_index_covers_every_dto() {
             request_json: String::new(),
         },
         ClientCommand::UpdatePromptSuggestionContext {
-            session_id: String::new(), focus: "focused".into(), input_empty: true,
-            pending_permission: false, elicitation_active: false,
+            session_id: String::new(),
+            focus: "focused".into(),
+            input_empty: true,
+            pending_permission: false,
+            elicitation_active: false,
         },
-        ClientCommand::RecordPromptSuggestionSubmission { text: String::new() },
+        ClientCommand::RecordPromptSuggestionSubmission {
+            text: String::new(),
+        },
         ClientCommand::PromptSuggestionFeedback {
-            session_id: String::new(), uuid: String::new(), action: "shown".into(),
+            session_id: String::new(),
+            uuid: String::new(),
+            action: "shown".into(),
         },
         ClientCommand::UiClientOperation {
             request_id: String::new(),

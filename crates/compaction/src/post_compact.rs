@@ -576,6 +576,12 @@ impl PostCompactBuilder {
 mod tests {
     use super::*;
 
+    fn autonomous_loop_state_guard() -> std::sync::MutexGuard<'static, ()> {
+        tool_cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn main_thread_gate_true_for_none() {
         // `/compact`, `/clear` pass no source — genuinely main-thread-only.
@@ -613,6 +619,10 @@ mod tests {
 
     #[test]
     fn run_post_compact_cleanup_main_thread_does_not_panic() {
+        // This cleanup resets tool_cron's process-global delivery marker. Keep
+        // it serialized with the lifecycle test below, which observes that
+        // marker across several fires and compact branches.
+        let _delivery_guard = autonomous_loop_state_guard();
         // No Rust module-level caches to assert on (most resets are
         // cross-crate / stateless); exercise both branches for coverage.
         run_post_compact_cleanup(None);
@@ -1018,6 +1028,8 @@ mod tests {
     fn post_compact_resets_autonomous_loop_delivered_on_main_thread() {
         use lingxi_core::types::utf16_json::Utf16JsonProjection;
         use tool_cron::{resolve_autonomous_loop_fire, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL};
+
+        let _delivery_guard = autonomous_loop_state_guard();
 
         fn starts_with_source(value: &Utf16JsonProjection, prefix: &str) -> bool {
             value

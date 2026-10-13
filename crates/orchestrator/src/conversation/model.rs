@@ -866,12 +866,14 @@ impl ConversationOrchestrator {
         };
         let request = sidequery::SideQueryRequest {
             model_attempt: None,
+            native_prompt_context: None,
             typed_attachment_ids: std::collections::HashSet::new(),
             task_deliveries: std::collections::HashMap::new(),
             model: resolved_model,
             profile,
             system_prompt: system.filter(|system| !source_text_is_empty(system)),
             system_prompt_input: None,
+            enable_prompt_caching: false,
             messages,
             tools: Vec::new(),
             tool_choice: None,

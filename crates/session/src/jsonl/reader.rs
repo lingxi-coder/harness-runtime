@@ -679,13 +679,16 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
             out.malformed_line_count += 1;
             continue;
         };
-        // A line without lone-surrogate escapes (nearly every line) parses to
-        // a plain projection that is never attached below: take its tree
-        // instead of copying it, and skip the rebase, which has nothing to
-        // carry over.
+        // Reject a caller-supplied private carrier in the authoritative tree,
+        // before constructing the display-only cache. Rebasing the whole display
+        // mirror would turn source overflow numbers into null.
+        if row.get_property(PRIVATE_UTF16_KEY).is_some() {
+            row.remove_field(PRIVATE_UTF16_KEY)
+                .expect("removing one private object property preserves source values");
+        }
         let (utf16_overrides, has_non_scalar_key) = collect_utf16_overrides(&row);
         let plain = utf16_overrides.is_empty() && !has_non_scalar_key;
-        let mut exact = crate::jsonl::exact_json::ExactJsonValue {
+        let exact = crate::jsonl::exact_json::ExactJsonValue {
             value: if plain {
                 std::mem::take(&mut row.value)
             } else {
@@ -693,22 +696,6 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
             },
             utf16_overrides,
         };
-        // Never adopt a caller-supplied private carrier from an outward row.
-        // Only the native JSON escapes establish these exact code units.
-        if let Some(object) = exact.value.as_object_mut() {
-            object.remove(PRIVATE_UTF16_KEY);
-        }
-        let private_pointer = format!("/{PRIVATE_UTF16_KEY}");
-        exact.utf16_overrides.retain(|pointer, _| {
-            pointer != &private_pointer
-                && !pointer
-                    .strip_prefix(&private_pointer)
-                    .is_some_and(|tail| tail.starts_with('/'))
-        });
-        if !plain {
-            row.rebase_display_value(exact.value.clone())
-                .expect("removing a private carrier preserves native projection");
-        }
         let ty = row.string_at("/type").unwrap_or("");
         if is_transcript_message_type(ty) {
             let Ok(mut msg) = JsonlMessage::from_projection(&row) else {

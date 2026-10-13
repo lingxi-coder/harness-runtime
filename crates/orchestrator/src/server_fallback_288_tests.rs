@@ -1,17 +1,17 @@
 //! Main-query integration checks for admitted server-fallback events.
 
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-    mock_message_response, noop_hook_executor,
+    mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use crate::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_core::host::{OrchestratorHandle, ResumeRuntimeSnapshot, refusal_server::Policy};
+use lingxi_core::host::{refusal_server::Policy, OrchestratorHandle, ResumeRuntimeSnapshot};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId};
 use llm_runtime::history::HistoryServerFallback;
 use llm_runtime::model::allowlist::ModelEnforcement;
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -293,12 +293,10 @@ async fn batched_cost_handoff_keeps_complete_and_incomplete_native_quotes_distin
         let state = tracker.snapshot().await;
         assert_eq!(state.total_nano_usd, expected_nano);
         assert_eq!(!state.unpriced_models.is_empty(), unpriced);
-        assert!(
-            state
-                .per_model_usage
-                .keys()
-                .all(|model| model.model == "served-model")
-        );
+        assert!(state
+            .per_model_usage
+            .keys()
+            .all(|model| model.model == "served-model"));
         assert_eq!(state.total_web_search_requests, 2);
     }
 }
@@ -477,13 +475,11 @@ fn persisted_profile_extensions_keep_absent_distinct_from_explicit_null() {
     }))
     .unwrap();
     assert_eq!(absent.previous_profile, None);
-    assert!(
-        !serde_json::to_value(absent)
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .contains_key("previousProfile")
-    );
+    assert!(!serde_json::to_value(absent)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("previousProfile"));
 }
 
 #[tokio::test]
@@ -1211,13 +1207,11 @@ async fn same_model_server_hop_keeps_session_effects_but_suppresses_the_notice()
     // observations arm the refusal request header (native 2.1.288 oracle).
     assert!(!selection.header_armed);
     drop(selection);
-    assert!(
-        !output
-            .snapshot()
-            .await
-            .iter()
-            .any(|event| matches!(event, lingxi_core::host::OutputEvent::SystemNotice { .. }))
-    );
+    assert!(!output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, lingxi_core::host::OutputEvent::SystemNotice { .. })));
 }
 
 #[tokio::test]
@@ -1267,11 +1261,9 @@ async fn local_server_notice_is_visible_and_persisted_without_mutating_session_r
                         .unwrap(),
                     crate::server_fallback::ServerFallbackAdmission::Applied
                 );
-                assert!(
-                    crate::server_fallback::flush_pending_notice(&orch)
-                        .await
-                        .is_some()
-                );
+                assert!(crate::server_fallback::flush_pending_notice(&orch)
+                    .await
+                    .is_some());
             }),
         )
         .await;
@@ -1337,18 +1329,14 @@ async fn local_server_notice_is_visible_and_persisted_without_mutating_session_r
         })
         .collect();
     assert_eq!(notices.len(), 1);
-    assert!(
-        notices[0]
-            .string_at("")
-            .unwrap()
-            .contains("This response was completed by")
-    );
-    assert!(
-        notices[0]
-            .string_at("")
-            .unwrap()
-            .contains("Your session model is unchanged.")
-    );
+    assert!(notices[0]
+        .string_at("")
+        .unwrap()
+        .contains("This response was completed by"));
+    assert!(notices[0]
+        .string_at("")
+        .unwrap()
+        .contains("Your session model is unchanged."));
 }
 
 #[tokio::test]
@@ -1835,10 +1823,8 @@ async fn ordinary_response_without_an_admitted_event_keeps_the_selected_route() 
     let session = orch.session.lock().await;
     assert_eq!(session.model, source);
     assert!(session.model_profile.is_none());
-    assert!(
-        session
-            .history
-            .iter()
-            .any(|message| { message_contains_text(message, "ordinary answer") })
-    );
+    assert!(session
+        .history
+        .iter()
+        .any(|message| { message_contains_text(message, "ordinary answer") }));
 }

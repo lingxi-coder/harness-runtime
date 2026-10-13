@@ -37,6 +37,9 @@ pub struct HookModelSelection {
 /// having to populate everything.
 #[derive(Clone, Default)]
 pub struct HookContext {
+    /// Defer UserPromptExpansion transcript attachments so the command host
+    /// can append their ordered history rows after the expanded prompt body.
+    pub defer_prompt_expansion_history_rows: bool,
     /// Captured originating cost authority for model work initiated by this
     /// hook. It is host-only and never serialized into hook input.
     pub model_safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,

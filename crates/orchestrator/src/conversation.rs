@@ -125,7 +125,8 @@ pub trait OrchestratorApiClient: Send + Sync {
         &self,
         _model: &str,
         _profile: Option<&str>,
-    ) -> Result<llm_runtime::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError> {
+    ) -> Result<llm_runtime::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError>
+    {
         Ok(Default::default())
     }
 
@@ -1866,8 +1867,8 @@ pub(crate) use compaction_impl::{
 #[path = "conversation/drivers/mod.rs"]
 mod drivers_impl;
 pub use drivers_impl::{
-    realtime_history, QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd,
-    RealtimeAgentInput, RealtimeAgentLimits,
+    realtime_history, skill_prompt_inputs, QueuedPromptInput, RealtimeAgentContext,
+    RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits,
 };
 #[path = "conversation/context_announcements.rs"]
 pub(crate) mod context_announcements_impl;
@@ -1883,10 +1884,6 @@ mod mod_projects_consent;
 mod mod_session_measure_sampler;
 #[path = "conversation/model.rs"]
 mod model_impl;
-#[path = "conversation/prompt_suggestion.rs"]
-mod prompt_suggestion;
-#[path = "conversation/prompt_suggestion_background.rs"]
-mod prompt_suggestion_background;
 #[path = "conversation/model_reminders.rs"]
 mod model_reminders_impl;
 #[path = "conversation/native_classifier_context.rs"]
@@ -1897,6 +1894,10 @@ mod native_policy_attachments;
 mod native_sandbox_attachments;
 #[path = "conversation/native_settings_attachments.rs"]
 mod native_settings_attachments;
+#[path = "conversation/prompt_suggestion.rs"]
+mod prompt_suggestion;
+#[path = "conversation/prompt_suggestion_background.rs"]
+mod prompt_suggestion_background;
 pub(crate) use context_announcements_impl::PreparedContextAnnouncements;
 #[path = "conversation/prompt_cache.rs"]
 mod prompt_cache_impl;

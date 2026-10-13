@@ -7,6 +7,116 @@ use super::*;
 
 use hooks::ExactHookText;
 
+fn is_native_js_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009..=0x000D
+            | 0x0020
+            | 0x00A0
+            | 0x1680
+            | 0x2000..=0x200A
+            | 0x2028
+            | 0x2029
+            | 0x202F
+            | 0x205F
+            | 0x3000
+            | 0xFEFF
+    )
+}
+
+fn is_native_js_word_unit(unit: u16) -> bool {
+    matches!(unit, 0x0030..=0x0039 | 0x0041..=0x005A | 0x005F | 0x0061..=0x007A)
+}
+
+fn native_ascii_lower_unit(unit: u16) -> u16 {
+    if (0x0041..=0x005A).contains(&unit) {
+        unit + 0x20
+    } else {
+        unit
+    }
+}
+
+/// Match Native 2.1.295's imported `Xst` (`/<(?=\s*(?:\/\s*)?system-reminder\b)/gi`)
+/// and `aE`'s trailing incomplete-tag escape without converting through UTF-8.
+fn escape_native_hook_reminder_body(text: &ExactHookText) -> ExactHookText {
+    let input = &text.utf16_code_units;
+    let mut escaped = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == u16::from(b'<')
+            && native_system_reminder_prefix_end(input, index + 1).is_some()
+        {
+            escaped.extend("&lt;".encode_utf16());
+        } else {
+            escaped.push(input[index]);
+        }
+        index += 1;
+    }
+
+    if let Some(index) = (0..escaped.len()).find(|index| {
+        escaped[*index] == u16::from(b'<') && native_incomplete_tag_tail(&escaped, *index + 1)
+    }) {
+        escaped.splice(index..=index, "&lt;".encode_utf16());
+    }
+
+    ExactHookText::from_utf16(escaped)
+}
+
+fn native_system_reminder_prefix_end(units: &[u16], mut index: usize) -> Option<usize> {
+    while units
+        .get(index)
+        .is_some_and(|unit| is_native_js_whitespace(*unit))
+    {
+        index += 1;
+    }
+    if units.get(index) == Some(&u16::from(b'/')) {
+        index += 1;
+        while units
+            .get(index)
+            .is_some_and(|unit| is_native_js_whitespace(*unit))
+        {
+            index += 1;
+        }
+    }
+
+    let name = b"system-reminder";
+    let end = index.checked_add(name.len())?;
+    let candidate = units.get(index..end)?;
+    if !candidate
+        .iter()
+        .zip(name)
+        .all(|(unit, expected)| native_ascii_lower_unit(*unit) == u16::from(*expected))
+    {
+        return None;
+    }
+    if units
+        .get(end)
+        .is_some_and(|unit| is_native_js_word_unit(*unit))
+    {
+        return None;
+    }
+    Some(end)
+}
+
+fn native_incomplete_tag_tail(units: &[u16], mut index: usize) -> bool {
+    while units
+        .get(index)
+        .is_some_and(|unit| is_native_js_whitespace(*unit))
+    {
+        index += 1;
+    }
+    if units.get(index) == Some(&u16::from(b'/')) {
+        index += 1;
+        while units
+            .get(index)
+            .is_some_and(|unit| is_native_js_whitespace(*unit))
+        {
+            index += 1;
+        }
+    }
+    index == units.len()
+}
+
 fn source_string_projection(value: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
         value.to_owned(),
@@ -1039,6 +1149,140 @@ impl ConversationOrchestrator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         admitted
+    }
+
+    /// Render a Native 2.1.295 UserPromptExpansion success row for model history.
+    pub(crate) fn native_hook_success_message_for_api(
+        message_id: MessageId,
+        attachment: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Option<ConversationMessage> {
+        if attachment.string_at("/type")? != "hook_success"
+            || attachment.string_at("/hookEvent")? != "UserPromptExpansion"
+        {
+            return None;
+        }
+        let hook_name = ExactHookText::from_json_projection(attachment, "/hookName")?;
+        let content = ExactHookText::from_json_projection(attachment, "/content")?;
+        if content.is_empty() {
+            return None;
+        }
+
+        let mut body = hook_name;
+        body.push_text(" hook success: ");
+        body.push(&content);
+        let body = escape_native_hook_reminder_body(&body);
+        Some(
+            ExactHookText::wrapped("<system-reminder>\n", &body, "\n</system-reminder>")
+                .to_conversation_message(message_id, true),
+        )
+    }
+
+    /// Render Native 2.1.295's UserPromptExpansion additional-context row.
+    /// Its renderer applies the same system-reminder escaping used for hook
+    /// success before wrapping the text as a model-facing meta message.
+    pub(crate) fn native_hook_additional_context_message_for_api(
+        message_id: MessageId,
+        attachment: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Option<ConversationMessage> {
+        if attachment.string_at("/type")? != "hook_additional_context"
+            || attachment.string_at("/hookEvent")? != "UserPromptExpansion"
+        {
+            return None;
+        }
+
+        let hook_name = ExactHookText::from_json_projection(attachment, "/hookName")
+            .unwrap_or_else(|| ExactHookText::from_text("UserPromptExpansion"));
+        let content = attachment.at_pointer("/content")?;
+        let count = content.array_len()?;
+        let contexts = (0..count)
+            .map(|index| {
+                ExactHookText::from_json_projection(attachment, &format!("/content/{index}"))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if contexts.is_empty() {
+            return None;
+        }
+
+        let mut body = hook_name;
+        body.push_text(" hook additional context: ");
+        body.push(&ExactHookText::join(&contexts, "\n"));
+        let body = escape_native_hook_reminder_body(&body);
+        Some(
+            ExactHookText::wrapped("<system-reminder>\n", &body, "\n</system-reminder>")
+                .to_conversation_message(message_id, true),
+        )
+    }
+
+    /// Append Native history rows yielded by UserPromptExpansion after the
+    /// command body has been queued. The raw attachment projection is the
+    /// durable transcript record; model-visible rows share the durable UUID.
+    pub(super) async fn append_native_prompt_expansion_history_rows(
+        &self,
+        rows: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+    ) {
+        for row in rows {
+            if row.string_at("/type") == Some("hook_success")
+                && row.string_at("/hookEvent") == Some("UserPromptExpansion")
+            {
+                if let Some(message) =
+                    Self::native_hook_success_message_for_api(MessageId::new(), row)
+                {
+                    let message_id = message.id();
+                    self.persist_hook_attachment_to_jsonl_with_id(message_id, row.clone())
+                        .await;
+                    self.register_mod_persisted_attachment(
+                        &message,
+                        "hook_success",
+                        serde_json::json!({"kind":"hook","event":"UserPromptExpansion"}),
+                    )
+                    .await;
+                    self.session.lock().await.history.push(message);
+                    continue;
+                }
+            }
+
+            if row.string_at("/type") != Some("hook_additional_context") {
+                self.persist_hook_attachment_to_jsonl(row.clone()).await;
+                continue;
+            }
+
+            let count = row
+                .at_pointer("/content")
+                .and_then(|content| content.array_len())
+                .unwrap_or_default();
+            let contexts = (0..count)
+                .filter_map(|index| {
+                    ExactHookText::from_json_projection(row, &format!("/content/{index}"))
+                })
+                .collect::<Vec<_>>();
+            if contexts.is_empty() {
+                self.persist_hook_attachment_to_jsonl(row.clone()).await;
+                continue;
+            }
+
+            let hook_name = ExactHookText::from_json_projection(row, "/hookName")
+                .unwrap_or_else(|| ExactHookText::from_text("UserPromptExpansion"));
+            let message_id = MessageId::new();
+            self.persist_hook_attachment_to_jsonl_with_id(message_id, row.clone())
+                .await;
+            let message = Self::native_hook_additional_context_message_for_api(message_id, row)
+                .unwrap_or_else(|| {
+                    let mut rendered = ExactHookText::from_text("<system-reminder>\n");
+                    rendered.push(&hook_name);
+                    rendered.push_text(" hook additional context: ");
+                    rendered.push(&ExactHookText::join(&contexts, "\n"));
+                    rendered.push_text("\n</system-reminder>");
+                    rendered.to_conversation_message(message_id, true)
+                });
+            let event = row.string_at("/hookEvent").unwrap_or("UserPromptExpansion");
+            self.register_mod_persisted_attachment(
+                &message,
+                "hook_additional_context",
+                serde_json::json!({"kind":"hook","event":event}),
+            )
+            .await;
+            self.session.lock().await.history.push(message);
+        }
     }
 
     pub(super) async fn append_mod_prompt_context(

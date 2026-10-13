@@ -114,10 +114,12 @@ fn request_context_attachment_persists_as_a_rendered_transcript_sidecar() {
                         .filter(|row| row.text_content().contains("Unknown slash fallback"))
                         .collect::<Vec<_>>();
                     assert_eq!(outbound_reminders.len(), 1);
+                    // Native 2.1.295 sets isMeta:true while retaining renderedRole:user.
                     assert!(matches!(
                         outbound_reminders[0],
-                        ConversationMessage::User { is_meta: false, .. }
+                        ConversationMessage::User { .. }
                     ));
+                    assert!(outbound_reminders[0].is_meta());
                     let fallback_request_index = calls[0]
                         .iter()
                         .position(|row| row.id() == outbound_reminders[0].id())
@@ -152,6 +154,13 @@ fn request_context_attachment_persists_as_a_rendered_transcript_sidecar() {
                         "the API fallback row and typed transcript sidecar share one identity"
                     );
                     assert_eq!(fallback.extra.string_at("/renderedRole"), Some("user"));
+                    assert!(fallback.extra.at_pointer("/isMeta").is_none());
+                    assert!(fallback
+                        .attachment_projection
+                        .as_ref()
+                        .unwrap()
+                        .at_pointer("/isMeta")
+                        .is_none());
                     assert_eq!(fallback.extra.array_len("/rendered"), Some(1));
                     assert_eq!(
                         fallback.extra.string_at("/rendered/0/content"),

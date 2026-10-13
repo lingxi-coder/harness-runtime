@@ -68,12 +68,14 @@ impl MemorySelector {
         let prompt = build_selector_prompt(query, &candidates, recent_tools);
         let req = SideQueryRequest {
             model_attempt: None,
+            native_prompt_context: None,
             model: model.to_string(),
             profile: profile.map(str::to_string),
             system_prompt: Some("You select memory files relevant to the query.".into()),
             typed_attachment_ids: HashSet::new(),
             task_deliveries: std::collections::HashMap::new(),
             system_prompt_input: None,
+            enable_prompt_caching: false,
             messages: vec![lingxi_core::types::ConversationMessage::user(
                 lingxi_core::types::MessageId::new(),
                 prompt,

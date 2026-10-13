@@ -114,6 +114,37 @@ function send(message) {
   process.stdout.write(`${encodeModsIpcFrame(message)}\n`);
 }
 
+function materializeSkillPromptIpcResult(result) {
+  // Native consumes accessible text directly, including prototype getters.
+  // Preserve enumerable fields while preventing JSON hooks from hiding it.
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) return result;
+  const text = result.text;
+  if (typeof text !== 'string') return result;
+
+  const own = Object.create(null);
+  let copiedText = false;
+  for (const key of Object.keys(result)) {
+    const value = key === 'text' ? text : result[key];
+    if (key === 'toJSON' && typeof value === 'function') continue;
+    if (key === 'text') copiedText = true;
+    Object.defineProperty(own, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  if (!copiedText) {
+    Object.defineProperty(own, 'text', {
+      value: text,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return own;
+}
+
 const clientSurfaceManager = new ClientSurfaceManager({ send });
 
 function freeze(value) {
@@ -1095,6 +1126,8 @@ function remotePromptArgumentError(event, input) {
 
 function validOperationResult(event, input, result, downstream = []) {
   if (event === 'prompt.submit') return validPromptSubmitResult(input, result, downstream);
+  if (event === 'skill.prompt') return result && typeof result === 'object'
+    && !Array.isArray(result) && typeof result.text === 'string';
   if (event === 'agent.offer') return validExactEventObject(result,
     new Set(['isOffered']), ['isOffered']) && typeof result.isOffered === 'boolean';
   if (event === 'session.measure') return validExactEventObject(result,
@@ -1398,6 +1431,13 @@ function turnCompleteForwarded(original, forwarded) {
   }
   return original?.agentId !== undefined && !Object.hasOwn(forwarded, 'agentId')
     ? { ...forwarded, agentId: original.agentId } : forwarded;
+}
+
+function skillPromptForwarded(original, forwarded) {
+  return original && typeof original === 'object' && !Array.isArray(original)
+    && typeof original.skill === 'string' && typeof original.text === 'string'
+    && forwarded && typeof forwarded === 'object' && !Array.isArray(forwarded)
+    && forwarded.skill === original.skill && typeof forwarded.text === 'string';
 }
 
 function matches(pattern, value, depth = 0) {
@@ -3366,7 +3406,7 @@ async function dispatch(message) {
     }
     handlers.sort((left, right) => tiers.indexOf(left.tier) - tiers.indexOf(right.tier)
       || left.tierOrder - right.tierOrder);
-    const matchingHandlers = ['tool.check', 'command.run', 'turn.complete'].includes(message.event)
+    const matchingHandlers = ['tool.check', 'command.run', 'turn.complete', 'skill.prompt'].includes(message.event)
       ? handlers.filter(item => !item.matcher || matches(item.matcher, message.input)) : [];
     const hooked = matchingHandlers.length > 0
       ? [...new Set(matchingHandlers.map(item => item.plugin))] : undefined;
@@ -3389,6 +3429,9 @@ async function dispatch(message) {
           }
           if (message.event === 'turn.complete' && !turnCompleteForwarded(message.input, event)) {
             throw new Error('turn.complete agentId is pinned and answer must be text');
+          }
+          if (message.event === 'skill.prompt' && !skillPromptForwarded(message.input, event)) {
+            throw new Error('skill.prompt needs string skill and text fields');
           }
           if (message.event === 'prompt.submit' && !promptSubmitForwarded(message.input, event)) {
             throw new Error('prompt.submit origin and wait are pinned');
@@ -3729,6 +3772,9 @@ async function dispatch(message) {
           nextEvent = turnCompleteForwarded(message.input, nextEvent);
           if (nextEvent === undefined) return Promise.reject(new Error('turn.complete agentId is pinned and answer must be text'));
         }
+        if (message.event === 'skill.prompt' && !skillPromptForwarded(event, nextEvent)) {
+          return Promise.reject(new Error('skill.prompt skill name is pinned and text must be text'));
+        }
         return continueBelow(nextEvent, index + 1);
       };
       next.to = function(nextEvent, target) {
@@ -3814,6 +3860,9 @@ async function dispatch(message) {
         if (message.event === 'turn.complete') {
           nextEvent = turnCompleteForwarded(message.input, nextEvent);
           if (nextEvent === undefined) return Promise.reject(new Error('turn.complete agentId is pinned and answer must be text'));
+        }
+        if (message.event === 'skill.prompt' && !skillPromptForwarded(event, nextEvent)) {
+          return Promise.reject(new Error('skill.prompt skill name is pinned and text must be text'));
         }
         if (!['append', 'builtin', 'core'].includes(target)) {
           return Promise.reject(new Error(`${entry.plugin}: next.to names "${String(target)}", which is not a tier a dispatch continues at (append, builtin, core)`));
@@ -3943,7 +3992,9 @@ async function dispatch(message) {
     if (message.event === 'ui.render') {
       commitUiPressActions(message.input, uiRenderContext.renderRevision, result);
     }
-    send({ id: message.id, kind: 'result', result: result ?? null, hooked, allHookedBuiltin,
+    const ipcResult = message.event === 'skill.prompt'
+      ? materializeSkillPromptIpcResult(result) : result;
+    send({ id: message.id, kind: 'result', result: ipcResult ?? null, hooked, allHookedBuiltin,
       ...(uiRenderPlugins ? { uiRenderPlugins } : {}),
       ...(uiRenderDurationMs === undefined ? {} : { uiRenderDurationMs }) });
   } finally {

@@ -198,7 +198,9 @@ async fn end_mobile_audio_owner(
 
 use crate::mobile::{
     skill_loader::command_visible_in_session_mode,
-    turn_durability::{DurableTurnStore, DurableTurnStoreError, ResumeDisposition},
+    turn_durability::{
+        DurableSkillPrompt, DurableTurnStore, DurableTurnStoreError, ResumeDisposition,
+    },
 };
 
 /// Everything a mobile host needs to drive a conversation, built deterministically
@@ -3676,8 +3678,17 @@ impl MobileEngineHandle {
         turn_id: Option<u64>,
         queue_if_busy: bool,
     ) -> Result<(), ClientError> {
-        self.start_streaming_turn_inner(text, prompt_mode, images, turn_id, true, queue_if_busy)
-            .await
+        self.start_streaming_turn_inner(
+            text,
+            prompt_mode,
+            images,
+            turn_id,
+            true,
+            queue_if_busy,
+            None,
+            None,
+        )
+        .await
     }
 
     async fn start_streaming_turn_inner(
@@ -3688,10 +3699,12 @@ impl MobileEngineHandle {
         turn_id: Option<u64>,
         create_checkpoint: bool,
         queue_if_busy: bool,
+        queued_inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
+        skill_prompt: Option<DurableSkillPrompt>,
     ) -> Result<(), ClientError> {
         let turn = match self.reserve_turn(turn_id).await {
             Ok(turn) => turn,
-            Err(ClientError::Rejected { .. }) if queue_if_busy => {
+            Err(ClientError::Rejected { .. }) if queue_if_busy && queued_inputs.is_none() => {
                 self.message_queue
                     .enqueue(mobile_prompt_command(text))
                     .await;
@@ -3726,7 +3739,14 @@ impl MobileEngineHandle {
             if let Some(turn_id) = turn_id {
                 let checkpoint = self
                     .durable_turns
-                    .begin(&turn.session_id, turn_id, text.clone(), prompt_mode, images)
+                    .begin_with_skill_prompt(
+                        &turn.session_id,
+                        turn_id,
+                        text.clone(),
+                        prompt_mode,
+                        images,
+                        skill_prompt.clone(),
+                    )
                     .map_err(Self::map_durable_turn_error);
                 match checkpoint {
                     Ok(checkpoint) => {
@@ -3781,9 +3801,16 @@ impl MobileEngineHandle {
         let loop_scheduler = self.inner.wakeup_scheduler.get().cloned();
         let cancel_reason = self.cancel_reason.clone();
         let task = self.runtime().spawn(async move {
-            let result = orch
-                .run_turn_streaming_with_cancel(&text, task_turn.cancel.clone())
-                .await;
+            let result = match queued_inputs {
+                Some(inputs) => {
+                    orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone())
+                        .await
+                }
+                None => {
+                    orch.run_turn_streaming_with_cancel(&text, task_turn.cancel.clone())
+                        .await
+                }
+            };
             if let Err(err) = &result {
                 message_output.reset_message_buffer().await;
                 sink.emit(client::adapter::map_orchestrator_error(err))
@@ -4425,6 +4452,14 @@ impl MobileEngineHandle {
                             recovery_source = "client_resume",
                             "mobile: resuming turn from pre-execution checkpoint"
                         );
+                        let skill_prompt = checkpoint.skill_prompt.clone();
+                        let queued_inputs = skill_prompt.as_ref().map(|source| {
+                            orchestrator::skill_prompt_inputs(
+                                source.command.clone(),
+                                source.body.clone(),
+                                source.hook_messages.clone(),
+                            )
+                        });
                         self.start_streaming_turn_inner(
                             checkpoint.prompt,
                             checkpoint.prompt_mode,
@@ -4432,6 +4467,8 @@ impl MobileEngineHandle {
                             Some(turn_id),
                             false,
                             false,
+                            queued_inputs,
+                            skill_prompt,
                         )
                         .await
                     }
@@ -4910,6 +4947,33 @@ impl MobileEngineHandle {
                     lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
                         self.start_streaming_turn(prompt, None, Vec::new(), turn_id, false)
                             .await?;
+                    }
+                    lingxi_core::host::SlashDispatchResult::RunSkillAsTurn {
+                        command,
+                        body,
+                        hook_messages,
+                    } => {
+                        let queued_inputs = orchestrator::skill_prompt_inputs(
+                            command.clone(),
+                            body.clone(),
+                            hook_messages.clone(),
+                        );
+                        let skill_prompt = DurableSkillPrompt {
+                            command: command.clone(),
+                            body,
+                            hook_messages,
+                        };
+                        self.start_streaming_turn_inner(
+                            command,
+                            None,
+                            Vec::new(),
+                            turn_id,
+                            true,
+                            false,
+                            Some(queued_inputs),
+                            Some(skill_prompt),
+                        )
+                        .await?;
                     }
                     lingxi_core::host::SlashDispatchResult::Handled { display } => {
                         self.event_sink

@@ -98,14 +98,13 @@ impl sidequery::SideQueryClient for UnreachableSideQuery {
 /// once, correcting the settings file and calling `preflight_error()`
 /// again (no restart, no re-construction) must recover to `None`,
 /// exactly as `DesktopFusionExecutor`'s doc comment now promises.
-#[test]
-fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
-    // `desktop_fusion_runtime_config` reads the managed tier at the call
-    // boundary, and a managed tier outranks the user settings this test
-    // fixes. Siblings in this binary set `MANAGED_DIR_ENV` process-wide, so
-    // without the lock a neighbour's managed directory can be live here and
-    // the "fixed" config stays invalid — the exact failure this asserts
-    // against, arriving from somewhere else.
+#[tokio::test]
+async fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
+    // Fusion reads the session's selected managed snapshot synchronously at
+    // the call boundary, and a managed tier outranks the user settings this
+    // test fixes. Siblings in this binary set `MANAGED_DIR_ENV` process-wide;
+    // seed an explicit empty managed snapshot below so a neighbouring test's
+    // managed directory cannot replace this fixture.
     let _guard = crate::desktop::tests::MANAGED_ENV_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -124,11 +123,15 @@ fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
         r#"{"fusion":{"totalTimeoutMs":500000}}"#,
     )
     .unwrap();
+    let managed_dir = tmp.path().join("managed");
+    std::fs::create_dir_all(&managed_dir).unwrap();
     let cfg = DesktopConfig {
         cwd: cwd.clone(),
         lingxi_home,
         ..DesktopConfig::default()
     };
+    cfg.managed_policy_snapshot_cache
+        .replace(settings_watch::read_managed_settings_snapshot(&managed_dir).await);
 
     let executor = desktop_fusion_executor(
         Arc::new(UnreachableSpawner),
@@ -168,8 +171,8 @@ fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
     );
 }
 
-#[test]
-fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
+#[tokio::test]
+async fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
     let _env_guard = crate::desktop::tests::MANAGED_ENV_LOCK.lock().unwrap();
     let tmp = tempfile::tempdir().expect("tempdir");
     let managed = tmp.path().join("managed-settings.json");
@@ -182,6 +185,8 @@ fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
         lingxi_home: tmp.path().join("home"),
         ..DesktopConfig::default()
     };
+    cfg.managed_policy_snapshot_cache
+        .replace(settings_watch::read_managed_settings_snapshot(tmp.path()).await);
     let executor = desktop_fusion_executor(
         Arc::new(UnreachableSpawner),
         Arc::new(UnreachableSideQuery),
@@ -196,6 +201,11 @@ fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
 
     std::fs::write(&managed, r#"{"fusion":{"totalTimeoutMs":1500000}}"#)
         .expect("replace managed settings");
+    // The synchronous Fusion config reader consumes the session snapshot. In
+    // production the managed-settings watcher replaces it after the file
+    // event; mirror that producer here rather than bypassing the cache.
+    cfg.managed_policy_snapshot_cache
+        .replace(settings_watch::read_managed_settings_snapshot(tmp.path()).await);
     assert_eq!(
         executor.preflight_error(),
         None,

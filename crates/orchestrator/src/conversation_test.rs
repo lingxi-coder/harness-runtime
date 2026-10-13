@@ -11,7 +11,7 @@ impl OrchestratorApiClient for ToolSearchGateApi {
         _model: &str,
         _profile: Option<&str>,
     ) -> Option<llm_runtime::ProtocolFamily> {
-        self.0.clone()
+        self.0
     }
 
     async fn messages_create(

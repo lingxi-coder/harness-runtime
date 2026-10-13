@@ -1213,6 +1213,21 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 display_salvage_text: true,
             },
         ),
+        (
+            "event/prompt_suggestion.json",
+            ClientEvent::PromptSuggestion {
+                suggestion: "Run the focused test suite".into(),
+                uuid: "44444444-4444-4444-8444-444444444444".into(),
+                session_id: "33333333-3333-4333-8333-333333333333".into(),
+            },
+        ),
+        (
+            "event/prompt_suggestion_state.json",
+            ClientEvent::PromptSuggestionState {
+                enabled: true,
+                notice: None,
+            },
+        ),
     ]
 }
 
@@ -1322,6 +1337,30 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::SetProactivityLevel {
                 level: "proactive".to_string(),
                 offer_bypass: Some(false),
+            },
+        ),
+        (
+            "command/update_prompt_suggestion_context.json",
+            ClientCommand::UpdatePromptSuggestionContext {
+                session_id: "session-1".to_string(),
+                focus: "composer".to_string(),
+                input_empty: false,
+                pending_permission: false,
+                elicitation_active: false,
+            },
+        ),
+        (
+            "command/prompt_suggestion_feedback.json",
+            ClientCommand::PromptSuggestionFeedback {
+                session_id: "session-1".to_string(),
+                uuid: "suggestion-1".to_string(),
+                action: "dismissed".to_string(),
+            },
+        ),
+        (
+            "command/record_prompt_suggestion_submission.json",
+            ClientCommand::RecordPromptSuggestionSubmission {
+                text: "Please review the diff.".to_string(),
             },
         ),
         (

@@ -95,6 +95,12 @@ pub struct MobileConfig {
     /// Whether non-vision primary models may delegate image analysis to an
     /// internal vision model. Defaults to `true` across mobile hosts.
     pub vision_delegation_enabled: bool,
+    /// Optional host-provided implementation of the local Insights source
+    /// transforms. The command is registered only when the host injects a
+    /// real executor; `None` means this Mobile composition does not expose it.
+    pub insights_source_executor: Option<Arc<dyn crate::insights::InsightsSourceExecutor>>,
+    /// Explicit local host policy verdict for Insights. Unknown remains unavailable.
+    pub insights_policy_gate: Option<bool>,
 }
 
 impl std::fmt::Debug for MobileConfig {
@@ -138,6 +144,15 @@ impl std::fmt::Debug for MobileConfig {
             .field("physical_memory_bytes", &self.physical_memory_bytes)
             .field("host_environment", &self.host_environment)
             .field("vision_delegation_enabled", &self.vision_delegation_enabled)
+            .field("insights_policy_gate", &self.insights_policy_gate)
+            .field(
+                "insights_source_executor",
+                if self.insights_source_executor.is_some() {
+                    &"Some(<executor>)"
+                } else {
+                    &"None"
+                },
+            )
             .finish()
     }
 }
@@ -167,6 +182,8 @@ impl Default for MobileConfig {
             physical_memory_bytes: 0,
             host_environment: None,
             vision_delegation_enabled: true,
+            insights_source_executor: None,
+            insights_policy_gate: None,
         }
     }
 }

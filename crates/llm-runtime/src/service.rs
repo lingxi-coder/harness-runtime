@@ -37,6 +37,46 @@ use crate::{
 
 const NATIVE_ANTHROPIC_FIRST_PARTY_BASE_URL: &str = "https://api.anthropic.com";
 
+fn apply_native_first_party_base_url_assumption(
+    facts: &mut crate::model::classifier_model_policy::ClassifierModelRouteFacts,
+    assume_first_party_base_url: bool,
+) {
+    if facts.provider.as_deref() == Some("firstParty") {
+        facts.native_base_url |= assume_first_party_base_url;
+    }
+}
+
+#[cfg(test)]
+mod native_first_party_base_url_assumption_tests {
+    use super::*;
+    use crate::model::classifier_model_policy::ClassifierModelRouteFacts;
+
+    #[test]
+    fn explicit_host_assumption_is_limited_to_native_first_party_route() {
+        let mut first_party = ClassifierModelRouteFacts {
+            provider: Some("firstParty".into()),
+            ..Default::default()
+        };
+        apply_native_first_party_base_url_assumption(&mut first_party, true);
+        assert!(first_party.native_base_url);
+
+        let mut bedrock = ClassifierModelRouteFacts {
+            provider: Some("bedrock".into()),
+            ..Default::default()
+        };
+        apply_native_first_party_base_url_assumption(&mut bedrock, true);
+        assert!(!bedrock.native_base_url);
+
+        let mut already_native = ClassifierModelRouteFacts {
+            provider: Some("firstParty".into()),
+            native_base_url: true,
+            ..Default::default()
+        };
+        apply_native_first_party_base_url_assumption(&mut already_native, false);
+        assert!(already_native.native_base_url);
+    }
+}
+
 fn env_truthy(name: &str) -> bool {
     std::env::var(name).ok().is_some_and(|value| {
         matches!(
@@ -1204,6 +1244,59 @@ fn prompt_cache_query_source(source: Option<&str>) -> PromptCacheQuerySource<'_>
     )
 }
 
+fn native_prompt_attribution(
+    messages: &[lingxi_core::types::ConversationMessage],
+    workload: Option<String>,
+) -> lingxi_llm_client::providers::anthropic::system_prompt::NativePromptAttribution {
+    use lingxi_llm_client::providers::anthropic::system_prompt::{
+        NativePromptAttribution, PromptText,
+    };
+
+    let first = messages
+        .iter()
+        .find_map(|message| match message {
+            lingxi_core::types::ConversationMessage::User {
+                content,
+                is_meta: false,
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .and_then(|content| content.iter().find(|block| block.visible_text().is_some()));
+    let first_user_text = first
+        .map(|block| {
+            let units = match block {
+                lingxi_core::types::ContentBlock::Text { text, .. } => {
+                    Some(text.encode_utf16().collect())
+                }
+                lingxi_core::types::ContentBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                } => Some(utf16_code_units.clone()),
+                lingxi_core::types::ContentBlock::ProviderContent { protocol, value }
+                    if protocol == "anthropic_messages"
+                        && value.string_at("/type") == Some("text") =>
+                {
+                    value.string_units("/text")
+                }
+                _ => None,
+            };
+            match units {
+                Some(units) => PromptText::from_utf16(units),
+                None => PromptText::from_string(block.visible_text().unwrap_or_default()),
+            }
+        })
+        .unwrap_or_else(|| PromptText::from_string(""));
+    NativePromptAttribution {
+        first_user_text,
+        is_subagent: lingxi_core::host::session_flags::current_request_is_subagent(),
+        workload,
+        previous_request_id: None,
+        prompt_id: None,
+        turn_origin: None,
+        turn_position: None,
+    }
+}
+
 /// 429-attempt state held until the retry loop declares the error TERMINAL —
 /// TS updates module state only in the terminal catch handler
 /// (`extractQuotaStatusFromError`, claudeAiLimits.ts:487), never on retried
@@ -1769,10 +1862,15 @@ impl ApiService {
     ) -> Result<crate::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError> {
         for _ in 0..2 {
             let epoch = self.prompt_cache_overage.account_epoch();
-            let facts = self
+            let mut facts = self
                 .client
                 .classifier_model_route_facts(model, profile)
                 .await?;
+            let assume_first_party_base_url = self
+                .native_system_prefix
+                .as_ref()
+                .is_some_and(|prefix| prefix.assume_first_party_base_url);
+            apply_native_first_party_base_url_assumption(&mut facts, assume_first_party_base_url);
             if epoch == self.prompt_cache_overage.account_epoch() {
                 return Ok(facts);
             }
@@ -2363,6 +2461,16 @@ impl ApiService {
     ) -> Self {
         self.native_system_prefix = Some(prefix);
         self
+    }
+
+    /// Return the immutable host prefix snapshot captured for this session.
+    /// Side-query producers may reuse its actual environment and host facts
+    /// when they need the Native envelope on an explicitly opted-in request.
+    #[must_use]
+    pub fn native_system_prefix_snapshot(
+        &self,
+    ) -> Option<lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix> {
+        self.native_system_prefix.clone()
     }
 
     fn anthropic_user_agent(&self) -> String {
@@ -3677,8 +3785,9 @@ impl ApiService {
                 .expect("empty object is valid JSON")
         });
         lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy {
+            protocol: prepared.route.protocol,
             request_kind: prepared.anthropic_request_kind,
-            plain_text_message_content: prepared.classifier_system_blocks,
+            plain_text_message_content: prepared.plain_text_message_content,
             explicit_empty_tools: prepared.anthropic_request_kind
                 == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
             extra_body,
@@ -3778,7 +3887,7 @@ impl ApiService {
     /// `xn()` is env-only (bedrock/foundry/…/else `"firstParty"`), which the
     /// port models as [`crate::ProviderId::AnthropicFirstParty`]. `Yd()` is the
     /// BASE-URL half and is independent of it: `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`
-    /// (`Pe.bool()`, i.e. `1|true|yes|on`) short-circuits to true, else
+    /// (Native JS nonempty string truthiness) short-circuits to true, else
     /// `d6r()` requires the configured base to be unset or to parse to host
     /// `api.anthropic.com` (`T1e`; an unparseable URL is false). A first-party
     /// route pointed at an enterprise gateway must get NO header.
@@ -3786,7 +3895,10 @@ impl ApiService {
         if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty {
             return false;
         }
-        if env_truthy("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL") {
+        if std::env::var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL")
+            .ok()
+            .is_some_and(|value| !value.is_empty())
+        {
             return true;
         }
         // The port always resolves a concrete base (default
@@ -5866,6 +5978,10 @@ impl ApiService {
         >,
     ) -> Result<LlmRequest, LlmError> {
         let system = side_query_system_prompt(system, system_input)?;
+        let side_query_attribution = self
+            .native_system_prefix
+            .as_ref()
+            .map(|_| native_prompt_attribution(&messages, self.ua.workload.clone()));
         let mut req = crate::thinking_scope::isolated(|| {
             self.build_request_with_typed_attachment_ids(
                 model,
@@ -5881,6 +5997,26 @@ impl ApiService {
                 &task_deliveries,
             )
         })?;
+        if req
+            .execution
+            .input_protocol
+            .as_ref()
+            .is_some_and(Self::is_anthropic_family_protocol)
+        {
+            if let (Some(prefix), Some(attribution), Some(prompt_cache)) = (
+                self.native_system_prefix.as_ref(),
+                side_query_attribution,
+                req.execution.prompt_cache.as_mut(),
+            ) {
+                // Native bze carries Fmo attribution on Anthropic-family side
+                // queries even when the route is hosted. Main-request route
+                // admission remains unchanged, and identity stays opt-in in
+                // the side-query execution context.
+                if prompt_cache.native_system_prefix.is_none() {
+                    prompt_cache.native_system_prefix = Some((prefix.clone(), attribution));
+                }
+            }
+        }
         // A main turn's Mod effort is task-local. Side queries assembled in
         // that same task keep their own explicit/default effort instead.
         if MOD_REQUEST_EFFORT.try_with(|_| ()).is_ok() {
@@ -8020,62 +8156,9 @@ impl ApiService {
             .as_ref()
             .filter(|_| self.native_api_system_route(model, profile))
             .map(|prefix| {
-                use lingxi_llm_client::providers::anthropic::system_prompt::{
-                    NativePromptAttribution, PromptText,
-                };
-                let first = msgs
-                    .iter()
-                    .find_map(|message| match message {
-                        ConversationMessage::User {
-                            content,
-                            is_meta: false,
-                            ..
-                        } => Some(content),
-                        _ => None,
-                    })
-                    .and_then(|content| {
-                        content.iter().find(|block| block.visible_text().is_some())
-                    });
-                let first_user_text = first
-                    .map(|block| {
-                        let units = match block {
-                            lingxi_core::types::ContentBlock::Text { text, .. } => {
-                                Some(text.encode_utf16().collect())
-                            }
-                            lingxi_core::types::ContentBlock::TextJsUtf16 {
-                                utf16_code_units,
-                                ..
-                            } => Some(utf16_code_units.clone()),
-                            lingxi_core::types::ContentBlock::ProviderContent {
-                                protocol,
-                                value,
-                            } if protocol == "anthropic_messages"
-                                && value.string_at("/type") == Some("text") =>
-                            {
-                                value.string_units("/text")
-                            }
-                            _ => None,
-                        };
-                        match units {
-                            Some(units) => PromptText::from_utf16(units),
-                            None => {
-                                PromptText::from_string(block.visible_text().unwrap_or_default())
-                            }
-                        }
-                    })
-                    .unwrap_or_else(|| PromptText::from_string(""));
                 (
                     prefix.clone(),
-                    NativePromptAttribution {
-                        first_user_text,
-                        is_subagent: lingxi_core::host::session_flags::current_request_is_subagent(
-                        ),
-                        workload: self.ua.workload.clone(),
-                        previous_request_id: None,
-                        prompt_id: None,
-                        turn_origin: None,
-                        turn_position: None,
-                    },
+                    native_prompt_attribution(&msgs, self.ua.workload.clone()),
                 )
             });
         let thinking_source_message_ids: Vec<_> = msgs

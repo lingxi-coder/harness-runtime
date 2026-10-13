@@ -3873,6 +3873,11 @@ impl StreamingTurnDriver<'_> {
                         input.is_meta,
                         message_images,
                     );
+                    if input.turn_companion {
+                        if let ConversationMessage::User { turn_companion, .. } = &mut message {
+                            *turn_companion = Some(Some(true));
+                        }
+                    }
                     orch.apply_native_user_message_source(
                         &mut message,
                         &crate::native_user_message_source::NativeUserMessageSource {
@@ -3936,20 +3941,52 @@ impl StreamingTurnDriver<'_> {
                 .map(ConversationMessage::id)
         };
         if !transient_rewake {
-            for (index, ((input, message), context)) in
-                submissions.iter().zip(&mod_contexts).enumerate()
-            {
-                orch.session.lock().await.history.push(message.clone());
-                orch.persist_queued_message_to_jsonl(message, input).await;
-                if index == primary && !input.is_meta {
-                    crate::request_context::persist_prompt_ingress_after_user(
-                        orch,
-                        message.id(),
-                        true,
-                    )
-                    .await;
+            let has_native_skill_companion =
+                submissions.iter().any(|(input, _)| input.turn_companion);
+            if has_native_skill_companion {
+                // Native persists the command header and expanded body as two
+                // adjacent user rows before the hook-yield rows. Keep all user
+                // rows durable first; then attach request context and the
+                // body's ordered hook history rows.
+                for (input, message) in &submissions {
+                    orch.session.lock().await.history.push(message.clone());
+                    orch.persist_queued_message_to_jsonl(message, input).await;
                 }
-                orch.append_mod_prompt_context(context).await;
+                for (index, ((input, message), _)) in
+                    submissions.iter().zip(&mod_contexts).enumerate()
+                {
+                    if index == primary && !input.is_meta {
+                        crate::request_context::persist_prompt_ingress_after_user(
+                            orch,
+                            message.id(),
+                            true,
+                        )
+                        .await;
+                    }
+                }
+                for (input, _) in &submissions {
+                    orch.append_native_prompt_expansion_history_rows(&input.trailing_history_rows)
+                        .await;
+                }
+                for context in &mod_contexts {
+                    orch.append_mod_prompt_context(context).await;
+                }
+            } else {
+                for (index, ((input, message), context)) in
+                    submissions.iter().zip(&mod_contexts).enumerate()
+                {
+                    orch.session.lock().await.history.push(message.clone());
+                    orch.persist_queued_message_to_jsonl(message, input).await;
+                    if index == primary && !input.is_meta {
+                        crate::request_context::persist_prompt_ingress_after_user(
+                            orch,
+                            message.id(),
+                            true,
+                        )
+                        .await;
+                    }
+                    orch.append_mod_prompt_context(context).await;
+                }
             }
         }
         // (/rewind) Snapshot the pre-turn file state IN MEMORY, keyed by this

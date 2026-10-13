@@ -2151,8 +2151,15 @@ mod tests {
         let disabled = read_managed_settings_snapshot(root.path()).await;
         assert!(auto_mode_disabled_from_policy(&disabled));
 
-        std::fs::write(&base, r#"{"disableAutoMode":"enable"}"#).unwrap();
+        // Native's only policy value is `"disable"`; explicit false removes
+        // the optional lock and leaves Auto Mode enabled.
+        std::fs::write(&base, r#"{"disableAutoMode":false}"#).unwrap();
         let enabled = read_managed_settings_snapshot(root.path()).await;
+        assert!(!enabled.read_failed());
+        assert!(enabled
+            .effective_projection()
+            .map_or(true, |projection| !projection
+                .contains_property("disableAutoMode")));
         assert!(!auto_mode_disabled_from_policy(&enabled));
 
         std::fs::write(&base, "not-json").unwrap();

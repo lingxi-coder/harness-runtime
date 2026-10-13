@@ -909,9 +909,12 @@ impl OutputStream for AdapterOutputStream {
     }
 
     async fn emit_prompt_suggestion_state(&self, enabled: bool, notice: Option<&str>) {
-        self.sink.emit(ClientEvent::PromptSuggestionState {
-            enabled, notice: notice.map(str::to_owned),
-        }).await;
+        self.sink
+            .emit(ClientEvent::PromptSuggestionState {
+                enabled,
+                notice: notice.map(str::to_owned),
+            })
+            .await;
     }
 
     async fn emit_prompt_suggestion(&self, session_id: &str, uuid: &str, suggestion: &str) {

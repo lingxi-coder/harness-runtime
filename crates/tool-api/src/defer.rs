@@ -931,7 +931,7 @@ impl DeferralState {
                     .push((message_uuid.to_owned(), attachment.clone()));
                 self.recompute_deferred_state_from_rows();
             }
-            _ => return,
+            _ => (),
         }
     }
 

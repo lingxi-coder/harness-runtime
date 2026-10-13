@@ -352,9 +352,9 @@ impl NativeSettingsPromptAttachmentProvider for ConversationOrchestrator {
             name: style.name.encode_utf16().collect(),
             prompt: style.prompt.encode_utf16().collect(),
         });
-        let current_style_is_valid = current_style.as_ref().map_or(true, |style| {
-            style.name.len() <= NATIVE_SETTINGS_STRING_LIMIT
-        });
+        let current_style_is_valid = current_style
+            .as_ref()
+            .is_none_or(|style| style.name.len() <= NATIVE_SETTINGS_STRING_LIMIT);
         // Native sends an explicit null reset only for the default selection.
         // A stale/unknown non-default setting with no resolved style suppresses
         // the style delta entirely.

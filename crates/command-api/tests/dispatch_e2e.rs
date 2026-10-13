@@ -82,7 +82,10 @@ async fn native_doctor_dispatches_the_bundled_prompt() {
     let SlashDispatchResult::RunAsTurn { prompt } = outcome else {
         panic!("expected /doctor bundled prompt turn, got {outcome:?}");
     };
-    assert!(prompt.string_at("").unwrap().starts_with("# LingXi Checkup\n"));
+    assert!(prompt
+        .string_at("")
+        .unwrap()
+        .starts_with("# LingXi Checkup\n"));
 }
 
 #[tokio::test]

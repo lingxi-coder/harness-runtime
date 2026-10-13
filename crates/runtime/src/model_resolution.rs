@@ -346,9 +346,12 @@ fn unique_value<'a>(values: &[&'a str]) -> Option<&'a str> {
 fn host_family_baseline(provider: ModelProviderKind, family: &str) -> Option<&'static str> {
     match family {
         "opus" => match provider {
-            ModelProviderKind::FirstParty
-            | ModelProviderKind::Bedrock
-            | ModelProviderKind::Vertex => Some("claude-opus-4-8"),
+            ModelProviderKind::FirstParty => Some("claude-opus-5-5"),
+            // Native 2.1.295's provider alias table points Bedrock to its
+            // provider-qualified cross-region model id and Vertex to the
+            // canonical 5.5 id. These are distinct route request ids.
+            ModelProviderKind::Bedrock => Some("us.anthropic.claude-opus-5-5"),
+            ModelProviderKind::Vertex => Some("claude-opus-5-5"),
             ModelProviderKind::Foundry => Some("claude-opus-4-6"),
             _ => None,
         },
@@ -522,6 +525,19 @@ mod tests {
             };
         }
         provider
+    }
+
+    #[test]
+    fn native_opus_family_defaults_follow_provider_catalog_aliases() {
+        let cases = [
+            (ModelProviderKind::FirstParty, "claude-opus-5-5"),
+            (ModelProviderKind::Bedrock, "us.anthropic.claude-opus-5-5"),
+            (ModelProviderKind::Vertex, "claude-opus-5-5"),
+            (ModelProviderKind::Foundry, "claude-opus-4-6"),
+        ];
+        for (provider, expected) in cases {
+            assert_eq!(host_family_baseline(provider, "opus"), Some(expected));
+        }
     }
 
     #[test]

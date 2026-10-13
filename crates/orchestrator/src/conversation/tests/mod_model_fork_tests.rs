@@ -69,6 +69,53 @@ struct DenyModModelReader {
     checked: Mutex<Vec<String>>,
 }
 
+struct NativeModelRouteApi;
+
+#[async_trait]
+impl crate::OrchestratorApiClient for NativeModelRouteApi {
+    async fn messages_create(
+        &self,
+        _request: crate::OrchestratorApiRequest,
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+        Err(llm_runtime::LlmError::ModelUnavailable)
+    }
+
+    fn resolve_media_route(
+        &self,
+        model: &str,
+        _profile: Option<&str>,
+    ) -> Result<llm_runtime::MediaRoute, llm_runtime::LlmError> {
+        assert_eq!(model, "claude-sonnet-4-6");
+        let provider_id = llm_runtime::ProviderId::AnthropicFirstParty;
+        let pricing_model = llm_runtime::PricingModelRef {
+            pricing_provider_id: provider_id.clone(),
+            billing_model: model.into(),
+            request_model: model.into(),
+            display_model: model.into(),
+        };
+        Ok(llm_runtime::MediaRoute {
+            main: llm_runtime::ResolvedRoute {
+                provider_id,
+                profile_name: "native-profile".into(),
+                request_model: model.into(),
+                display_model: model.into(),
+                pricing_model,
+                capabilities: llm_runtime::Capabilities {
+                    streaming: true,
+                    tools: true,
+                    vision: false,
+                    documents: false,
+                    reasoning: true,
+                    structured_output: false,
+                },
+                connection_chain: Vec::new(),
+                failover: Default::default(),
+            },
+            vision_delegate: None,
+        })
+    }
+}
+
 #[async_trait]
 impl hooks::mods::ModSettingsReader for DenyModModelReader {
     async fn read(
@@ -304,14 +351,14 @@ async fn model_fork_uses_restored_task_deliveries_for_only_the_cached_history_pr
     let mut native_history = lingxi_core::host::NativeRequestHistoryMetadata::default();
     native_history
         .task_deliveries
-        .insert(retained_id.clone(), delivery.clone());
+        .insert(retained_id, delivery.clone());
     native_history.task_deliveries.insert(
         stale_id,
         Utf16JsonProjection::parse(r#"{"taskId":"older-task"}"#).unwrap(),
     );
     let restored: lingxi_core::host::NativeRequestHistoryMetadata =
         serde_json::from_value(serde_json::to_value(native_history).unwrap()).unwrap();
-    let history = ConversationMessage::user(retained_id.clone(), "task completed".into());
+    let history = ConversationMessage::user(retained_id, "task completed".into());
     {
         let mut session = orch.session.lock().await;
         session.history = vec![history.clone()];
@@ -533,7 +580,7 @@ async fn model_complete_respects_live_managed_model_denial() {
     );
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
-        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(NativeModelRouteApi),
         Arc::new(tool_api::registry::ToolRegistry::new()),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),

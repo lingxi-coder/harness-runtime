@@ -845,7 +845,7 @@ fn display_name_line(display_name: &Source) -> Source {
 /// then appending U+2026. A cap boundary may intentionally split a surrogate.
 fn cap_description(source: &Source, max_desc_chars: f64) -> Source {
     let original = units(source);
-    if !(original.len() as f64 > max_desc_chars) {
+    if (original.len() as f64).partial_cmp(&max_desc_chars) != Some(std::cmp::Ordering::Greater) {
         return source.clone();
     }
     let end = js_slice_end(original.len(), max_desc_chars - 1.0);

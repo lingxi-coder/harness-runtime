@@ -150,7 +150,11 @@ fn register_cron_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
                 .into(),
         menu_description: Some("Create, list, or cancel scheduled prompts".into()),
         source: CommandSource::Bundled,
-        native_source: Some("built-in".into()),
+        // LingXi extension; 2.1.295 exposes recurring local schedules through
+        // `/loop` and the remote `/schedule` skill, not a `/cron` prompt skill.
+        // The direct desktop handler remains available to an explicitly typed
+        // `/cron` invocation, while the Native Headless projection excludes it.
+        native_source: None,
         native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter {
@@ -492,6 +496,11 @@ fn register_verify_skill(reg: &mut CommandRegistry) {
         loaded_from: Some("bundled".into()),
         // Reference `userInvocable:!0`.
         user_invocable: Some(true),
+        // Native's dynamic `disableModelInvocation: () => !wvr()` reads the
+        // `tengu_opal_circuit` rollout, defaulting off when no reader is
+        // installed. The current host's flag snapshot is evaluated at
+        // registration, matching the other bundled factory gates.
+        disable_model_invocation: !telemetry::flag_bool("tengu_opal_circuit", false),
         // The frontmatter carries an explicit `description` ⇒ listing-eligible.
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -597,6 +606,10 @@ fn register_keybindings_help_skill(reg: &mut CommandRegistry) {
         },
         loaded_from: Some("bundled".into()),
         user_invocable: Some(false),
+        // Native's bundled-skill constructor derives `isHidden` from
+        // `!userInvocable`; this remains model-only and must not enter the
+        // unknown-command name list or available-command count.
+        is_hidden: true,
         has_user_specified_description: true,
         ..SlashCommand::default()
     });
@@ -852,6 +865,44 @@ mod tests {
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn verify_model_invocation_follows_native_opal_circuit_default_and_override() {
+        const FLAG: &str = "tengu_opal_circuit";
+        telemetry::test_clear_flag(FLAG);
+
+        let mut defaulted = CommandRegistry::new();
+        register_bundled_skills(&mut defaulted, false);
+        assert!(
+            defaulted
+                .resolve(&"verify".into())
+                .unwrap()
+                .disable_model_invocation,
+            "Native wvr() defaults to false without a flag reader"
+        );
+
+        telemetry::test_set_flag(FLAG, true);
+        let mut enabled = CommandRegistry::new();
+        register_bundled_skills(&mut enabled, false);
+        assert!(
+            !enabled
+                .resolve(&"verify".into())
+                .unwrap()
+                .disable_model_invocation
+        );
+        telemetry::test_clear_flag(FLAG);
+    }
+
+    #[test]
+    fn keybindings_help_maps_non_user_invocable_to_native_hidden() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let command = reg
+            .resolve(&"keybindings-help".into())
+            .expect("model-only keybindings prompt remains registered");
+        assert_eq!(command.user_invocable, Some(false));
+        assert!(command.is_hidden);
     }
 
     #[test]

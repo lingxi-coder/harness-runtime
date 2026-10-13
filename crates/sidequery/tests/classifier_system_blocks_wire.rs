@@ -119,7 +119,9 @@ async fn classifier_keeps_each_system_cache_control_without_implicit_prompt_rewr
         let response = client
             .query_fork(
                 SideQueryRequest {
+                    enable_prompt_caching: false,
                     model_attempt: None,
+                    native_prompt_context: None,
                     model: "claude-haiku-4-5".into(),
                     profile: Some("classifier".into()),
                     system_prompt: None,

@@ -227,7 +227,7 @@ pub(super) fn should_enforce_permissions(
 }
 
 /// Everything the boot permission-policy construction folds out of the
-/// settings tiers, produced by [`load_boot_permission_tiers`].
+/// settings tiers, produced by [`load_boot_permission_tiers_with_policy_snapshot`].
 pub(super) struct BootPermissionTiers {
     /// Permission rules accumulated from every tier (bucketed by source at
     /// `PermissionPolicy::from_rules` time; `authorize` walks them by priority).
@@ -365,33 +365,6 @@ pub(super) async fn reload_classifier_auto_mode_settings(
         trusted_raw_tiers.push(raw);
     }
     merge_trusted_auto_mode_settings(&trusted_raw_tiers)
-}
-
-pub(super) async fn load_boot_permission_tiers(
-    lingxi_home: &std::path::Path,
-    cwd: &std::path::Path,
-    setting_source_scope: (bool, bool),
-) -> BootPermissionTiers {
-    load_boot_permission_tiers_with_flag(lingxi_home, cwd, setting_source_scope, None, None).await
-}
-
-pub(super) async fn load_boot_permission_tiers_with_flag(
-    lingxi_home: &std::path::Path,
-    cwd: &std::path::Path,
-    setting_source_scope: (bool, bool),
-    flag_settings: Option<&lingxi_core::settings::SettingsJson>,
-    flag_settings_source: Option<&str>,
-) -> BootPermissionTiers {
-    let managed_snapshot = crate::desktop::settings_watch::managed_settings_snapshot().await;
-    load_boot_permission_tiers_with_policy_snapshot(
-        lingxi_home,
-        cwd,
-        setting_source_scope,
-        flag_settings,
-        flag_settings_source,
-        &managed_snapshot,
-    )
-    .await
 }
 
 pub(super) async fn load_boot_permission_tiers_with_policy_snapshot(

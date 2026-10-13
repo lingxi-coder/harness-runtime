@@ -1,0 +1,3 @@
+// Extracted source closure for 2.1.295; source module src_186023567.js sha256 f089d132dc57e75d9bc6769a779c5c7d16f33fcbde09e783d652b845345b2224
+function Vo(){return`claude-code/${{ISSUES_EXPLAINER:"report the issue at https://github.com/anthropics/claude-code/issues",PACKAGE_URL:"@anthropic-ai/claude-code",README_URL:"https://code.claude.com/docs/en/overview",VERSION:"2.1.295",FEEDBACK_CHANNEL:"https://github.com/anthropics/claude-code/issues",BUILD_TIME:"2026-10-08T16:50:59Z",GIT_SHA:"07e8f67ea3282bf154a9e05673a0942b1b173cef",HOOKS_WORKER_URL:"/$bunfs/root/src/plugins/functionHooks/hooks-worker/hooks-worker.js",DD_SOURCEMAP_GROUP:"darwin"}.VERSION}`}
+export { Vo as Vo };

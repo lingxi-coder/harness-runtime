@@ -419,11 +419,15 @@ async fn actual_bash_wire_description_tracks_reload_settings_and_offered_skill_t
     );
 }
 
-#[test]
-fn code_review_suggestion_uses_live_owned_settings_and_session_cwd() {
-    let (_tmp, mut cfg) = tests::test_config(true);
+#[tokio::test]
+async fn code_review_suggestion_uses_live_owned_settings_and_session_cwd() {
+    let (tmp, mut cfg) = tests::test_config(true);
     cfg.lingxi_home = cfg.cwd.join("user-config");
     std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
+    let managed_dir = tmp.path().join("managed");
+    std::fs::create_dir_all(&managed_dir).unwrap();
+    cfg.managed_policy_snapshot_cache
+        .replace(settings_watch::read_managed_settings_snapshot(&managed_dir).await);
     let settings = cfg.lingxi_home.join("settings.json");
     let cwd = SessionCwd::new(cfg.cwd.clone(), vec![]);
     let provider = code_review_suggestion_provider(cfg.clone(), cwd.clone());

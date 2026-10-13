@@ -1,5 +1,6 @@
 //! Suggestion fork uses native streaming, per-block candidates, and request-local metadata.
 use lingxi_llm_client::protocol::JsonPayload;
+use lingxi_llm_client::providers::anthropic::system_prompt::{NativeSystemPrefix, PromptText};
 use llm_runtime::test_support::{FixtureTransport, FrameStream};
 use llm_runtime::{
     BoxFuture, LlmError, ProviderRequest, ProviderResponse, RawStreamFrame, StreamingResponse,
@@ -25,9 +26,26 @@ struct Transport {
 impl FixtureTransport for Transport {
     fn execute<'a>(
         &'a self,
-        _: &'a ProviderRequest,
+        request: &'a ProviderRequest,
     ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
-        Box::pin(async { panic!("suggestions must stream through the parent service") })
+        self.seen
+            .lock()
+            .unwrap()
+            .push(request.body_json.as_json_source().to_owned());
+        Box::pin(async {
+            Ok(ProviderResponse::json(
+                200,
+                json!({
+                    "id":"ordinary_side_query",
+                    "type":"message",
+                    "role":"assistant",
+                    "model":"claude-sonnet-4-6",
+                    "content":[{"type":"text","text":"ordinary response"}],
+                    "stop_reason":"end_turn",
+                    "usage":{"input_tokens":1,"output_tokens":1}
+                }),
+            ))
+        })
     }
     fn open_stream<'a>(
         &'a self,
@@ -60,6 +78,115 @@ impl FixtureTransport for Transport {
     }
 }
 llm_runtime::impl_fixture_transport!(Transport);
+
+fn identity_policy_request(query_source: QuerySource, system_prompt: &str) -> SideQueryRequest {
+    SideQueryRequest {
+        enable_prompt_caching: false,
+        model_attempt: None,
+        native_prompt_context: None,
+        model: "claude-sonnet-4-6".into(),
+        profile: Some("parent".into()),
+        system_prompt: Some(system_prompt.into()),
+        system_prompt_input: None,
+        typed_attachment_ids: HashSet::new(),
+        task_deliveries: HashMap::new(),
+        messages: vec![lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "identity policy fixture".into(),
+        )],
+        tools: Vec::new(),
+        tool_choice: None,
+        output_format: None,
+        max_tokens: 128,
+        max_retries: 0,
+        temperature: None,
+        thinking: None,
+        effort: None,
+        stop_sequences: Vec::new(),
+        query_source,
+        skip_system_prompt_prefix: false,
+    }
+}
+
+fn system_texts(wire: &Value) -> Vec<&str> {
+    wire["system"]
+        .as_array()
+        .expect("Anthropic system blocks are captured")
+        .iter()
+        .map(|block| {
+            block["text"]
+                .as_str()
+                .expect("each captured system block is text")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn prompt_suggestion_main_transition_keeps_identity_but_ordinary_side_query_does_not() {
+    const HOST_IDENTITY: &str = "HOST_ROLE_SENTINEL";
+
+    let config: llm_runtime::ClientConfig = serde_json::from_value(json!({"providers":[{
+        "provider_id":"anthropic_first_party","profile_name":"parent","protocol":"anthropic_messages","base_url":"https://api.anthropic.com","auth":"none","credential":{"type":"none"},
+        "models":[{"display_model":"claude-sonnet-4-6","request_model":"claude-sonnet-4-6","billing_model":"claude-sonnet-4-6","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":true,"structured_output":false}}]
+    }]}))
+    .unwrap();
+    let transport = Arc::new(Transport::default());
+    let service = Arc::new(
+        llm_runtime::ApiService::new_with_routing(
+            Arc::new(llm_runtime::ModelRuntime::from_config(config).unwrap()),
+            transport.clone(),
+            Default::default(),
+            Default::default(),
+            "test",
+            None,
+            None,
+            None,
+            Default::default(),
+            Some(0),
+            Some(0),
+        )
+        .with_native_system_prefix(NativeSystemPrefix {
+            compatibility_version: "2.1.295".into(),
+            entrypoint: "sdk-cli".into(),
+            host_identity: PromptText::from_string(HOST_IDENTITY),
+            attribution_enabled: true,
+            assume_first_party_base_url: false,
+        }),
+    );
+    let client = ProviderSideQueryClient::from_service(service);
+
+    client
+        .query_fork(
+            identity_policy_request(QuerySource::PromptSuggestion, "suggestion parent system"),
+            sidequery::ForkedSideQueryOptions::default(),
+        )
+        .await
+        .unwrap();
+    client
+        .query(identity_policy_request(
+            QuerySource::Classifier,
+            "ordinary side-query system",
+        ))
+        .await
+        .unwrap();
+
+    let captured = transport.seen.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    let suggestion_wire: Value = serde_json::from_str(&captured[0]).unwrap();
+    let suggestion_system = system_texts(&suggestion_wire);
+    assert_eq!(suggestion_system.len(), 3);
+    assert!(suggestion_system[0].starts_with("x-anthropic-billing-header:"));
+    assert_eq!(suggestion_system[1], HOST_IDENTITY);
+    assert_eq!(suggestion_system[2], "suggestion parent system");
+
+    let ordinary_wire: Value = serde_json::from_str(&captured[1]).unwrap();
+    let ordinary_system = system_texts(&ordinary_wire);
+    assert_eq!(ordinary_system.len(), 2);
+    assert!(ordinary_system[0].starts_with("x-anthropic-billing-header:"));
+    assert_eq!(ordinary_system[1], "ordinary side-query system");
+    assert!(!ordinary_system.contains(&HOST_IDENTITY));
+}
+
 #[tokio::test]
 async fn session_prompt_suggestion_streams_with_parent_prefix_candidates_and_http_request_id() {
     let config:llm_runtime::ClientConfig=serde_json::from_value(json!({"providers":[{
@@ -93,7 +220,9 @@ async fn session_prompt_suggestion_streams_with_parent_prefix_candidates_and_htt
         let result = client
             .query_fork(
                 SideQueryRequest {
+                    enable_prompt_caching: true,
                     model_attempt: None,
+                    native_prompt_context: None,
                     model: "claude-sonnet-4-6".into(),
                     profile: Some("parent".into()),
                     system_prompt: Some("parent system".into()),

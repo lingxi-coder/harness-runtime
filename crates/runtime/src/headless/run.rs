@@ -2064,6 +2064,53 @@ async fn run_slash_command_with_budget(
                 }
             }
         }
+        SlashDispatchResult::RunSkillAsTurn {
+            command,
+            body,
+            hook_messages,
+        } => {
+            sink.turn_start().await;
+            let cancel = runtime.turn_cancel();
+            let inputs = orchestrator::skill_prompt_inputs(command, body, hook_messages);
+            let turn_result = if no_stream {
+                orchestrator::native_user_message_source::with_sdk_source(
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"sdk"}),
+                        runtime
+                            .orchestrator
+                            .run_queued_prompt_batch_batched(inputs, cancel),
+                    ),
+                )
+                .await
+            } else {
+                orchestrator::native_user_message_source::with_sdk_source(
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"sdk"}),
+                        runtime.orchestrator.run_queued_prompt_batch(inputs, cancel),
+                    ),
+                )
+                .await
+            };
+            stop_background_agents_at_budget(
+                max_budget_usd,
+                runtime.orchestrator.as_ref(),
+                runtime.task_registry.as_ref(),
+                &runtime.output,
+            )
+            .await;
+            runtime.execution_interrupted.store(
+                matches!(&turn_result, Ok(orchestrator::TurnOutcome::Cancelled)),
+                std::sync::atomic::Ordering::Release,
+            );
+            match turn_result {
+                Ok(_outcome) => exit_codes::SUCCESS,
+                Err(e) => {
+                    runtime.record_execution_error(&e);
+                    sink.error("runtime", &e.to_string()).await;
+                    exit_codes::RUNTIME_ERROR
+                }
+            }
+        }
         SlashDispatchResult::Unknown { name, .. } => {
             let catalog = runtime.headless_command_catalog().await;
             let reminder = command_api::render_unknown_command_reminder(&name, &catalog);
@@ -2125,6 +2172,7 @@ fn unknown_command_fallback_attachment(
         message_id: lingxi_core::types::MessageId::new(),
         payload,
         rendered,
+        // Native keeps renderedRole=user; isMeta is mapped independently from the payload type.
         rendered_role: "user",
     }
 }
@@ -2586,10 +2634,12 @@ mod result_publication_tests {
                 lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
             ) && message.text_content() == "/__missing_command__ keep this prompt"
         }));
+        // Native 2.1.295 `unknown_command_fallback` at src_194447854.js byte 198866158 sets
+        // isMeta:true while the JSONL sidecar keeps renderedRole:user.
         assert!(calls[0].messages.iter().any(|message| {
             matches!(
                 message,
-                lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+                lingxi_core::types::ConversationMessage::User { is_meta: true, .. }
             ) && message
                 .text_content()
                 .contains("The user's message starts with the slash command")
@@ -2600,7 +2650,7 @@ mod result_publication_tests {
             .find(|message| {
                 matches!(
                     message,
-                    lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+                    lingxi_core::types::ConversationMessage::User { is_meta: true, .. }
                 ) && message
                     .text_content()
                     .contains("The user's message starts with the slash command")
@@ -2629,7 +2679,7 @@ mod result_publication_tests {
             .find(|message| {
                 matches!(
                     message,
-                    lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+                    lingxi_core::types::ConversationMessage::User { is_meta: true, .. }
                 ) && message
                     .text_content()
                     .contains("The user's message starts with the slash command")

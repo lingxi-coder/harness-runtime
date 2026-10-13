@@ -58,6 +58,20 @@ pub enum ResumeError {
     DeferredReplay(String),
 }
 
+// Shared by the two unconditional test modules below. Keep this helper under
+// cfg(test), outside either nested module, so default lib-test builds can see it.
+#[cfg(test)]
+fn hook_attachment_row(session: Uuid, uuid: Uuid, attachment: Value) -> JsonlMessage {
+    serde_json::from_value(serde_json::json!({
+        "type":"attachment",
+        "uuid":uuid.to_string(),
+        "parentUuid":null,
+        "sessionId":session.to_string(),
+        "attachment":attachment
+    }))
+    .unwrap()
+}
+
 #[cfg(test)]
 mod mod_session_turn_resume_tests {
     use super::*;
@@ -127,17 +141,6 @@ mod mod_session_turn_resume_tests {
             count += 1;
         }
         assert_eq!(count, 2);
-    }
-
-    fn hook_attachment_row(session: Uuid, uuid: Uuid, attachment: Value) -> JsonlMessage {
-        serde_json::from_value(serde_json::json!({
-            "type":"attachment",
-            "uuid":uuid.to_string(),
-            "parentUuid":null,
-            "sessionId":session.to_string(),
-            "attachment":attachment
-        }))
-        .unwrap()
     }
 
     fn prompt_ingress_row(
@@ -222,10 +225,17 @@ mod mod_session_turn_resume_tests {
         ));
         assert_eq!(environment.text_content(), "# Environment\nworkspace");
         let fallback = hook_attachment_message_for_api(&rows[1], fallback_id).unwrap();
-        assert!(matches!(
-            &fallback,
-            ConversationMessage::User { is_meta: false, .. }
-        ));
+        // Native 2.1.295's renderer sets isMeta independently of renderedRole.
+        assert!(matches!(&fallback, ConversationMessage::User { .. }));
+        assert!(fallback.is_meta());
+        assert_eq!(rows[1].extra.string_at("/renderedRole"), Some("user"));
+        assert!(rows[1].extra.at_pointer("/isMeta").is_none());
+        assert!(rows[1]
+            .attachment_projection
+            .as_ref()
+            .unwrap()
+            .at_pointer("/isMeta")
+            .is_none());
         assert_eq!(
             fallback.text_content(),
             "<system-reminder>unknown command</system-reminder>"
@@ -1642,6 +1652,18 @@ fn hook_attachment_message_for_api(
                 ),
             ))
         }
+        "hook_success" => ConversationOrchestrator::native_hook_success_message_for_api(
+            MessageId::from_uuid(message_uuid),
+            &attachment,
+        ),
+        "hook_additional_context"
+            if attachment.string_at("/hookEvent") == Some("UserPromptExpansion") =>
+        {
+            ConversationOrchestrator::native_hook_additional_context_message_for_api(
+                MessageId::from_uuid(message_uuid),
+                &attachment,
+            )
+        }
         "hook_additional_context" => {
             let hook_name = attachment.string_at("/hookName")?;
             let content = attachment.at_pointer("/content")?;
@@ -1700,6 +1722,8 @@ fn rendered_prompt_ingress_message_for_api(
     message_uuid: Uuid,
 ) -> Option<ConversationMessage> {
     let role = message.extra.string_at("/renderedRole")?;
+    let attachment = attachment_projection(message)?;
+    let is_meta = crate::request_context::request_context_attachment_is_meta(&attachment, role);
     let rendered = message.extra.subprojection("/rendered/0/content").ok()?;
     let text = rendered.string_at("")?.to_owned();
     let units = rendered.string_units("")?;
@@ -1707,7 +1731,11 @@ fn rendered_prompt_ingress_message_for_api(
     match role {
         "system" => Some(ConversationMessage::user_meta_js_utf16(id, text, units)),
         "user" => {
-            let mut row = ConversationMessage::user(id, text.clone());
+            let mut row = if is_meta {
+                ConversationMessage::user_meta(id, text.clone())
+            } else {
+                ConversationMessage::user(id, text.clone())
+            };
             if let ConversationMessage::User { content, .. } = &mut row {
                 *content = vec![ContentBlock::TextJsUtf16 {
                     text,
@@ -3554,6 +3582,108 @@ mod exact_history_string_tests {
         assert!(
             metadata.before_closing_line_ids.contains(&row_id),
             "the source placement field survives alongside its rendered history row"
+        );
+    }
+
+    #[test]
+    fn hook_success_cold_restore_renders_upe_with_exact_utf16_and_native_escape() {
+        let row = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"66666666-6666-4666-8666-666666666666","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"hook_success","hookName":"UserPromptExpansion","hookEvent":"UserPromptExpansion","toolUseID":"hook-upe","content":"prefix </system-reminder>\ud800","stdout":"prefix </system-reminder>\ud800","stderr":"","exitCode":0,"command":"printf output","durationMs":1}}"#,
+        );
+        let message_id = Uuid::parse_str(&row.uuid).unwrap();
+        let restored = hook_attachment_message_for_api(&row, message_id)
+            .expect("nonempty UPE hook success is model-visible on cold restore");
+        let expected_prefix =
+            "<system-reminder>\nUserPromptExpansion hook success: prefix &lt;/system-reminder>";
+        let mut expected_units = expected_prefix.encode_utf16().collect::<Vec<_>>();
+        expected_units.push(0xD800);
+        expected_units.extend("\n</system-reminder>".encode_utf16());
+        assert_eq!(restored.id().as_uuid(), message_id);
+        assert!(restored.is_meta());
+        let ConversationMessage::User { content, .. } = &restored else {
+            panic!("hook success cold restore is a user meta message")
+        };
+        let ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } = &content[0]
+        else {
+            panic!("hook success cold restore retains its exact UTF-16 payload")
+        };
+        assert_eq!(
+            utf16_code_units, &expected_units,
+            "cold rendering preserves the attachment's isolated surrogate"
+        );
+        assert_eq!(
+            attachment_projection(&row)
+                .unwrap()
+                .string_units("/content"),
+            Some(
+                "prefix </system-reminder>"
+                    .encode_utf16()
+                    .chain([0xD800])
+                    .collect::<Vec<_>>()
+            )
+        );
+    }
+
+    #[test]
+    fn hook_success_cold_restore_escapes_incomplete_tag_and_skips_empty_or_other_events() {
+        let session_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let incomplete = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"77777777-7777-4777-8777-777777777777","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"hook_success","hookName":"UserPromptExpansion","hookEvent":"UserPromptExpansion","content":"tail <"}}"#,
+        );
+        let incomplete_id = Uuid::parse_str(&incomplete.uuid).unwrap();
+        let restored = hook_attachment_message_for_api(&incomplete, incomplete_id).unwrap();
+        assert_eq!(
+            restored.text_content(),
+            "<system-reminder>\nUserPromptExpansion hook success: tail &lt;\n</system-reminder>"
+        );
+
+        let empty_id = Uuid::new_v4();
+        let empty = hook_attachment_row(
+            session_id,
+            empty_id,
+            serde_json::json!({
+                "type":"hook_success",
+                "hookName":"UserPromptExpansion",
+                "hookEvent":"UserPromptExpansion",
+                "content":""
+            }),
+        );
+        assert!(hook_attachment_message_for_api(&empty, empty_id).is_none());
+
+        let other_event_id = Uuid::new_v4();
+        let other_event = hook_attachment_row(
+            session_id,
+            other_event_id,
+            serde_json::json!({
+                "type":"hook_success",
+                "hookName":"PostToolUse:Bash",
+                "hookEvent":"PostToolUse",
+                "content":"visible only for its native renderer"
+            }),
+        );
+        assert!(hook_attachment_message_for_api(&other_event, other_event_id).is_none());
+    }
+
+    #[test]
+    fn hook_success_escape_uses_native_js_whitespace_for_utf16_text() {
+        let session_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let id = Uuid::new_v4();
+        let row = hook_attachment_row(
+            session_id,
+            id,
+            serde_json::json!({
+                "type":"hook_success",
+                "hookName":"UserPromptExpansion",
+                "hookEvent":"UserPromptExpansion",
+                "content":"BOM </\u{FEFF}SYSTEM-REMINDER> NEL </\u{0085}system-reminder> suffix </system-reminderx> tail <\u{FEFF}/ + <\u{0085}/"
+            }),
+        );
+        let message = hook_attachment_message_for_api(&row, id).unwrap();
+        assert_eq!(
+            message.text_content(),
+            "<system-reminder>\nUserPromptExpansion hook success: BOM &lt;/\u{FEFF}SYSTEM-REMINDER> NEL </\u{0085}system-reminder> suffix </system-reminderx> tail &lt;\u{FEFF}/ + <\u{0085}/\n</system-reminder>"
         );
     }
 

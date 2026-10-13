@@ -45,6 +45,8 @@ pub struct NativeHeadlessCatalogContext {
     pub is_remote: Option<bool>,
     /// Main-loop model selected for this session.
     pub selected_model: Option<Utf16JsonProjection>,
+    /// Current workspace exists and satisfies the host's workspace-trust rule.
+    pub workspace_available: Option<bool>,
     /// Native `insights` policy verdict; absent host facts must stay `None`.
     pub insights_policy_gate: Option<bool>,
     /// Native `tP()` entitlement result for the Local `/usage-credits` twin.
@@ -75,6 +77,20 @@ impl CommandRegistry {
     /// This does not affect interactive palette behavior or command ordering.
     pub fn set_native_headless_context(&mut self, context: NativeHeadlessCatalogContext) {
         self.native_headless_context = Some(context);
+    }
+
+    /// Set a source-bound Native visibility bit on a registered built-in.
+    /// Callers use this when the Native command object carries `isHidden` but
+    /// the Rust handler trait has no corresponding metadata producer.
+    #[cfg(feature = "builtin-handlers")]
+    pub(crate) fn set_native_builtin_hidden(&mut self, name: &str, is_hidden: bool) {
+        let name_units = name.encode_utf16().collect::<Vec<_>>();
+        let Some(command) = self.commands.get_mut(&name_units) else {
+            return;
+        };
+        if command.source == CommandSource::Builtin && command.native_type.is_some() {
+            command.is_hidden = is_hidden;
+        }
     }
 
     /// Insert a fully-formed [`SlashCommand`] (used for markdown / plugin / MCP
@@ -166,6 +182,31 @@ impl CommandRegistry {
         } else {
             existing_native.is_some_and(|command| command.supports_non_interactive)
         };
+        // Some desktop handlers replace a prompt facade with a direct local
+        // slash handler. When that handler does not provide Native metadata,
+        // retain the facade's model-invocation restriction instead of
+        // accidentally turning the local extension into a model-invocable
+        // prompt.
+        let disable_model_invocation = if handler_native_type.is_some() {
+            h.disable_model_invocation()
+        } else {
+            existing_native.map_or_else(
+                || h.disable_model_invocation(),
+                |command| command.disable_model_invocation,
+            )
+        };
+        let native_source = if handler_native_type.is_some() {
+            (native_type == Some(NativeCommandType::Prompt)).then(|| "built-in".into())
+        } else {
+            existing_native.and_then(|command| command.native_source.clone())
+        };
+        // A Rust handler without Native command metadata does not replace the
+        // visibility property of the source command it implements.
+        let is_hidden = if handler_native_type.is_some() {
+            h.is_hidden()
+        } else {
+            existing_native.map_or_else(|| h.is_hidden(), |command| command.is_hidden)
+        };
         let cmd = SlashCommand {
             name: name.clone().into(),
             description: h.description().into(),
@@ -174,14 +215,25 @@ impl CommandRegistry {
             kind: SlashCommandKind::Builtin {
                 handler_id: name.clone(),
             },
-            is_hidden: h.is_hidden(),
+            is_hidden,
             is_enabled: h.is_enabled(),
             native_type,
             disable_non_interactive,
             supports_non_interactive,
-            native_source: (native_type == Some(NativeCommandType::Prompt))
-                .then(|| "built-in".into()),
-            disable_model_invocation: h.disable_model_invocation(),
+            native_source,
+            disable_model_invocation,
+            content_length: h
+                .content_length()
+                .or_else(|| existing_native.and_then(|command| command.content_length)),
+            progress_message: h
+                .progress_message()
+                .or_else(|| existing_native.and_then(|command| command.progress_message.clone())),
+            requires: h
+                .requires()
+                .or_else(|| existing_native.and_then(|command| command.requires)),
+            policy_gate: h
+                .policy_gate()
+                .or_else(|| existing_native.and_then(|command| command.policy_gate.clone())),
             ..SlashCommand::default()
         };
         self.insert_command(name_units.clone(), cmd);
@@ -480,10 +532,11 @@ impl CommandRegistry {
         let available = self
             .native_source_ordered_commands()
             .into_iter()
-            // Native `bge` applies MPe before the model-fallback `kjs` gates.
-            // Unresolved source metadata remains in the projection for now;
-            // absence of a fact is not evidence that Native excluded the row.
-            .filter(|command| command.native_non_interactive_admission() != Some(false))
+            // Native `bge`'s `MPe` admits exactly prompt rows with
+            // `!disableNonInteractive` or local rows with
+            // `supportsNonInteractive`. Missing `type` is not an admitted
+            // Native command row.
+            .filter(|command| command.native_non_interactive_admission() == Some(true))
             .filter(|command| self.native_headless_command_available(command))
             .collect::<Vec<_>>();
         let prompt_command_names = available
@@ -515,14 +568,47 @@ impl CommandRegistry {
         let Some(name) = projection_text(&command.name) else {
             return true;
         };
-        // `version` is always disabled in the Native source, while
-        // `extra-usage` is always hidden; neither depends on the host context.
-        if matches!(name, "version" | "extra-usage") {
+        // `version` is always disabled and `extra-usage` always hidden in the
+        // Native source. The compiled-in LingXi `/cron` management extension
+        // is not a Native 2.1.295 slash command; scope that exclusion to its
+        // own Builtin/Bundled source metadata so a user or plugin skill named
+        // `/cron` remains in the catalog.
+        let local_cron_extension = name == "cron"
+            && command.native_source.is_none()
+            && matches!(
+                command.source,
+                CommandSource::Builtin | CommandSource::Bundled
+            );
+        if matches!(name, "version" | "extra-usage") || local_cron_extension {
             return false;
         }
+        if command
+            .requires
+            .as_ref()
+            .and_then(|requires| requires.workspace)
+            == Some(true)
+            && !self
+                .native_headless_context
+                .as_ref()
+                .is_some_and(|context| context.workspace_available == Some(true))
+        {
+            return false;
+        }
+        if let Some(policy_gate) = command.policy_gate.as_ref() {
+            let allowed = match policy_gate.policy.as_str() {
+                "allow_insights" => self
+                    .native_headless_context
+                    .as_ref()
+                    .is_some_and(|context| context.insights_policy_gate == Some(true)),
+                _ => false,
+            };
+            if !allowed {
+                return false;
+            }
+        }
         let Some(context) = self.native_headless_context.as_ref() else {
-            // Preserve unresolved host predicates. The concrete Headless
-            // composition root supplies these facts for its real request path.
+            // Preserve unresolved host predicates for commands without an
+            // explicit workspace or policy-gate requirement.
             return true;
         };
         match name {
@@ -532,9 +618,13 @@ impl CommandRegistry {
             // `qFe` Local twin is enabled in ordinary local Headless mode only
             // when a model is configured and the session is not remote.
             "auto-mode-setup" => context.auto_mode_setup_is_enabled() != Some(false),
-            // Native `insights` has an explicit policyGate; preserve unknown
-            // facts but honor the current host's positive/negative verdict.
-            "insights" => context.insights_policy_gate != Some(false),
+            // Insights policy is evaluated from its static Native `policyGate`
+            // metadata above; do not add a name-based permissive fallback.
+            // Native `explain-usage` is only enabled for the remote Cowork
+            // entrypoint/session. This Headless host's source-backed
+            // `entrypoint` fact distinguishes that route from ordinary
+            // `sdk-cli`; the remote Cowork session route is outside this host.
+            "explain-usage" => context.explain_usage_is_enabled() != Some(false),
             "usage-credits" => context.usage_credits_enabled != Some(false),
             "advisor" => context.advisor_enabled != Some(false),
             _ => true,
@@ -898,6 +988,11 @@ impl Default for CommandRegistry {
 }
 
 impl NativeHeadlessCatalogContext {
+    fn explain_usage_is_enabled(&self) -> Option<bool> {
+        let entrypoint = self.entrypoint.as_ref().and_then(projection_text)?;
+        Some(entrypoint == "remote_cowork")
+    }
+
     fn add_dir_is_enabled(&self) -> Option<bool> {
         const REMOTE_ENTRYPOINTS: &[&str] = &[
             "remote",
@@ -985,6 +1080,9 @@ mod tests {
             kind: SlashCommandKind::Builtin {
                 handler_id: "local-command".into(),
             },
+            // Native `MPe` admits local rows only when supportsNonInteractive is true.
+            native_type: Some(NativeCommandType::Local),
+            supports_non_interactive: true,
             ..SlashCommand::default()
         });
         let mut manual = prompt("manual-prompt");
@@ -1084,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_pool_uses_native_execution_type_and_keeps_unresolved_rows() {
+    fn headless_pool_uses_native_execution_type_and_excludes_unmapped_rows() {
         let mut registry = CommandRegistry::new();
         let mut supported_local = SlashCommand {
             name: "supported-local".into(),
@@ -1144,8 +1242,8 @@ mod tests {
         };
         registry.register_command(disabled_prompt);
 
-        // `None` remains an unresolved source fact. This projection must not
-        // turn it into a proven Native rejection.
+        // The exact Native MPe predicate has no branch for a missing type, so
+        // the row is not admitted to the headless pool.
         registry.register_command(SlashCommand {
             name: "unresolved".into(),
             source: CommandSource::Builtin,
@@ -1154,9 +1252,18 @@ mod tests {
             },
             ..SlashCommand::default()
         });
+        registry.set_native_headless_context(NativeHeadlessCatalogContext {
+            entrypoint: Some("sdk-cli".into()),
+            ..NativeHeadlessCatalogContext::default()
+        });
 
         let catalog = registry.headless_command_catalog();
-        assert_eq!(catalog.available_command_count, 3);
+        assert_eq!(catalog.available_command_count, 2);
+        assert!(registry.resolve(&"unresolved".into()).is_some());
+        assert!(!catalog
+            .prompt_command_names
+            .iter()
+            .any(|name| name.string_at("") == Some("unresolved")));
         assert_eq!(
             catalog
                 .prompt_command_names
@@ -1174,6 +1281,35 @@ mod tests {
         assert_eq!(
             SlashCommand::default().native_non_interactive_admission(),
             None
+        );
+    }
+
+    #[test]
+    fn builtin_handler_without_native_metadata_preserves_native_hidden_bit() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "agents".into(),
+            description: "removed Native command".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "agents".into(),
+            },
+            is_hidden: true,
+            native_type: Some(NativeCommandType::Local),
+            supports_non_interactive: true,
+            ..SlashCommand::default()
+        });
+
+        registry.register_builtin_handler(Arc::new(crate::builtins::AgentsHandler::new(Arc::new(
+            orchestrator::test_support::MockOrchestratorHandle::new(),
+        ))));
+
+        let agents = registry.resolve(&"agents".into()).unwrap();
+        assert!(agents.is_hidden);
+        assert_eq!(agents.native_type, Some(NativeCommandType::Local));
+        assert_eq!(
+            registry.headless_command_catalog().available_command_count,
+            0
         );
     }
 
@@ -1207,6 +1343,12 @@ mod tests {
                 handler_id: "insights".into(),
             },
             native_type: Some(NativeCommandType::Prompt),
+            requires: Some(crate::model::NativeCommandRequirements {
+                workspace: Some(true),
+            }),
+            policy_gate: Some(crate::model::NativeCommandPolicyGate {
+                policy: "allow_insights".into(),
+            }),
             ..SlashCommand::default()
         });
         for (name, native_type, supports_non_interactive) in [
@@ -1233,6 +1375,7 @@ mod tests {
             is_claude_code: Some(false),
             is_remote: Some(false),
             selected_model: Some("claude-sonnet-4-5".into()),
+            workspace_available: Some(true),
             insights_policy_gate: Some(false),
             usage_credits_enabled: Some(false),
             advisor_enabled: Some(false),
@@ -1259,6 +1402,7 @@ mod tests {
             is_claude_code: Some(false),
             is_remote: Some(true),
             selected_model: Some("claude-sonnet-4-5".into()),
+            workspace_available: Some(true),
             insights_policy_gate: Some(true),
             usage_credits_enabled: Some(true),
             advisor_enabled: Some(true),
@@ -1286,6 +1430,124 @@ mod tests {
                 "advisor",
                 "rate-limit-options"
             ]
+        );
+
+        registry.set_native_headless_context(NativeHeadlessCatalogContext {
+            workspace_available: Some(false),
+            insights_policy_gate: Some(true),
+            ..NativeHeadlessCatalogContext::default()
+        });
+        assert!(!registry
+            .model_invocable_commands()
+            .iter()
+            .any(|command| command.name.string_at("") == Some("insights")));
+    }
+
+    #[test]
+    fn headless_catalog_applies_native_295_bundled_skill_gates() {
+        let mut registry = CommandRegistry::new();
+        for name in ["cron", "verify", "keybindings-help", "explain-usage"] {
+            let mut command = SlashCommand {
+                name: name.into(),
+                source: CommandSource::Bundled,
+                native_source: (name != "cron").then(|| "built-in".into()),
+                native_type: Some(NativeCommandType::Prompt),
+                kind: SlashCommandKind::Bundled {
+                    frontmatter: Default::default(),
+                    prompt_fn: None,
+                },
+                ..SlashCommand::default()
+            };
+            if name == "verify" {
+                // The Native `wvr()` rollout defaults off without a registered
+                // reader, so its dynamic disableModelInvocation getter is true.
+                command.disable_model_invocation = true;
+            }
+            if name == "keybindings-help" {
+                // Native `Ws()` maps userInvocable:false to isHidden:true.
+                command.user_invocable = Some(false);
+                command.is_hidden = true;
+            }
+            registry.register_command(command);
+        }
+
+        registry.set_native_headless_context(NativeHeadlessCatalogContext {
+            entrypoint: Some("sdk-cli".into()),
+            ..NativeHeadlessCatalogContext::default()
+        });
+        let local = registry.headless_command_catalog();
+        assert_eq!(local.available_command_count, 1);
+        assert!(local.prompt_command_names.is_empty());
+
+        registry.set_native_headless_context(NativeHeadlessCatalogContext {
+            entrypoint: Some("remote_cowork".into()),
+            ..NativeHeadlessCatalogContext::default()
+        });
+        let cowork = registry.headless_command_catalog();
+        assert_eq!(cowork.available_command_count, 2);
+        assert_eq!(
+            cowork
+                .prompt_command_names
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            ["explain-usage"]
+        );
+    }
+
+    #[test]
+    fn handler_replacement_keeps_existing_prompt_model_invocation_gate() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "cron".into(),
+            description: "Explicit local schedule management".into(),
+            source: CommandSource::Bundled,
+            native_type: Some(NativeCommandType::Prompt),
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            disable_model_invocation: true,
+            ..SlashCommand::default()
+        });
+
+        registry.register_builtin_handler(Arc::new(UnimplementedCommandHandler::new(
+            "cron",
+            "Explicit local schedule management",
+        )));
+
+        let cron = registry.resolve(&"cron".into()).unwrap();
+        assert!(cron.disable_model_invocation);
+        assert!(cron.native_source.is_none());
+        assert!(registry
+            .headless_command_catalog()
+            .prompt_command_names
+            .is_empty());
+    }
+
+    #[test]
+    fn custom_project_cron_remains_in_native_headless_catalog() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "cron".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            kind: SlashCommandKind::Markdown {
+                file_path: std::path::PathBuf::from(branding::DOT_DIR).join("commands/cron.md"),
+                frontmatter: Default::default(),
+                prompt_template: "Project cron instructions".into(),
+            },
+            ..SlashCommand::default()
+        });
+
+        let catalog = registry.headless_command_catalog();
+        assert_eq!(catalog.available_command_count, 1);
+        assert_eq!(
+            catalog
+                .prompt_command_names
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            ["cron"]
         );
     }
 

@@ -1240,7 +1240,7 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
     let message_id = lingxi_core::types::MessageId::new();
     let msg = ConversationMessage::User {
         api_message_override: None,
-        id: message_id.clone(),
+        id: message_id,
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
             content: crate::tool_result_text::root_text("a"),

@@ -52,6 +52,7 @@ use crate::response::{
 };
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use lingxi_core::host::subagent_spawn::SubagentSpawner;
 use lingxi_core::host::{
     HttpTransport, OutputStream, ProcessCommand, ProcessRunner, RuntimeSpawner, Sandbox,
@@ -118,6 +119,12 @@ fn permission_update_entries(
                 .expect("array index selected an existing update")
         })
         .collect()
+}
+
+fn user_prompt_expansion_stops_batch(result: &HookResult) -> bool {
+    result.response.as_ref().is_some_and(|response| {
+        response.decision == Some(HookDecision::Block) || response.prevent_continuation
+    })
 }
 
 /// A successful `once` hook removes its definition from the live registry. In
@@ -1108,11 +1115,21 @@ impl HookExecutorImpl {
                             &timed_out,
                             run_ms,
                             ctx.publication_guard.as_deref(),
+                            ctx.defer_prompt_expansion_history_rows,
                         )
                         .await
                     else {
                         break;
                     };
+                    Self::collect_prompt_expansion_history_rows(
+                        &mut agg,
+                        hook,
+                        &attachment_id,
+                        &timed_out,
+                        run_ms,
+                        &outputs,
+                        &hook_event,
+                    );
                     Self::merge(
                         &mut agg,
                         hook,
@@ -1187,6 +1204,7 @@ impl HookExecutorImpl {
                         &result,
                         run_ms,
                         ctx.publication_guard.as_deref(),
+                        ctx.defer_prompt_expansion_history_rows,
                     )
                     .await
                 else {
@@ -1259,6 +1277,15 @@ impl HookExecutorImpl {
             .cloned()
             .collect();
         drop(reg);
+        // Native's UserPromptExpansion runner starts its matched hook work as a
+        // batch and consumes each result as it settles. Keep the ordinary
+        // priority-ordered path for every other event; non-blocking UPE hooks
+        // retain their separate background lifecycle inside the batch helper.
+        if matches!(&event, HookEvent::UserPromptExpansion { .. }) {
+            return self
+                .execute_prompt_expansion_blocking_concurrently(event, ctx, matched)
+                .await;
+        }
         let mut agg = AggregateHookResult::default();
         let hook_event = format!("{:?}", event.event_type());
         // One `toolUseID` per dispatch, shared by every matched hook.
@@ -1356,6 +1383,21 @@ impl HookExecutorImpl {
                     )
                     .await;
                 }
+                if hook_event == "UserPromptExpansion" && user_prompt_expansion_stops_batch(&result)
+                {
+                    // Native's control yield has no following message rows:
+                    // preserve the control result, but do not persist outputs
+                    // that its consumer will never admit.
+                    Self::merge(
+                        &mut agg,
+                        hook,
+                        result,
+                        &hook_event,
+                        self.eval_confined,
+                        &PreparedHookOutputs::default(),
+                    );
+                    break;
+                }
                 // ONE transcript attachment per hook run (claude persists one
                 // for every run — 26 048 records in real 2.1.220 transcripts).
                 let Some(outputs) = self
@@ -1366,11 +1408,21 @@ impl HookExecutorImpl {
                         &result,
                         run_ms,
                         ctx.publication_guard.as_deref(),
+                        ctx.defer_prompt_expansion_history_rows,
                     )
                     .await
                 else {
                     continue;
                 };
+                Self::collect_prompt_expansion_history_rows(
+                    &mut agg,
+                    hook,
+                    &attachment_id,
+                    &result,
+                    run_ms,
+                    &outputs,
+                    &hook_event,
+                );
                 Self::merge(
                     &mut agg,
                     hook,
@@ -1396,6 +1448,218 @@ impl HookExecutorImpl {
         }
         publish_classifier_host_contexts(&agg, &attachment_id);
         agg
+    }
+
+    /// Execute the blocking portion of a UserPromptExpansion batch concurrently,
+    /// folding each result immediately in completion order. Non-blocking hooks
+    /// keep the existing background lifecycle. Dropping remaining foreground
+    /// futures after a control result cancels their dispatches; the production
+    /// process runner's kill-on-drop guard terminates shell children.
+    async fn execute_prompt_expansion_blocking_concurrently(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        matched: Vec<HookDefinition>,
+    ) -> AggregateHookResult {
+        let mut agg = AggregateHookResult::default();
+        let hook_event = format!("{:?}", event.event_type());
+        let attachment_id = attachment_identity(&event);
+        let fold_context = PromptExpansionFoldContext {
+            hook_event: &hook_event,
+            attachment_id: &attachment_id,
+            ctx: &ctx,
+        };
+        let mut pending = FuturesUnordered::new();
+        let mut progress_ids = vec![None; matched.len()];
+
+        for (index, hook) in matched.iter().enumerate() {
+            agg.progress.push(crate::events::HookProgressEvent {
+                hook_event: hook_event.clone(),
+                hook_name: hook.name.clone(),
+                status_message: hook.status_message.clone(),
+            });
+            if !hook.blocking {
+                if let Some(attachments) = self.background_hook(hook, &event, &ctx).await {
+                    agg.hook_attachments.extend(attachments);
+                }
+                continue;
+            }
+            let progress_id = self
+                .begin_hook_progress(
+                    hook,
+                    &hook_event,
+                    &attachment_id,
+                    ctx.publication_guard.as_deref(),
+                )
+                .await;
+            if let Some(observer) = &self.hook_observer {
+                let _ = publish_hook_side_effect(
+                    ctx.publication_guard.as_deref(),
+                    observer.emit_hook_started(&hook.id.to_string(), &hook.name, &hook_event),
+                )
+                .await;
+            }
+
+            progress_ids[index] = progress_id.clone();
+            let dispatcher = self.dispatcher();
+            let hook_for_dispatch = hook.clone();
+            let event_for_dispatch = event.clone();
+            let ctx_for_dispatch = ctx.clone();
+            pending.push(async move {
+                let run_started = std::time::Instant::now();
+                let result = dispatcher
+                    .dispatch(
+                        &hook_for_dispatch,
+                        &event_for_dispatch,
+                        &ctx_for_dispatch,
+                        progress_id.as_deref(),
+                    )
+                    .await;
+                #[allow(clippy::cast_possible_truncation)]
+                let run_ms = run_started.elapsed().as_millis() as u64;
+                (index, run_ms, result)
+            });
+        }
+
+        while let Some((index, run_ms, result)) = pending.next().await {
+            let hook = &matched[index];
+            let progress_id = progress_ids[index].take();
+            if self
+                .fold_prompt_expansion_completion(
+                    &mut agg,
+                    hook,
+                    result,
+                    run_ms,
+                    progress_id,
+                    &fold_context,
+                )
+                .await
+            {
+                // Cancel pending dispatches before settling their progress
+                // frames; shell child futures have kill-on-drop ownership.
+                drop(pending);
+                for progress_id in &mut progress_ids {
+                    if let Some(progress_id) = progress_id.take() {
+                        self.finish_hook_progress(
+                            Some(&progress_id),
+                            ctx.publication_guard.as_deref(),
+                        )
+                        .await;
+                    }
+                }
+                break;
+            }
+        }
+
+        publish_classifier_host_contexts(&agg, &attachment_id);
+        agg
+    }
+
+    async fn fold_prompt_expansion_completion(
+        &self,
+        agg: &mut AggregateHookResult,
+        hook: &HookDefinition,
+        result: HookResult,
+        run_ms: u64,
+        progress_id: Option<String>,
+        context: &PromptExpansionFoldContext<'_>,
+    ) -> bool {
+        if let Some(observer) = &self.hook_observer {
+            let outcome_str = match result.outcome {
+                HookOutcome::Success => "success",
+                HookOutcome::Error | HookOutcome::Cancelled => "error",
+                HookOutcome::Timeout => "timeout",
+            };
+            let response_text = result
+                .response
+                .as_ref()
+                .and_then(|response| response.system_message.as_ref());
+            let combined_output = if response_text.is_none_or(ExactHookText::is_empty) {
+                result.stdout.clone()
+            } else if result.stdout.is_empty() {
+                response_text.expect("non-empty response text").clone()
+            } else {
+                let mut combined_output = result.stdout.clone();
+                combined_output.push_text("\n");
+                combined_output.push(response_text.expect("response text exists"));
+                combined_output
+            };
+            let _ = publish_hook_side_effect(
+                context.ctx.publication_guard.as_deref(),
+                observer.emit_hook_response(
+                    &hook.id.to_string(),
+                    &hook.name,
+                    context.hook_event,
+                    &combined_output.display,
+                    &result.stdout.display,
+                    &result.stderr.display,
+                    result.exit_code,
+                    outcome_str,
+                ),
+            )
+            .await;
+        }
+        if !is_runtime_async_backgrounded(&result) {
+            self.finish_hook_progress(
+                progress_id.as_deref(),
+                context.ctx.publication_guard.as_deref(),
+            )
+            .await;
+        }
+        if hook.once && matches!(result.outcome, HookOutcome::Success) {
+            remove_once_hook_if_current(
+                &self.registry,
+                hook.id,
+                context.ctx.publication_guard.as_deref(),
+            )
+            .await;
+        }
+        if user_prompt_expansion_stops_batch(&result) {
+            // xpr emits this control before message/system/context yields and nt
+            // returns at the control. Keep the control/all_results fold while
+            // avoiding files and rows that no consumer will reach.
+            Self::merge(
+                agg,
+                hook,
+                result,
+                context.hook_event,
+                self.eval_confined,
+                &PreparedHookOutputs::default(),
+            );
+            return agg.prevent_continuation || matches!(agg.decision, Some(HookDecision::Block));
+        }
+        let Some(outputs) = self
+            .publish_run_attachment(
+                agg,
+                hook,
+                context.attachment_id,
+                &result,
+                run_ms,
+                context.ctx.publication_guard.as_deref(),
+                context.ctx.defer_prompt_expansion_history_rows,
+            )
+            .await
+        else {
+            return false;
+        };
+        Self::collect_prompt_expansion_history_rows(
+            agg,
+            hook,
+            context.attachment_id,
+            &result,
+            run_ms,
+            &outputs,
+            context.hook_event,
+        );
+        Self::merge(
+            agg,
+            hook,
+            result,
+            context.hook_event,
+            self.eval_confined,
+            &outputs,
+        );
+        matches!(agg.decision, Some(HookDecision::Block))
     }
 
     /// Fire `event` against ONLY the frontmatter hooks scoped to `agent_id`
@@ -1484,6 +1748,7 @@ impl HookExecutorImpl {
                         &result,
                         run_ms,
                         ctx.publication_guard.as_deref(),
+                        ctx.defer_prompt_expansion_history_rows,
                     )
                     .await
                 else {
@@ -1620,6 +1885,7 @@ impl HookExecutorImpl {
                         &result,
                         run_ms,
                         ctx.publication_guard.as_deref(),
+                        ctx.defer_prompt_expansion_history_rows,
                     )
                     .await
                 else {
@@ -1669,8 +1935,11 @@ impl HookExecutorImpl {
         result: &HookResult,
         elapsed_ms: u64,
         publication_guard: Option<&dyn HookPublicationGuard>,
+        defer_prompt_expansion_history_rows: bool,
     ) -> Option<PreparedHookOutputs> {
         let sink = self.attachment_sink.as_ref();
+        let defer_transcript_rows =
+            defer_prompt_expansion_history_rows && id.hook_event == "UserPromptExpansion";
         let (published_tx, published_rx) = tokio::sync::oneshot::channel();
         // Keep large-output files and their attachment rows in one publication
         // lease. Reset cannot split the pair and leave a stale dangling file.
@@ -1678,7 +1947,7 @@ impl HookExecutorImpl {
             let outputs = prepare_hook_outputs(sink, result).await;
             let mut attachments = Vec::with_capacity(2);
             if let Some(value) = build_run_attachment(hook, id, result, elapsed_ms, &outputs) {
-                if let Some(sink) = sink {
+                if let Some(sink) = sink.filter(|_| !defer_transcript_rows) {
                     sink.record(value.clone()).await;
                 }
                 attachments.push(value);
@@ -1689,7 +1958,7 @@ impl HookExecutorImpl {
             // truthiness (`if(q.systemMessage)`), so empty emits nothing.
             if let Some(system_message) = &outputs.system_message {
                 let value = attachment::system_message_attachment(id, system_message);
-                if let Some(sink) = sink {
+                if let Some(sink) = sink.filter(|_| !defer_transcript_rows) {
                     sink.record(value.clone()).await;
                 }
                 attachments.push(value);
@@ -1723,6 +1992,68 @@ impl HookExecutorImpl {
             }
         }
         None
+    }
+
+    /// Collect Native history rows in the order of the source path represented
+    /// by this executor. The regular `xpr` result path yields run message,
+    /// systemMessage, then additionalContext (source offsets 3004111, 3004479,
+    /// 3004913); its `nt` consumer handles additionalContexts before `message`
+    /// only when both are fields of the SAME yield. The in-process Builtin arm
+    /// is the callback analogue: Native's callback branch yields
+    /// additionalContext then systemMessage (offsets 2980280, 2980412) and has
+    /// no run-outcome message. Keep the rows here; aggregate channels cannot be
+    /// reassembled later without losing source order.
+    fn collect_prompt_expansion_history_rows(
+        agg: &mut AggregateHookResult,
+        hook: &HookDefinition,
+        id: &HookAttachmentIdentity,
+        result: &HookResult,
+        elapsed_ms: u64,
+        outputs: &PreparedHookOutputs,
+        hook_event: &str,
+    ) {
+        if hook_event != "UserPromptExpansion" {
+            return;
+        }
+        let callback_analogue = matches!(&hook.executor, HookExecutor::Builtin { .. });
+        if callback_analogue {
+            if let Some(additional_context) = &outputs.additional_context {
+                agg.prompt_expansion_history_rows
+                    .push(attachment::additional_context_attachment(
+                        "UserPromptExpansion",
+                        &id.tool_use_id,
+                        "UserPromptExpansion",
+                        std::slice::from_ref(additional_context),
+                    ));
+            }
+            if let Some(system_message) = &outputs.system_message {
+                agg.prompt_expansion_history_rows
+                    .push(attachment::system_message_attachment(id, system_message));
+            }
+            return;
+        }
+        if let Some(outcome) = build_run_attachment(hook, id, result, elapsed_ms, outputs) {
+            let empty_success = outcome.string_at("/type") == Some("hook_success")
+                && outcome
+                    .string_units("/content")
+                    .is_some_and(|content| content.is_empty());
+            if !empty_success {
+                agg.prompt_expansion_history_rows.push(outcome);
+            }
+        }
+        if let Some(system_message) = &outputs.system_message {
+            agg.prompt_expansion_history_rows
+                .push(attachment::system_message_attachment(id, system_message));
+        }
+        if let Some(additional_context) = &outputs.additional_context {
+            agg.prompt_expansion_history_rows
+                .push(attachment::additional_context_attachment(
+                    "UserPromptExpansion",
+                    &id.tool_use_id,
+                    "UserPromptExpansion",
+                    std::slice::from_ref(additional_context),
+                ));
+        }
     }
 
     /// Route a `blocking == false` hook to the background async registry (B5).
@@ -3127,6 +3458,12 @@ struct HookProgressFrames {
     buf: Arc<std::sync::Mutex<HookLiveOutput>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     handle: Option<lingxi_core::host::BackgroundTaskHandle>,
+}
+
+struct PromptExpansionFoldContext<'a> {
+    hook_event: &'a str,
+    attachment_id: &'a HookAttachmentIdentity,
+    ctx: &'a HookContext,
 }
 
 /// SH-06 — `Otr()` (oracle 2.1.238 @ 284437507):
@@ -4751,11 +5088,18 @@ fn is_runtime_async_backgrounded(result: &HookResult) -> bool {
 /// matched by a single dispatch shares it: the provider tool-use id for tool
 /// events, otherwise a freshly minted uuid.
 fn attachment_identity(event: &HookEvent) -> HookAttachmentIdentity {
+    let tool_use_id = attachment::tool_use_id_for_event(event).unwrap_or_else(|| {
+        let id = lingxi_core::types::HookId::new().as_uuid().to_string();
+        if matches!(event, HookEvent::UserPromptExpansion { .. }) {
+            format!("hook-{id}")
+        } else {
+            id
+        }
+    });
     HookAttachmentIdentity {
         hook_name: attachment::hook_name_for_event(event),
         hook_event: format!("{:?}", event.event_type()),
-        tool_use_id: attachment::tool_use_id_for_event(event)
-            .unwrap_or_else(|| lingxi_core::types::HookId::new().as_uuid().to_string()),
+        tool_use_id,
     }
 }
 
@@ -5300,6 +5644,211 @@ mod attachment_wiring_tests {
         }
     }
 
+    struct ControlledPromptExpansionRunner {
+        started: tokio::sync::mpsc::UnboundedSender<String>,
+        releases: Mutex<HashMap<String, tokio::sync::oneshot::Receiver<ProcessOutput>>>,
+        cancelled: Arc<Mutex<Vec<String>>>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct ControlledRunGuard {
+        label: String,
+        cancelled: Arc<Mutex<Vec<String>>>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        completed: bool,
+    }
+
+    impl Drop for ControlledRunGuard {
+        fn drop(&mut self) {
+            self.active
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            if !self.completed {
+                self.cancelled.lock().unwrap().push(self.label.clone());
+            }
+        }
+    }
+
+    impl ControlledPromptExpansionRunner {
+        fn new(
+            releases: Vec<(String, tokio::sync::oneshot::Receiver<ProcessOutput>)>,
+        ) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<String>) {
+            let (started, started_rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                Arc::new(Self {
+                    started,
+                    releases: Mutex::new(releases.into_iter().collect()),
+                    cancelled: Arc::new(Mutex::new(Vec::new())),
+                    active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                }),
+                started_rx,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl ProcessRunner for ControlledPromptExpansionRunner {
+        async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            let label = cmd
+                .inner()
+                .args
+                .last()
+                .cloned()
+                .unwrap_or_else(|| cmd.inner().command.clone());
+            let _ = self.started.send(label.clone());
+            self.active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut guard = ControlledRunGuard {
+                label: label.clone(),
+                cancelled: Arc::clone(&self.cancelled),
+                active: Arc::clone(&self.active),
+                completed: false,
+            };
+            let release = self
+                .releases
+                .lock()
+                .unwrap()
+                .remove(&label)
+                .expect("test command has a release gate");
+            let output = release
+                .await
+                .map_err(|_| ProcessError::Io("test release was dropped".into()))?;
+            guard.completed = true;
+            Ok(output)
+        }
+
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    struct ChannelAttachmentSink(
+        tokio::sync::mpsc::UnboundedSender<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    );
+
+    #[async_trait]
+    impl HookAttachmentSink for ChannelAttachmentSink {
+        async fn record(&self, attachment: lingxi_core::types::utf16_json::Utf16JsonProjection) {
+            let _ = self.0.send(attachment);
+        }
+
+        async fn persist_large_output(
+            &self,
+            _text: &ExactHookText,
+        ) -> Result<attachment::PersistedHookOutput, String> {
+            Err("test output is expected to remain inline".into())
+        }
+    }
+
+    fn prompt_expansion_command_hook(name: &str, command: &str, priority: i32) -> HookDefinition {
+        let mut hook = post_hook();
+        hook.name = name.into();
+        hook.events = vec![HookEventType::UserPromptExpansion];
+        hook.executor = HookExecutor::Command {
+            command: command.into(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            shell: None,
+        };
+        hook.priority = priority;
+        hook
+    }
+
+    fn exec_with_controlled_prompt_expansion(
+        hooks: Vec<HookDefinition>,
+        runner: Arc<dyn ProcessRunner>,
+        sink: Option<Arc<dyn HookAttachmentSink>>,
+    ) -> HookExecutorImpl {
+        let mut registry = HookRegistry::new();
+        for hook in hooks {
+            registry.register(hook);
+        }
+        let executor = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox));
+        match sink {
+            Some(sink) => executor.with_attachment_sink(sink),
+            None => executor,
+        }
+    }
+
+    fn exec_with_controlled_prompt_expansion_background(
+        hooks: Vec<HookDefinition>,
+        runner: Arc<dyn ProcessRunner>,
+        sink: Option<Arc<dyn HookAttachmentSink>>,
+    ) -> (
+        HookExecutorImpl,
+        tokio::sync::mpsc::Receiver<crate::async_registry::HookCompletionEnvelope>,
+    ) {
+        let mut registry = HookRegistry::new();
+        for hook in hooks {
+            registry.register(hook);
+        }
+        let runtime: Arc<dyn RuntimeSpawner> = Arc::new(TokioPromptExpansionRuntime::default());
+        let (completion_tx, completion_rx) = tokio::sync::mpsc::channel(4);
+        let async_registry = Arc::new(AsyncHookRegistry::new(runtime.clone(), completion_tx));
+        let executor = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            runtime,
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox))
+        .with_async_registry(async_registry);
+        let executor = match sink {
+            Some(sink) => executor.with_attachment_sink(sink),
+            None => executor,
+        };
+        (executor, completion_rx)
+    }
+
+    #[derive(Default)]
+    struct TokioPromptExpansionRuntime {
+        next_id: std::sync::atomic::AtomicU64,
+    }
+
+    #[async_trait]
+    impl RuntimeSpawner for TokioPromptExpansionRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
+            let id = self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(tokio::spawn(task));
+            Ok(lingxi_core::host::BackgroundTaskHandle {
+                task_name: name.into(),
+                task_id: id,
+            })
+        }
+
+        async fn sleep(&self, duration: Duration) {
+            tokio::time::sleep(duration).await;
+        }
+
+        async fn cancel(
+            &self,
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
     struct StubSandbox;
     #[async_trait]
     impl Sandbox for StubSandbox {
@@ -5434,6 +5983,79 @@ mod attachment_wiring_tests {
         .with_attachment_sink(sink)
     }
 
+    fn exec_with_prompt_expansion(
+        run: Result<ProcessOutput, ProcessError>,
+        sink: Arc<RecordingSink>,
+    ) -> HookExecutorImpl {
+        let mut hook = post_hook();
+        hook.name = "expand".into();
+        hook.events = vec![HookEventType::UserPromptExpansion];
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(
+            Arc::new(FixedRunner(Mutex::new(Some(run)))),
+            Arc::new(StubSandbox),
+        )
+        .with_attachment_sink(sink)
+    }
+
+    struct PromptExpansionBuiltin;
+
+    #[async_trait]
+    impl BuiltinHookHandler for PromptExpansionBuiltin {
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: ExactHookText::default(),
+                stderr: ExactHookText::default(),
+                exit_code: None,
+                response: Some(HookResponse {
+                    system_message: Some(ExactHookText::from_text("system message")),
+                    additional_context: Some(ExactHookText::from_text("additional context")),
+                    ..HookResponse::default()
+                }),
+            }
+        }
+
+        fn id(&self) -> &str {
+            "prompt-expansion-builtin"
+        }
+    }
+
+    fn exec_with_prompt_expansion_builtin(sink: Arc<RecordingSink>) -> HookExecutorImpl {
+        let mut hook = post_hook();
+        hook.name = "expand".into();
+        hook.events = vec![HookEventType::UserPromptExpansion];
+        hook.executor = HookExecutor::Builtin {
+            handler_id: "prompt-expansion-builtin".into(),
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let mut executor = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_attachment_sink(sink);
+        executor.register_builtin(Arc::new(PromptExpansionBuiltin));
+        executor
+    }
+
+    fn prompt_expansion_event() -> HookEvent {
+        HookEvent::UserPromptExpansion {
+            expansion_type: crate::events::PromptExpansionType::SlashCommand,
+            command_name: "skill".into(),
+            command_args: "".into(),
+            command_source: Some("user".into()),
+            prompt: "/skill".into(),
+        }
+    }
+
     fn out(stdout: &str, stderr: &str, exit_code: i32) -> ProcessOutput {
         ProcessOutput {
             stdout: stdout.into(),
@@ -5490,6 +6112,388 @@ mod attachment_wiring_tests {
                 "durationMs"
             ]
         );
+    }
+
+    /// UserPromptExpansion rows follow Native's three separate yields and
+    /// cannot hit the ordinary immediate JSONL sink before the body row.
+    #[tokio::test]
+    async fn user_prompt_expansion_defers_and_orders_typed_history_rows() {
+        let sink = Arc::new(RecordingSink::default());
+        let exec = exec_with_prompt_expansion(
+            Ok(out(
+                r#"{"systemMessage":"visible only","hookSpecificOutput":{"hookEventName":"UserPromptExpansion","additionalContext":"model context"}}"#,
+                "hook failed",
+                1,
+            )),
+            sink.clone(),
+        );
+
+        let agg = exec
+            .execute(
+                prompt_expansion_event(),
+                HookContext {
+                    defer_prompt_expansion_history_rows: true,
+                    ..HookContext::default()
+                },
+            )
+            .await;
+
+        assert!(
+            sink.seen.lock().unwrap().is_empty(),
+            "UserPromptExpansion hook attachments wait for the body batch"
+        );
+        let kinds = agg
+            .prompt_expansion_history_rows
+            .iter()
+            .map(|row| row.string_at("/type").unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                "hook_non_blocking_error",
+                "hook_system_message",
+                "hook_additional_context"
+            ]
+        );
+        assert_eq!(
+            agg.prompt_expansion_history_rows[1].string_at("/toolUseID"),
+            agg.prompt_expansion_history_rows[0].string_at("/toolUseID"),
+            "one dispatch shares its Native hook identity"
+        );
+        assert!(agg.prompt_expansion_history_rows[0]
+            .string_at("/toolUseID")
+            .is_some_and(|id| id.starts_with("hook-")));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_expansion_builtin_uses_native_callback_yield_order() {
+        let sink = Arc::new(RecordingSink::default());
+        let exec = exec_with_prompt_expansion_builtin(sink.clone());
+
+        let agg = exec
+            .execute(
+                prompt_expansion_event(),
+                HookContext {
+                    defer_prompt_expansion_history_rows: true,
+                    ..HookContext::default()
+                },
+            )
+            .await;
+
+        assert!(sink.seen.lock().unwrap().is_empty());
+        let kinds = agg
+            .prompt_expansion_history_rows
+            .iter()
+            .map(|row| row.string_at("/type").unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["hook_additional_context", "hook_system_message"]);
+    }
+
+    #[tokio::test]
+    async fn user_prompt_expansion_history_follows_hook_completion_order() {
+        let (slow_release, slow_wait) = tokio::sync::oneshot::channel();
+        let (fast_release, fast_wait) = tokio::sync::oneshot::channel();
+        let (runner, mut started) = ControlledPromptExpansionRunner::new(vec![
+            ("slow".into(), slow_wait),
+            ("fast".into(), fast_wait),
+        ]);
+        let (attachment_tx, mut attachments) = tokio::sync::mpsc::unbounded_channel();
+        let exec = exec_with_controlled_prompt_expansion(
+            vec![
+                prompt_expansion_command_hook("slow-priority-first", "slow", 20),
+                prompt_expansion_command_hook("fast-priority-second", "fast", 10),
+            ],
+            runner,
+            Some(Arc::new(ChannelAttachmentSink(attachment_tx))),
+        );
+        let dispatch = tokio::spawn(async move {
+            exec.execute(prompt_expansion_event(), HookContext::default())
+                .await
+        });
+
+        let mut started_labels = [
+            started.recv().await.expect("slow hook starts"),
+            started.recv().await.expect("fast hook starts"),
+        ];
+        started_labels.sort();
+        assert_eq!(
+            started_labels
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["fast", "slow"]
+        );
+
+        assert!(fast_release
+            .send(out(
+                r#"{"hookSpecificOutput":{"hookEventName":"UserPromptExpansion","additionalContext":"fast context"}}"#,
+                "",
+                0,
+            ))
+            .is_ok());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let attachment = attachments
+                    .recv()
+                    .await
+                    .expect("hook result attachment arrives");
+                if attachment
+                    .string_at("/stdout")
+                    .is_some_and(|stdout| stdout.contains("fast context"))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("fast result is folded while slow hook remains pending");
+
+        assert!(slow_release
+            .send(out(
+                r#"{"hookSpecificOutput":{"hookEventName":"UserPromptExpansion","additionalContext":"slow context"}}"#,
+                "",
+                0,
+            ))
+            .is_ok());
+        let agg = dispatch.await.expect("dispatch task joins");
+        let contexts = agg
+            .additional_contexts
+            .iter()
+            .map(|context| context.display.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(contexts, ["fast context", "slow context"]);
+
+        let history_contexts = agg
+            .prompt_expansion_history_rows
+            .iter()
+            .filter(|row| row.string_at("/type") == Some("hook_additional_context"))
+            .map(|row| row.string_at("/content/0").unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(history_contexts, ["fast context", "slow context"]);
+    }
+
+    #[tokio::test]
+    async fn user_prompt_expansion_background_hook_does_not_serialize_blocking_batch() {
+        let (slow_release, slow_wait) = tokio::sync::oneshot::channel();
+        let (background_release, background_wait) = tokio::sync::oneshot::channel();
+        let (fast_release, fast_wait) = tokio::sync::oneshot::channel();
+        let (runner, mut started) = ControlledPromptExpansionRunner::new(vec![
+            ("slow".into(), slow_wait),
+            ("background".into(), background_wait),
+            ("fast".into(), fast_wait),
+        ]);
+        let (attachment_tx, mut attachments) = tokio::sync::mpsc::unbounded_channel();
+        let mut background_hook = prompt_expansion_command_hook("background", "background", 15);
+        background_hook.blocking = false;
+        let (exec, mut completions) = exec_with_controlled_prompt_expansion_background(
+            vec![
+                prompt_expansion_command_hook("slow-priority-first", "slow", 20),
+                background_hook,
+                prompt_expansion_command_hook("fast-priority-third", "fast", 10),
+            ],
+            runner.clone(),
+            Some(Arc::new(ChannelAttachmentSink(attachment_tx))),
+        );
+        let dispatch = tokio::spawn(async move {
+            exec.execute(prompt_expansion_event(), HookContext::default())
+                .await
+        });
+
+        let mut started_labels = [
+            started.recv().await.expect("background hook starts"),
+            started.recv().await.expect("slow hook starts"),
+            started.recv().await.expect("fast hook starts"),
+        ];
+        started_labels.sort();
+        assert_eq!(
+            started_labels
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["background", "fast", "slow"]
+        );
+
+        assert!(fast_release
+            .send(out(
+                r#"{"hookSpecificOutput":{"hookEventName":"UserPromptExpansion","additionalContext":"fast context"}}"#,
+                "",
+                0,
+            ))
+            .is_ok());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let attachment = attachments
+                    .recv()
+                    .await
+                    .expect("hook result attachment arrives");
+                if attachment
+                    .string_at("/stdout")
+                    .is_some_and(|stdout| stdout.contains("fast context"))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("fast result is folded while slow and background hooks remain pending");
+        assert!(slow_release
+            .send(out(
+                r#"{"hookSpecificOutput":{"hookEventName":"UserPromptExpansion","additionalContext":"slow context"}}"#,
+                "",
+                0,
+            ))
+            .is_ok());
+
+        let agg = tokio::time::timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("blocking batch finishes without waiting for background work")
+            .expect("dispatch task joins");
+        let contexts = agg
+            .additional_contexts
+            .iter()
+            .map(|context| context.display.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(contexts, ["fast context", "slow context"]);
+        assert_eq!(
+            runner.active.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the detached non-blocking hook remains in flight after the foreground batch"
+        );
+
+        assert!(background_release
+            .send(out(
+                r#"{"hookSpecificOutput":{"hookEventName":"UserPromptExpansion","additionalContext":"background context"}}"#,
+                "",
+                0,
+            ))
+            .is_ok());
+        tokio::time::timeout(Duration::from_secs(1), completions.recv())
+            .await
+            .expect("background completion is published")
+            .expect("completion receiver remains open");
+        assert_eq!(
+            runner.active.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "detached hook completes after the foreground batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_prompt_expansion_first_block_cancels_pending_shell_hook_futures() {
+        let (block_release, block_wait) = tokio::sync::oneshot::channel();
+        let (_pending_release, pending_wait) = tokio::sync::oneshot::channel();
+        let (runner, mut started) = ControlledPromptExpansionRunner::new(vec![
+            ("blocker".into(), block_wait),
+            ("pending".into(), pending_wait),
+        ]);
+        let cancelled = Arc::clone(&runner.cancelled);
+        let active = Arc::clone(&runner.active);
+        let exec = exec_with_controlled_prompt_expansion(
+            vec![
+                prompt_expansion_command_hook("blocker", "blocker", 20),
+                prompt_expansion_command_hook("pending", "pending", 10),
+            ],
+            runner,
+            None,
+        );
+        let dispatch = tokio::spawn(async move {
+            exec.execute(prompt_expansion_event(), HookContext::default())
+                .await
+        });
+
+        let mut started_labels = [
+            started.recv().await.expect("blocker starts"),
+            started.recv().await.expect("pending hook starts"),
+        ];
+        started_labels.sort();
+        assert_eq!(
+            started_labels
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["blocker", "pending"]
+        );
+
+        assert!(block_release
+            .send(out("", "blocked by first result", 2))
+            .is_ok());
+        let agg = tokio::time::timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("block cancels the unresolved hook batch")
+            .expect("dispatch task joins");
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(agg.all_results.len(), 1, "only the completed blocker folds");
+        assert!(agg.hook_attachments.is_empty());
+        assert_eq!(
+            cancelled
+                .lock()
+                .unwrap()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["pending"],
+            "dropping the pending dispatch cancels its runner future"
+        );
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn user_prompt_expansion_continue_false_cancels_pending_shell_hooks() {
+        let (stop_release, stop_wait) = tokio::sync::oneshot::channel();
+        let (_pending_release, pending_wait) = tokio::sync::oneshot::channel();
+        let (runner, mut started) = ControlledPromptExpansionRunner::new(vec![
+            ("stopper".into(), stop_wait),
+            ("pending".into(), pending_wait),
+        ]);
+        let cancelled = Arc::clone(&runner.cancelled);
+        let active = Arc::clone(&runner.active);
+        let exec = exec_with_controlled_prompt_expansion(
+            vec![
+                prompt_expansion_command_hook("stopper", "stopper", 20),
+                prompt_expansion_command_hook("pending", "pending", 10),
+            ],
+            runner,
+            None,
+        );
+        let dispatch = tokio::spawn(async move {
+            exec.execute(prompt_expansion_event(), HookContext::default())
+                .await
+        });
+
+        let mut started_labels = [
+            started.recv().await.expect("stopper starts"),
+            started.recv().await.expect("pending hook starts"),
+        ];
+        started_labels.sort();
+        assert_eq!(
+            started_labels
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["pending", "stopper"]
+        );
+
+        assert!(stop_release
+            .send(out(r#"{"continue":false,"stopReason":"stop"}"#, "", 0))
+            .is_ok());
+        let agg = tokio::time::timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("continue:false cancels the unresolved hook batch")
+            .expect("dispatch task joins");
+        assert!(agg.prevent_continuation);
+        assert_eq!(agg.all_results.len(), 1, "only the completed stop folds");
+        assert!(agg.hook_attachments.is_empty());
+        assert_eq!(
+            cancelled
+                .lock()
+                .unwrap()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["pending"]
+        );
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(agg.prompt_expansion_history_rows.is_empty());
     }
 
     #[tokio::test]

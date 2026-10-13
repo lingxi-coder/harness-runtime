@@ -290,5 +290,8 @@ async fn doctor_dispatch() {
     let SlashDispatchResult::RunAsTurn { prompt } = r else {
         panic!("Native /doctor is a bundled prompt, got {r:?}");
     };
-    assert!(prompt.string_at("").unwrap().starts_with("# LingXi Checkup\n"));
+    assert!(prompt
+        .string_at("")
+        .unwrap()
+        .starts_with("# LingXi Checkup\n"));
 }

@@ -35,9 +35,10 @@ pub enum NativeBashFirstSessionAssignment {
 }
 
 /// Current Native proactivity level accepted by `set_proactivity_level`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum NativeProactivityLevel {
     Ask,
+    #[default]
     Default,
     Proactive,
 }
@@ -58,12 +59,6 @@ impl NativeProactivityLevel {
             "proactive" => Some(Self::Proactive),
             _ => None,
         }
-    }
-}
-
-impl Default for NativeProactivityLevel {
-    fn default() -> Self {
-        Self::Default
     }
 }
 

@@ -2553,6 +2553,7 @@ fn mobile_controls_event_contains_the_live_native_proactivity_snapshot() {
         let events = listener.received.lock().await;
         let controls = events
             .iter()
+            .rev()
             .find_map(|event| match event {
                 Ev::ConversationControlsChanged { controls } => Some(controls),
                 _ => None,
@@ -4489,10 +4490,24 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         .await
         .unwrap()
         .unwrap();
-        let body = tokio::time::timeout(std::time::Duration::from_secs(5), captured_rx)
-            .await
-            .unwrap()
-            .unwrap();
+        let body = match tokio::time::timeout(std::time::Duration::from_secs(5), captured_rx).await
+        {
+            Ok(Ok(body)) => body,
+            Ok(Err(error)) => panic!("provider request capture channel closed: {error}"),
+            Err(error) => {
+                let state = registry.get(&task.task_id).await;
+                let output =
+                    lingxi_core::host::task_registry::TaskRegistryHandle::output(
+                        registry,
+                        &task.task_id,
+                        Some(0),
+                    )
+                    .await;
+                panic!(
+                    "no provider request arrived within 5s after human-resume startup: {error}; task state: {state:?}; task output: {output:?}"
+                );
+            }
+        };
         assert_eq!(
             body["stream"], true,
             "restoration must reach an actual streaming model request"
@@ -5243,6 +5258,217 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
                 .prompt
                 .string_units(""),
             Some(prompt_units.clone())
+        );
+    });
+}
+
+#[test]
+fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
+    };
+
+    fn assert_skill_batch(messages: &[ConversationMessage], command_units: &[u16]) {
+        let user_rows = messages
+            .iter()
+            .filter_map(|message| match message {
+                ConversationMessage::User {
+                    content,
+                    is_meta,
+                    turn_companion,
+                    ..
+                } => content.iter().find_map(|block| match block {
+                    ContentBlock::TextJsUtf16 {
+                        utf16_code_units, ..
+                    } => Some((utf16_code_units.clone(), *is_meta, *turn_companion)),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(user_rows.len(), 2, "skill dispatch remains two user rows");
+        assert_eq!(
+            user_rows[0].0.as_slice(),
+            command_units,
+            "slash command stays the user row"
+        );
+        assert!(!user_rows[0].1, "the command row is not synthetic metadata");
+        assert_eq!(user_rows[0].2, None, "the command row is not a companion");
+        let expected_body = "MOBILE SKILL BODY".encode_utf16().collect::<Vec<_>>();
+        assert!(
+            user_rows[1]
+                .0
+                .windows(expected_body.len())
+                .any(|window| window == expected_body.as_slice()),
+            "expanded skill body remains a separate source row"
+        );
+        assert!(user_rows[1].1, "expanded body is meta");
+        assert_eq!(
+            user_rows[1].2,
+            Some(Some(true)),
+            "expanded body carries Native turn-companion history metadata"
+        );
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        tmp.path(),
+        "mobile-review",
+        "Mobile review fixture",
+        "MOBILE SKILL BODY",
+    );
+    let command_units = "/mobile-review "
+        .encode_utf16()
+        .chain([0xd800])
+        .collect::<Vec<_>>();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let first_listener = Arc::new(FakeListener::default());
+    let first = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        first_listener,
+        Arc::new(RecordingPermissionSink::default()),
+        Some(pending.clone()),
+    )
+    .expect("build mobile host with a pending stream");
+
+    let first_for_work = first.clone();
+    let first_command_units = command_units.clone();
+    let session_id = first.runtime().block_on(async move {
+        let first = first_for_work;
+        let session_id = first
+            .inner()
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        first
+            .inner()
+            .session_writer
+            .append_mobile_empty_session(&session_id, "skill cold replay")
+            .await
+            .expect("anchor the session before restart");
+        first
+            .inner()
+            .session_writer
+            .append_session_mode(first.inner().session_mode.as_str())
+            .await
+            .expect("persist session mode");
+
+        first
+            .submit(ClientCommand::RunSlashCommand {
+                raw: ClientTextDto::from_code_units(first_command_units.clone()),
+                turn_id: Some(247),
+            })
+            .await
+            .expect("dispatch mobile skill as a turn batch");
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .expect("skill batch reaches the streaming client")
+            .expect("stream entry signal");
+
+        let first_calls = pending.captured_calls();
+        assert_eq!(first_calls.len(), 1);
+        assert_skill_batch(&first_calls[0].messages, &first_command_units);
+        let transcript_path =
+            session::jsonl::session_path(&first.lingxi_home, &first.session_cwd, &session_id);
+        let transcript =
+            std::fs::read_to_string(transcript_path).expect("read durable skill transcript rows");
+        let command_row = transcript
+            .find(r#"/mobile-review \ud800"#)
+            .expect("exact command source reached JSONL");
+        let body_row = transcript
+            .find("MOBILE SKILL BODY")
+            .expect("expanded body reached JSONL as its own row");
+        assert!(command_row < body_row, "batch source order reaches JSONL");
+        assert!(transcript[body_row..].contains("\"turnCompanion\":true"));
+
+        let checkpoint = first
+            .durable_turns
+            .load(&session_id, 247)
+            .expect("load skill turn checkpoint");
+        let source = checkpoint
+            .skill_prompt
+            .as_ref()
+            .expect("checkpoint retains source inputs for the complete batch");
+        assert_eq!(source.command.string_units(""), Some(first_command_units));
+        assert!(source_string_contains(&source.body, "MOBILE SKILL BODY"));
+        assert!(source.hook_messages.is_empty());
+
+        first
+            .durable_turns
+            .transition(
+                &session_id,
+                247,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("simulated_process_restart".into()),
+            )
+            .expect("mark the still-pending skill batch recoverable");
+        session_id
+    });
+    drop(first);
+
+    let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+        message_start("mobile-skill-replay", "test"),
+        content_block_start_text(0),
+        text_delta(0, "resumed"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]]));
+    let resumed = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(resumed_stream.clone()),
+    )
+    .expect("rebuild mobile host after restart");
+
+    resumed.runtime().block_on(async {
+        resumed
+            .submit(ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            })
+            .await
+            .expect("restore the session containing the skill turn");
+        resumed
+            .submit(ClientCommand::ResumeTurn { turn_id: 247 })
+            .await
+            .expect("resume the whole stored skill batch");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !resumed_stream.captured_calls().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cold resume reaches the model request");
+
+        let calls = resumed_stream.captured_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert_skill_batch(&calls[0].messages, &command_units);
+        let checkpoint = resumed
+            .durable_turns
+            .load(&session_id, 247)
+            .expect("read resumed skill checkpoint");
+        assert_eq!(
+            checkpoint
+                .skill_prompt
+                .as_ref()
+                .expect("skill envelope remains attached to the turn")
+                .command
+                .string_units(""),
+            Some(command_units.clone())
         );
     });
 }

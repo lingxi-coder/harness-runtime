@@ -42,6 +42,15 @@ fn credential_scope(entry: &RouteEntry, profile_name: &str) -> CredentialScope {
     }
 }
 
+fn plain_text_message_content_for_execution(execution: &crate::ExecutionContext) -> bool {
+    use lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind;
+
+    execution.classifier_system_blocks
+        || (execution.anthropic_request_kind == AnthropicRequestKind::SideQuery
+            && execution.query_source.as_deref() == Some("insights")
+            && execution.enable_prompt_caching == Some(false))
+}
+
 fn native_message_effort(
     value: &lingxi_llm_client::protocol::JsonPayload,
 ) -> Option<lingxi_llm_client::providers::anthropic::types::AnthropicMessageEffort> {
@@ -923,6 +932,12 @@ impl ModelRuntime {
             use lingxi_llm_client::providers::anthropic::system_prompt::{
                 project_system_prompt, PromptCacheSubscriberState,
             };
+            let caching_enabled = request.execution.enable_prompt_caching.unwrap_or(true)
+                && lingxi_llm_client::providers::anthropic::system_prompt::prompt_caching_enabled(
+                    &request.input.model,
+                    effective_protocol,
+                );
+            let caching_requested = request.execution.enable_prompt_caching.unwrap_or(true);
 
             // The logical request may have been assembled before an account
             // change. Read the live Host generation immediately before the
@@ -931,7 +946,7 @@ impl ModelRuntime {
             // keeps the earlier epoch so late responses cannot be attributed
             // to the new account using credential material captured mid-swap.
             let account_epoch_before = (context.current_account_epoch)();
-            let subscriber = if context.native_bare_mode {
+            let subscriber = if !caching_requested || context.native_bare_mode {
                 PromptCacheSubscriberState::NotSubscriber
             } else if context.native_unix_socket {
                 // Native resolves this path directly from the OAuth token env;
@@ -1007,8 +1022,15 @@ impl ModelRuntime {
                         .filter_map(|item| item.cache_breakpoint),
                 );
             } else {
+                let include_native_identity =
+                    request.execution.anthropic_request_kind
+                        == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+                    || (request.execution.anthropic_request_kind
+                        == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery
+                        && request.execution.include_native_system_identity_for_side_query
+                        && request.execution.query_source.as_deref() == Some("insights"));
                 let prefixed_system = context.native_system_prefix.as_ref().map(|(prefix, attribution)| {
-                    if request.execution.anthropic_request_kind == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main {
+                    if include_native_identity {
                         lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_system_prefix(context.system.as_ref(), prefix, attribution, &entry.profile)
                     } else {
                         lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_attribution(context.system.as_ref(), prefix, attribution, &entry.profile)
@@ -1024,18 +1046,15 @@ impl ModelRuntime {
                     );
                     request_for_encoding.input.system =
                         projection.iter().map(|item| item.block.clone()).collect();
-                    request_for_encoding.input.prompt_cache.breakpoints.extend(
-                        projection
-                            .into_iter()
-                            .filter_map(|item| item.cache_breakpoint),
-                    );
+                    if caching_enabled {
+                        request_for_encoding.input.prompt_cache.breakpoints.extend(
+                            projection
+                                .into_iter()
+                                .filter_map(|item| item.cache_breakpoint),
+                        );
+                    }
                 }
             }
-            let caching_enabled =
-                lingxi_llm_client::providers::anthropic::system_prompt::prompt_caching_enabled(
-                    &request.input.model,
-                    effective_protocol,
-                );
             if request.execution.query_source.as_deref() == Some("prompt_suggestion") {
                 use lingxi_llm_client::providers::anthropic::system_prompt::ForkMessageCachePolicy;
                 let fork_point = request.execution.fork_point_message_id.and_then(|id| {
@@ -1235,6 +1254,9 @@ impl ModelRuntime {
                 .native_anthropic_request_context
                 .clone(),
             classifier_system_blocks: request.execution.classifier_system_blocks,
+            plain_text_message_content: plain_text_message_content_for_execution(
+                &request.execution,
+            ),
             stream_fallback: request.execution.stream_fallback,
             extra_body,
             effort_policy,
@@ -1864,6 +1886,9 @@ pub struct PreparedLlmCall {
     pub(crate) effort_policy:
         Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicEffortPolicy>,
     pub(crate) classifier_system_blocks: bool,
+    /// Preserve source plain-string content only for the explicitly uncached
+    /// Native Insights side query, while retaining classifier behavior.
+    pub(crate) plain_text_message_content: bool,
     pub(crate) anthropic_request_kind:
         lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
     pub(crate) native_anthropic_request_context:
@@ -1876,6 +1901,62 @@ pub struct PreparedLlmCall {
     registered_attempt: bool,
     pub route: Route,
     pub provider_request: ProviderRequest,
+}
+
+#[cfg(test)]
+mod plain_text_message_content_tests {
+    use super::plain_text_message_content_for_execution;
+    use crate::ExecutionContext;
+    use lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind;
+
+    fn execution(
+        request_kind: AnthropicRequestKind,
+        query_source: Option<&str>,
+        enable_prompt_caching: Option<bool>,
+        classifier_system_blocks: bool,
+    ) -> ExecutionContext {
+        ExecutionContext {
+            anthropic_request_kind: request_kind,
+            query_source: query_source.map(str::to_owned),
+            enable_prompt_caching,
+            classifier_system_blocks,
+            ..ExecutionContext::default()
+        }
+    }
+
+    #[test]
+    fn plain_string_projection_is_scoped_to_uncached_insights_side_queries() {
+        assert!(plain_text_message_content_for_execution(&execution(
+            AnthropicRequestKind::SideQuery,
+            Some("insights"),
+            Some(false),
+            false,
+        )));
+        assert!(!plain_text_message_content_for_execution(&execution(
+            AnthropicRequestKind::SideQuery,
+            Some("prompt_suggestion"),
+            Some(false),
+            false,
+        )));
+        assert!(!plain_text_message_content_for_execution(&execution(
+            AnthropicRequestKind::SideQuery,
+            Some("insights"),
+            None,
+            false,
+        )));
+        assert!(!plain_text_message_content_for_execution(&execution(
+            AnthropicRequestKind::Main,
+            Some("insights"),
+            Some(false),
+            false,
+        )));
+        assert!(plain_text_message_content_for_execution(&execution(
+            AnthropicRequestKind::Main,
+            None,
+            None,
+            true,
+        )));
+    }
 }
 
 #[derive(Debug, Clone)]

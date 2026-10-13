@@ -3,6 +3,7 @@
 //! The runner owns protocol, operation and transcript state. Its embedding
 //! host owns environment overlays, account metadata and background-job identity.
 
+use lingxi_core::host::OrchestratorHandle;
 pub use llm_runtime::auth::anthropic::environment::OAuthDescriptorCredential;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -156,6 +157,8 @@ pub(crate) async fn configure_native_command_catalog(
         // Native rate-limit-status helper is also a source-bound null, so it
         // cannot enable this command independently.
         .unwrap_or(false);
+    let workspace_available =
+        runtime.session_cwd.cwd().is_dir() && runtime.orchestrator.workspace_trusted().await;
     let context = command_api::NativeHeadlessCatalogContext {
         entrypoint: user_agent
             .and_then(|snapshot| snapshot.entrypoint.clone())
@@ -174,9 +177,10 @@ pub(crate) async fn configure_native_command_catalog(
                 .is_some_and(|value| !value.is_empty()),
         ),
         selected_model: Some(selected_model.into()),
-        // This Headless host has no NativeVerdict producer. Native's absent
-        // policy verdict is false for the `insights` command gate.
-        insights_policy_gate: Some(false),
+        workspace_available: Some(workspace_available),
+        // Bridge hosts supply the Product's local allowInsights setting; the
+        // local CLI fallback is sourced from its existing workspace-trust rule.
+        insights_policy_gate: runtime.native_insights_policy_gate,
         usage_credits_enabled: Some(usage_credits_enabled),
         // The Headless host has no first-party advisor eligibility or enabled
         // Statsig fact producer. Native's absent `gv()` prerequisites and

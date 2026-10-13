@@ -20,7 +20,7 @@ icu_locale = "=2.3.1"
 workflow = { path = "../workflow", optional = true }
 cron = { path = "../cron", optional = true }
 permission = { path = "../permission", optional = true }
-telemetry = { path = "../telemetry", optional = true }
+telemetry = { path = "../telemetry" }
 cost = { path = "../cost", optional = true }
 indexmap = { version = "2", optional = true }
 regex = { version = "1", optional = true }
@@ -53,7 +53,6 @@ builtin-handlers = [
     "dep:workflow",
     "dep:cron",
     "dep:permission",
-    "dep:telemetry",
     "dep:cost",
     "dep:indexmap",
     "dep:regex",

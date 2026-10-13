@@ -5643,7 +5643,8 @@ mod tests {
         let plugins_dir = tmp.path();
         let enabled_path = plugins_dir.join("cache/mkt/enabled/1.0.0");
         let disabled_path = plugins_dir.join("cache/mkt/disabled/1.0.0");
-        for path in [&enabled_path, &disabled_path] {
+        let array_path = plugins_dir.join("cache/mkt/array-enabled/1.0.0");
+        for path in [&enabled_path, &disabled_path, &array_path] {
             fs::create_dir_all(path.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
         }
         fs::write(
@@ -5661,6 +5662,13 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            array_path
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"array-enabled","defaultEnabled":false}"#,
+        )
+        .unwrap();
+        fs::write(
             crate::installed::path(plugins_dir),
             serde_json::to_vec(&serde_json::json!({
                 "version": 2,
@@ -5673,6 +5681,11 @@ mod tests {
                     "disabled@mkt": [{
                         "scope": "user",
                         "installPath": disabled_path,
+                        "version": "1.0.0"
+                    }],
+                    "array-enabled@mkt": [{
+                        "scope": "user",
+                        "installPath": array_path,
                         "version": "1.0.0"
                     }]
                 }
@@ -5693,6 +5706,8 @@ mod tests {
         let overrides = BTreeMap::from([
             ("enabled@mkt".to_string(), false),
             ("disabled@mkt".to_string(), true),
+            // Arrays are projected to true before this bool-map API is called.
+            ("array-enabled@mkt".to_string(), true),
         ]);
         let explicit = discover_effective_plugins(plugins_dir, &overrides).await;
         assert_eq!(
@@ -5700,7 +5715,7 @@ mod tests {
                 .iter()
                 .map(|(_, manifest, _)| manifest.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["disabled"]
+            vec!["array-enabled", "disabled"]
         );
     }
 

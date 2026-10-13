@@ -1,0 +1,17 @@
+// Extracted source closure for 2.1.295; source module src_188299680.js sha256 4666a180faee6eec8795f33f5333c6d538ea484f2d979cf68ac854eb342e1067
+import { QRs, XRs, Avo, KRs, _Ar, YRs, KOt, dtn, Vjn, qjn, JRs } from "./src_187665336.mjs";
+import { accessSync as p, constants as E, openSync as y, readSync as w, closeSync as k } from "fs";
+import { execFile as S } from "child_process";
+class f{promise=null;start(){if(this.promise)return;this.promise=Wjn()}reset(){this.promise=null}}
+var g=new f;
+function _(t){if(!t)return{status:"ok",exitCode:0,errno:null,signal:null};let n=t,e=typeof n.signal==="string"&&n.signal?n.signal:null;if(typeof n.code==="string")return{status:"spawn_error",exitCode:null,errno:n.code,signal:null};if(n.killed===!0)return{status:"timeout",exitCode:null,errno:null,signal:e};if(e)return{status:"killed",exitCode:null,errno:null,signal:e};return{status:"exited",exitCode:typeof n.code==="number"?n.code:null,errno:null,signal:null}}
+function d(t,n,e){let u=Date.now();return new Promise((o)=>{try{S(t,n,{encoding:"utf-8",timeout:XRs,windowsHide:!0,...e!==void 0&&{maxBuffer:e}},(s,r)=>{o({stdout:r??"",..._(s),durationMs:Date.now()-u})})}catch(s){let r=s.code;o({stdout:"",status:"spawn_error",exitCode:null,errno:typeof r==="string"?r:null,signal:null,durationMs:Date.now()-u})}})}
+function m(t){return{status:t.status,exitCode:t.exitCode,errno:t.errno,signal:t.signal,durationMs:t.durationMs}}
+function R(t){return t.status==="ok"||t.status==="exited"&&t.exitCode!==null}
+function x(t){return t.status==="spawn_error"&&t.errno==="ERR_CHILD_PROCESS_STDIO_MAXBUFFER"}
+function O(t){let n;try{return n=y(t,"r"),w(n,Buffer.alloc(1),0,1,0),null}catch(e){return{code:e&&typeof e==="object"&&"code"in e?e.code:void 0,message:e instanceof Error?e.message:String(e)}}finally{if(n!==void 0)try{k(n)}catch{}}}
+function Wjn(){return(async()=>{{let t=QRs(),e=(await Promise.all(t.map(async({path:o,...s})=>{try{p(o,E.R_OK)}catch(l){let a=l&&typeof l==="object"&&"code"in l?l.code:void 0;if(a==="ENOENT"||a==="ENOTDIR")return null;return{stdout:null,unreadReason:l instanceof Error?l.message:String(l),...typeof a==="string"&&{unreadErrno:a},...s}}let r=await d(Avo,[...KRs,o],_Ar);if(!R(r))return{stdout:null,unreadReason:"plutil did not finish converting it",...s};if(r.status==="ok")return{stdout:r.stdout,...s};let c=await d(Avo,[...YRs,o]);if(!R(c))return{stdout:null,unreadReason:"plutil did not finish checking it",...s};if(c.status==="ok")return{stdout:null,unreadReason:"it holds a value plutil cannot convert to JSON (a date or data value)",...s};let i=O(o);if(i!==null){if(i.code==="ENOENT"||i.code==="ENOTDIR")return null;return{stdout:null,unreadReason:i.message,...typeof i.code==="string"&&{unreadErrno:i.code},...s}}return{stdout:"",...s}}))).filter((o)=>o!==null),u=e.findIndex((o)=>o.stdout!==null);return{plistStdouts:u===-1?e:e.slice(0,u+1),hklmStdout:null,hkcuStdout:null,outcomes:{hklm:null,hkcu:null}}}if(KOt())return h(JRs);return{plistStdouts:null,hklmStdout:null,hkcuStdout:null,outcomes:{hklm:null,hkcu:null}}})()}
+async function h(t){let n=(o)=>d(t,["query",o,"/v",dtn],_Ar),[e,u]=await Promise.all([n(Vjn),n(qjn)]);return{plistStdouts:null,hklmStdout:e.status==="ok"?e.stdout:null,...x(e)&&{hklmUnreadReason:`the value exceeds ${_Ar/1048576} MiB`},hkcuStdout:u.status==="ok"?u.stdout:null,outcomes:{hklm:m(e),hkcu:m(u)}}}
+function wvo(){return g.promise}
+export { wvo as wvo };
+export { Wjn as Wjn };

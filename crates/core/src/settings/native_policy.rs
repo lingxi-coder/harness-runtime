@@ -629,7 +629,7 @@ pub fn resolve_native_policy(inputs: NativePolicyInputs) -> NativePolicySelectio
     let parent_settings = inputs.parent.as_ref().and_then(|document| {
         document
             .controls()
-            .and_then(|_| document.normalized_projection.as_ref())
+            .and(document.normalized_projection.as_ref())
     });
     let held_empty_source = if selected_admin.is_none() {
         inputs
@@ -677,7 +677,7 @@ pub fn resolve_native_policy(inputs: NativePolicyInputs) -> NativePolicySelectio
             let host = inputs.host.as_ref().and_then(|document| {
                 document
                     .controls()
-                    .and_then(|_| document.normalized_projection.as_ref())
+                    .and(document.normalized_projection.as_ref())
             });
             match host.filter(|projection| !is_empty_object(projection)) {
                 Some(projection) => (Some(projection.clone()), true),
@@ -1487,8 +1487,8 @@ fn parse_controls(projection: &Utf16JsonProjection) -> Result<NativePolicyContro
     })
 }
 
-fn enum_field<'a>(
-    projection: &'a Utf16JsonProjection,
+fn enum_field(
+    projection: &Utf16JsonProjection,
     key: &str,
     allowed: &[&'static str],
 ) -> Result<Option<&'static str>, String> {
@@ -1827,6 +1827,54 @@ mod tests {
     }
 
     #[test]
+    fn classifier_false_and_permission_locks_are_admitted_as_complete_managed_policy() {
+        let raw = r#"{"model":"kept","autoMode":{"classifyAllShell":false},"permissions":{"disableBypassPermissionsMode":"disable","disableAutoMode":"disable"}}"#;
+        let document = managed_file(raw, "/etc/claude-code/managed-settings.json");
+        assert!(document.unresolved_fields().is_empty());
+        assert_eq!(
+            document.raw_projection().unwrap().to_json_string().unwrap(),
+            raw
+        );
+        let normalized = document.normalized_projection().unwrap();
+        assert_eq!(
+            normalized
+                .at_pointer("/autoMode/classifyAllShell")
+                .and_then(JsonValueView::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            normalized.string_at("/permissions/disableBypassPermissionsMode"),
+            Some("disable")
+        );
+        assert_eq!(
+            normalized.string_at("/permissions/disableAutoMode"),
+            Some("disable")
+        );
+
+        let selection = resolve_native_policy(NativePolicyInputs {
+            managed_file_documents: vec![document],
+            ..NativePolicyInputs::default()
+        });
+        assert!(selection.complete);
+        let effective = projection(&selection);
+        assert_eq!(effective.string_at("/model"), Some("kept"));
+        assert_eq!(
+            effective
+                .at_pointer("/autoMode/classifyAllShell")
+                .and_then(JsonValueView::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            effective.string_at("/permissions/disableBypassPermissionsMode"),
+            Some("disable")
+        );
+        assert_eq!(
+            effective.string_at("/permissions/disableAutoMode"),
+            Some("disable")
+        );
+    }
+
+    #[test]
     fn first_wins_prefers_plist_on_equal_native_source_rank() {
         let selection = resolve_native_policy(NativePolicyInputs {
             plist_candidates: vec![plist(
@@ -2069,8 +2117,41 @@ mod tests {
     }
 
     #[test]
+    fn invalid_enabled_plugins_field_is_ignored_and_keeps_siblings() {
+        let raw = Utf16JsonProjection::parse(r#"{"enabledPlugins":"invalid","model":"kept"}"#)
+            .expect("fixture JSON");
+        let document = NativePolicyDocument::parse_managed_file(
+            Some(raw.clone()),
+            NativePolicyManagedFileFacts {
+                path: PathBuf::from("/etc/claude-code/managed-settings.json"),
+                load_state: NativePolicyLoadState::Loaded,
+                document_has_policy_content: Some(true),
+            },
+        );
+        let selection = resolve_native_policy(NativePolicyInputs {
+            managed_file_documents: vec![document],
+            ..NativePolicyInputs::default()
+        });
+        assert!(selection.complete);
+        assert_eq!(selection.documents.len(), 1);
+        assert_eq!(selection.documents[0].raw_projection(), Some(&raw));
+        assert_eq!(
+            selection.selected_admin,
+            Some(NativePolicySource::ManagedFile)
+        );
+        assert!(selection.documents[0].unresolved_fields().is_empty());
+        let effective = &selection
+            .effective
+            .as_ref()
+            .expect("Native uses the parsed policy projection")
+            .projection;
+        assert!(effective.get_property("enabledPlugins").is_none());
+        assert_eq!(effective.string_at("/model"), Some("kept"));
+    }
+
+    #[test]
     fn unresolved_native_field_stays_visible_and_marks_result_incomplete() {
-        let raw = Utf16JsonProjection::parse(r#"{"enabledPlugins":"invalid","model":"bad"}"#)
+        let raw = Utf16JsonProjection::parse(r#"{"deniedModels":["legacy"],"model":"bad"}"#)
             .expect("fixture JSON");
         let unresolved = NativePolicyDocument::parse_managed_file(
             Some(raw.clone()),
@@ -2094,14 +2175,15 @@ mod tests {
         assert_eq!(selection.documents[0].unresolved_fields().len(), 1);
         assert_eq!(
             selection.documents[0].unresolved_fields()[0].as_str(),
-            "enabledPlugins"
+            "deniedModels"
         );
         let effective = &selection
             .effective
             .as_ref()
             .expect("Native uses the parsed policy projection")
             .projection;
-        assert_eq!(effective.string_at("/enabledPlugins"), Some("invalid"));
+        assert_eq!(effective.array_len("/deniedModels"), Some(1));
+        assert_eq!(effective.string_at("/deniedModels/0"), Some("legacy"));
         assert_eq!(effective.string_at("/model"), Some("bad"));
     }
 }

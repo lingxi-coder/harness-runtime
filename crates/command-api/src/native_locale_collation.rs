@@ -40,15 +40,15 @@ fn native_default_locale() -> String {
         if let Some(locale) = sys_locale::get_locale() {
             return normalize_locale_identifier(&locale);
         }
-        return "en-US".to_owned();
+        "en-US".to_owned()
     }
 
     #[cfg(all(unix, not(any(target_vendor = "apple", target_os = "android"))))]
     {
-        return lingxi_core::native_locale::current_lc_ctype()
+        lingxi_core::native_locale::current_lc_ctype()
             .as_deref()
             .map(normalize_locale_identifier)
-            .unwrap_or_else(|| "en-US".to_owned());
+            .unwrap_or_else(|| "en-US".to_owned())
     }
 
     #[cfg(not(any(unix, target_os = "windows", target_os = "android")))]

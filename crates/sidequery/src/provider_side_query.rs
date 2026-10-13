@@ -440,6 +440,36 @@ fn decode_fork_response(
     }
 }
 
+fn apply_native_side_query_prompt_context(
+    request: &mut LlmRequest,
+    context: Option<&crate::side_query::NativeSideQueryPromptContext>,
+    query_source: &str,
+) -> Result<(), LlmError> {
+    // This is an explicit per-host Insights opt-in. Other side queries keep
+    // their existing attribution-only behavior even if an API service has a
+    // Native prefix configured for main-loop requests.
+    if query_source != "insights" {
+        return Ok(());
+    }
+    let Some(context) = context else {
+        return Ok(());
+    };
+    let prompt_cache =
+        request
+            .execution
+            .prompt_cache
+            .as_mut()
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "Insights Native prompt context requires a Session prompt-cache context"
+                    .into(),
+            })?;
+    prompt_cache.native_system_prefix = Some((context.prefix.clone(), context.attribution.clone()));
+    request
+        .execution
+        .include_native_system_identity_for_side_query = context.include_host_identity;
+    Ok(())
+}
+
 #[async_trait]
 impl SideQueryClient for ProviderSideQueryClient {
     fn estimate_request(
@@ -453,7 +483,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             ) => {
                 let query_source = request.query_source.as_str();
                 let system_prompt = request.system_prompt.clone();
-                let canonical = service.build_side_query_request_with_thinking(
+                let mut canonical = service.build_side_query_request_with_thinking(
                     &request.model,
                     request.profile.as_deref(),
                     system_prompt.as_ref(),
@@ -470,6 +500,12 @@ impl SideQueryClient for ProviderSideQueryClient {
                     Some(query_source),
                     request.typed_attachment_ids,
                     request.task_deliveries,
+                )?;
+                canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
+                apply_native_side_query_prompt_context(
+                    &mut canonical,
+                    request.native_prompt_context.as_ref(),
+                    query_source,
                 )?;
                 estimate_canonical_request(canonical)
             }
@@ -546,6 +582,7 @@ impl SideQueryClient for ProviderSideQueryClient {
         if let ProviderSideQueryBackend::Session(service) = &self.backend {
             let wants_structured = request.output_format.is_some();
             let query_source = request.query_source.as_str();
+            let native_prompt_context = request.native_prompt_context.clone();
             let system_prompt = request.system_prompt.clone();
             let mut canonical = service.build_side_query_request_with_thinking(
                 &request.model,
@@ -571,8 +608,10 @@ impl SideQueryClient for ProviderSideQueryClient {
                 request.typed_attachment_ids,
                 request.task_deliveries,
             )?;
+            canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
             canonical.execution.model_attempt = request.model_attempt;
             canonical.execution.fork_point_message_id = options.fork_point_message_id;
+            let explicit_system_blocks = options.system_blocks.is_some();
             if let Some(system_blocks) = options.system_blocks {
                 // The utility caller supplied its complete system wire shape.
                 // Do not reclassify/cache-join it as a main conversation prompt.
@@ -597,6 +636,13 @@ impl SideQueryClient for ProviderSideQueryClient {
                 } else {
                     canonical.execution.prompt_cache = None;
                 }
+            }
+            if !explicit_system_blocks {
+                apply_native_side_query_prompt_context(
+                    &mut canonical,
+                    native_prompt_context.as_ref(),
+                    query_source,
+                )?;
             }
             let resp = if prompt_suggestion {
                 // Native I -> runForkedAgent -> query uses the main streaming
@@ -742,6 +788,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                         Some(query_source.as_str()),
                     )
                     .map_err(map_structured_llm_error)?;
+                canonical.execution.enable_prompt_caching = Some(false);
                 canonical.execution.model_attempt = request.model_attempt;
                 let stream = service
                     .stream_request(canonical)
@@ -795,6 +842,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                         ..Default::default()
                     },
                 };
+                llm_req.execution.enable_prompt_caching = Some(false);
                 llm_req.input.max_tokens = Some(request.max_tokens);
                 llm_req.input.temperature = temperature;
                 llm_req.input.output_format =
@@ -1221,7 +1269,9 @@ mod tests {
 
     fn req(output_format: Option<serde_json::Value>) -> SideQueryRequest {
         SideQueryRequest {
+            enable_prompt_caching: false,
             model_attempt: None,
+            native_prompt_context: None,
             model: "claude-haiku-4-5".into(),
             profile: None,
             system_prompt: Some("system".into()),

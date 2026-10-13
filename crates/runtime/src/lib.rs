@@ -50,6 +50,15 @@ mod main_report_waker;
 mod instruction_identity;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod insights_corpus;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod insights;
+
+#[cfg(feature = "desktop")]
+mod insights_bun_worker;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
 mod model_resolution;
 
 #[cfg(feature = "collaboration")]

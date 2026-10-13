@@ -1,0 +1,705 @@
+{
+  "schema_version": 1,
+  "native_version": "2.1.295",
+  "native_binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "entries": [
+    {
+      "path": "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_186220896.mjs",
+      "source_file": "src_186220896.js",
+      "source_binary_offset": 186220896,
+      "source_bytes": 5225,
+      "source_sha256": "687cb3f6dffa3cd7e4d002249bb8537c255492cce767104e382e2d0b23def2ac",
+      "transform_sha256": "6bf817515a23acf5e360d8d5de05079f8cdf55b59827ef5442897d9595140341",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "lines": [
+            8
+          ]
+        }
+      ],
+      "kind": "immutable-native-source-artifact"
+    },
+    {
+      "path": "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_187673145.mjs",
+      "source_file": "src_187673145.js",
+      "source_binary_offset": 187673145,
+      "source_bytes": 434959,
+      "source_sha256": "6fbf3e921382e88e71bd834f2034ee24a15cada553c00e95181e44fa033d22aa",
+      "transform_sha256": "d9be539093a2b9f2ec1aac19e91c8068bd434607cdb556f8ae32d8c57acd7bc5",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "lines": [
+            73,
+            80,
+            81,
+            85,
+            97,
+            98,
+            236,
+            268,
+            388,
+            812,
+            821
+          ]
+        },
+        {
+          "rule": "G1",
+          "needle": "CLAUDE\\.md",
+          "lines": [
+            388
+          ]
+        },
+        {
+          "rule": "G7",
+          "needle": "CLAUDE_PLUGIN_",
+          "lines": [
+            194
+          ]
+        },
+        {
+          "rule": "G7",
+          "needle": "\\.claude-plugin",
+          "lines": [
+            268,
+            278,
+            279
+          ]
+        }
+      ],
+      "kind": "immutable-native-source-artifact"
+    },
+    {
+      "path": "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_188442564.mjs",
+      "source_file": "src_188442564.js",
+      "source_binary_offset": 188442564,
+      "source_bytes": 3120,
+      "source_sha256": "857d9b766d74a7f5bf26b64e812924eef31b07a6abf457e7ece16f6c4c48b7da",
+      "transform_sha256": "2928f311b2009ec333dbb60ea605b419e57cc93c12f77ee1dd15f1f2e25ad604",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "lines": [
+            9
+          ]
+        }
+      ],
+      "kind": "immutable-native-source-artifact"
+    },
+    {
+      "path": "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_188544988.mjs",
+      "source_file": "src_188544988.js",
+      "source_binary_offset": 188544988,
+      "source_bytes": 11086,
+      "source_sha256": "8e7897b9db5f62bcd06085bbcfb9860ae17df3597cc46a1d5059eab778c18224",
+      "transform_sha256": "bddb9776bde883ab5a44dd17cc3c11d0f5bd8f074e14578f1df90915371dfd03",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "lines": [
+            13
+          ]
+        }
+      ],
+      "kind": "immutable-native-source-artifact"
+    },
+    {
+      "path": "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_188693222.mjs",
+      "source_file": "src_188693222.js",
+      "source_binary_offset": 188693222,
+      "source_bytes": 739749,
+      "source_sha256": "681f216602a81e1bd7b8891f3a679dcf6ff837a3539b737183165565369917dd",
+      "transform_sha256": "d98da261ec71af4fa89c380eeed98f0f23730f8dfd4765374c8548a9df981004",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "lines": [
+            335,
+            337
+          ]
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.claude\\.json",
+          "lines": [
+            390,
+            397
+          ]
+        }
+      ],
+      "kind": "immutable-native-source-artifact"
+    },
+    {
+      "path": "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_191305605.mjs",
+      "source_file": "src_191305605.js",
+      "source_binary_offset": 191305605,
+      "source_bytes": 21817,
+      "source_sha256": "6132fd0d55e1665730b8725888d03c889ad0544dda309f29c4f1442830e23dc8",
+      "transform_sha256": "96a3b849567f80d9941de5457db1be02018f1c6ff4875b5ade427b4b8ab92bd3",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "lines": [
+            13,
+            33
+          ]
+        }
+      ],
+      "kind": "immutable-native-source-artifact"
+    },
+    {
+      "path": "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_191362209.mjs",
+      "source_file": "src_191362209.js",
+      "source_binary_offset": 191362209,
+      "source_bytes": 943089,
+      "source_sha256": "2feb2c7861c6f63d9839c2d9113ca5c8a69ccf369561f18eec0988384ea61943",
+      "transform_sha256": "aa63c59e94e2f9a18c184a99aa985d9573c4887257cdd2237ab30531a8264955",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "lines": [
+            580,
+            584,
+            587,
+            716,
+            722
+          ]
+        },
+        {
+          "rule": "G1",
+          "needle": "CLAUDE\\.md",
+          "lines": [
+            722
+          ]
+        }
+      ],
+      "kind": "immutable-native-source-artifact"
+    }
+  ],
+  "reviewed_static_brand_projections": [
+    {
+      "kind": "reviewed-static-brand-projection",
+      "path": "crates/runtime/src/insights_assets/insights_html_worker.mjs",
+      "transform_sha256": "83ef1693d923be6ffd2eac7a26f919cecc953a608f0a95a6960cdef18aa0fd4b",
+      "source_literal_projections": [
+        {
+          "source_range": {
+            "source_file": "src_207151635.js",
+            "source_chunk_offset": 207151635,
+            "source_chunk_bytes": 101275,
+            "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+            "source_binary_offset": 207198648,
+            "source_bytes": 46214,
+            "source_sha256": "959d3b85a832a01f4e32699bad297d2efd72e16709332e11038f5b8112db2350"
+          },
+          "literal_map": [
+            {
+              "source_literal": "Claude Code's always-safe set",
+              "runtime_literal": "LingXi's always-safe set",
+              "count": 1
+            },
+            {
+              "source_literal": "How You Use Claude Code",
+              "runtime_literal": "How You Use LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Suggested CLAUDE.md Additions",
+              "runtime_literal": "Suggested LINGXI.md Additions",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "CLAUDE.md",
+              "runtime_literal": "LINGXI.md",
+              "count": 1
+            },
+            {
+              "source_literal": "Add to CLAUDE.md",
+              "runtime_literal": "Add to LINGXI.md",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "New Ways to Use Claude Code",
+              "runtime_literal": "New Ways to Use LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Paste into Claude Code",
+              "runtime_literal": "Paste into LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Paste into Claude Code",
+              "runtime_literal": "Paste into LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code Insights",
+              "runtime_literal": "LingXi Insights",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code Insights",
+              "runtime_literal": "LingXi Insights",
+              "count": 1
+            },
+            {
+              "source_literal": "one Claude Code session",
+              "runtime_literal": "one LingXi session",
+              "count": 1
+            },
+            {
+              "source_literal": "multiple Claude Code sessions",
+              "runtime_literal": "multiple LingXi sessions",
+              "count": 1
+            },
+            {
+              "source_literal": "Multi-clauding is detected",
+              "runtime_literal": "Parallel usage is detected",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude's Capabilities",
+              "runtime_literal": "LingXi's Capabilities",
+              "count": 1
+            },
+            {
+              "source_literal": "Existing CC Features to Try",
+              "runtime_literal": "Existing LingXi Features to Try",
+              "count": 1
+            }
+          ],
+          "source_excerpt_utf8": "function fe(e){return Rs(e).replace(/\\*\\*(.+?)\\*\\*/g,\"<strong>$1</strong>\")}var Pt=[\"frustrated\",\"dissatisfied\",\"likely_satisfied\",\"satisfied\",\"happy\",\"unsure\"],jt=[\"not_achieved\",\"partially_achieved\",\"mostly_achieved\",\"fully_achieved\",\"unclear_from_transcript\"];function ee(e,s,n=6,a){let l;if(a)l=a.filter((g)=>(g in e)&&(e[g]??0)>0).map((g)=>[g,e[g]??0]);else l=Object.entries(e).sort((g,y)=>y[1]-g[1]).slice(0,n);if(l.length===0)return'<p class=\"empty\">No data</p>';let m=Math.max(...l.map((g)=>g[1]));return l.map(([g,y])=>{let w=y/m*100,r=Qe[g]||g.replaceAll(\"_\",\" \").replace(/\\b\\w/g,(f)=>f.toUpperCase());return`<div class=\"bar-row\">\n        <div class=\"bar-label\">${Rs(r)}</div>\n        <div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:${w}%;background:${s}\"></div></div>\n        <div class=\"bar-value\">${y}</div>\n      </div>`}).join(`\n`)}function Dt(e){if(e.length===0)return'<p class=\"empty\">No response time data</p>';let s={\"2-10s\":0,\"10-30s\":0,\"30s-1m\":0,\"1-2m\":0,\"2-5m\":0,\"5-15m\":0,\">15m\":0};for(let a of e)if(a<10)s[\"2-10s\"]=(s[\"2-10s\"]??0)+1;else if(a<30)s[\"10-30s\"]=(s[\"10-30s\"]??0)+1;else if(a<60)s[\"30s-1m\"]=(s[\"30s-1m\"]??0)+1;else if(a<120)s[\"1-2m\"]=(s[\"1-2m\"]??0)+1;else if(a<300)s[\"2-5m\"]=(s[\"2-5m\"]??0)+1;else if(a<900)s[\"5-15m\"]=(s[\"5-15m\"]??0)+1;else s[\">15m\"]=(s[\">15m\"]??0)+1;let n=Math.max(...Object.values(s));if(n===0)return'<p class=\"empty\">No response time data</p>';return Object.entries(s).map(([a,l])=>{let m=l/n*100;return`<div class=\"bar-row\">\n        <div class=\"bar-label\">${a}</div>\n        <div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:${m}%;background:#6366f1\"></div></div>\n        <div class=\"bar-value\">${l}</div>\n      </div>`}).join(`\n`)}function Nt(e){if(e.length===0)return'<p class=\"empty\">No time data</p>';let s=[{label:\"Morning (6-12)\",range:[6,7,8,9,10,11]},{label:\"Afternoon (12-18)\",range:[12,13,14,15,16,17]},{label:\"Evening (18-24)\",range:[18,19,20,21,22,23]},{label:\"Night (0-6)\",range:[0,1,2,3,4,5]}],n={};for(let g of e)n[g]=(n[g]||0)+1;let a=s.map((g)=>({label:g.label,count:g.range.reduce((y,w)=>y+(n[w]||0),0)})),l=Math.max(...a.map((g)=>g.count))||1;return`<div id=\"hour-histogram\">${a.map((g)=>`\n      <div class=\"bar-row\">\n        <div class=\"bar-label\">${g.label}</div>\n        <div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:${g.count/l*100}%;background:#8b5cf6\"></div></div>\n        <div class=\"bar-value\">${g.count}</div>\n      </div>`).join(`\n`)}</div>`}function Lt(e){let s={};for(let n of e)s[n]=(s[n]||0)+1;return _(s)}function Ft(e,s,n){let a=(b)=>{if(!b)return\"\";return b.split(`\n\n`).map((A)=>{let E=Rs(A);return E=E.replace(/\\*\\*(.+?)\\*\\*/g,\"<strong>$1</strong>\"),E=E.replace(/^- /gm,\"\\u2022 \"),E=E.replaceAll(`\n`,\"<br>\"),`<p>${E}</p>`}).join(`\n`)},l=s.at_a_glance,m=l?`\n    <div class=\"at-a-glance\">\n      <div class=\"glance-title\">At a Glance</div>\n      <div class=\"glance-sections\">\n        ${l.whats_working?`<div class=\"glance-section\"><strong>What's working:</strong> ${fe(l.whats_working)} <a href=\"#section-wins\" class=\"see-more\">Impressive Things You Did \\u2192</a></div>`:\"\"}\n        ${l.whats_hindering?`<div class=\"glance-section\"><strong>What's hindering you:</strong> ${fe(l.whats_hindering)} <a href=\"#section-friction\" class=\"see-more\">Where Things Go Wrong \\u2192</a></div>`:\"\"}\n        ${l.quick_wins?`<div class=\"glance-section\"><strong>Quick wins to try:</strong> ${fe(l.quick_wins)} <a href=\"#section-features\" class=\"see-more\">Features to Try \\u2192</a></div>`:\"\"}\n        ${l.ambitious_workflows?`<div class=\"glance-section\"><strong>Ambitious workflows:</strong> ${fe(l.ambitious_workflows)} <a href=\"#section-horizon\" class=\"see-more\">On the Horizon \\u2192</a></div>`:\"\"}\n      </div>\n    </div>\n    `:\"\",g=!n?\"\":n.kind===\"switch_to_auto\"?`\n    <div class=\"auto-mode-card\" id=\"section-auto-mode\">\n      <div class=\"auto-mode-title\">Auto mode could have handled up to ~${We(n.estimatedPrompts).toLocaleString()} permission prompts for you</div>\n      <div class=\"auto-mode-desc\">Across ${n.nonAutoSessions.toLocaleString()} recent sessions, roughly that many tool calls fell outside Claude Code's always-safe set \\u2014 each one a potential \"can I run this?\" interruption. Auto mode approves routine actions automatically and only checks in on risky ones. Press <code>Shift+Tab</code> in any session until the mode indicator shows auto.</div>\n      ${n.destructiveCommands>0?`<div class=\"auto-mode-note\">It stays careful: ${n.destructiveCommands.toLocaleString()} of those commands looked potentially destructive (force-deletes, history rewrites, and the like) \\u2014 auto mode reviews actions like these instead of waving them through.</div>`:\"\"}\n      <div class=\"auto-mode-fineprint\">Estimated from your local session history; the actual number depends on your allowlist rules.</div>\n    </div>\n    `:`\n    <div class=\"auto-mode-card\" id=\"section-auto-mode\">\n      <div class=\"auto-mode-title\">Make auto mode smarter: run /auto-mode-setup</div>\n      <div class=\"auto-mode-desc\">You already use auto mode, but it doesn't know your environment yet. <code>/auto-mode-setup</code> spends a few minutes mapping your repos, trusted services, and routine commands, then writes the result to your settings \\u2014 auto mode's decisions get noticeably better. One approval at the end, and you can re-run it anytime.</div>\n    </div>\n    `,y=s.project_areas?.areas||[],w=y.length>0?`\n    <h2 id=\"section-work\">What You Work On</h2>\n    <div class=\"project-areas\">\n      ${y.map((b)=>`\n        <div class=\"project-area\">\n          <div class=\"area-header\">\n            <span class=\"area-name\">${Rs(b.name)}</span>\n            <span class=\"area-count\">~${b.session_count} sessions</span>\n          </div>\n          <div class=\"area-desc\">${Rs(b.description)}</div>\n        </div>\n      `).join(\"\")}\n    </div>\n    `:\"\",r=s.interaction_style,f=r?.narrative?`\n    <h2 id=\"section-usage\">How You Use Claude Code</h2>\n    <div class=\"narrative\">\n      ${a(r.narrative)}\n      ${r.key_pattern?`<div class=\"key-insight\"><strong>Key pattern:</strong> ${Rs(r.key_pattern)}</div>`:\"\"}\n    </div>\n    `:\"\",h=s.what_works,T=h?.impressive_workflows&&h.impressive_workflows.length>0?`\n    <h2 id=\"section-wins\">Impressive Things You Did</h2>\n    ${h.intro?`<p class=\"section-intro\">${Rs(h.intro)}</p>`:\"\"}\n    <div class=\"big-wins\">\n      ${h.impressive_workflows.map((b)=>`\n        <div class=\"big-win\">\n          <div class=\"big-win-title\">${Rs(b.title||\"\")}</div>\n          <div class=\"big-win-desc\">${Rs(b.description||\"\")}</div>\n        </div>\n      `).join(\"\")}\n    </div>\n    `:\"\",R=s.friction_analysis,I=R?.categories&&R.categories.length>0?`\n    <h2 id=\"section-friction\">Where Things Go Wrong</h2>\n    ${R.intro?`<p class=\"section-intro\">${Rs(R.intro)}</p>`:\"\"}\n    <div class=\"friction-categories\">\n      ${R.categories.map((b)=>`\n        <div class=\"friction-category\">\n          <div class=\"friction-title\">${Rs(b.category||\"\")}</div>\n          <div class=\"friction-desc\">${Rs(b.description||\"\")}</div>\n          ${b.examples?`<ul class=\"friction-examples\">${b.examples.map((A)=>`<li>${Rs(A)}</li>`).join(\"\")}</ul>`:\"\"}\n        </div>\n      `).join(\"\")}\n    </div>\n    `:\"\",O=s.suggestions,K=O?`\n    ${O.claude_md_additions&&O.claude_md_additions.length>0?`\n    <h2 id=\"section-features\">Existing CC Features to Try</h2>\n    <div class=\"claude-md-section\">\n      <h3>Suggested CLAUDE.md Additions</h3>\n      <p style=\"font-size: 12px; color: #64748b; margin-bottom: 12px;\">Just copy this into Claude Code to add it to your CLAUDE.md.</p>\n      <div class=\"claude-md-actions\">\n        <button class=\"copy-all-btn\" onclick=\"copyAllCheckedClaudeMd()\">Copy All Checked</button>\n      </div>\n      ${O.claude_md_additions.map((b,A)=>`\n        <div class=\"claude-md-item\">\n          <input type=\"checkbox\" id=\"cmd-${A}\" class=\"cmd-checkbox\" checked data-text=\"${Rs(b.prompt_scaffold||b.where||\"Add to CLAUDE.md\")}\\\\n\\\\n${Rs(b.addition)}\">\n          <label for=\"cmd-${A}\">\n            <code class=\"cmd-code\">${Rs(b.addition)}</code>\n            <button class=\"copy-btn\" onclick=\"copyCmdItem(${A})\">Copy</button>\n          </label>\n          <div class=\"cmd-why\">${Rs(b.why)}</div>\n        </div>\n      `).join(\"\")}\n    </div>\n    `:\"\"}\n    ${O.features_to_try&&O.features_to_try.length>0?`\n    <p style=\"font-size: 13px; color: #64748b; margin-bottom: 12px;\">Just copy this into Claude Code and it'll set it up for you.</p>\n    <div class=\"features-section\">\n      ${O.features_to_try.map((b)=>`\n        <div class=\"feature-card\">\n          <div class=\"feature-title\">${Rs(b.feature||\"\")}</div>\n          <div class=\"feature-oneliner\">${Rs(b.one_liner||\"\")}</div>\n          <div class=\"feature-why\"><strong>Why for you:</strong> ${Rs(b.why_for_you||\"\")}</div>\n          ${b.example_code?`\n          <div class=\"feature-examples\">\n            <div class=\"feature-example\">\n              <div class=\"example-code-row\">\n                <code class=\"example-code\">${Rs(b.example_code)}</code>\n                <button class=\"copy-btn\" onclick=\"copyText(this)\">Copy</button>\n              </div>\n            </div>\n          </div>\n          `:\"\"}\n        </div>\n      `).join(\"\")}\n    </div>\n    `:\"\"}\n    ${O.usage_patterns&&O.usage_patterns.length>0?`\n    <h2 id=\"section-patterns\">New Ways to Use Claude Code</h2>\n    <p style=\"font-size: 13px; color: #64748b; margin-bottom: 12px;\">Just copy this into Claude Code and it'll walk you through it.</p>\n    <div class=\"patterns-section\">\n      ${O.usage_patterns.map((b)=>`\n        <div class=\"pattern-card\">\n          <div class=\"pattern-title\">${Rs(b.title||\"\")}</div>\n          <div class=\"pattern-summary\">${Rs(b.suggestion||\"\")}</div>\n          ${b.detail?`<div class=\"pattern-detail\">${Rs(b.detail)}</div>`:\"\"}\n          ${b.copyable_prompt?`\n          <div class=\"copyable-prompt-section\">\n            <div class=\"prompt-label\">Paste into Claude Code:</div>\n            <div class=\"copyable-prompt-row\">\n              <code class=\"copyable-prompt\">${Rs(b.copyable_prompt)}</code>\n              <button class=\"copy-btn\" onclick=\"copyText(this)\">Copy</button>\n            </div>\n          </div>\n          `:\"\"}\n        </div>\n      `).join(\"\")}\n    </div>\n    `:\"\"}\n    `:\"\",z=s.on_the_horizon,W=z?.opportunities&&z.opportunities.length>0?`\n    <h2 id=\"section-horizon\">On the Horizon</h2>\n    ${z.intro?`<p class=\"section-intro\">${Rs(z.intro)}</p>`:\"\"}\n    <div class=\"horizon-section\">\n      ${z.opportunities.map((b)=>`\n        <div class=\"horizon-card\">\n          <div class=\"horizon-title\">${Rs(b.title||\"\")}</div>\n          <div class=\"horizon-possible\">${Rs(b.whats_possible||\"\")}</div>\n          ${b.how_to_try?`<div class=\"horizon-tip\"><strong>Getting started:</strong> ${Rs(b.how_to_try)}</div>`:\"\"}\n          ${b.copyable_prompt?`<div class=\"pattern-prompt\"><div class=\"prompt-label\">Paste into Claude Code:</div><code>${Rs(b.copyable_prompt)}</code><button class=\"copy-btn\" onclick=\"copyText(this)\">Copy</button></div>`:\"\"}\n        </div>\n      `).join(\"\")}\n    </div>\n    `:\"\",S=[],L=[],oe=S.length>0||L.length>0?`\n    <h2 id=\"section-feedback\" class=\"feedback-header\">Closing the Loop: Feedback for Other Teams</h2>\n    <p class=\"feedback-intro\">Suggestions for the CC product and model teams based on your usage patterns. Click to expand.</p>\n    ${S.length>0?`\n    <div class=\"collapsible-section\">\n      <div class=\"collapsible-header\" onclick=\"toggleCollapsible(this)\">\n        <span class=\"collapsible-arrow\">\\u25B6</span>\n        <h3>Product Improvements for CC Team</h3>\n      </div>\n      <div class=\"collapsible-content\">\n        <div class=\"suggestions-section\">\n          ${S.map((b)=>`\n            <div class=\"feedback-card team-card\">\n              <div class=\"feedback-title\">${Rs(b.title||\"\")}</div>\n              <div class=\"feedback-detail\">${Rs(b.detail||\"\")}</div>\n              ${b.evidence?`<div class=\"feedback-evidence\"><em>Evidence:</em> ${Rs(b.evidence)}</div>`:\"\"}\n            </div>\n          `).join(\"\")}\n        </div>\n      </div>\n    </div>\n    `:\"\"}\n    ${L.length>0?`\n    <div class=\"collapsible-section\">\n      <div class=\"collapsible-header\" onclick=\"toggleCollapsible(this)\">\n        <span class=\"collapsible-arrow\">\\u25B6</span>\n        <h3>Model Behavior Improvements</h3>\n      </div>\n      <div class=\"collapsible-content\">\n        <div class=\"suggestions-section\">\n          ${L.map((b)=>`\n            <div class=\"feedback-card model-card\">\n              <div class=\"feedback-title\">${Rs(b.title||\"\")}</div>\n              <div class=\"feedback-detail\">${Rs(b.detail||\"\")}</div>\n              ${b.evidence?`<div class=\"feedback-evidence\"><em>Evidence:</em> ${Rs(b.evidence)}</div>`:\"\"}\n            </div>\n          `).join(\"\")}\n        </div>\n      </div>\n    </div>\n    `:\"\"}\n    `:\"\",Z=s.fun_ending,ie=Z?.headline?`\n    <div class=\"fun-ending\">\n      <div class=\"fun-headline\">\"${Rs(Z.headline)}\"</div>\n      ${Z.detail?`<div class=\"fun-detail\">${Rs(Z.detail)}</div>`:\"\"}\n    </div>\n    `:\"\",J=`\n    * { box-sizing: border-box; margin: 0; padding: 0; }\n    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: #f8fafc; color: #334155; line-height: 1.65; padding: 48px 24px; }\n    .container { max-width: 800px; margin: 0 auto; }\n    h1 { font-size: 32px; font-weight: 700; color: #0f172a; margin-bottom: 8px; }\n    h2 { font-size: 20px; font-weight: 600; color: #0f172a; margin-top: 48px; margin-bottom: 16px; }\n    .subtitle { color: #64748b; font-size: 15px; margin-bottom: 32px; }\n    .nav-toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0 32px 0; padding: 16px; background: white; border-radius: 8px; border: 1px solid #e2e8f0; }\n    .nav-toc a { font-size: 12px; color: #64748b; text-decoration: none; padding: 6px 12px; border-radius: 6px; background: #f1f5f9; transition: all 0.15s; }\n    .nav-toc a:hover { background: #e2e8f0; color: #334155; }\n    .stats-row { display: flex; gap: 24px; margin-bottom: 40px; padding: 20px 0; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; flex-wrap: wrap; }\n    .stat { text-align: center; }\n    .stat-value { font-size: 24px; font-weight: 700; color: #0f172a; }\n    .stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; }\n    .at-a-glance { background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border: 1px solid #f59e0b; border-radius: 12px; padding: 20px 24px; margin-bottom: 32px; }\n    .glance-title { font-size: 16px; font-weight: 700; color: #92400e; margin-bottom: 16px; }\n    .glance-sections { display: flex; flex-direction: column; gap: 12px; }\n    .glance-section { font-size: 14px; color: #78350f; line-height: 1.6; }\n    .glance-section strong { color: #92400e; }\n    .see-more { color: #b45309; text-decoration: none; font-size: 13px; white-space: nowrap; }\n    .see-more:hover { text-decoration: underline; }\n    .auto-mode-card { background: linear-gradient(135deg, #eff6ff 0%, #e0f2fe 100%); border: 1px solid #60a5fa; border-radius: 12px; padding: 20px 24px; margin-bottom: 32px; }\n    .auto-mode-title { font-size: 16px; font-weight: 700; color: #1e40af; margin-bottom: 10px; }\n    .auto-mode-desc { font-size: 14px; color: #1e3a8a; line-height: 1.6; }\n    .auto-mode-desc code { background: rgba(255,255,255,0.7); padding: 1px 6px; border-radius: 4px; font-size: 13px; }\n    .auto-mode-note { font-size: 13px; color: #1e3a8a; background: rgba(255,255,255,0.6); padding: 8px 12px; border-radius: 6px; margin-top: 10px; }\n    .auto-mode-fineprint { font-size: 11px; color: #3b82f6; margin-top: 10px; }\n    .project-areas { display: flex; flex-direction: column; gap: 12px; margin-bottom: 32px; }\n    .project-area { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; }\n    .area-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }\n    .area-name { font-weight: 600; font-size: 15px; color: #0f172a; }\n    .area-count { font-size: 12px; color: #64748b; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; }\n    .area-desc { font-size: 14px; color: #475569; line-height: 1.5; }\n    .narrative { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; margin-bottom: 24px; }\n    .narrative p { margin-bottom: 12px; font-size: 14px; color: #475569; line-height: 1.7; }\n    .key-insight { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 12px 16px; margin-top: 12px; font-size: 14px; color: #166534; }\n    .section-intro { font-size: 14px; color: #64748b; margin-bottom: 16px; }\n    .big-wins { display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px; }\n    .big-win { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 16px; }\n    .big-win-title { font-weight: 600; font-size: 15px; color: #166534; margin-bottom: 8px; }\n    .big-win-desc { font-size: 14px; color: #15803d; line-height: 1.5; }\n    .friction-categories { display: flex; flex-direction: column; gap: 16px; margin-bottom: 24px; }\n    .friction-category { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 16px; }\n    .friction-title { font-weight: 600; font-size: 15px; color: #991b1b; margin-bottom: 6px; }\n    .friction-desc { font-size: 13px; color: #7f1d1d; margin-bottom: 10px; }\n    .friction-examples { margin: 0 0 0 20px; font-size: 13px; color: #334155; }\n    .friction-examples li { margin-bottom: 4px; }\n    .claude-md-section { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 16px; margin-bottom: 20px; }\n    .claude-md-section h3 { font-size: 14px; font-weight: 600; color: #1e40af; margin: 0 0 12px 0; }\n    .claude-md-actions { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #dbeafe; }\n    .copy-all-btn { background: #2563eb; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer; font-weight: 500; transition: all 0.2s; }\n    .copy-all-btn:hover { background: #1d4ed8; }\n    .copy-all-btn.copied { background: #16a34a; }\n    .claude-md-item { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; padding: 10px 0; border-bottom: 1px solid #dbeafe; }\n    .claude-md-item:last-child { border-bottom: none; }\n    .cmd-checkbox { margin-top: 2px; }\n    .cmd-code { background: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; color: #1e40af; border: 1px solid #bfdbfe; font-family: monospace; display: block; white-space: pre-wrap; word-break: break-word; flex: 1; }\n    .cmd-why { font-size: 12px; color: #64748b; width: 100%; padding-left: 24px; margin-top: 4px; }\n    .features-section, .patterns-section { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }\n    .feature-card { background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 16px; }\n    .pattern-card { background: #f0f9ff; border: 1px solid #7dd3fc; border-radius: 8px; padding: 16px; }\n    .feature-title, .pattern-title { font-weight: 600; font-size: 15px; color: #0f172a; margin-bottom: 6px; }\n    .feature-oneliner { font-size: 14px; color: #475569; margin-bottom: 8px; }\n    .pattern-summary { font-size: 14px; color: #475569; margin-bottom: 8px; }\n    .feature-why, .pattern-detail { font-size: 13px; color: #334155; line-height: 1.5; }\n    .feature-examples { margin-top: 12px; }\n    .feature-example { padding: 8px 0; border-top: 1px solid #d1fae5; }\n    .feature-example:first-child { border-top: none; }\n    .example-desc { font-size: 13px; color: #334155; margin-bottom: 6px; }\n    .example-code-row { display: flex; align-items: flex-start; gap: 8px; }\n    .example-code { flex: 1; background: #f1f5f9; padding: 8px 12px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #334155; overflow-x: auto; white-space: pre-wrap; }\n    .copyable-prompt-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid #e2e8f0; }\n    .copyable-prompt-row { display: flex; align-items: flex-start; gap: 8px; }\n    .copyable-prompt { flex: 1; background: #f8fafc; padding: 10px 12px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #334155; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.5; }\n    .feature-code { background: #f8fafc; padding: 12px; border-radius: 6px; margin-top: 12px; border: 1px solid #e2e8f0; display: flex; align-items: flex-start; gap: 8px; }\n    .feature-code code { flex: 1; font-family: monospace; font-size: 12px; color: #334155; white-space: pre-wrap; }\n    .pattern-prompt { background: #f8fafc; padding: 12px; border-radius: 6px; margin-top: 12px; border: 1px solid #e2e8f0; }\n    .pattern-prompt code { font-family: monospace; font-size: 12px; color: #334155; display: block; white-space: pre-wrap; margin-bottom: 8px; }\n    .prompt-label { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #64748b; margin-bottom: 6px; }\n    .copy-btn { background: #e2e8f0; border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px; cursor: pointer; color: #475569; flex-shrink: 0; }\n    .copy-btn:hover { background: #cbd5e1; }\n    .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 24px 0; }\n    .chart-card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; }\n    .chart-title { font-size: 12px; font-weight: 600; color: #64748b; text-transform: uppercase; margin-bottom: 12px; }\n    .bar-row { display: flex; align-items: center; margin-bottom: 6px; }\n    .bar-label { width: 100px; font-size: 11px; color: #475569; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n    .bar-track { flex: 1; height: 6px; background: #f1f5f9; border-radius: 3px; margin: 0 8px; }\n    .bar-fill { height: 100%; border-radius: 3px; }\n    .bar-value { width: 28px; font-size: 11px; font-weight: 500; color: #64748b; text-align: right; }\n    .empty { color: #94a3b8; font-size: 13px; }\n    .horizon-section { display: flex; flex-direction: column; gap: 16px; }\n    .horizon-card { background: linear-gradient(135deg, #faf5ff 0%, #f5f3ff 100%); border: 1px solid #c4b5fd; border-radius: 8px; padding: 16px; }\n    .horizon-title { font-weight: 600; font-size: 15px; color: #5b21b6; margin-bottom: 8px; }\n    .horizon-possible { font-size: 14px; color: #334155; margin-bottom: 10px; line-height: 1.5; }\n    .horizon-tip { font-size: 13px; color: #6b21a8; background: rgba(255,255,255,0.6); padding: 8px 12px; border-radius: 4px; }\n    .feedback-header { margin-top: 48px; color: #64748b; font-size: 16px; }\n    .feedback-intro { font-size: 13px; color: #94a3b8; margin-bottom: 16px; }\n    .feedback-section { margin-top: 16px; }\n    .feedback-section h3 { font-size: 14px; font-weight: 600; color: #475569; margin-bottom: 12px; }\n    .feedback-card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 12px; }\n    .feedback-card.team-card { background: #eff6ff; border-color: #bfdbfe; }\n    .feedback-card.model-card { background: #faf5ff; border-color: #e9d5ff; }\n    .feedback-title { font-weight: 600; font-size: 14px; color: #0f172a; margin-bottom: 6px; }\n    .feedback-detail { font-size: 13px; color: #475569; line-height: 1.5; }\n    .feedback-evidence { font-size: 12px; color: #64748b; margin-top: 8px; }\n    .fun-ending { background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border: 1px solid #fbbf24; border-radius: 12px; padding: 24px; margin-top: 40px; text-align: center; }\n    .fun-headline { font-size: 18px; font-weight: 600; color: #78350f; margin-bottom: 8px; }\n    .fun-detail { font-size: 14px; color: #92400e; }\n    .collapsible-section { margin-top: 16px; }\n    .collapsible-header { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 12px 0; border-bottom: 1px solid #e2e8f0; }\n    .collapsible-header h3 { margin: 0; font-size: 14px; font-weight: 600; color: #475569; }\n    .collapsible-arrow { font-size: 12px; color: #94a3b8; transition: transform 0.2s; }\n    .collapsible-content { display: none; padding-top: 16px; }\n    .collapsible-content.open { display: block; }\n    .collapsible-header.open .collapsible-arrow { transform: rotate(90deg); }\n    @media (max-width: 640px) { .charts-row { grid-template-columns: 1fr; } .stats-row { justify-content: center; } }\n  `,D=`\n    function toggleCollapsible(header) {\n      header.classList.toggle('open');\n      const content = header.nextElementSibling;\n      content.classList.toggle('open');\n    }\n    function copyText(btn) {\n      const code = btn.previousElementSibling;\n      navigator.clipboard.writeText(code.textContent).then(() => {\n        btn.textContent = 'Copied!';\n        setTimeout(() => { btn.textContent = 'Copy'; }, 2000);\n      });\n    }\n    function copyCmdItem(idx) {\n      const checkbox = document.getElementById('cmd-' + idx);\n      if (checkbox) {\n        const text = checkbox.dataset.text;\n        navigator.clipboard.writeText(text).then(() => {\n          const btn = checkbox.nextElementSibling.querySelector('.copy-btn');\n          if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 2000); }\n        });\n      }\n    }\n    function copyAllCheckedClaudeMd() {\n      const checkboxes = document.querySelectorAll('.cmd-checkbox:checked');\n      const texts = [];\n      checkboxes.forEach(cb => {\n        if (cb.dataset.text) { texts.push(cb.dataset.text); }\n      });\n      const combined = texts.join('\\\\n');\n      const btn = document.querySelector('.copy-all-btn');\n      if (btn) {\n        navigator.clipboard.writeText(combined).then(() => {\n          btn.textContent = 'Copied ' + texts.length + ' items!';\n          btn.classList.add('copied');\n          setTimeout(() => { btn.textContent = 'Copy All Checked'; btn.classList.remove('copied'); }, 2000);\n        });\n      }\n    }\n    // Timezone selector for time of day chart (data is from our own analytics, not user input)\n    const rawHourCounts = ${Lt(e.message_hours)};\n    function updateHourHistogram(offsetFromPT) {\n      const periods = [\n        { label: \"Morning (6-12)\", range: [6,7,8,9,10,11] },\n        { label: \"Afternoon (12-18)\", range: [12,13,14,15,16,17] },\n        { label: \"Evening (18-24)\", range: [18,19,20,21,22,23] },\n        { label: \"Night (0-6)\", range: [0,1,2,3,4,5] }\n      ];\n      const adjustedCounts = {};\n      for (const [hour, count] of Object.entries(rawHourCounts)) {\n        const newHour = (parseInt(hour) + offsetFromPT + 24) % 24;\n        adjustedCounts[newHour] = (adjustedCounts[newHour] || 0) + count;\n      }\n      const periodCounts = periods.map(p => ({\n        label: p.label,\n        count: p.range.reduce((sum, h) => sum + (adjustedCounts[h] || 0), 0)\n      }));\n      const maxCount = Math.max(...periodCounts.map(p => p.count)) || 1;\n      const container = document.getElementById('hour-histogram');\n      container.textContent = '';\n      periodCounts.forEach(p => {\n        const row = document.createElement('div');\n        row.className = 'bar-row';\n        const label = document.createElement('div');\n        label.className = 'bar-label';\n        label.textContent = p.label;\n        const track = document.createElement('div');\n        track.className = 'bar-track';\n        const fill = document.createElement('div');\n        fill.className = 'bar-fill';\n        fill.style.width = (p.count / maxCount) * 100 + '%';\n        fill.style.background = '#8b5cf6';\n        track.appendChild(fill);\n        const value = document.createElement('div');\n        value.className = 'bar-value';\n        value.textContent = p.count;\n        row.appendChild(label);\n        row.appendChild(track);\n        row.appendChild(value);\n        container.appendChild(row);\n      });\n    }\n    document.getElementById('timezone-select').addEventListener('change', function() {\n      const customInput = document.getElementById('custom-offset');\n      if (this.value === 'custom') {\n        customInput.style.display = 'inline-block';\n        customInput.focus();\n      } else {\n        customInput.style.display = 'none';\n        updateHourHistogram(parseInt(this.value));\n      }\n    });\n    document.getElementById('custom-offset').addEventListener('change', function() {\n      const parsed = parseInt(this.value, 10);\n      if (isNaN(parsed)) return;\n      updateHourHistogram(parsed + 8);\n    });\n  `;return`<!DOCTYPE html>\n<html>\n<head>\n  <meta charset=\"utf-8\">\n  <title>Claude Code Insights</title>\n  <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">\n  <style>\n    * { box-sizing: border-box; margin: 0; padding: 0; }\n    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: #f8fafc; color: #334155; line-height: 1.65; padding: 48px 24px; }\n    .container { max-width: 800px; margin: 0 auto; }\n    h1 { font-size: 32px; font-weight: 700; color: #0f172a; margin-bottom: 8px; }\n    h2 { font-size: 20px; font-weight: 600; color: #0f172a; margin-top: 48px; margin-bottom: 16px; }\n    .subtitle { color: #64748b; font-size: 15px; margin-bottom: 32px; }\n    .nav-toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0 32px 0; padding: 16px; background: white; border-radius: 8px; border: 1px solid #e2e8f0; }\n    .nav-toc a { font-size: 12px; color: #64748b; text-decoration: none; padding: 6px 12px; border-radius: 6px; background: #f1f5f9; transition: all 0.15s; }\n    .nav-toc a:hover { background: #e2e8f0; color: #334155; }\n    .stats-row { display: flex; gap: 24px; margin-bottom: 40px; padding: 20px 0; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; flex-wrap: wrap; }\n    .stat { text-align: center; }\n    .stat-value { font-size: 24px; font-weight: 700; color: #0f172a; }\n    .stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; }\n    .at-a-glance { background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border: 1px solid #f59e0b; border-radius: 12px; padding: 20px 24px; margin-bottom: 32px; }\n    .glance-title { font-size: 16px; font-weight: 700; color: #92400e; margin-bottom: 16px; }\n    .glance-sections { display: flex; flex-direction: column; gap: 12px; }\n    .glance-section { font-size: 14px; color: #78350f; line-height: 1.6; }\n    .glance-section strong { color: #92400e; }\n    .see-more { color: #b45309; text-decoration: none; font-size: 13px; white-space: nowrap; }\n    .see-more:hover { text-decoration: underline; }\n    .auto-mode-card { background: linear-gradient(135deg, #eff6ff 0%, #e0f2fe 100%); border: 1px solid #60a5fa; border-radius: 12px; padding: 20px 24px; margin-bottom: 32px; }\n    .auto-mode-title { font-size: 16px; font-weight: 700; color: #1e40af; margin-bottom: 10px; }\n    .auto-mode-desc { font-size: 14px; color: #1e3a8a; line-height: 1.6; }\n    .auto-mode-desc code { background: rgba(255,255,255,0.7); padding: 1px 6px; border-radius: 4px; font-size: 13px; }\n    .auto-mode-note { font-size: 13px; color: #1e3a8a; background: rgba(255,255,255,0.6); padding: 8px 12px; border-radius: 6px; margin-top: 10px; }\n    .auto-mode-fineprint { font-size: 11px; color: #3b82f6; margin-top: 10px; }\n    .project-areas { display: flex; flex-direction: column; gap: 12px; margin-bottom: 32px; }\n    .project-area { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; }\n    .area-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }\n    .area-name { font-weight: 600; font-size: 15px; color: #0f172a; }\n    .area-count { font-size: 12px; color: #64748b; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; }\n    .area-desc { font-size: 14px; color: #475569; line-height: 1.5; }\n    .narrative { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; margin-bottom: 24px; }\n    .narrative p { margin-bottom: 12px; font-size: 14px; color: #475569; line-height: 1.7; }\n    .key-insight { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 12px 16px; margin-top: 12px; font-size: 14px; color: #166534; }\n    .section-intro { font-size: 14px; color: #64748b; margin-bottom: 16px; }\n    .big-wins { display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px; }\n    .big-win { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 16px; }\n    .big-win-title { font-weight: 600; font-size: 15px; color: #166534; margin-bottom: 8px; }\n    .big-win-desc { font-size: 14px; color: #15803d; line-height: 1.5; }\n    .friction-categories { display: flex; flex-direction: column; gap: 16px; margin-bottom: 24px; }\n    .friction-category { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 16px; }\n    .friction-title { font-weight: 600; font-size: 15px; color: #991b1b; margin-bottom: 6px; }\n    .friction-desc { font-size: 13px; color: #7f1d1d; margin-bottom: 10px; }\n    .friction-examples { margin: 0 0 0 20px; font-size: 13px; color: #334155; }\n    .friction-examples li { margin-bottom: 4px; }\n    .claude-md-section { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 16px; margin-bottom: 20px; }\n    .claude-md-section h3 { font-size: 14px; font-weight: 600; color: #1e40af; margin: 0 0 12px 0; }\n    .claude-md-actions { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #dbeafe; }\n    .copy-all-btn { background: #2563eb; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer; font-weight: 500; transition: all 0.2s; }\n    .copy-all-btn:hover { background: #1d4ed8; }\n    .copy-all-btn.copied { background: #16a34a; }\n    .claude-md-item { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; padding: 10px 0; border-bottom: 1px solid #dbeafe; }\n    .claude-md-item:last-child { border-bottom: none; }\n    .cmd-checkbox { margin-top: 2px; }\n    .cmd-code { background: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; color: #1e40af; border: 1px solid #bfdbfe; font-family: monospace; display: block; white-space: pre-wrap; word-break: break-word; flex: 1; }\n    .cmd-why { font-size: 12px; color: #64748b; width: 100%; padding-left: 24px; margin-top: 4px; }\n    .features-section, .patterns-section { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }\n    .feature-card { background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 16px; }\n    .pattern-card { background: #f0f9ff; border: 1px solid #7dd3fc; border-radius: 8px; padding: 16px; }\n    .feature-title, .pattern-title { font-weight: 600; font-size: 15px; color: #0f172a; margin-bottom: 6px; }\n    .feature-oneliner { font-size: 14px; color: #475569; margin-bottom: 8px; }\n    .pattern-summary { font-size: 14px; color: #475569; margin-bottom: 8px; }\n    .feature-why, .pattern-detail { font-size: 13px; color: #334155; line-height: 1.5; }\n    .feature-examples { margin-top: 12px; }\n    .feature-example { padding: 8px 0; border-top: 1px solid #d1fae5; }\n    .feature-example:first-child { border-top: none; }\n    .example-desc { font-size: 13px; color: #334155; margin-bottom: 6px; }\n    .example-code-row { display: flex; align-items: flex-start; gap: 8px; }\n    .example-code { flex: 1; background: #f1f5f9; padding: 8px 12px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #334155; overflow-x: auto; white-space: pre-wrap; }\n    .copyable-prompt-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid #e2e8f0; }\n    .copyable-prompt-row { display: flex; align-items: flex-start; gap: 8px; }\n    .copyable-prompt { flex: 1; background: #f8fafc; padding: 10px 12px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #334155; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.5; }\n    .feature-code { background: #f8fafc; padding: 12px; border-radius: 6px; margin-top: 12px; border: 1px solid #e2e8f0; display: flex; align-items: flex-start; gap: 8px; }\n    .feature-code code { flex: 1; font-family: monospace; font-size: 12px; color: #334155; white-space: pre-wrap; }\n    .pattern-prompt { background: #f8fafc; padding: 12px; border-radius: 6px; margin-top: 12px; border: 1px solid #e2e8f0; }\n    .pattern-prompt code { font-family: monospace; font-size: 12px; color: #334155; display: block; white-space: pre-wrap; margin-bottom: 8px; }\n    .prompt-label { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #64748b; margin-bottom: 6px; }\n    .copy-btn { background: #e2e8f0; border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px; cursor: pointer; color: #475569; flex-shrink: 0; }\n    .copy-btn:hover { background: #cbd5e1; }\n    .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 24px 0; }\n    .chart-card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; }\n    .chart-title { font-size: 12px; font-weight: 600; color: #64748b; text-transform: uppercase; margin-bottom: 12px; }\n    .bar-row { display: flex; align-items: center; margin-bottom: 6px; }\n    .bar-label { width: 100px; font-size: 11px; color: #475569; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n    .bar-track { flex: 1; height: 6px; background: #f1f5f9; border-radius: 3px; margin: 0 8px; }\n    .bar-fill { height: 100%; border-radius: 3px; }\n    .bar-value { width: 28px; font-size: 11px; font-weight: 500; color: #64748b; text-align: right; }\n    .empty { color: #94a3b8; font-size: 13px; }\n    .horizon-section { display: flex; flex-direction: column; gap: 16px; }\n    .horizon-card { background: linear-gradient(135deg, #faf5ff 0%, #f5f3ff 100%); border: 1px solid #c4b5fd; border-radius: 8px; padding: 16px; }\n    .horizon-title { font-weight: 600; font-size: 15px; color: #5b21b6; margin-bottom: 8px; }\n    .horizon-possible { font-size: 14px; color: #334155; margin-bottom: 10px; line-height: 1.5; }\n    .horizon-tip { font-size: 13px; color: #6b21a8; background: rgba(255,255,255,0.6); padding: 8px 12px; border-radius: 4px; }\n    .feedback-header { margin-top: 48px; color: #64748b; font-size: 16px; }\n    .feedback-intro { font-size: 13px; color: #94a3b8; margin-bottom: 16px; }\n    .feedback-section { margin-top: 16px; }\n    .feedback-section h3 { font-size: 14px; font-weight: 600; color: #475569; margin-bottom: 12px; }\n    .feedback-card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 12px; }\n    .feedback-card.team-card { background: #eff6ff; border-color: #bfdbfe; }\n    .feedback-card.model-card { background: #faf5ff; border-color: #e9d5ff; }\n    .feedback-title { font-weight: 600; font-size: 14px; color: #0f172a; margin-bottom: 6px; }\n    .feedback-detail { font-size: 13px; color: #475569; line-height: 1.5; }\n    .feedback-evidence { font-size: 12px; color: #64748b; margin-top: 8px; }\n    .fun-ending { background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border: 1px solid #fbbf24; border-radius: 12px; padding: 24px; margin-top: 40px; text-align: center; }\n    .fun-headline { font-size: 18px; font-weight: 600; color: #78350f; margin-bottom: 8px; }\n    .fun-detail { font-size: 14px; color: #92400e; }\n    .collapsible-section { margin-top: 16px; }\n    .collapsible-header { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 12px 0; border-bottom: 1px solid #e2e8f0; }\n    .collapsible-header h3 { margin: 0; font-size: 14px; font-weight: 600; color: #475569; }\n    .collapsible-arrow { font-size: 12px; color: #94a3b8; transition: transform 0.2s; }\n    .collapsible-content { display: none; padding-top: 16px; }\n    .collapsible-content.open { display: block; }\n    .collapsible-header.open .collapsible-arrow { transform: rotate(90deg); }\n    @media (max-width: 640px) { .charts-row { grid-template-columns: 1fr; } .stats-row { justify-content: center; } }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <h1>Claude Code Insights</h1>\n    <p class=\"subtitle\">${e.total_messages.toLocaleString()} messages across ${e.total_sessions} sessions${e.total_sessions_scanned&&e.total_sessions_scanned>e.total_sessions?` (${e.total_sessions_scanned.toLocaleString()} total)`:\"\"} | ${e.date_range.start} to ${e.date_range.end}</p>\n\n    ${m}\n\n    ${g}\n\n    <nav class=\"nav-toc\">\n      <a href=\"#section-work\">What You Work On</a>\n      <a href=\"#section-usage\">How You Use CC</a>\n      <a href=\"#section-wins\">Impressive Things</a>\n      <a href=\"#section-friction\">Where Things Go Wrong</a>\n      <a href=\"#section-features\">Features to Try</a>\n      <a href=\"#section-patterns\">New Usage Patterns</a>\n      <a href=\"#section-horizon\">On the Horizon</a>\n      <a href=\"#section-feedback\">Team Feedback</a>\n    </nav>\n\n    <div class=\"stats-row\">\n      <div class=\"stat\"><div class=\"stat-value\">${e.total_messages.toLocaleString()}</div><div class=\"stat-label\">Messages</div></div>\n      <div class=\"stat\"><div class=\"stat-value\">+${e.total_lines_added.toLocaleString()}/-${e.total_lines_removed.toLocaleString()}</div><div class=\"stat-label\">Lines</div></div>\n      <div class=\"stat\"><div class=\"stat-value\">${e.total_files_modified}</div><div class=\"stat-label\">Files</div></div>\n      <div class=\"stat\"><div class=\"stat-value\">${e.days_active}</div><div class=\"stat-label\">Days</div></div>\n      <div class=\"stat\"><div class=\"stat-value\">${e.messages_per_day}</div><div class=\"stat-label\">Msgs/Day</div></div>\n    </div>\n\n    ${w}\n\n    <div class=\"charts-row\">\n      <div class=\"chart-card\">\n        <div class=\"chart-title\">What You Wanted</div>\n        ${ee(e.goal_categories,\"#2563eb\")}\n      </div>\n      <div class=\"chart-card\">\n        <div class=\"chart-title\">Top Tools Used</div>\n        ${ee(e.tool_counts,\"#0891b2\")}\n      </div>\n    </div>\n\n    <div class=\"charts-row\">\n      <div class=\"chart-card\">\n        <div class=\"chart-title\">Languages</div>\n        ${ee(e.languages,\"#10b981\")}\n      </div>\n      <div class=\"chart-card\">\n        <div class=\"chart-title\">Session Types</div>\n        ${ee(e.session_types||{},\"#8b5cf6\")}\n      </div>\n    </div>\n\n    ${f}\n\n    <!-- Response Time Distribution -->\n    <div class=\"chart-card\" style=\"margin: 24px 0;\">\n      <div class=\"chart-title\">User Response Time Distribution</div>\n      ${Dt(e.user_response_times)}\n      <div style=\"font-size: 12px; color: #64748b; margin-top: 8px;\">\n        Median: ${e.median_response_time.toFixed(1)}s &bull; Average: ${e.avg_response_time.toFixed(1)}s\n      </div>\n    </div>\n\n    <!-- Multi-clauding Section (matching Python reference) -->\n    <div class=\"chart-card\" style=\"margin: 24px 0;\">\n      <div class=\"chart-title\">Multi-Clauding (Parallel Sessions)</div>\n      ${e.multi_clauding.overlap_events===0?`\n        <p style=\"font-size: 14px; color: #64748b; padding: 8px 0;\">\n          No parallel session usage detected. You typically work with one Claude Code session at a time.\n        </p>\n      `:`\n        <div style=\"display: flex; gap: 24px; margin: 12px 0;\">\n          <div style=\"text-align: center;\">\n            <div style=\"font-size: 24px; font-weight: 700; color: #7c3aed;\">${e.multi_clauding.overlap_events}</div>\n            <div style=\"font-size: 11px; color: #64748b; text-transform: uppercase;\">Overlap Events</div>\n          </div>\n          <div style=\"text-align: center;\">\n            <div style=\"font-size: 24px; font-weight: 700; color: #7c3aed;\">${e.multi_clauding.sessions_involved}</div>\n            <div style=\"font-size: 11px; color: #64748b; text-transform: uppercase;\">Sessions Involved</div>\n          </div>\n          <div style=\"text-align: center;\">\n            <div style=\"font-size: 24px; font-weight: 700; color: #7c3aed;\">${e.total_messages>0?Math.round(100*e.multi_clauding.user_messages_during/e.total_messages):0}%</div>\n            <div style=\"font-size: 11px; color: #64748b; text-transform: uppercase;\">Of Messages</div>\n          </div>\n        </div>\n        <p style=\"font-size: 13px; color: #475569; margin-top: 12px;\">\n          You run multiple Claude Code sessions simultaneously. Multi-clauding is detected when sessions\n          overlap in time, suggesting parallel workflows.\n        </p>\n      `}\n    </div>\n\n    <!-- Time of Day & Tool Errors -->\n    <div class=\"charts-row\">\n      <div class=\"chart-card\">\n        <div class=\"chart-title\" style=\"display: flex; align-items: center; gap: 12px;\">\n          User Messages by Time of Day\n          <select id=\"timezone-select\" style=\"font-size: 12px; padding: 4px 8px; border-radius: 4px; border: 1px solid #e2e8f0;\">\n            <option value=\"0\">PT (UTC-8)</option>\n            <option value=\"3\">ET (UTC-5)</option>\n            <option value=\"8\">London (UTC)</option>\n            <option value=\"9\">CET (UTC+1)</option>\n            <option value=\"17\">Tokyo (UTC+9)</option>\n            <option value=\"custom\">Custom offset...</option>\n          </select>\n          <input type=\"number\" id=\"custom-offset\" placeholder=\"UTC offset\" style=\"display: none; width: 80px; font-size: 12px; padding: 4px; border-radius: 4px; border: 1px solid #e2e8f0;\">\n        </div>\n        ${Nt(e.message_hours)}\n      </div>\n      <div class=\"chart-card\">\n        <div class=\"chart-title\">Tool Errors Encountered</div>\n        ${Object.keys(e.tool_error_categories).length>0?ee(e.tool_error_categories,\"#dc2626\"):'<p class=\"empty\">No tool errors</p>'}\n      </div>\n    </div>\n\n    ${T}\n\n    <div class=\"charts-row\">\n      <div class=\"chart-card\">\n        <div class=\"chart-title\">What Helped Most (Claude's Capabilities)</div>\n        ${ee(e.success,\"#16a34a\")}\n      </div>\n      <div class=\"chart-card\">\n        <div class=\"chart-title\">Outcomes</div>\n        ${ee(e.outcomes,\"#8b5cf6\",6,jt)}\n      </div>\n    </div>\n\n    ${I}\n\n    <div class=\"charts-row\">\n      <div class=\"chart-card\">\n        <div class=\"chart-title\">Primary Friction Types</div>\n        ${ee(e.friction,\"#dc2626\")}\n      </div>\n      <div class=\"chart-card\">\n        <div class=\"chart-title\">Inferred Satisfaction (model-estimated)</div>\n        ${ee(e.satisfaction,\"#eab308\",6,Pt)}\n      </div>\n    </div>\n\n    ${K}\n\n    ${W}\n\n    ${ie}\n\n    ${oe}\n  </div>\n  <script>${D}</script>\n</body>\n</html>`}"
+        },
+        {
+          "source_range": {
+            "source_file": "src_207151635.js",
+            "source_chunk_offset": 207151635,
+            "source_chunk_bytes": 101275,
+            "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+            "source_binary_offset": 207168616,
+            "source_bytes": 1756,
+            "source_sha256": "8b09824fe4146a271b804df372d8f823259be50bd7c4ca0258d5740194f703b5"
+          },
+          "source_excerpt_utf8": "Qe={debug_investigate:\"Debug/Investigate\",implement_feature:\"Implement Feature\",fix_bug:\"Fix Bug\",write_script_tool:\"Write Script/Tool\",refactor_code:\"Refactor Code\",configure_system:\"Configure System\",create_pr_commit:\"Create PR/Commit\",analyze_data:\"Analyze Data\",understand_codebase:\"Understand Codebase\",write_tests:\"Write Tests\",write_docs:\"Write Docs\",deploy_infra:\"Deploy/Infra\",warmup_minimal:\"Cache Warmup\",fast_accurate_search:\"Fast/Accurate Search\",correct_code_edits:\"Correct Code Edits\",good_explanations:\"Good Explanations\",proactive_help:\"Proactive Help\",multi_file_changes:\"Multi-file Changes\",handled_complexity:\"Multi-file Changes\",good_debugging:\"Good Debugging\",misunderstood_request:\"Misunderstood Request\",wrong_approach:\"Wrong Approach\",buggy_code:\"Buggy Code\",user_rejected_action:\"User Rejected Action\",claude_got_blocked:\"Claude Got Blocked\",user_stopped_early:\"User Stopped Early\",wrong_file_or_location:\"Wrong File/Location\",excessive_changes:\"Excessive Changes\",slow_or_verbose:\"Slow/Verbose\",tool_failed:\"Tool Failed\",user_unclear:\"User Unclear\",external_issue:\"External Issue\",frustrated:\"Frustrated\",dissatisfied:\"Dissatisfied\",likely_satisfied:\"Likely Satisfied\",satisfied:\"Satisfied\",happy:\"Happy\",unsure:\"Unsure\",neutral:\"Neutral\",delighted:\"Delighted\",single_task:\"Single Task\",multi_task:\"Multi Task\",iterative_refinement:\"Iterative Refinement\",exploration:\"Exploration\",quick_question:\"Quick Question\",fully_achieved:\"Fully Achieved\",mostly_achieved:\"Mostly Achieved\",partially_achieved:\"Partially Achieved\",not_achieved:\"Not Achieved\",unclear_from_transcript:\"Unclear\",unhelpful:\"Unhelpful\",slightly_helpful:\"Slightly Helpful\",moderately_helpful:\"Moderately Helpful\",very_helpful:\"Very Helpful\",essential:\"Essential\"}",
+          "literal_map": [
+            {
+              "source_literal": "claude_got_blocked:\"Claude Got Blocked\"",
+              "runtime_literal": "claude_got_blocked:\"LingXi Got Blocked\"",
+              "count": 1
+            }
+          ]
+        }
+      ],
+      "dynamic_text_policy": "preserve_runtime_values_no_global_brand_rewrite",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "lines": [
+            4
+          ]
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI.md",
+          "lines": [
+            98,
+            99,
+            105
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "reviewed-static-brand-projection",
+      "path": "crates/runtime/src/insights_assets/insights_native_at_glance.mjs",
+      "transform_sha256": "866fc68ea13862fae486fcc617c52e09535bb7296ab76d0d0007e29c157b7996",
+      "source_literal_projections": [
+        {
+          "source_range": {
+            "source_file": "src_207151635.js",
+            "source_chunk_offset": 207151635,
+            "source_chunk_bytes": 101275,
+            "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+            "source_binary_offset": 207194861,
+            "source_bytes": 3787,
+            "source_sha256": "0fd66490e486bb8477284aa56065384da4cffa3175904865cabb8a78118d7a13"
+          },
+          "literal_map": [
+            {
+              "source_literal": "USER INSTRUCTIONS TO CLAUDE:",
+              "runtime_literal": "USER INSTRUCTIONS TO LINGXI:",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 2
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            }
+          ],
+          "source_excerpt_utf8": "async function zt(e,s,n){let a=Array.from(s.values()).slice(0,50).map((S)=>`- ${S.brief_summary} (${S.outcome}, ${S.claude_helpfulness})`).join(`\n`),l=Array.from(s.values()).filter((S)=>S.friction_detail).slice(0,20).map((S)=>`- ${S.friction_detail}`).join(`\n`),m=Array.from(s.values()).flatMap((S)=>S.user_instructions_to_claude||[]).slice(0,15).map((S)=>`- ${S}`).join(`\n`),y=_({sessions:e.total_sessions,analyzed:e.sessions_with_facets,date_range:e.date_range,messages:e.total_messages,hours:Math.round(e.total_duration_hours),commits:e.git_commits,top_tools:Object.entries(e.tool_counts).sort((S,L)=>L[1]-S[1]).slice(0,8),top_goals:Object.entries(e.goal_categories).sort((S,L)=>L[1]-S[1]).slice(0,8),outcomes:e.outcomes,satisfaction:e.satisfaction,friction:e.friction,success:e.success,languages:e.languages},null,2)+`\n\nSESSION SUMMARIES:\n`+a+`\n\nFRICTION DETAILS:\n`+l+`\n\nUSER INSTRUCTIONS TO CLAUDE:\n`+(m||\"None captured\"),w=await Promise.all(Ot.map((S)=>Me(S,y,n))),r={};for(let{name:S,result:L}of w)if(L)r[S]=L;let f=r.project_areas?.areas?.map((S)=>`- ${S.name}: ${S.description}`).join(`\n`)||\"\",h=r.what_works?.impressive_workflows?.map((S)=>`- ${S.title}: ${S.description}`).join(`\n`)||\"\",T=r.friction_analysis?.categories?.map((S)=>`- ${S.category}: ${S.description}`).join(`\n`)||\"\",R=r.suggestions?.features_to_try?.map((S)=>`- ${S.feature}: ${S.one_liner}`).join(`\n`)||\"\",I=r.suggestions?.usage_patterns?.map((S)=>`- ${S.title}: ${S.suggestion}`).join(`\n`)||\"\",O=r.on_the_horizon?.opportunities?.map((S)=>`- ${S.title}: ${S.whats_possible}`).join(`\n`)||\"\",z={name:\"at_a_glance\",prompt:`You're writing an \"At a Glance\" summary for a Claude Code usage insights report for Claude Code users. The goal is to help them understand their usage and improve how they can use Claude better, especially as models improve.\n\nUse this 4-part structure:\n\n1. **What's working** - What is the user's unique style of interacting with Claude and what are some impactful things they've done? You can include one or two details, but keep it high level since things might not be fresh in the user's memory. Don't be fluffy or overly complimentary. Also, don't focus on the tool calls they use.\n\n2. **What's hindering you** - Split into (a) Claude's fault (misunderstandings, wrong approaches, bugs) and (b) user-side friction (not providing enough context, environment issues -- ideally more general than just one project). Be honest but constructive.\n\n3. **Quick wins to try** - Specific Claude Code features they could try from the examples below, or a workflow technique if you think it's really compelling. (Avoid stuff like \"Ask Claude to confirm before taking actions\" or \"Type out more context up front\" which are less compelling.)\n\n4. **Ambitious workflows for better models** - As we move to much more capable models over the next 3-6 months, what should they prepare for? What workflows that seem impossible now will become possible? Draw from the appropriate section below.\n\nKeep each section to 2-3 not-too-long sentences. Don't overwhelm the user. Don't mention specific numerical stats or underlined_categories from the session data below. Use a coaching tone.\n\nRESPOND WITH ONLY A VALID JSON OBJECT:\n{\n  \"whats_working\": \"(refer to instructions above)\",\n  \"whats_hindering\": \"(refer to instructions above)\",\n  \"quick_wins\": \"(refer to instructions above)\",\n  \"ambitious_workflows\": \"(refer to instructions above)\"\n}\n\nSESSION DATA:\n${y}\n\n## Project Areas (what user works on)\n${f}\n\n## Big Wins (impressive accomplishments)\n${h}\n\n## Friction Categories (where things go wrong)\n${T}\n\n## Features to Try\n${R}\n\n## Usage Patterns to Adopt\n${I}\n\n## On the Horizon (ambitious workflows for better models)\n${O}`,maxTokens:8192},W=await Me(z,\"\",n);if(W.result)r.at_a_glance=W.result;return r}"
+        }
+      ],
+      "dynamic_text_policy": "preserve_runtime_values_no_global_brand_rewrite",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "lines": [
+            32,
+            34
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "reviewed-static-brand-projection",
+      "path": "crates/runtime/src/insights_assets/insights_report_section_prompts.mjs",
+      "transform_sha256": "92ebb1c843405a28f516f28f587ff9b2880d703c36d9feb0e002183e6ee1d309",
+      "source_literal_projections": [
+        {
+          "source_range": {
+            "source_file": "src_207151635.js",
+            "source_chunk_offset": 207151635,
+            "source_chunk_bytes": 101275,
+            "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+            "source_binary_offset": 207188639,
+            "source_bytes": 5599,
+            "source_sha256": "e143619a6f0167c7493f89a1592fd91a2f7eddbc7aeb9304f96ca7a5acdc887d"
+          },
+          "literal_map": [
+            {
+              "source_literal": "claude mcp add <server-name> -- <command>",
+              "runtime_literal": "lingxi-cli mcp add <server-name> -- <command>",
+              "count": 1
+            },
+            {
+              "source_literal": "claude -p \"fix lint errors\" --allowedTools \"Edit,Read,Bash\"",
+              "runtime_literal": "lingxi-cli --print \"fix lint errors\"",
+              "count": 1
+            },
+            {
+              "source_literal": ".claude/",
+              "runtime_literal": ".lingxi/",
+              "count": 2
+            },
+            {
+              "source_literal": "CLAUDE.md",
+              "runtime_literal": "LINGXI.md",
+              "count": 2
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 9
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 6
+            },
+            {
+              "source_literal": "CC FEATURES REFERENCE",
+              "runtime_literal": "LINGXI FEATURES REFERENCE",
+              "count": 3
+            },
+            {
+              "source_literal": "Skip internal CC operations.",
+              "runtime_literal": "Skip internal LingXi operations.",
+              "count": 1
+            }
+          ],
+          "source_excerpt_utf8": "var Ot=[{name:\"project_areas\",prompt:`Analyze this Claude Code usage data and identify project areas.\n\nRESPOND WITH ONLY A VALID JSON OBJECT:\n{\n  \"areas\": [\n    {\"name\": \"Area name\", \"session_count\": N, \"description\": \"2-3 sentences about what was worked on and how Claude Code was used.\"}\n  ]\n}\n\nInclude 4-5 areas. Skip internal CC operations.`,maxTokens:8192},{name:\"interaction_style\",prompt:`Analyze this Claude Code usage data and describe the user's interaction style.\n\nRESPOND WITH ONLY A VALID JSON OBJECT:\n{\n  \"narrative\": \"2-3 paragraphs analyzing HOW the user interacts with Claude Code. Use second person 'you'. Describe patterns: iterate quickly vs detailed upfront specs? Interrupt often or let Claude run? Include specific examples. Use **bold** for key insights.\",\n  \"key_pattern\": \"One sentence summary of most distinctive interaction style\"\n}`,maxTokens:8192},{name:\"what_works\",prompt:`Analyze this Claude Code usage data and identify what's working well for this user. Use second person (\"you\").\n\nRESPOND WITH ONLY A VALID JSON OBJECT:\n{\n  \"intro\": \"1 sentence of context\",\n  \"impressive_workflows\": [\n    {\"title\": \"Short title (3-6 words)\", \"description\": \"2-3 sentences describing the impressive workflow or approach. Use 'you' not 'the user'.\"}\n  ]\n}\n\nInclude 3 impressive workflows.`,maxTokens:8192},{name:\"friction_analysis\",prompt:`Analyze this Claude Code usage data and identify friction points for this user. Use second person (\"you\").\n\nRESPOND WITH ONLY A VALID JSON OBJECT:\n{\n  \"intro\": \"1 sentence summarizing friction patterns\",\n  \"categories\": [\n    {\"category\": \"Concrete category name\", \"description\": \"1-2 sentences explaining this category and what could be done differently. Use 'you' not 'the user'.\", \"examples\": [\"Specific example with consequence\", \"Another example\"]}\n  ]\n}\n\nInclude 3 friction categories with 2 examples each.`,maxTokens:8192},{name:\"suggestions\",prompt:`Analyze this Claude Code usage data and suggest improvements.\n\n## CC FEATURES REFERENCE (pick from these for features_to_try):\n1. **MCP Servers**: Connect Claude to external tools, databases, and APIs via Model Context Protocol.\n   - How to use: Run \\`claude mcp add <server-name> -- <command>\\`\n   - Good for: database queries, Slack integration, GitHub issue lookup, connecting to internal APIs\n\n2. **Custom Skills**: Reusable prompts you define as markdown files that run with a single /command.\n   - How to use: Create \\`.claude/skills/commit/SKILL.md\\` with instructions. Then type \\`/commit\\` to run it.\n   - Good for: repetitive workflows - /commit, /review, /test, /deploy, /pr, or complex multi-step workflows\n\n3. **Hooks**: Shell commands that auto-run at specific lifecycle events.\n   - How to use: Add to \\`.claude/settings.json\\` under \"hooks\" key.\n   - Good for: auto-formatting code, running type checks, enforcing conventions\n\n4. **Headless Mode**: Run Claude non-interactively from scripts and CI/CD.\n   - How to use: \\`claude -p \"fix lint errors\" --allowedTools \"Edit,Read,Bash\"\\`\n   - Good for: CI/CD integration, batch code fixes, automated reviews\n\n5. **Task Agents**: Claude spawns focused subagents for complex exploration or parallel work.\n   - How to use: Claude auto-invokes when helpful, or ask \"use an agent to explore X\"\n   - Good for: codebase exploration, understanding complex systems\n\nRESPOND WITH ONLY A VALID JSON OBJECT:\n{\n  \"claude_md_additions\": [\n    {\"addition\": \"A specific line or block to add to CLAUDE.md based on workflow patterns. E.g., 'Always run tests after modifying auth-related files'\", \"why\": \"1 sentence explaining why this would help based on actual sessions\", \"prompt_scaffold\": \"Instructions for where to add this in CLAUDE.md. E.g., 'Add under ## Testing section'\"}\n  ],\n  \"features_to_try\": [\n    {\"feature\": \"Feature name from CC FEATURES REFERENCE above\", \"one_liner\": \"What it does\", \"why_for_you\": \"Why this would help YOU based on your sessions\", \"example_code\": \"Actual command or config to copy\"}\n  ],\n  \"usage_patterns\": [\n    {\"title\": \"Short title\", \"suggestion\": \"1-2 sentence summary\", \"detail\": \"3-4 sentences explaining how this applies to YOUR work\", \"copyable_prompt\": \"A specific prompt to copy and try\"}\n  ]\n}\n\nIMPORTANT for claude_md_additions: PRIORITIZE instructions that appear MULTIPLE TIMES in the user data. If user told Claude the same thing in 2+ sessions (e.g., 'always run tests', 'use TypeScript'), that's a PRIME candidate - they shouldn't have to repeat themselves.\n\nIMPORTANT for features_to_try: Pick 2-3 from the CC FEATURES REFERENCE above. Include 2-3 items for each category.`,maxTokens:8192},{name:\"on_the_horizon\",prompt:`Analyze this Claude Code usage data and identify future opportunities.\n\nRESPOND WITH ONLY A VALID JSON OBJECT:\n{\n  \"intro\": \"1 sentence about evolving AI-assisted development\",\n  \"opportunities\": [\n    {\"title\": \"Short title (4-8 words)\", \"whats_possible\": \"2-3 ambitious sentences about autonomous workflows\", \"how_to_try\": \"1-2 sentences mentioning relevant tooling\", \"copyable_prompt\": \"Detailed prompt to try\"}\n  ]\n}\n\nInclude 3 opportunities. Think BIG - autonomous workflows, parallel agents, iterating against tests.`,maxTokens:8192},...[],{name:\"fun_ending\",prompt:`Analyze this Claude Code usage data and find a memorable moment.\n\nRESPOND WITH ONLY A VALID JSON OBJECT:\n{\n  \"headline\": \"A memorable QUALITATIVE moment from the transcripts - not a statistic. Something human, funny, or surprising.\",\n  \"detail\": \"Brief context about when/where this happened\"\n}\n\nFind something genuinely interesting or amusing from the session summaries.`,maxTokens:8192}"
+        }
+      ],
+      "dynamic_text_policy": "preserve_runtime_values_no_global_brand_rewrite",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "lines": [
+            62,
+            65
+          ]
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "lines": [
+            6,
+            14
+          ]
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "lines": [
+            44,
+            48
+          ]
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI.md",
+          "lines": [
+            62
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "reviewed-static-brand-projection",
+      "path": "crates/runtime/src/insights_assets/insights_source_actions.mjs",
+      "transform_sha256": "39c70b0990eb918b16c49e726d10e2db4a795051939afaffd78b34a2f0c91e5a",
+      "source_literal_projections": [
+        {
+          "source_range": {
+            "source_file": "src_207151635.js",
+            "source_chunk_offset": 207151635,
+            "source_chunk_bytes": 101275,
+            "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+            "source_binary_offset": 207171585,
+            "source_bytes": 1147,
+            "source_sha256": "f8aa5680da24a15a01df10ed8aa4f21b7567f5a347b3d6aa408659cb89436933"
+          },
+          "literal_map": [
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            }
+          ],
+          "source_excerpt_utf8": "var it=`Analyze this Claude Code session and extract structured facets.\n\nCRITICAL GUIDELINES:\n\n1. **goal_categories**: Count ONLY what the USER explicitly asked for.\n   - DO NOT count Claude's autonomous codebase exploration\n   - DO NOT count work Claude decided to do on its own\n   - ONLY count when user says \"can you...\", \"please...\", \"I need...\", \"let's...\"\n\n2. **user_satisfaction_counts**: Base ONLY on explicit user signals.\n   - \"Yay!\", \"great!\", \"perfect!\" \\u2192 happy\n   - \"thanks\", \"looks good\", \"that works\" \\u2192 satisfied\n   - \"ok, now let's...\" (continuing without complaint) \\u2192 likely_satisfied\n   - \"that's not right\", \"try again\" \\u2192 dissatisfied\n   - \"this is broken\", \"I give up\" \\u2192 frustrated\n\n3. **friction_counts**: Be specific about what went wrong.\n   - misunderstood_request: Claude interpreted incorrectly\n   - wrong_approach: Right goal, wrong solution method\n   - buggy_code: Code didn't work correctly\n   - user_rejected_action: User said no/stop to a tool call\n   - excessive_changes: Over-engineered or changed too much\n\n4. If very short or just warmup, use warmup_minimal for goal_category\n\nSESSION:\n`"
+        },
+        {
+          "source_range": {
+            "source_file": "src_207151635.js",
+            "source_chunk_offset": 207151635,
+            "source_chunk_bytes": 101275,
+            "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+            "source_binary_offset": 207177380,
+            "source_bytes": 326,
+            "source_sha256": "917d8fceda1b2b94a9b333cdad7281bcd9057eda0a0619c271eb2abaab488947"
+          },
+          "literal_map": [
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude",
+              "runtime_literal": "LingXi",
+              "count": 1
+            },
+            {
+              "source_literal": "Claude Code",
+              "runtime_literal": "LingXi",
+              "count": 1
+            }
+          ],
+          "source_excerpt_utf8": "var pt=`Summarize this portion of a Claude Code session transcript. Focus on:\n1. What the user asked for\n2. What Claude did (tools used, files modified)\n3. Any friction or issues\n4. The outcome\n\nKeep it concise - 3-5 sentences. Preserve specific details like file names, error messages, and user feedback.\n\nTRANSCRIPT CHUNK:\n`"
+        }
+      ],
+      "dynamic_text_policy": "preserve_runtime_values_no_global_brand_rewrite",
+      "findings": []
+    }
+  ],
+  "test_expected_brand_projections": [
+    {
+      "kind": "test-expected-brand-projection",
+      "path": "crates/runtime/src/insights_assets/insights_source_actions.test.mjs",
+      "transform_sha256": "604577e34159150f34cb6bc05f6f72b6d1c11cf2485be587dcde1f000326127d",
+      "source_expectations": [
+        {
+          "source_range": {
+            "source_file": "src_207151635.js",
+            "source_chunk_offset": 207151635,
+            "source_chunk_bytes": 101275,
+            "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+            "source_binary_offset": 207171585,
+            "source_bytes": 1147,
+            "source_sha256": "f8aa5680da24a15a01df10ed8aa4f21b7567f5a347b3d6aa408659cb89436933"
+          },
+          "native_literal": "Claude Code",
+          "runtime_literal": "LingXi",
+          "finding": {
+            "rule": "G1",
+            "needle": "LingXi",
+            "lines": [
+              63
+            ]
+          }
+        },
+        {
+          "source_range": {
+            "source_file": "src_207151635.js",
+            "source_chunk_offset": 207151635,
+            "source_chunk_bytes": 101275,
+            "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+            "source_binary_offset": 207177380,
+            "source_bytes": 326,
+            "source_sha256": "917d8fceda1b2b94a9b333cdad7281bcd9057eda0a0619c271eb2abaab488947"
+          },
+          "native_literal": "Claude Code",
+          "runtime_literal": "LingXi",
+          "finding": {
+            "rule": "G1",
+            "needle": "LingXi",
+            "lines": [
+              72
+            ]
+          }
+        },
+        {
+          "source_range": {
+            "source_file": "src_207151635.js",
+            "source_chunk_offset": 207151635,
+            "source_chunk_bytes": 101275,
+            "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+            "source_binary_offset": 207251649,
+            "source_bytes": 20,
+            "source_sha256": "d88ebf7defa1281e33ee87d53bd80e2fd6a954749d9a4c1ec382830e8eed5c40"
+          },
+          "native_literal": "Claude Code Insights",
+          "runtime_literal": "LingXi Insights",
+          "finding": {
+            "rule": "G1",
+            "needle": "LingXi",
+            "lines": [
+              191
+            ]
+          }
+        }
+      ],
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "lines": [
+            63,
+            72,
+            191
+          ]
+        }
+      ]
+    }
+  ],
+  "integrity_only_assets": [
+    {
+      "kind": "source-exact-runtime-support-asset",
+      "path": "crates/runtime/src/insights_assets/insights_native_aggregate.mjs",
+      "transform_sha256": "d8c2c6f2494512a1bbb763be3ae21cfcc6ae6a28165b7e622e423457de33e220",
+      "source_ranges": [
+        {
+          "source_file": "src_207151635.js",
+          "source_chunk_offset": 207151635,
+          "source_chunk_bytes": 101275,
+          "source_chunk_sha256": "4ca188d26091c3a3e1803c70bbea77b343ccc1574aab7cc435a2b089e04c815b",
+          "source_binary_offset": 207182285,
+          "source_bytes": 6354,
+          "source_sha256": "908b71f6274af461408c166694d4d9c1df2136293af54e45867f71805c113f9b"
+        }
+      ]
+    }
+  ]
+}

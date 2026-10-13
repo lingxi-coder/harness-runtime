@@ -37,7 +37,7 @@ fn task_deliveries_for_messages(
     task_deliveries
         .iter()
         .filter(|(id, _)| retained_ids.contains(id))
-        .map(|(id, delivery)| (id.clone(), delivery.clone()))
+        .map(|(id, delivery)| (*id, delivery.clone()))
         .collect()
 }
 
@@ -305,6 +305,7 @@ impl ForkedAgentRunner {
 
         let mut request = SideQueryRequest {
             model_attempt: None,
+            native_prompt_context: None,
             model,
             profile: cp.tool_use_options.model_profile.clone(),
             // Replay the parent's already-rendered system prompt verbatim;
@@ -313,6 +314,7 @@ impl ForkedAgentRunner {
             // break the byte-identical layout the cache relies on).
             system_prompt: Some(cp.system_prompt.as_ref().clone()),
             system_prompt_input: cp.system_prompt_input.clone(),
+            enable_prompt_caching: true,
             typed_attachment_ids: cp.typed_attachment_ids.clone(),
             task_deliveries,
             messages,
@@ -663,7 +665,7 @@ mod tests {
         let mut restored = lingxi_core::host::NativeRequestHistoryMetadata::default();
         restored
             .task_deliveries
-            .insert(retained_id.clone(), delivery.clone());
+            .insert(retained_id, delivery.clone());
         restored.task_deliveries.insert(stale_id, stale_delivery);
         let restored: lingxi_core::host::NativeRequestHistoryMetadata =
             serde_json::from_value(serde_json::to_value(restored).unwrap()).unwrap();
@@ -678,7 +680,7 @@ mod tests {
             refusal_fallback: None,
         };
         let prefix = vec![
-            ConversationMessage::user(retained_id.clone(), "delivered task row".into()),
+            ConversationMessage::user(retained_id, "delivered task row".into()),
             placeholder,
         ];
         let mut request = request_with(prefix, vec![user_msg("summarize")], None);

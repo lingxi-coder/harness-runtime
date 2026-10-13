@@ -39,19 +39,19 @@ mod tests {
     // Task 6: StreamingToolExecutor::add_tool tests
     // ============================================================================
 
-    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-        StaticMemoryProvider, mock_message_response, noop_hook_executor,
+        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+        MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::test_support_stream::{
         content_block_start_text, content_block_start_tool_use, content_block_stop,
         input_json_delta, message_start, message_stop, text_delta,
     };
+    use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use futures::stream::{self, StreamExt};
-    use lingxi_core::types::{MessageId, utf16_json::Utf16JsonProjection};
+    use lingxi_core::types::{utf16_json::Utf16JsonProjection, MessageId};
 
     use llm_runtime::{HistoryEvent, LlmError};
     use serde_json::json;
@@ -1738,13 +1738,11 @@ mod tests {
         .expect("the async registry finishes its rejected publication path");
 
         assert!(completion_rx.try_recv().is_err());
-        assert!(
-            provider
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty()
-        );
+        assert!(provider
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
 
         assert!(streaming.captured_calls().await.is_empty());
     }
@@ -1790,13 +1788,12 @@ mod tests {
             .await
             .expect("real W1 dispatch and PostToolUse hook finish before provider error")
             .expect("dispatch finish signal");
-        assert!(
-            orch.transcript
-                .pending_hook_attachments
-                .lock()
-                .await
-                .contains_key(id.as_str())
-        );
+        assert!(orch
+            .transcript
+            .pending_hook_attachments
+            .lock()
+            .await
+            .contains_key(id.as_str()));
 
         // This is the provider-error finalizer used by the streaming driver.
         // It must commit Tn-accepted results and their attachments before it
@@ -1825,14 +1822,13 @@ mod tests {
         assert!(lines[0].contains(id.as_str()), "{result}");
         assert_eq!(attachment["attachment"]["type"], "hook_additional_context");
         assert_eq!(attachment["attachment"]["content"][0], "POST-ERROR-CTX");
-        assert!(
-            orch.transcript
-                .pending_hook_attachments
-                .lock()
-                .await
-                .get(id.as_str())
-                .is_none()
-        );
+        assert!(orch
+            .transcript
+            .pending_hook_attachments
+            .lock()
+            .await
+            .get(id.as_str())
+            .is_none());
     }
 
     fn orch_with_safe_and_strict_schema_tool() -> ConversationOrchestrator {
@@ -2151,16 +2147,12 @@ mod tests {
         else {
             panic!("expected error")
         };
-        assert!(
-            content
-                .string_at("")
-                .is_some_and(|text| text.contains("disabled for this session"))
-        );
-        assert!(
-            !content
-                .string_at("")
-                .is_some_and(|text| text.contains("run it from a worker"))
-        );
+        assert!(content
+            .string_at("")
+            .is_some_and(|text| text.contains("disabled for this session")));
+        assert!(!content
+            .string_at("")
+            .is_some_and(|text| text.contains("run it from a worker")));
     }
 
     #[tokio::test]
@@ -2299,11 +2291,8 @@ mod tests {
     #[test]
     fn coordinator_pool_metadata_and_extras_follow_idr() {
         let orch = orch_with_named_tools(&[]);
-        assert!(
-            orch.is_coordinator_pool_tool(&SafeToolNamed::new(
-                "mcp__github__subscribe_pr_activity"
-            ))
-        );
+        assert!(orch
+            .is_coordinator_pool_tool(&SafeToolNamed::new("mcp__github__subscribe_pr_activity")));
         let comms = SafeToolNamed {
             role: Some("comms"),
             ..SafeToolNamed::new("mcp__chat__send")
@@ -2780,11 +2769,10 @@ mod tests {
         entries.sort();
         assert_eq!(entries, vec!["A", "B"]);
         exec.sync_statuses().await;
-        assert!(
-            exec.tools
-                .iter()
-                .all(|tool| tool.status == ToolStatus::Executing)
-        );
+        assert!(exec
+            .tools
+            .iter()
+            .all(|tool| tool.status == ToolStatus::Executing));
 
         release_actor_call(&mut releases, "A").await;
         release_actor_call(&mut releases, "B").await;
@@ -2882,11 +2870,9 @@ mod tests {
         add_actor_queue_call(&mut exec, "B", true, true, assistant).await;
         add_actor_queue_call(&mut exec, "C", true, true, assistant).await;
         exec.sync_statuses().await;
-        assert!(
-            exec.tools[1..]
-                .iter()
-                .all(|tool| tool.status == ToolStatus::Queued)
-        );
+        assert!(exec.tools[1..]
+            .iter()
+            .all(|tool| tool.status == ToolStatus::Queued));
 
         release_actor_call(&mut releases, "A").await;
         let mut entries = vec![
@@ -2905,7 +2891,7 @@ mod tests {
     // ============================================================================
 
     use lingxi_core::host::tool_use_lifecycle::{
-        DEFAULT_MAX_TOOL_USE_CONCURRENCY, max_tool_use_concurrency, max_tool_use_concurrency_from,
+        max_tool_use_concurrency, max_tool_use_concurrency_from, DEFAULT_MAX_TOOL_USE_CONCURRENCY,
     };
 
     /// Binary `r1p`: `parseInt(env, 10) > 0 ? env : 10`.
@@ -3306,8 +3292,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_model_error_keeps_finished_results_and_synthesizes_unmatched_without_queueing()
-     {
+    async fn terminal_model_error_keeps_finished_results_and_synthesizes_unmatched_without_queueing(
+    ) {
         let (orch, mut started, mut releases) = actor_queue_orch(&["executing-at-error"]);
         let mut exec = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
             .await
@@ -3901,11 +3887,9 @@ mod tests {
             Some(REJECT_MESSAGE),
             "in-flight Cancel tool must get the bare REJECT_MESSAGE on user interrupt"
         );
-        assert!(
-            !content
-                .string_at("")
-                .is_some_and(|text| text.contains("cancel-tool-ran-to-end"))
-        );
+        assert!(!content
+            .string_at("")
+            .is_some_and(|text| text.contains("cancel-tool-ran-to-end")));
 
         let drained = exec.take_newly_completed();
         assert_eq!(drained.len(), 1);
@@ -4218,7 +4202,7 @@ mod tests {
         let mut config = OrchestratorConfig::default();
         config.server_fallback_regular_available_models = Some(
             lingxi_core::types::utf16_json::Utf16JsonProjection::array(vec![
-                "requested-model".into(),
+                "requested-model".into()
             ])
             .unwrap(),
         );
@@ -5692,30 +5676,24 @@ mod tests {
             )),
             "a detached generation cannot publish a late ToolResult"
         );
-        assert!(
-            !orch
-                .transcript
-                .tool_use_results
-                .lock()
-                .await
-                .contains_key(old_id.as_str())
-        );
-        assert!(
-            !orch
-                .transcript
-                .tool_use_mcp_meta
-                .lock()
-                .await
-                .contains_key(old_id.as_str())
-        );
-        assert!(
-            !orch
-                .transcript
-                .pending_tool_result_turn_end
-                .lock()
-                .await
-                .contains_key(old_id.as_str())
-        );
+        assert!(!orch
+            .transcript
+            .tool_use_results
+            .lock()
+            .await
+            .contains_key(old_id.as_str()));
+        assert!(!orch
+            .transcript
+            .tool_use_mcp_meta
+            .lock()
+            .await
+            .contains_key(old_id.as_str()));
+        assert!(!orch
+            .transcript
+            .pending_tool_result_turn_end
+            .lock()
+            .await
+            .contains_key(old_id.as_str()));
 
         assert_eq!(
             orch.session.lock().await.history.len(),
@@ -5833,30 +5811,24 @@ mod tests {
             )),
             "a Drop-only old generation cannot publish ToolResult"
         );
-        assert!(
-            !orch
-                .transcript
-                .tool_use_results
-                .lock()
-                .await
-                .contains_key(tool_id.as_str())
-        );
-        assert!(
-            !orch
-                .transcript
-                .tool_use_mcp_meta
-                .lock()
-                .await
-                .contains_key(tool_id.as_str())
-        );
-        assert!(
-            !orch
-                .transcript
-                .pending_tool_result_turn_end
-                .lock()
-                .await
-                .contains_key(tool_id.as_str())
-        );
+        assert!(!orch
+            .transcript
+            .tool_use_results
+            .lock()
+            .await
+            .contains_key(tool_id.as_str()));
+        assert!(!orch
+            .transcript
+            .tool_use_mcp_meta
+            .lock()
+            .await
+            .contains_key(tool_id.as_str()));
+        assert!(!orch
+            .transcript
+            .pending_tool_result_turn_end
+            .lock()
+            .await
+            .contains_key(tool_id.as_str()));
 
         assert_eq!(
             orch.session.lock().await.history.len(),
@@ -6593,15 +6565,13 @@ mod tests {
             0,
             "Drop cannot publish a late ToolResult"
         );
-        assert!(
-            !fixture
-                .orch
-                .transcript
-                .tool_use_results
-                .lock()
-                .await
-                .contains_key(tool_id.as_str())
-        );
+        assert!(!fixture
+            .orch
+            .transcript
+            .tool_use_results
+            .lock()
+            .await
+            .contains_key(tool_id.as_str()));
 
         assert_eq!(
             fixture.orch.session.lock().await.history.len(),
@@ -6654,12 +6624,10 @@ mod tests {
         .expect("the actor remains usable after a generation reset");
         assert_eq!(removal.ids, vec![tool_id.clone()]);
         assert!(executor.tools.is_empty());
-        assert!(
-            fixture
-                .sink
-                .future_dropped
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert!(fixture
+            .sink
+            .future_dropped
+            .load(std::sync::atomic::Ordering::SeqCst));
 
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -6694,15 +6662,13 @@ mod tests {
             0,
             "reset fences the old result frame"
         );
-        assert!(
-            !fixture
-                .orch
-                .transcript
-                .tool_use_results
-                .lock()
-                .await
-                .contains_key(tool_id.as_str())
-        );
+        assert!(!fixture
+            .orch
+            .transcript
+            .tool_use_results
+            .lock()
+            .await
+            .contains_key(tool_id.as_str()));
 
         assert_eq!(
             fixture.orch.session.lock().await.history.len(),

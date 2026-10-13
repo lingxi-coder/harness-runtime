@@ -2583,6 +2583,8 @@ pub struct DesktopRuntime {
     /// on. The CLI `/add-dir` effect calls `add_trusted_dir(...)` on it so a
     /// directory added mid-session is immediately accessible to
     /// Read/Edit/Write/Glob/Grep/NotebookEdit without a reboot.
+    /// Local policy verdict captured at assembly for the strict Insights gate.
+    pub native_insights_policy_gate: Option<bool>,
     pub session_cwd: Arc<SessionCwd>,
     /// (P1-08 runtime `/add-dir`) The live MCP registry. The CLI `/add-dir`
     /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so
@@ -4190,6 +4192,29 @@ async fn build_agent_mcp_tool_set(
     }
 }
 
+/// Fold an admitted source projection into the Native QO bool view. Any
+/// array, including an empty one, is true; later source layers replace a key.
+fn merge_enabled_plugins_source(merged: &mut BTreeMap<String, bool>, source: &Utf16JsonProjection) {
+    let Some(entries) = source
+        .get_property("enabledPlugins")
+        .and_then(|value| value.object_entries())
+    else {
+        return;
+    };
+    for entry in entries {
+        let Ok(plugin_id) = String::from_utf16(entry.code_units) else {
+            continue;
+        };
+        let active = entry
+            .value
+            .as_bool()
+            .or_else(|| entry.value.array_len().map(|_| true));
+        if let Some(active) = active {
+            merged.insert(plugin_id, active);
+        }
+    }
+}
+
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
 /// enabled). Ambient user/project roots are optional; restricted sessions pass
 /// `include_ambient = false` and therefore receive only explicit flagSettings
@@ -4221,17 +4246,11 @@ async fn load_enabled_plugins(
             let Ok(raw) = tokio::fs::read_to_string(&path).await else {
                 continue;
             };
-            let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            let Ok(source) = Utf16JsonProjection::parse(&raw) else {
                 tracing::warn!(path = %path.display(), "skipping malformed settings.json for enabledPlugins");
                 continue;
             };
-            if let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) {
-                for (k, v) in map {
-                    if let Some(b) = v.as_bool() {
-                        merged.insert(k.clone(), b);
-                    }
-                }
-            }
+            merge_enabled_plugins_source(&mut merged, &source);
         }
     }
     // Explicit `--settings` is trusted even when ambient settings are
@@ -4239,8 +4258,9 @@ async fn load_enabled_plugins(
     // managed policy, matching the canonical settings tier order.
     if let Some(settings) = flag_settings {
         if let Some(enabled) = settings.enabled_plugins.as_ref() {
-            for (plugin, active) in enabled {
-                if let Some(active) = active.as_bool() {
+            for (plugin, value) in enabled {
+                let active = value.as_bool().or_else(|| value.is_array().then_some(true));
+                if let Some(active) = active {
                     merged.insert(plugin.clone(), active);
                 }
             }
@@ -4251,14 +4271,8 @@ async fn load_enabled_plugins(
     // disabled all ambient file settings.
     if !managed_snapshot.read_failed() {
         if let Some(raw) = managed_snapshot.effective_json() {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) {
-                    for (k, v) in map {
-                        if let Some(b) = v.as_bool() {
-                            merged.insert(k.clone(), b);
-                        }
-                    }
-                }
+            if let Ok(source) = Utf16JsonProjection::parse(&raw) {
+                merge_enabled_plugins_source(&mut merged, &source);
             }
         }
     }
@@ -4477,6 +4491,55 @@ mod managed_mod_seat_tests {
 
 /// Read the managed-only blocked marketplace policy (`blockedMarketplaces`),
 /// last-write-wins across the managed tiers.
+#[cfg(test)]
+mod enabled_plugins_projection_tests {
+    use super::merge_enabled_plugins_source;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn later_array_and_boolean_values_replace_prior_tiers_and_empty_array_is_on() {
+        let mut enabled = BTreeMap::new();
+        let lower = Utf16JsonProjection::parse(
+            r#"{"enabledPlugins":{"empty@mkt":[],"range@mkt":["not-a-version-range"],"array_then_bool@mkt":["1"],"bool_then_array@mkt":false,"false@mkt":false}}"#,
+        )
+        .unwrap();
+        let later = Utf16JsonProjection::parse(
+            r#"{"enabledPlugins":{"array_then_bool@mkt":false,"bool_then_array@mkt":[],"false@mkt":false}}"#,
+        )
+        .unwrap();
+
+        merge_enabled_plugins_source(&mut enabled, &lower);
+        merge_enabled_plugins_source(&mut enabled, &later);
+
+        assert_eq!(enabled.get("empty@mkt"), Some(&true));
+        assert_eq!(enabled.get("range@mkt"), Some(&true));
+        assert_eq!(enabled.get("array_then_bool@mkt"), Some(&false));
+        assert_eq!(enabled.get("bool_then_array@mkt"), Some(&true));
+        assert_eq!(enabled.get("false@mkt"), Some(&false));
+        assert!(!enabled.contains_key("missing@mkt"));
+    }
+
+    #[test]
+    fn array_source_keeps_exact_utf16_members_while_projection_enables_it() {
+        let source =
+            Utf16JsonProjection::parse(r#"{"enabledPlugins":{"surrogate@mkt":["\ud800"]}}"#)
+                .unwrap();
+        let mut enabled = BTreeMap::new();
+        merge_enabled_plugins_source(&mut enabled, &source);
+
+        assert_eq!(enabled.get("surrogate@mkt"), Some(&true));
+        let raw_member = source
+            .get_property("enabledPlugins")
+            .unwrap()
+            .get_property("surrogate@mkt")
+            .unwrap()
+            .get_index(0)
+            .unwrap();
+        assert_eq!(raw_member.code_units(), Some(&[0xd800][..]));
+    }
+}
+
 fn load_blocked_marketplaces(
     managed_snapshot: &settings_watch::ManagedSettingsSnapshot,
 ) -> std::collections::HashSet<String> {
@@ -6137,8 +6200,6 @@ use permission_config::current_uid;
 use permission_config::current_uid;
 use permission_config::expand_trusted_dir;
 use permission_config::lingxi_temp_dir;
-#[cfg(test)]
-use permission_config::load_boot_permission_tiers_with_flag;
 use permission_config::load_boot_permission_tiers_with_policy_snapshot;
 use permission_config::managed_force_login_org_pin;
 pub use permission_config::managed_model_allowlist;
@@ -6172,6 +6233,3 @@ use fusion_services::publish_fusion_catalog_credential_to;
 use orchestrator::{QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK};
 #[cfg(test)]
 use permission_config::fold_managed_otel_env_overrides;
-
-#[cfg(test)]
-use permission_config::load_boot_permission_tiers;

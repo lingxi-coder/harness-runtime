@@ -1,0 +1,11 @@
+// Extracted source closure for 2.1.295; source module src_188480784.js sha256 17865893ccfd03e6d45b4c586b871fd1b4303689d726af2a76247999da8338f1
+import { ln } from "./src_188479944.mjs";
+import { zr, xH, yIr } from "./src_186056234.mjs";
+import { gHt, drn, lTo, RWn, ARr, crn } from "./src_188159463.mjs";
+function A4e(e){return e.slice(0,500).replace(/https?:\/\/\S+/gi,"<url>").replace(/\b[\w.+-]+@[\w.-]+\.\w{2,}\b/g,"<email>").replace(/\b(?:sk-ant|sk|pk|ghp|gho|ghs|ghu|github_pat|xox[bpoars])[-_][\w-]{8,}\b/gi,"<key>").replace(/[A-Za-z]:\\[^\s"']*/g,"<path>").replace(/\\\\[^\s"']+/g,"<path>").replace(/(?:[^\s"'\\]+\\){2,}[^\s"']+/g,"<path>").replace(/(?:\/[^\s"':]+){2,}/g,"<path>").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,"<id>").replace(/\breq_[A-Za-z0-9_-]{12,}/g,"<id>").replace(/\b[0-9a-fA-F]{16,}\b/g,"<id>").replace(/\b[A-Za-z0-9+/]{32,}={0,2}/g,"<b64>").replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g,"<ip>").replace(/\b\d{4,}\b/g,"<num>")}
+var p=4000;
+function v(e,n=5){let t=[],o;for(let R of e.slice(0,p).split(`
+`)){let i=R.trim();if(!i.startsWith("at "))continue;let d=i.slice(3),s=d.indexOf(" (");if(o===void 0){let f=s!==-1?d.slice(s+2,-1):d;if(/^(?:node|bun|internal):/.test(f))o=f;else{let E=f.match(/([^/\\]+:\d+:\d+)\)?$/);if(E)o=E[1]}}let u=s!==-1?d.slice(0,s):d;if(u=u.replace(/^async\s+/,"").replace(/^new\s+/,""),u.includes("/")||u.includes("\\")||/:\d/.test(u))continue;if(u)t.push(u);if(t.length>=n)break}return{names:t,topFrame:o}}
+function N(e){try{return String(e)}catch{return"[unstringifiable]"}}
+function qu(e){try{let n=N(e instanceof Error?e.message:e),t={error_message_hash:ln(A4e(n))},o=zr(e);if(o!==void 0)t.error_code=o;if(!(e instanceof Error))return t;let R=xH(e.constructor?.name);if(R!==void 0)t.error_constructor=R;let i=e.stack;if(typeof i!=="string")return t;let d={name:e.name,message:e.message,stack:i},s=gHt(d),u=s.length<i.length&&i.endsWith(s),{names:f,topFrame:E}=v(s);if(f.length>0)t.error_stack_hash=ln(f.join("|"));let h=i.length-s.length,g=i.slice(0,h+p),[l]=u?drn({...d,stack:g},1):[];if(l!==void 0){let m=lTo(l)?l.file:RWn(l)?ARr(l.file):void 0,_=yIr(m===void 0?crn:`${m}:${l.line}:${l.column}`),b=m!==void 0&&yIr(E??"")!==_;if(_!==void 0&&!b)t.error_top_frame=_}return t}catch{return{}}}
+export { qu as qu };

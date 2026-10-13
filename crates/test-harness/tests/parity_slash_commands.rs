@@ -15,8 +15,8 @@ use command_api::builtin_support::names::{
     BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES, CORRECT_BY_DESIGN_STUBS, HOST_BOUND_DEFERRED_GAPS,
 };
 use command_api::builtins::{
-    register_all_builtin_commands, register_bundled_skills, register_core_batch_1, register_core_batch_2,
-    register_core_batch_4, register_core_batch_5, register_core_batch_8,
+    register_all_builtin_commands, register_bundled_skills, register_core_batch_1,
+    register_core_batch_2, register_core_batch_4, register_core_batch_5, register_core_batch_8,
 };
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;

@@ -4142,7 +4142,7 @@ mod tests {
         let unset = body_after_inject(&adapter, &request).await;
         assert_eq!(
             unset.as_json_source(),
-            r#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"max_tokens":4096}"#,
+            r#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[],"max_tokens":4096}"#,
             "unset extra body retains the Native main-template source"
         );
 

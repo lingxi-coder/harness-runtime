@@ -28,6 +28,16 @@ pub enum SlashDispatchResult {
         /// The exact source projection of the expanded prompt to submit as the user turn.
         prompt: Utf16JsonProjection,
     },
+    /// A directory Skill whose Native ingress is a command row followed by
+    /// an expanded body companion and ordered hook-produced history rows.
+    RunSkillAsTurn {
+        /// Exact `<command-message>` / `<command-name>` command header.
+        command: Utf16JsonProjection,
+        /// Exact base-directory prefix and expanded Skill body.
+        body: Utf16JsonProjection,
+        /// Ordered Native history rows emitted by UserPromptExpansion hooks.
+        hook_messages: Vec<Utf16JsonProjection>,
+    },
     /// Input did not start with `/` — treat as a regular user prompt.
     NotASlashCommand,
     /// Input started with `/` but the parser could not extract a command name.

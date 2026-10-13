@@ -2,6 +2,7 @@
 //! The host owns lifecycle and persistence; shipped JS owns classification,
 //! Unicode truncation and secret redaction. Provider I/O stays in sidequery.
 use super::*;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{json, Value};
 
 #[path = "prompt_suggestion_background_state.rs"]
@@ -14,6 +15,55 @@ mod javascript;
 #[path = "prompt_suggestion_background_model.rs"]
 mod model_selection;
 use javascript::evaluate;
+
+fn null_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("null").expect("null is valid JSON")
+}
+
+fn object_projection(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(fields).expect("classifier result fields form a JSON object")
+}
+
+fn projection_from_value(value: serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value)
+        .expect("classifier control JSON is representable as a UTF-16 projection")
+}
+
+fn projection_member_or_default(
+    value: Option<&Utf16JsonProjection>,
+    pointer: &str,
+    default: Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    value
+        .and_then(|value| value.subprojection(pointer).ok())
+        .unwrap_or(default)
+}
+
+fn read_projection_bytes(bytes: &[u8]) -> Option<Utf16JsonProjection> {
+    let json = std::str::from_utf8(bytes).ok()?;
+    Utf16JsonProjection::parse(json).ok()
+}
+
+async fn read_projection_file(path: &std::path::Path) -> Option<Utf16JsonProjection> {
+    let bytes = tokio::fs::read(path).await.ok()?;
+    read_projection_bytes(&bytes)
+}
+
+fn read_projection_file_sync(path: &std::path::Path) -> Option<Utf16JsonProjection> {
+    let bytes = std::fs::read(path).ok()?;
+    read_projection_bytes(&bytes)
+}
+
+fn projection_options_match(
+    left: Option<&Utf16JsonProjection>,
+    right: Option<&Utf16JsonProjection>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.semantically_eq(right),
+        _ => false,
+    }
+}
 
 impl ConversationOrchestrator {
     fn background_suggestion_state(&self) -> std::sync::MutexGuard<'_, BackgroundSuggestionState> {
@@ -66,10 +116,7 @@ impl ConversationOrchestrator {
             )
         };
         let saved = if let Some(path) = self.background_suggestion_path(&session_id) {
-            tokio::fs::read(path)
-                .await
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            read_projection_file(&path).await
         } else {
             None
         };
@@ -86,21 +133,19 @@ impl ConversationOrchestrator {
                 state.session_id = session_id.clone();
                 state.previous_state_since_ms = saved
                     .as_ref()
-                    .and_then(|value| value.get("updatedAt"))
-                    .and_then(Value::as_str)
+                    .and_then(|value| value.string_at("/updatedAt"))
                     .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
                     .map(|value| value.timestamp_millis())
                     .unwrap_or(now);
                 state.previous_state = saved
                     .as_ref()
-                    .and_then(|value| value.get("state"))
-                    .and_then(Value::as_str)
+                    .and_then(|value| value.string_at("/state"))
                     .unwrap_or("working")
                     .into();
                 state.persisted = saved.clone();
             }
             if let Some(saved) = &saved {
-                if let Some(saved_state) = saved.get("state").and_then(Value::as_str) {
+                if let Some(saved_state) = saved.string_at("/state") {
                     let terminal = matches!(saved_state, "done" | "failed" | "stopped");
                     if terminal || saved_state != state.previous_state {
                         state.previous_state = if terminal {
@@ -109,8 +154,7 @@ impl ConversationOrchestrator {
                             saved_state.into()
                         };
                         state.previous_state_since_ms = saved
-                            .get("updatedAt")
-                            .and_then(Value::as_str)
+                            .string_at("/updatedAt")
                             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
                             .map(|value| value.timestamp_millis())
                             .unwrap_or(now);
@@ -137,14 +181,8 @@ impl ConversationOrchestrator {
             json!({"type":"assistant","message":{"content":content},"isApiErrorMessage":self.is_prompt_suggestion_api_error(&message.id())})
         }).collect::<Vec<_>>();
         let assembled = evaluate("assemble", json!({"messages":messages,"lastCount":start}))?;
-        let text = assembled
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let tools = assembled
-            .get("tools")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let text = assembled.string_at("/text").unwrap_or_default();
+        let tools = assembled.string_at("/tools").unwrap_or_default();
         let latest_ask = history
             .iter()
             .rev()
@@ -165,28 +203,55 @@ impl ConversationOrchestrator {
             "prepare",
             json!({"text":text,"previous":previous,"latestAsk":latest_ask,"tools":tools,"minutes":mins}),
         )?;
-        let no_text_result = if prepared.get("hasText").and_then(Value::as_bool) == Some(false)
+        let no_text_result = if prepared
+            .at_pointer("/hasText")
+            .and_then(|value| value.as_bool())
+            == Some(false)
             && count > start
         {
             let previous_state = saved
                 .as_ref()
-                .and_then(|value| value.get("state"))
-                .and_then(Value::as_str)
-                .unwrap_or(&previous);
-            Some(
-                json!({"state": previous_state, "tempo": if previous_state == "blocked" {"blocked"} else {"idle"}, "detail": saved.as_ref().and_then(|value| value.get("detail")).cloned().unwrap_or(json!("")), "needs": saved.as_ref().and_then(|value| value.get("needs")).cloned(), "output":{}}),
-            )
+                .and_then(|value| value.string_at("/state"))
+                .unwrap_or(&previous)
+                .to_owned();
+            Some(object_projection(vec![
+                (
+                    "state".into(),
+                    Utf16JsonProjection::from(previous_state.as_str()),
+                ),
+                (
+                    "tempo".into(),
+                    Utf16JsonProjection::from(if previous_state == "blocked" {
+                        "blocked"
+                    } else {
+                        "idle"
+                    }),
+                ),
+                (
+                    "detail".into(),
+                    projection_member_or_default(
+                        saved.as_ref(),
+                        "/detail",
+                        Utf16JsonProjection::from(""),
+                    ),
+                ),
+                (
+                    "needs".into(),
+                    projection_member_or_default(saved.as_ref(), "/needs", null_projection()),
+                ),
+                ("output".into(), projection_from_value(json!({}))),
+            ]))
         } else {
             None
         };
         let mut result = no_text_result.or_else(|| {
             prepared
-                .get("result")
+                .at_pointer("/result")
                 .filter(|value| !value.is_null())
-                .cloned()
+                .and_then(|_| prepared.subprojection("/result").ok())
         });
         if result.is_none() && heuristic_only {
-            result = prepared.get("fallback").cloned();
+            result = prepared.subprojection("/fallback").ok();
         }
         if result.is_none() {
             let config = telemetry::feature_flags::flag_value(
@@ -218,10 +283,7 @@ impl ConversationOrchestrator {
                 });
             }
             if let Some(runner) = &self.recap_runner {
-                let base_prompt = prepared
-                    .get("prompt")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let base_prompt = prepared.string_at("/prompt").unwrap_or_default();
                 for attempt in 0..2 {
                     let prompt = if attempt == 0 {
                         base_prompt.to_owned()
@@ -232,12 +294,14 @@ impl ConversationOrchestrator {
                     };
                     let request = sidequery::SideQueryRequest {
                         model_attempt: None,
+                        native_prompt_context: None,
                         model: query_model.clone(),
                         profile: query_profile.clone(),
                         system_prompt: None,
                         typed_attachment_ids: std::collections::HashSet::new(),
                         task_deliveries: std::collections::HashMap::new(),
                         system_prompt_input: None,
+                        enable_prompt_caching: false,
                         messages: vec![ConversationMessage::user(MessageId::new(), prompt)],
                         tools: Vec::new(),
                         tool_choice: None,
@@ -264,83 +328,85 @@ impl ConversationOrchestrator {
                     let Some(response_text) = response.text else {
                         continue;
                     };
-                    result = evaluate("parse", json!({"text":response_text,"previous":previous}))
-                        .filter(|value| !value.is_null());
+                    result = javascript::evaluate_parse_projection(response_text, &previous)
+                        .ok()
+                        .filter(|value| value.at_pointer("").is_some_and(|root| !root.is_null()));
                     if result.is_some() {
                         break;
                     }
                 }
             }
             if result.is_none() {
-                result = prepared.get("fallback").cloned();
+                result = prepared.subprojection("/fallback").ok();
             }
         }
         if cancel.is_cancelled() {
             return None;
         }
         let mut result = result?;
-        if result.get("state").and_then(Value::as_str) == Some("working")
-            && result.get("tempo").and_then(Value::as_str) == Some("active")
+        if result.string_at("/state") == Some("working")
+            && result.string_at("/tempo") == Some("active")
         {
-            result["tempo"] = json!("idle");
+            result
+                .set_field("tempo", Utf16JsonProjection::from("idle"))
+                .ok()?;
         }
         // Reload at placement boundary: a structured permission may have
         // superseded the classifier while its provider call was in flight.
         let current = if let Some(path) = self.background_suggestion_path(&session_id) {
-            tokio::fs::read(path)
-                .await
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            read_projection_file(&path).await
         } else {
             None
         };
         let terminal = matches!(
-            result.get("state").and_then(Value::as_str),
+            result.string_at("/state"),
             Some("done" | "failed" | "stopped")
         );
         let preserve_block = !terminal
             && current.as_ref().is_some_and(|value| {
-                value.get("tempo").and_then(Value::as_str) == Some("blocked")
-                    && value.get("updatedAt")
-                        != saved.as_ref().and_then(|value| value.get("updatedAt"))
+                value.string_at("/tempo") == Some("blocked")
+                    && value.string_at("/updatedAt")
+                        != saved
+                            .as_ref()
+                            .and_then(|value| value.string_at("/updatedAt"))
             });
         let context_result = result.clone();
         if preserve_block {
             if let Some(current) = &current {
-                result["tempo"] = json!("blocked");
+                result
+                    .set_field("tempo", Utf16JsonProjection::from("blocked"))
+                    .ok()?;
                 for key in ["needs", "block"] {
-                    if let Some(value) = current.get(key) {
-                        result[key] = value.clone();
+                    if current.get_property(key).is_some() {
+                        let value = current.subprojection(&format!("/{key}")).ok()?;
+                        result.set_field(key, value).ok()?;
                     }
                 }
             }
         }
-        result["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
+        result
+            .set_field(
+                "updatedAt",
+                Utf16JsonProjection::from(chrono::Utc::now().to_rfc3339()),
+            )
+            .ok()?;
         let context = {
             let mut state = self.background_suggestion_state();
             if state.session_id != session_id || state.epoch != epoch {
                 return None;
             }
-            let new_state = result
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("working");
+            let new_state = result.string_at("/state").unwrap_or("working");
             if state.previous_state != new_state {
                 state.previous_state = new_state.into();
                 state.previous_state_since_ms = now;
             }
             state.last_message_count = count;
-            state.last_result = (context_result.get("tempo").and_then(Value::as_str)
-                == Some("blocked")
-                && result.get("block").is_none_or(Value::is_null))
-            .then(|| BackgroundSuggestionContext {
-                session_id: session_id.clone(),
+            state.last_result = BackgroundSuggestionContext::from_blocked_classifier(
+                session_id.clone(),
                 epoch,
-                needs: context_result
-                    .get("needs")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            });
+                &context_result,
+                &result,
+            );
             state.persisted = Some(result.clone());
             state.eligible_context()
         };
@@ -359,17 +425,15 @@ impl ConversationOrchestrator {
         text: &str,
         context: &BackgroundSuggestionContext,
     ) {
-        if evaluate("safeReply", json!({"text":text})).and_then(|value| value.as_bool())
+        if evaluate("safeReply", json!({"text":text}))
+            .and_then(|value| value.at_pointer("").and_then(|root| root.as_bool()))
             != Some(true)
         {
             return;
         }
         let path = self.background_suggestion_path(&context.session_id);
         let disk_state = if let Some(path) = &path {
-            tokio::fs::read(path)
-                .await
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            read_projection_file(path).await
         } else {
             None
         };
@@ -403,8 +467,8 @@ impl ConversationOrchestrator {
         &self,
         session_id: &str,
         epoch: u64,
-        value: &Value,
-        expected: Option<&Value>,
+        value: &Utf16JsonProjection,
+        expected: Option<&Utf16JsonProjection>,
     ) -> bool {
         let Some(path) = self.background_suggestion_path(session_id) else {
             return true;
@@ -416,10 +480,13 @@ impl ConversationOrchestrator {
             return false;
         }
         let temporary = parent.join(format!(".{session_id}.{}.tmp", uuid::Uuid::new_v4()));
-        let Ok(bytes) = serde_json::to_vec(value) else {
+        let Ok(bytes) = value.to_json_string() else {
             return false;
         };
-        if tokio::fs::write(&temporary, bytes).await.is_err() {
+        if tokio::fs::write(&temporary, bytes.as_bytes())
+            .await
+            .is_err()
+        {
             return false;
         }
         let published = {
@@ -427,10 +494,9 @@ impl ConversationOrchestrator {
             if state.epoch != epoch || state.session_id != session_id {
                 false
             } else {
-                let current = std::fs::read(&path)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-                current.as_ref() == expected && std::fs::rename(&temporary, &path).is_ok()
+                let current = read_projection_file_sync(&path);
+                projection_options_match(current.as_ref(), expected)
+                    && std::fs::rename(&temporary, &path).is_ok()
             }
         };
         if !published {

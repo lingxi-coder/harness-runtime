@@ -62,6 +62,8 @@ baseline 会移动那些行号，下一次扫描又会得到不同的自我引�
 两次（一次是本门自身的测试文件），下一个人不该再摔第三次。
 """
 import argparse
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -352,8 +354,50 @@ SELF_ARTIFACTS = frozenset({
     "scripts/checks/check_brand_leaks.py",
     "scripts/checks/brand_leak_baseline.txt",
     "scripts/checks/brand_frozen_identities.txt",
+    "scripts/checks/brand_source_provenance.json",
     "crates/test-harness/src/parity/fixtures/accepted_divergences.json",
 })
+
+# Source-preserving Insights worker modules are allowed only when the exact
+# provenance receipt and each transformed module still match their pinned
+# digests. This is intentionally a file-level allowlist, not a directory rule.
+BRAND_SOURCE_PROVENANCE = "scripts/checks/brand_source_provenance.json"
+BRAND_SOURCE_PROVENANCE_SHA256 = (
+    "dcf89590180c4a19c6d5c4ff346cc1182b7cdbc1d4599915feda779acd0bae19"
+)
+NATIVE_295_BINARY_SHA256 = (
+    "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+)
+BRAND_SOURCE_ALLOWANCE_PATHS = frozenset({
+    "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_186220896.mjs",
+    "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_187673145.mjs",
+    "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_188442564.mjs",
+    "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_188544988.mjs",
+    "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_188693222.mjs",
+    "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_191305605.mjs",
+    "crates/runtime/src/insights_assets/metadata-source/native-bundle/src_191362209.mjs",
+})
+BRAND_STATIC_PROJECTION_PATHS = frozenset({
+    "crates/runtime/src/insights_assets/insights_html_worker.mjs",
+    "crates/runtime/src/insights_assets/insights_native_at_glance.mjs",
+    "crates/runtime/src/insights_assets/insights_report_section_prompts.mjs",
+    "crates/runtime/src/insights_assets/insights_source_actions.mjs",
+})
+BRAND_TEST_PROJECTION_PATHS = frozenset({
+    "crates/runtime/src/insights_assets/insights_source_actions.test.mjs",
+})
+BRAND_INTEGRITY_ONLY_PATHS = frozenset({
+    "crates/runtime/src/insights_assets/insights_native_aggregate.mjs",
+})
+BRAND_PROVENANCE_APPROVED_PATHS = frozenset(
+    BRAND_SOURCE_ALLOWANCE_PATHS
+    | BRAND_STATIC_PROJECTION_PATHS
+    | BRAND_TEST_PROJECTION_PATHS
+)
+BRAND_DYNAMIC_REWRITE = re.compile(
+    r"\.replace(?:All)?\s*\([^)]*(?:Claude(?: Code)?|CLAUDE|LingXi|LINGXI)[^)]*\)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 # 每种文件的行注释前导符。G1 只看代码行 —— oracle 出处引用只合法地存在于
 # 注释里。
@@ -682,11 +726,11 @@ def span_is_exempt(line, start, end, literals):
     return False
 
 
-def scan(root, exempt=None):
+def scan(root, exempt=None, paths=None):
     """产出 (rule_id, path, lineno, needle) 四元组的集合。"""
     exempt = exempt or {}
     findings = set()
-    for path in tracked_files(root):
+    for path in tracked_files(root) if paths is None else paths:
         full = os.path.join(root, path)
         try:
             with open(full, encoding="utf-8") as fh:
@@ -761,6 +805,332 @@ def scan(root, exempt=None):
                     findings.add(("G4", path, i, fake.group(1)))
 
     return findings
+
+
+class SourceProvenanceError(ValueError):
+    """A source allowance is missing, stale, or broader than its pinned receipt."""
+
+
+def _sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _validate_sha256(value, context):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise SourceProvenanceError(f"invalid SHA-256 for {context}")
+
+
+def _validate_source_range(source_range, context):
+    if not isinstance(source_range, dict) or set(source_range) != {
+        "source_file", "source_chunk_offset", "source_chunk_bytes",
+        "source_chunk_sha256", "source_binary_offset", "source_bytes", "source_sha256",
+    }:
+        raise SourceProvenanceError(f"invalid Native source range shape for {context}")
+    source_file = source_range["source_file"]
+    match = re.fullmatch(r"src_(\d+)\.js", source_file) if isinstance(source_file, str) else None
+    integer_fields = (
+        "source_chunk_offset", "source_chunk_bytes", "source_binary_offset", "source_bytes"
+    )
+    if not match or any(
+        not isinstance(source_range[field], int) or source_range[field] <= 0
+        for field in integer_fields
+    ):
+        raise SourceProvenanceError(f"invalid Native source range coordinates for {context}")
+    if int(match.group(1)) != source_range["source_chunk_offset"]:
+        raise SourceProvenanceError(f"Native source filename/offset mismatch for {context}")
+    start = source_range["source_binary_offset"]
+    chunk_start = source_range["source_chunk_offset"]
+    chunk_end = chunk_start + source_range["source_chunk_bytes"]
+    if start < chunk_start or start + source_range["source_bytes"] > chunk_end:
+        raise SourceProvenanceError(f"Native source range escapes its source chunk for {context}")
+    for field in ("source_chunk_sha256", "source_sha256"):
+        _validate_sha256(source_range[field], f"{context}.{field}")
+    return source_range
+
+
+def _read_transform_sha256(root, path, expected, context):
+    _validate_sha256(expected, f"{context}.transform_sha256")
+    full_path = os.path.join(root, path)
+    if not os.path.isfile(full_path):
+        raise SourceProvenanceError(f"transformed source module missing: {path}")
+    with open(full_path, "rb") as fh:
+        actual = _sha256(fh.read())
+    if actual != expected:
+        raise SourceProvenanceError(
+            f"transformed source SHA-256 mismatch for {path}: expected {expected}, got {actual}"
+        )
+    return full_path
+
+
+def _findings_from_receipt(path, findings, context, allow_empty):
+    if not isinstance(findings, list) or (not allow_empty and not findings):
+        raise SourceProvenanceError(f"source allowance has no exact scanner findings: {path}")
+    result = set()
+    for finding in findings:
+        if not isinstance(finding, dict) or set(finding) != {"rule", "needle", "lines"}:
+            raise SourceProvenanceError(f"invalid scanner finding receipt for {context}")
+        rule, needle, lines = finding["rule"], finding["needle"], finding["lines"]
+        if rule == "G1" and needle not in FULL_NEEDLES:
+            raise SourceProvenanceError(f"unrecognized G1 allowance needle for {path}: {needle!r}")
+        if rule == "G3" and needle not in {label for _, label, _ in L1_ALL_COMPILED}:
+            raise SourceProvenanceError(f"unrecognized G3 allowance needle for {path}: {needle!r}")
+        if rule == "G7" and needle not in ARRIVING_PLUGIN_NEEDLES:
+            raise SourceProvenanceError(f"unrecognized G7 allowance needle for {path}: {needle!r}")
+        if rule not in {"G1", "G3", "G7"}:
+            raise SourceProvenanceError(f"unrecognized source allowance rule for {path}: {rule!r}")
+        if (not isinstance(lines, list) or not lines
+                or any(not isinstance(line, int) or line <= 0 for line in lines)
+                or lines != sorted(set(lines))):
+            raise SourceProvenanceError(f"invalid line list for {rule} {path} {needle!r}")
+        for line in lines:
+            key = (rule, path, line, needle)
+            if key in result:
+                raise SourceProvenanceError(f"duplicate scanner finding receipt: {key}")
+            result.add(key)
+    return result
+
+
+def _validate_literal_projections(path, projections, target_text):
+    if not isinstance(projections, list) or not projections:
+        raise SourceProvenanceError(f"static brand projection has no literal map: {path}")
+    for projection in projections:
+        if not isinstance(projection, dict) or set(projection) != {
+            "source_range", "source_excerpt_utf8", "literal_map",
+        }:
+            raise SourceProvenanceError(f"invalid static literal projection for {path}")
+        source_range = _validate_source_range(projection["source_range"], path)
+        excerpt = projection["source_excerpt_utf8"]
+        if not isinstance(excerpt, str):
+            raise SourceProvenanceError(f"Native source excerpt is not UTF-8 text for {path}")
+        try:
+            excerpt_bytes = excerpt.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise SourceProvenanceError(f"Native source excerpt is not valid UTF-8 for {path}") from exc
+        if (len(excerpt_bytes) != source_range["source_bytes"]
+                or _sha256(excerpt_bytes) != source_range["source_sha256"]):
+            raise SourceProvenanceError(
+                f"Native source excerpt does not match its pinned byte range for {path}"
+            )
+        literal_map = projection["literal_map"]
+        if not isinstance(literal_map, list) or not literal_map:
+            raise SourceProvenanceError(f"empty static literal map for {path}")
+        for item in literal_map:
+            if not isinstance(item, dict) or set(item) != {"source_literal", "runtime_literal", "count"}:
+                raise SourceProvenanceError(f"invalid literal mapping for {path}")
+            if (not isinstance(item["source_literal"], str) or not item["source_literal"]
+                    or not isinstance(item["runtime_literal"], str) or not item["runtime_literal"]
+                    or not isinstance(item["count"], int) or item["count"] <= 0):
+                raise SourceProvenanceError(f"invalid literal mapping values for {path}")
+            if excerpt.count(item["source_literal"]) < item["count"]:
+                raise SourceProvenanceError(
+                    f"source literal is absent from its pinned Native range for {path}: "
+                    f"{item['source_literal']!r}"
+                )
+            if target_text.count(item["runtime_literal"]) < item["count"]:
+                raise SourceProvenanceError(
+                    f"runtime literal is absent from its pinned projection for {path}: "
+                    f"{item['runtime_literal']!r}"
+                )
+
+
+def _validate_no_dynamic_brand_rewrite(path, source_text):
+    if BRAND_DYNAMIC_REWRITE.search(source_text):
+        raise SourceProvenanceError(f"dynamic brand rewrite found in {path}")
+
+
+def load_source_allowances(root, provenance_path=None, expected_manifest_sha256=None,
+                           approved_paths=None, approved_static_paths=None,
+                           approved_test_paths=None, approved_integrity_paths=None):
+    """Validate Native sources, reviewed literal projections, and target hashes.
+
+    Native source SHA values are sealed in this checker-pinned receipt. Every
+    transformed file is independently hashed. The static projection kind has
+    an explicit literal map and a no-dynamic-rewrite policy; test expectations
+    are separate and cite the production source literals they assert.
+    """
+    provenance_path = provenance_path or os.path.join(root, BRAND_SOURCE_PROVENANCE)
+    expected_manifest_sha256 = (
+        BRAND_SOURCE_PROVENANCE_SHA256
+        if expected_manifest_sha256 is None else expected_manifest_sha256
+    )
+    approved_paths = BRAND_SOURCE_ALLOWANCE_PATHS if approved_paths is None else approved_paths
+    approved_static_paths = (
+        BRAND_STATIC_PROJECTION_PATHS
+        if approved_static_paths is None else approved_static_paths
+    )
+    approved_test_paths = (
+        BRAND_TEST_PROJECTION_PATHS if approved_test_paths is None else approved_test_paths
+    )
+    approved_integrity_paths = (
+        BRAND_INTEGRITY_ONLY_PATHS
+        if approved_integrity_paths is None else approved_integrity_paths
+    )
+    if not os.path.isfile(provenance_path):
+        raise SourceProvenanceError(f"source provenance manifest missing: {provenance_path}")
+    with open(provenance_path, "rb") as fh:
+        raw = fh.read()
+    actual_manifest_sha256 = _sha256(raw)
+    if actual_manifest_sha256 != expected_manifest_sha256:
+        raise SourceProvenanceError(
+            "source provenance manifest SHA-256 mismatch: "
+            f"expected {expected_manifest_sha256}, got {actual_manifest_sha256}"
+        )
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SourceProvenanceError(f"invalid source provenance JSON: {exc}") from exc
+
+    expected_keys = {
+        "schema_version", "native_version", "native_binary_sha256", "entries",
+        "reviewed_static_brand_projections", "test_expected_brand_projections",
+        "integrity_only_assets",
+    }
+    if not isinstance(document, dict) or set(document) != expected_keys:
+        raise SourceProvenanceError("source provenance has an unexpected top-level shape")
+    if (document["schema_version"] != 1
+            or document["native_version"] != "2.1.295"
+            or document["native_binary_sha256"] != NATIVE_295_BINARY_SHA256):
+        raise SourceProvenanceError("source provenance does not identify the pinned Native 2.1.295 binary")
+
+    lists = (
+        ("entries", approved_paths),
+        ("reviewed_static_brand_projections", approved_static_paths),
+        ("test_expected_brand_projections", approved_test_paths),
+        ("integrity_only_assets", approved_integrity_paths),
+    )
+    for key, _ in lists:
+        if not isinstance(document[key], list):
+            raise SourceProvenanceError(f"source provenance {key} must be a list")
+
+    entries_by_path = {}
+    allowed_findings = set()
+    for entry in document["entries"]:
+        if not isinstance(entry, dict) or set(entry) != {
+            "kind", "path", "source_file", "source_binary_offset", "source_bytes",
+            "source_sha256", "transform_sha256", "findings",
+        }:
+            raise SourceProvenanceError("immutable Native source entry has an unexpected shape")
+        path = entry["path"]
+        if entry["kind"] != "immutable-native-source-artifact":
+            raise SourceProvenanceError(f"wrong provenance kind for {path!r}")
+        if not isinstance(path, str) or path not in approved_paths or path in entries_by_path:
+            raise SourceProvenanceError(f"source allowance path is not approved or is duplicated: {path!r}")
+        match = re.fullmatch(r"src_(\d+)\.mjs", os.path.basename(path))
+        if not match:
+            raise SourceProvenanceError(f"invalid source module basename: {path}")
+        expected_offset = int(match.group(1))
+        if (entry["source_file"] != f"src_{expected_offset}.js"
+                or entry["source_binary_offset"] != expected_offset
+                or not isinstance(entry["source_bytes"], int)
+                or entry["source_bytes"] <= 0):
+            raise SourceProvenanceError(f"Native source range identity mismatch for {path}")
+        _validate_sha256(entry["source_sha256"], f"{path}.source_sha256")
+        _read_transform_sha256(root, path, entry["transform_sha256"], path)
+        allowed_findings |= _findings_from_receipt(path, entry["findings"], path, allow_empty=False)
+        entries_by_path[path] = entry
+
+    for key, approved in lists[1:3]:
+        static_kind = key == "reviewed_static_brand_projections"
+        required_kind = (
+            "reviewed-static-brand-projection"
+            if static_kind else "test-expected-brand-projection"
+        )
+        for entry in document[key]:
+            required_keys = (
+                {"kind", "path", "transform_sha256", "source_literal_projections",
+                 "dynamic_text_policy", "findings"}
+                if static_kind else
+                {"kind", "path", "transform_sha256", "source_expectations", "findings"}
+            )
+            if not isinstance(entry, dict) or set(entry) != required_keys:
+                raise SourceProvenanceError(f"{key} entry has an unexpected shape")
+            path = entry["path"]
+            if (entry["kind"] != required_kind or not isinstance(path, str)
+                    or path not in approved or path in entries_by_path):
+                raise SourceProvenanceError(f"{key} path or kind is not approved: {path!r}")
+            full_path = _read_transform_sha256(root, path, entry["transform_sha256"], path)
+            with open(full_path, encoding="utf-8") as fh:
+                source_text = fh.read()
+            _validate_no_dynamic_brand_rewrite(path, source_text)
+            if static_kind:
+                if entry["dynamic_text_policy"] != "preserve_runtime_values_no_global_brand_rewrite":
+                    raise SourceProvenanceError(f"static brand projection policy mismatch for {path}")
+                _validate_literal_projections(
+                    path, entry["source_literal_projections"], source_text
+                )
+            else:
+                expectations = entry["source_expectations"]
+                if not isinstance(expectations, list) or not expectations:
+                    raise SourceProvenanceError(f"test projection has no source expectations: {path}")
+                expected_test_findings = set()
+                for expectation in expectations:
+                    if not isinstance(expectation, dict) or set(expectation) != {
+                        "source_range", "native_literal", "runtime_literal", "finding",
+                    }:
+                        raise SourceProvenanceError(f"invalid test source expectation for {path}")
+                    _validate_source_range(expectation["source_range"], path)
+                    if (not isinstance(expectation["native_literal"], str)
+                            or not isinstance(expectation["runtime_literal"], str)
+                            or not expectation["native_literal"] or not expectation["runtime_literal"]):
+                        raise SourceProvenanceError(f"invalid test source literal for {path}")
+                    expected_test_findings |= _findings_from_receipt(
+                        path, [expectation["finding"]], path, allow_empty=False
+                    )
+                actual_test_findings = _findings_from_receipt(
+                    path, entry["findings"], path, allow_empty=False
+                )
+                if expected_test_findings != actual_test_findings:
+                    raise SourceProvenanceError(f"test source expectations do not match findings for {path}")
+            allowed_findings |= _findings_from_receipt(
+                path, entry["findings"], path, allow_empty=static_kind
+            )
+            entries_by_path[path] = entry
+
+    integrity_paths = set()
+    for entry in document["integrity_only_assets"]:
+        if not isinstance(entry, dict) or set(entry) != {
+            "kind", "path", "transform_sha256", "source_ranges",
+        }:
+            raise SourceProvenanceError("integrity-only source asset has an unexpected shape")
+        path = entry["path"]
+        if (entry["kind"] != "source-exact-runtime-support-asset"
+                or not isinstance(path, str) or path not in approved_integrity_paths
+                or path in integrity_paths or path in entries_by_path):
+            raise SourceProvenanceError(f"integrity-only source asset path or kind is not approved: {path!r}")
+        integrity_paths.add(path)
+        if not isinstance(entry["source_ranges"], list) or not entry["source_ranges"]:
+            raise SourceProvenanceError(f"integrity-only asset lacks Native source identity: {path}")
+        for source_range in entry["source_ranges"]:
+            _validate_source_range(source_range, path)
+        _read_transform_sha256(root, path, entry["transform_sha256"], path)
+
+    for key, approved in lists:
+        actual_paths = {entry.get("path") for entry in document[key] if isinstance(entry, dict)}
+        if len(actual_paths) != len(document[key]) or actual_paths != approved:
+            missing = sorted(approved - actual_paths)
+            extra = sorted(actual_paths - approved)
+            raise SourceProvenanceError(f"{key} path set mismatch; missing={missing}, extra={extra}")
+    return entries_by_path, allowed_findings
+
+
+def apply_source_allowances(root, findings, provenance_path=None,
+                            expected_manifest_sha256=None, approved_paths=None,
+                            approved_static_paths=None, approved_test_paths=None,
+                            approved_integrity_paths=None):
+    """Remove only exact receipt findings; reject drift, new needles, or asset edits."""
+    entries, allowed = load_source_allowances(
+        root, provenance_path, expected_manifest_sha256, approved_paths,
+        approved_static_paths, approved_test_paths, approved_integrity_paths,
+    )
+    mapped_paths = set(entries)
+    observed = {finding for finding in findings if finding[1] in mapped_paths}
+    if observed != allowed:
+        missing = sorted(allowed - observed)
+        unexpected = sorted(observed - allowed)
+        raise SourceProvenanceError(
+            f"scanner findings differ from source receipt; missing={missing}, unexpected={unexpected}"
+        )
+    return findings - allowed
 
 
 BRANDING_LIB = "crates/branding/src/lib.rs"
@@ -991,7 +1361,7 @@ def _selftest_matches(findings, rule, path, needle_sub, lineno=None):
 
 
 def run_selftest():
-    """在合成树上跑每规则正对照 + 负对照。返回 0/1。"""
+    """在合成树上跑每规则和来源摘要门的正对照 + 负对照。返回 0/1。"""
     import shutil
     import tempfile
 
@@ -1006,12 +1376,8 @@ def run_selftest():
         with open(frozen, "w", encoding="utf-8") as fh:
             fh.write("crates/st/vanished.rs:.lingxi  # 目标文件不存在 => G5\n")
 
-        for cmd in (["init", "-q"], ["add", "-A"]):
-            subprocess.run(["git", "-C", tmp] + cmd, check=True,
-                           capture_output=True, text=True)
-
         entries = parse_frozen(frozen)
-        findings = scan(tmp, exemptions_by_path(entries))
+        findings = scan(tmp, exemptions_by_path(entries), paths=tuple(SELFTEST_FILES))
         findings |= check_frozen(tmp, frozen, entries)
         findings |= check_namespace_coverage(tmp)
 
@@ -1045,6 +1411,189 @@ def run_selftest():
                     failures.append(f"{name}: expected NO {rule} at {path}, got {sorted(hit)}")
             if not failures or not any(f.startswith(name) for f in failures):
                 print(f"  ok   {name}")
+
+        # Provenance-gate tests use a tiny synthetic source module. The manifest
+        # digest is injected only here; production always uses the pinned digest
+        # above. This keeps the selftest independent of Git and real Native files.
+        provenance_root = os.path.join(tmp, "source-provenance")
+        source_rel = (
+            "crates/runtime/src/insights_assets/metadata-source/native-bundle/"
+            "src_186220896.mjs"
+        )
+        source_content = 'const root = ".claude"; const plugin = ".claude-plugin";\n'
+        source_full = os.path.join(provenance_root, source_rel)
+        os.makedirs(os.path.dirname(source_full), exist_ok=True)
+        with open(source_full, "w", encoding="utf-8") as fh:
+            fh.write(source_content)
+        new_token_rel = "crates/st/unmapped.js"
+        new_token_full = os.path.join(provenance_root, new_token_rel)
+        os.makedirs(os.path.dirname(new_token_full), exist_ok=True)
+        with open(new_token_full, "w", encoding="utf-8") as fh:
+            fh.write('const plugin = ".claude-plugin";\n')
+
+        source_doc = {
+            "schema_version": 1,
+            "native_version": "2.1.295",
+            "native_binary_sha256": NATIVE_295_BINARY_SHA256,
+            "entries": [{
+                "kind": "immutable-native-source-artifact",
+                "path": source_rel,
+                "source_file": "src_186220896.js",
+                "source_binary_offset": 186220896,
+                "source_bytes": 5,
+                "source_sha256": _sha256(b"source-range-fixture"),
+                "transform_sha256": _sha256(source_content.encode("utf-8")),
+                "findings": [{
+                    "rule": "G1",
+                    "needle": r"\.claude(?![A-Za-z0-9_.\-])",
+                    "lines": [1],
+                }],
+            }],
+            "reviewed_static_brand_projections": [],
+            "test_expected_brand_projections": [],
+            "integrity_only_assets": [],
+        }
+        source_manifest = os.path.join(provenance_root, BRAND_SOURCE_PROVENANCE)
+        os.makedirs(os.path.dirname(source_manifest), exist_ok=True)
+
+        def rejected(call):
+            try:
+                call()
+            except SourceProvenanceError:
+                return True
+            return False
+
+        def write_source_manifest(document):
+            raw = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            with open(source_manifest, "wb") as fh:
+                fh.write(raw)
+            return _sha256(raw)
+
+        approved_fixture_paths = ({source_rel}, set(), set(), set())
+
+        def load_fixture_source_manifest(path=source_manifest, digest=None):
+            return load_source_allowances(
+                provenance_root, path, digest, *approved_fixture_paths
+            )
+
+        def apply_fixture_source_allowances(source_finding_set, digest=None):
+            return apply_source_allowances(
+                provenance_root, source_finding_set, source_manifest, digest,
+                *approved_fixture_paths,
+            )
+
+        source_manifest_sha256 = write_source_manifest(source_doc)
+        source_findings = scan(
+            provenance_root, paths=(source_rel, new_token_rel)
+        )
+
+        # The exact transformed bytes may contain a second valid scanner needle;
+        # it must be explicitly recorded rather than silently included by path.
+        if not any(f[1] == source_rel and f[0] == "G7" for f in source_findings):
+            failures.append("source provenance: unrecorded-needle fixture did not produce its G7 token")
+        if not rejected(lambda: apply_fixture_source_allowances(
+                source_findings, source_manifest_sha256)):
+            failures.append("source provenance: an unrecorded needle in a mapped module was allow-passed")
+        source_doc["entries"][0]["findings"].append({
+            "rule": "G7", "needle": r"\.claude-plugin", "lines": [1]
+        })
+        source_manifest_sha256 = write_source_manifest(source_doc)
+        allowed_result = apply_fixture_source_allowances(
+            source_findings, source_manifest_sha256
+        )
+        expected_unmapped = any(
+            finding[1] == new_token_rel and finding[0] == "G7"
+            and finding[3] == r"\.claude-plugin"
+            for finding in allowed_result
+        )
+        if not expected_unmapped:
+            failures.append("source provenance: an unmapped new plugin token was allow-passed")
+        else:
+            print("  ok   source provenance requires exact needles and leaves new paths visible")
+        if any("unrecorded needle" in f for f in failures):
+            pass
+        else:
+            print("  ok   source provenance rejects an unrecorded needle in an unchanged mapped module")
+
+        if not rejected(lambda: load_fixture_source_manifest(
+                source_manifest + ".missing", source_manifest_sha256)):
+            failures.append("source provenance: missing manifest did not fail closed")
+        if not rejected(lambda: load_fixture_source_manifest(source_manifest, "0" * 64)):
+            failures.append("source provenance: manifest digest mismatch did not fail closed")
+        if not any("missing manifest did not fail" in f for f in failures) and not any(
+                "manifest digest mismatch did not fail" in f for f in failures):
+            print("  ok   source provenance rejects a missing manifest and a changed receipt digest")
+
+        # A changed mapped module containing a fresh branded token must fail on
+        # its transform digest before any recorded finding can be removed.
+        with open(source_full, "w", encoding="utf-8") as fh:
+            fh.write(source_content + 'const newToken = "CLAUDE_PLUGIN_NEW";\n')
+        mutated_findings = scan(
+            provenance_root, paths=(source_rel, new_token_rel)
+        )
+        if not any(f[1] == source_rel and f[0] == "G7" for f in mutated_findings):
+            failures.append("source provenance: mapped-file mutation fixture did not produce its new G7 token")
+        if not rejected(lambda: apply_fixture_source_allowances(
+                mutated_findings, source_manifest_sha256)):
+            failures.append("source provenance: modified mapped module was allow-passed")
+        if not any("modified mapped module was allow-passed" in f for f in failures):
+            print("  ok   source provenance rejects a mutated mapped module with a new token")
+
+        # SourceSHA is part of the sealed receipt. Mutating it while keeping the
+        # runtime pin must fail before the changed source identity is trusted.
+        mutated_doc = json.loads(json.dumps(source_doc))
+        mutated_doc["entries"][0]["source_sha256"] = "0" * 64
+        write_source_manifest(mutated_doc)
+        if not rejected(lambda: load_fixture_source_manifest(
+                source_manifest, source_manifest_sha256)):
+            failures.append("source provenance: changed Native source SHA was not rejected by the receipt pin")
+        if not any("changed Native source SHA was not rejected" in f for f in failures):
+            print("  ok   source provenance rejects a changed Native source SHA under the receipt pin")
+
+        excerpt = "alpha"
+        excerpt_digest = _sha256(excerpt.encode("utf-8"))
+        projection_range = {
+            "source_file": "src_1.js",
+            "source_chunk_offset": 1,
+            "source_chunk_bytes": len(excerpt.encode("utf-8")),
+            "source_chunk_sha256": excerpt_digest,
+            "source_binary_offset": 1,
+            "source_bytes": len(excerpt.encode("utf-8")),
+            "source_sha256": excerpt_digest,
+        }
+        valid_projection = [{
+            "source_range": projection_range,
+            "source_excerpt_utf8": excerpt,
+            "literal_map": [{
+                "source_literal": "alpha",
+                "runtime_literal": "LingXi",
+                "count": 1,
+            }],
+        }]
+        _validate_literal_projections(source_rel, valid_projection, 'const x = "LingXi";')
+        wrong_range_projection = json.loads(json.dumps(valid_projection))
+        wrong_range_projection[0]["source_excerpt_utf8"] = "omega"
+        missing_literal_projection = json.loads(json.dumps(valid_projection))
+        missing_literal_projection[0]["literal_map"][0]["source_literal"] = "omega"
+        if not rejected(lambda: _validate_literal_projections(
+                source_rel, wrong_range_projection, 'const x = "LingXi";')):
+            failures.append("source provenance: excerpt bytes from a different range were accepted")
+        if not rejected(lambda: _validate_literal_projections(
+                source_rel, missing_literal_projection, 'const x = "LingXi";')):
+            failures.append("source provenance: a mapped literal absent from its source range was accepted")
+        if not any("different range were accepted" in f for f in failures) and not any(
+                "absent from its source range was accepted" in f for f in failures):
+            print("  ok   source literals are checked against the exact hashed range excerpt")
+
+        dynamic_rewrite = 'const out = transcript.replaceAll("Claude", "LingXi");'
+        static_projection = 'const prompt = "LingXi session report";'
+        if not rejected(lambda: _validate_no_dynamic_brand_rewrite(source_rel, dynamic_rewrite)):
+            failures.append("source provenance: dynamic global brand rewrite was not rejected")
+        if rejected(lambda: _validate_no_dynamic_brand_rewrite(source_rel, static_projection)):
+            failures.append("source provenance: static product literal was mistaken for a dynamic rewrite")
+        if not any("dynamic global brand rewrite was not rejected" in f for f in failures) and not any(
+                "static product literal was mistaken" in f for f in failures):
+            print("  ok   source provenance permits static literals and rejects dynamic transcript rewriting")
 
         for f in failures:
             print(f"  FAIL {f}")
@@ -1088,6 +1637,10 @@ def main():
 
     frozen_entries = parse_frozen(frozen_path)
     findings = scan(root, exemptions_by_path(frozen_entries))
+    try:
+        findings = apply_source_allowances(root, findings)
+    except SourceProvenanceError as exc:
+        raise SystemExit(f"check_brand_leaks: {exc}") from exc
     findings |= check_frozen(root, frozen_path, frozen_entries)
     findings |= check_namespace_coverage(root)
 

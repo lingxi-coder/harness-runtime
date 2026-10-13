@@ -13,7 +13,9 @@ use crate::purposes::QuerySource;
 use async_trait::async_trait;
 use lingxi_core::host::task_delivery::TaskDeliveryRequest;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage, MessageId};
-use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
+use lingxi_llm_client::providers::anthropic::system_prompt::{
+    NativePromptAttribution, NativeSystemPrefix, SystemPromptInput,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -39,6 +41,29 @@ where
         ));
     }
     Ok(source)
+}
+/// Host-only Native system context for a deliberately opted-in side query.
+/// This is never serialized into side-query JSON; `ProviderSideQueryClient`
+/// projects it into the existing SDK prompt-cache context.
+#[derive(Clone)]
+pub struct NativeSideQueryPromptContext {
+    /// Captured SDK prefix with the role appropriate for the resolved provider.
+    pub prefix: NativeSystemPrefix,
+    /// Source attribution facts for this particular request.
+    pub attribution: NativePromptAttribution,
+    /// Only the Insights host call opts into the SDK's full Native prefix.
+    pub include_host_identity: bool,
+}
+
+impl std::fmt::Debug for NativeSideQueryPromptContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeSideQueryPromptContext")
+            .field("prefix", &"<redacted>")
+            .field("attribution", &"<redacted>")
+            .field("include_host_identity", &self.include_host_identity)
+            .finish()
+    }
 }
 
 /// Parameters for one side-query LLM call.
@@ -73,10 +98,19 @@ pub struct SideQueryRequest {
     /// not serialized into side-query JSON.
     #[serde(skip)]
     pub task_deliveries: HashMap<MessageId, TaskDeliveryRequest>,
+    /// Host-captured Native system prefix and attribution for an explicitly
+    /// opted-in side query. This is never part of the serialized payload.
+    #[serde(skip)]
+    pub native_prompt_context: Option<NativeSideQueryPromptContext>,
     /// Host-captured provider system structure for forked requests; not part of
     /// the serialized model-facing side-query payload.
     #[serde(skip)]
     pub system_prompt_input: Option<SystemPromptInput>,
+    /// Whether this side-query call explicitly enables automatic Native
+    /// prompt-cache markers. Native's `bze` option defaults to false; cache-safe
+    /// fork callers opt in when they intentionally reuse the parent cache.
+    #[serde(skip)]
+    pub enable_prompt_caching: bool,
     /// Conversation messages to feed the model.
     pub messages: Vec<ConversationMessage>,
     /// Tool schemas exposed to the model (may be empty).
@@ -323,7 +357,9 @@ mod source_system_prompt_tests {
 
     fn request(system_prompt: Option<Utf16JsonProjection>) -> SideQueryRequest {
         SideQueryRequest {
+            enable_prompt_caching: false,
             model_attempt: None,
+            native_prompt_context: None,
             model: "model".into(),
             profile: None,
             system_prompt,

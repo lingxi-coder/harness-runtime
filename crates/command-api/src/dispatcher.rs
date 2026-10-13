@@ -4,7 +4,9 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` Task 5.
 
 use crate::expand::{expand_markdown_command, ExpandCtx};
-use crate::model::{CommandResult, CommandSource, SlashCommandKind};
+use crate::model::{
+    source_concat, CommandResult, CommandSource, NativeCommandType, PromptPart, SlashCommandKind,
+};
 use crate::parser::{
     is_js_whitespace_unit, parse_slash_command, tokenize_args_source, ParsedSlashCommand,
 };
@@ -27,6 +29,109 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 type Ujp = Utf16JsonProjection;
+
+/// Build Native's user-facing command header for a prompt command.
+fn native_prompt_command_header(command: &crate::model::SlashCommand, raw_args: &Ujp) -> Ujp {
+    let mut header = vec![
+        PromptPart::Text("<command-message>"),
+        PromptPart::Source(&command.name),
+        PromptPart::Text("</command-message>\n<command-name>/"),
+        PromptPart::Source(&command.name),
+        PromptPart::Text("</command-name>"),
+    ];
+    if raw_args
+        .string_units("")
+        .is_some_and(|units| !units.is_empty())
+    {
+        header.push(PromptPart::Text("\n<command-args>"));
+        header.push(PromptPart::Source(raw_args));
+        header.push(PromptPart::Text("</command-args>"));
+    }
+    source_concat(header)
+}
+
+/// Build Native's command-header/body pair for a non-directory prompt command.
+fn native_prompt_turn_projections(
+    command: &crate::model::SlashCommand,
+    raw_args: &Ujp,
+    expanded_body: &Ujp,
+) -> (Ujp, Ujp) {
+    (
+        native_prompt_command_header(command, raw_args),
+        expanded_body.clone(),
+    )
+}
+
+/// Build Native's separate header/body user rows for a directory Skill.
+fn native_skill_turn_projections(
+    command: &crate::model::SlashCommand,
+    raw_args: &Ujp,
+    expanded_body: &Ujp,
+) -> Result<(Ujp, Ujp), &'static str> {
+    let skill_root = command
+        .skill_root
+        .as_deref()
+        .ok_or("directory Skill has no base directory")?;
+    let skill_root = skill_root
+        .to_str()
+        .ok_or("Skill base directory is not representable as UTF-8")?;
+    let command_row = native_prompt_command_header(command, raw_args);
+    let body_row = source_concat([
+        PromptPart::Text("Base directory for this skill: "),
+        PromptPart::Text(skill_root),
+        PromptPart::Text("\n\n"),
+        PromptPart::Source(expanded_body),
+    ]);
+    Ok((command_row, body_row))
+}
+
+fn user_prompt_expansion_control_result(
+    aggregate: &hooks::response::AggregateHookResult,
+    command_name: &Ujp,
+    raw_args: &Ujp,
+) -> Option<Ujp> {
+    for (_, result) in &aggregate.all_results {
+        let Some(response) = result.response.as_ref() else {
+            continue;
+        };
+        if response.decision == Some(hooks::response::HookDecision::Block) {
+            let mut text =
+                hooks::ExactHookText::from_text("UserPromptExpansion operation blocked by hook:\n");
+            let reason = response
+                .reason
+                .as_ref()
+                .filter(|reason| !reason.is_empty())
+                .cloned()
+                .unwrap_or_else(|| hooks::ExactHookText::from_text("Blocked by hook"));
+            text.push(&reason);
+            if !response.suppress_original_prompt {
+                text.push_text("\n\nOriginal prompt: /");
+                text.push(
+                    &hooks::ExactHookText::from_json_projection(command_name, "")
+                        .expect("command name is a root string"),
+                );
+                let args = raw_args.string_units("").unwrap_or_default();
+                if !args.is_empty() {
+                    text.push_text(" ");
+                    text.push(
+                        &hooks::ExactHookText::from_json_projection(raw_args, "")
+                            .expect("command arguments are a root string"),
+                    );
+                }
+            }
+            return Some(text.into_projection());
+        }
+        if response.prevent_continuation {
+            let mut text = hooks::ExactHookText::from_text("Operation stopped by hook");
+            if let Some(reason) = response.reason.as_ref().filter(|reason| !reason.is_empty()) {
+                text.push_text(": ");
+                text.push(reason);
+            }
+            return Some(text.into_projection());
+        }
+    }
+    None
+}
 
 /// Selected model identity supplied by the owning session for bundled prompts.
 pub type BundledPromptModelProvider = Arc<
@@ -83,6 +188,23 @@ pub type McpPromptResolver = Arc<
 pub type SkillInvocationObserver = Arc<
     dyn Fn(Utf16JsonProjection) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
+        + Sync,
+>;
+
+/// Host-owned Native `skill.prompt` transformation for a prompt command's
+/// completed text. The first projection is the canonical skill/command name;
+/// the second is the producer's text before Native's header/body envelope.
+pub type SkillPromptTransformer = Arc<
+    dyn Fn(
+            Utf16JsonProjection,
+            Utf16JsonProjection,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Utf16JsonProjection, Utf16JsonProjection>>
+                    + Send
+                    + 'static,
+            >,
+        > + Send
         + Sync,
 >;
 
@@ -180,9 +302,10 @@ pub struct RegistrySlashDispatcher {
     /// existing caller — e.g. the bridge-server command router) keeps the
     /// dispatcher a STRICT no-op: the markdown / plugin arm falls back to the
     /// [`UnavailableShellRunner`] / [`DenyShellPermissionGate`] stubs and the
-    /// builtin `InjectMessage` arm delivers content verbatim, byte-identical to
-    /// today. When wired via [`Self::with_shell_expansion`], each expansion
-    /// builds a FRESH per-command [`ShellExpansionCtx`] (that command's
+    /// non-Native-Prompt `InjectMessage` arm delivers content verbatim. Native
+    /// Prompt producer output is never scanned here; its producer owns any
+    /// source-authored expansion. When wired via [`Self::with_shell_expansion`],
+    /// each expansion builds a FRESH per-command [`ShellExpansionCtx`] (that command's
     /// `allowed_tools` injected on top of the base policy) before running
     /// [`execute_shell_commands_in_prompt`], 1:1 with claude-code's
     /// `executeShellCommandsInPrompt` at the COMMAND layer.
@@ -198,6 +321,8 @@ pub struct RegistrySlashDispatcher {
     mcp_prompt_resolver: Option<McpPromptResolver>,
     /// Best-effort observer for successful prompt-skill dispatches.
     skill_invocation_observer: Option<SkillInvocationObserver>,
+    /// Mods `skill.prompt` hook. `None` preserves the producer text exactly.
+    skill_prompt_transformer: Option<SkillPromptTransformer>,
     /// Whether builtin `InjectMessage` results become model turns. Thin clients
     /// enable this because they have no TUI loop to consume injected prompts;
     /// the default stays display-only for existing embedded/mobile callers.
@@ -268,6 +393,7 @@ impl RegistrySlashDispatcher {
             background_prompt_launcher: None,
             mcp_prompt_resolver: None,
             skill_invocation_observer: None,
+            skill_prompt_transformer: None,
             injected_messages_as_turns: false,
             prompt_paths: None,
             bundled_prompt_model: None,
@@ -312,9 +438,9 @@ impl RegistrySlashDispatcher {
     /// Wire the embedded-shell-expansion provider (#3). After this, expanding a
     /// markdown / plugin slash command runs its embedded shell substitutions
     /// bodies through the real host runner + policy-backed gate (that command's
-    /// frontmatter `allowed_tools` injected), and the builtin `InjectMessage`
-    /// commands (`/commit`, `/security-review`) expand their embedded bodies
-    /// with their own `allowed_tools`. A strict no-op when
+    /// frontmatter `allowed_tools` injected), and eligible non-Native-Prompt
+    /// builtin `InjectMessage` commands expand their embedded bodies with their
+    /// own `allowed_tools`. A strict no-op when
     /// unset (the default): the stubs deny, and `InjectMessage` content is
     /// verbatim. MCP-sourced commands are NEVER expanded (claude-code
     /// `loadedFrom === 'mcp'` carve-out), even when wired.
@@ -357,6 +483,15 @@ impl RegistrySlashDispatcher {
         self
     }
 
+    /// Wire the host's `skill.prompt` Mods callback. It runs once after a
+    /// Native prompt producer returns text and before the command header/body
+    /// rows are built; hosts without Mods leave it unset.
+    #[must_use]
+    pub fn with_skill_prompt_transformer(mut self, transformer: SkillPromptTransformer) -> Self {
+        self.skill_prompt_transformer = Some(transformer);
+        self
+    }
+
     async fn observe_skill_invocation(&self, name: &Utf16JsonProjection) {
         if let Some(observer) = self.skill_invocation_observer.as_ref() {
             observer(name.clone()).await;
@@ -372,12 +507,11 @@ impl RegistrySlashDispatcher {
     }
 
     /// Wire the `UserPromptExpansion` hook (#39): the engine's hook executor
-    /// plus a [`HookContext`] provider. After this, expanding a markdown /
-    /// MCP-prompt slash command fires the `UserPromptExpansion` event with the
-    /// command metadata, faithful to claude-code `WFa`→`b$t` (BIN off
-    /// 201270310). A no-op for handler/builtin commands (which are never
-    /// "expanded") and a strict no-op when no `UserPromptExpansion` hook is
-    /// registered (the executor itself no-ops on an empty match set).
+    /// plus a [`HookContext`] provider. After this, a prompt slash command fires
+    /// the event before its prompt producer runs, faithful to claude-code
+    /// `Ajs`→`nt`→`Qe` (2.1.295 source chunk `src_215528992.js`). A strict
+    /// no-op when no `UserPromptExpansion` hook is registered (the executor
+    /// itself no-ops on an empty match set).
     #[must_use]
     pub fn with_expansion_hooks(
         mut self,
@@ -388,20 +522,19 @@ impl RegistrySlashDispatcher {
         self
     }
 
-    /// Fire the `UserPromptExpansion` hook for a just-expanded markdown /
-    /// MCP-prompt slash command, matching claude-code `WFa`'s firing site
-    /// (after building the `/name args` prompt line, before the expanded
-    /// prompt is queried). Strict no-op when no expansion hook is wired. The
-    /// aggregate is discarded — best-effort, so a failing / blocking
-    /// `UserPromptExpansion` hook never breaks dispatch.
+    /// Fire the `UserPromptExpansion` hook for a prompt slash command before
+    /// its producer runs. The Native event carries the `/name args` line, and
+    /// successful hook history rows stay deferred for the prompt turn. Strict
+    /// no-op when no expansion hook is wired.
     async fn fire_user_prompt_expansion(
         &self,
         name: &Utf16JsonProjection,
         raw_args: &Utf16JsonProjection,
         source: CommandSource,
-    ) {
+        defer_history_rows: bool,
+    ) -> hooks::response::AggregateHookResult {
         let Some(eh) = self.expansion_hooks.as_ref() else {
-            return;
+            return hooks::response::AggregateHookResult::default();
         };
         // Keep the command name exact while adding generated slash/space text.
         let mut prompt_units = vec![b'/' as u16];
@@ -418,9 +551,9 @@ impl RegistrySlashDispatcher {
         } else {
             PromptExpansionType::SlashCommand
         };
-        let ctx = (eh.context)().await;
-        let _ = eh
-            .executor
+        let mut ctx = (eh.context)().await;
+        ctx.defer_prompt_expansion_history_rows = defer_history_rows;
+        eh.executor
             .execute(
                 HookEvent::UserPromptExpansion {
                     expansion_type,
@@ -431,7 +564,45 @@ impl RegistrySlashDispatcher {
                 },
                 ctx,
             )
+            .await
+    }
+
+    /// Run Native's pre-producer hook gate for every command whose source
+    /// metadata says `type: "prompt"`. Its caller must first release the
+    /// registry read lock, then invoke this before building, resolving, or
+    /// shell-expanding the prompt.
+    async fn prepare_native_prompt_expansion(
+        &self,
+        command: &crate::model::SlashCommand,
+        raw_args: &Utf16JsonProjection,
+    ) -> Result<Option<hooks::response::AggregateHookResult>, Utf16JsonProjection> {
+        if command.native_type != Some(NativeCommandType::Prompt) {
+            return Ok(None);
+        }
+
+        let aggregate = self
+            .fire_user_prompt_expansion(&command.name, raw_args, command.source, true)
             .await;
+        if let Some(display) =
+            user_prompt_expansion_control_result(&aggregate, &command.name, raw_args)
+        {
+            return Err(display);
+        }
+        Ok(Some(aggregate))
+    }
+
+    async fn transform_native_prompt_body(
+        &self,
+        command: &crate::model::SlashCommand,
+        body: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
+        if command.native_type != Some(NativeCommandType::Prompt) {
+            return Ok(body);
+        }
+        match self.skill_prompt_transformer.as_ref() {
+            Some(transformer) => transformer(command.name.clone(), body).await,
+            None => Ok(body),
+        }
     }
 
     /// The shared registry handle backing this dispatcher.
@@ -473,6 +644,7 @@ impl RegistrySlashDispatcher {
             background_prompt_launcher: self.background_prompt_launcher.clone(),
             mcp_prompt_resolver: self.mcp_prompt_resolver.clone(),
             skill_invocation_observer: self.skill_invocation_observer.clone(),
+            skill_prompt_transformer: self.skill_prompt_transformer.clone(),
             injected_messages_as_turns: self.injected_messages_as_turns,
             prompt_paths: self.prompt_paths.clone(),
             bundled_prompt_model: self.bundled_prompt_model.clone(),
@@ -608,6 +780,13 @@ impl RegistrySlashDispatcher {
             // builder so the registry lock can be dropped before building.
             let builder = prompt_fn.clone();
             drop(reg);
+            let prompt_expansion = match self
+                .prepare_native_prompt_expansion(&command, &parsed.raw_args)
+                .await
+            {
+                Ok(aggregate) => aggregate,
+                Err(display) => return SlashDispatchResult::Handled { display },
+            };
             return match builder {
                 Some(pf) => {
                     let (project_root, cwd) = self.prompt_paths.as_ref().map_or_else(
@@ -692,13 +871,22 @@ impl RegistrySlashDispatcher {
                     } else {
                         content
                     };
+                    let content = match self.transform_native_prompt_body(&command, content).await {
+                        Ok(content) => content,
+                        Err(display) => return SlashDispatchResult::Handled { display },
+                    };
                     self.observe_skill_invocation(&command.name).await;
-                    self.fire_user_prompt_expansion(
-                        &command.name,
-                        &parsed.raw_args,
-                        command.source,
-                    )
-                    .await;
+                    if prompt_expansion.is_none() {
+                        // Preserve the prior extension behavior for bundled
+                        // builders without Native prompt metadata.
+                        self.fire_user_prompt_expansion(
+                            &command.name,
+                            &parsed.raw_args,
+                            command.source,
+                            false,
+                        )
+                        .await;
+                    }
                     if frontmatter.context.as_deref() == Some("fork")
                         && frontmatter.background.unwrap_or(true)
                     {
@@ -726,13 +914,20 @@ impl RegistrySlashDispatcher {
                             },
                         };
                     }
-                    // claude-code bundled skills are `type: "prompt"` /
-                    // `userInvocable: true` (cc_all.txt:480599): the expanded
-                    // prompt becomes the user TURN, not display text. A typed
-                    // `/loop 5m /foo` must actually run the model so the cron is
-                    // scheduled + the prompt executed now.
-                    SlashDispatchResult::RunAsTurn {
-                        prompt: content.into(),
+                    if let Some(aggregate) = prompt_expansion {
+                        let (command_row, body_row) =
+                            native_prompt_turn_projections(&command, &parsed.raw_args, &content);
+                        SlashDispatchResult::RunSkillAsTurn {
+                            command: command_row,
+                            body: body_row,
+                            hook_messages: aggregate.prompt_expansion_history_rows,
+                        }
+                    } else {
+                        // Keep the established route for local bundled builders
+                        // that do not carry Native prompt metadata.
+                        SlashDispatchResult::RunAsTurn {
+                            prompt: content.into(),
+                        }
                     }
                 }
                 None => SlashDispatchResult::Unknown {
@@ -753,6 +948,13 @@ impl RegistrySlashDispatcher {
             let arguments = arguments.clone();
             let resolver = self.mcp_prompt_resolver.clone();
             drop(reg);
+            let prompt_expansion = match self
+                .prepare_native_prompt_expansion(&command, &parsed.raw_args)
+                .await
+            {
+                Ok(aggregate) => aggregate,
+                Err(display) => return SlashDispatchResult::Handled { display },
+            };
 
             let positional = split_mcp_prompt_arguments(&parsed.raw_args);
             let wire_arguments = match bind_mcp_prompt_arguments(&arguments, &positional) {
@@ -772,11 +974,37 @@ impl RegistrySlashDispatcher {
                 };
             };
 
-            self.fire_user_prompt_expansion(&command.name, &parsed.raw_args, CommandSource::Mcp)
+            if prompt_expansion.is_none() {
+                // Preserve the established behavior for MCP prompt facades
+                // that do not carry Native `type: "prompt"` metadata.
+                self.fire_user_prompt_expansion(
+                    &command.name,
+                    &parsed.raw_args,
+                    CommandSource::Mcp,
+                    false,
+                )
                 .await;
+            }
             return match resolver(connection_id, prompt_name, wire_arguments).await {
                 Ok(result) => match render_mcp_prompt_result(&result) {
-                    Ok(prompt) => SlashDispatchResult::RunAsTurn { prompt },
+                    Ok(prompt) => match self.transform_native_prompt_body(&command, prompt).await {
+                        Ok(prompt) => match prompt_expansion {
+                            Some(aggregate) => {
+                                let (command_row, body_row) = native_prompt_turn_projections(
+                                    &command,
+                                    &parsed.raw_args,
+                                    &prompt,
+                                );
+                                SlashDispatchResult::RunSkillAsTurn {
+                                    command: command_row,
+                                    body: body_row,
+                                    hook_messages: aggregate.prompt_expansion_history_rows,
+                                }
+                            }
+                            None => SlashDispatchResult::RunAsTurn { prompt },
+                        },
+                        Err(display) => SlashDispatchResult::Handled { display },
+                    },
                     Err(error) => SlashDispatchResult::Handled {
                         display: command_source_message(
                             &command.name,
@@ -798,6 +1026,13 @@ impl RegistrySlashDispatcher {
             SlashCommandKind::Markdown { .. } | SlashCommandKind::Plugin { .. }
         ) {
             drop(reg);
+            let native_prompt_expansion = match self
+                .prepare_native_prompt_expansion(&command, &parsed.raw_args)
+                .await
+            {
+                Ok(aggregate) => aggregate,
+                Err(display) => return SlashDispatchResult::Handled { display },
+            };
             // This command's frontmatter allow-list + selected shell (both drive
             // the real gate). `command` is an owned clone, so this reads after the
             // registry lock is dropped.
@@ -827,27 +1062,80 @@ impl RegistrySlashDispatcher {
                 session_id: "",
                 shell: &shell_ctx,
             };
-            return match expand_markdown_command(&command, &parsed, &expand_ctx).await {
-                Ok(content) => {
-                    self.observe_skill_invocation(&command.name).await;
-                    // hooks #39: a markdown / MCP-prompt slash command WAS
-                    // expanded — fire `UserPromptExpansion` (claude-code `WFa`
-                    // →`b$t`) with the command metadata, at the same point the
-                    // binary does: after the `/name args` line is formed and
-                    // the body resolved, before the expanded prompt is queried.
-                    self.fire_user_prompt_expansion(
+            let prompt_expansion = if let Some(aggregate) = native_prompt_expansion {
+                Some(aggregate)
+            } else if command.skill_root.is_some() {
+                let aggregate = self
+                    .fire_user_prompt_expansion(
                         &command.name,
                         &parsed.raw_args,
                         command.source,
+                        true,
                     )
                     .await;
+                if let Some(display) = user_prompt_expansion_control_result(
+                    &aggregate,
+                    &command.name,
+                    &parsed.raw_args,
+                ) {
+                    return SlashDispatchResult::Handled { display };
+                }
+                Some(aggregate)
+            } else {
+                None
+            };
+            return match expand_markdown_command(&command, &parsed, &expand_ctx).await {
+                Ok(content) => {
+                    let content = match self
+                        .transform_native_prompt_body(&command, content.into())
+                        .await
+                    {
+                        Ok(content) => content,
+                        Err(display) => return SlashDispatchResult::Handled { display },
+                    };
+                    self.observe_skill_invocation(&command.name).await;
+                    if let Some(aggregate) = prompt_expansion {
+                        let (command_row, body_row) = if command.skill_root.is_some() {
+                            match native_skill_turn_projections(
+                                &command,
+                                &parsed.raw_args,
+                                &content,
+                            ) {
+                                Ok(rows) => rows,
+                                Err(error) => {
+                                    return SlashDispatchResult::Handled {
+                                        display: command_source_message(
+                                            &command.name,
+                                            &format!(" expansion failed: {error}"),
+                                        ),
+                                    };
+                                }
+                            }
+                        } else {
+                            native_prompt_turn_projections(&command, &parsed.raw_args, &content)
+                        };
+                        return SlashDispatchResult::RunSkillAsTurn {
+                            command: command_row,
+                            body: body_row,
+                            hook_messages: aggregate.prompt_expansion_history_rows,
+                        };
+                    }
+                    // Preserve the prior post-expansion hook behavior for
+                    // locally mapped Markdown/Plugin prompts without Native
+                    // prompt metadata.
+                    let _ = self
+                        .fire_user_prompt_expansion(
+                            &command.name,
+                            &parsed.raw_args,
+                            command.source,
+                            false,
+                        )
+                        .await;
                     // claude-code Markdown / Plugin prompt commands are
                     // `type: "prompt"`: the expanded body is submitted as the
                     // user turn (the model runs it), not printed. Mirrors the
                     // bundled-skill path above.
-                    SlashDispatchResult::RunAsTurn {
-                        prompt: content.into(),
-                    }
+                    SlashDispatchResult::RunAsTurn { prompt: content }
                 }
                 // Expansion FAILURE stays display-only (there is no prompt to
                 // run) — surface the error text to the user instead.
@@ -870,6 +1158,14 @@ impl RegistrySlashDispatcher {
         // 5. Drop the registry lock before awaiting handler (handler may
         //    re-lock the registry or take a while).
         drop(reg);
+        let prompt_expansion = match self
+            .prepare_native_prompt_expansion(&command, &parsed.raw_args)
+            .await
+        {
+            Ok(aggregate) => aggregate,
+            Err(display) => return SlashDispatchResult::Handled { display },
+        };
+
         let result = handler.handle(&parsed).await;
 
         match result {
@@ -881,21 +1177,15 @@ impl RegistrySlashDispatcher {
                 }
             }
             CommandResult::InjectMessage { content } => {
-                // Builtin prompt commands (`/commit`, `/commit-push-pr`,
-                // `/security-review`) carry RAW `!`git …`` / ` ```! ` bodies. When
-                // a shell-expansion provider is wired AND the command is not
-                // MCP-sourced AND the content actually embeds a shell pattern, run
-                // `execute_shell_commands_in_prompt` over it with THIS command's
-                // `allowed_tools` (shell = None → Bash for builtins), 1:1 with
-                // claude-code expanding the body inside `getPromptForCommand`
-                // before it becomes the prompt. On a permission-deny / run failure
-                // the WHOLE expansion aborts (patterns are never left in place) —
-                // surface the error text instead of the unexpanded template. A
-                // strict no-op (verbatim content) when unset / MCP / no patterns.
-                let has_embedded = contains_embedded_shell_commands(&content);
-                match self.shell_expansion.as_ref() {
+                // Non-Native-Prompt local injectors may own raw shell blocks.
+                // Native prompt output has already passed its source producer;
+                // do not even scan that returned text here (Native Insights is
+                // one example whose final report may contain backticks).
+                let content = match self.shell_expansion.as_ref() {
                     Some(provider)
-                        if has_embedded && !matches!(command.source, CommandSource::Mcp) =>
+                        if prompt_expansion.is_none()
+                            && !matches!(command.source, CommandSource::Mcp)
+                            && contains_embedded_shell_commands(&content) =>
                     {
                         let allowed: Vec<String> = handler
                             .allowed_tools()
@@ -911,16 +1201,34 @@ impl RegistrySlashDispatcher {
                         )
                         .await
                         {
-                            Ok(expanded) => self.injected_message_result(expanded),
-                            Err(e) => SlashDispatchResult::Handled {
-                                display: command_source_message(
-                                    &command.name,
-                                    &format!(" expansion failed: {e}"),
-                                ),
-                            },
+                            Ok(expanded) => expanded,
+                            Err(e) => {
+                                return SlashDispatchResult::Handled {
+                                    display: command_source_message(
+                                        &command.name,
+                                        &format!(" expansion failed: {e}"),
+                                    ),
+                                }
+                            }
                         }
                     }
-                    _ => self.injected_message_result(content),
+                    _ => content,
+                };
+
+                let content = match self.transform_native_prompt_body(&command, content).await {
+                    Ok(content) => content,
+                    Err(display) => return SlashDispatchResult::Handled { display },
+                };
+                if let Some(aggregate) = prompt_expansion {
+                    let (command_row, body_row) =
+                        native_prompt_turn_projections(&command, &parsed.raw_args, &content);
+                    SlashDispatchResult::RunSkillAsTurn {
+                        command: command_row,
+                        body: body_row,
+                        hook_messages: aggregate.prompt_expansion_history_rows,
+                    }
+                } else {
+                    self.injected_message_result(content)
                 }
             }
             CommandResult::RequestConfirmation { prompt, .. } => SlashDispatchResult::Handled {
@@ -950,7 +1258,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                 resolve_command_invocation(&registry, parsed).and_then(|(command, parsed)| {
                     (crate::registry::native_factory_enabled(&command)
                         && registry.mod_owner_of(&command.name).is_none())
-                        .then_some((command.name.clone(), parsed.raw_args))
+                    .then_some((command.name.clone(), parsed.raw_args))
                 })
             };
             if let Some((command, args)) = resolved {
@@ -976,11 +1284,12 @@ fn starts_with_raw_slash(input: &Utf16JsonProjection) -> bool {
 
 fn contains_embedded_shell_commands(content: &Utf16JsonProjection) -> bool {
     content.string_units("").is_some_and(|units| {
-        units.windows(4).any(|window| {
-            window == [b'`' as u16, b'`' as u16, b'`' as u16, b'!' as u16]
-        }) || units
-            .windows(2)
-            .any(|window| window == [b'!' as u16, b'`' as u16])
+        units
+            .windows(4)
+            .any(|window| window == [b'`' as u16, b'`' as u16, b'`' as u16, b'!' as u16])
+            || units
+                .windows(2)
+                .any(|window| window == [b'!' as u16, b'`' as u16])
     })
 }
 
@@ -1257,6 +1566,70 @@ mod tests {
             .expect("test display is a root string")
     }
 
+    fn expected_native_prompt_header(name: &[u16], raw_args: &[u16]) -> Vec<u16> {
+        let mut header = "<command-message>".encode_utf16().collect::<Vec<_>>();
+        header.extend_from_slice(name);
+        header.extend("</command-message>\n<command-name>/".encode_utf16());
+        header.extend_from_slice(name);
+        header.extend("</command-name>".encode_utf16());
+        if !raw_args.is_empty() {
+            header.extend("\n<command-args>".encode_utf16());
+            header.extend_from_slice(raw_args);
+            header.extend("</command-args>".encode_utf16());
+        }
+        header
+    }
+
+    #[test]
+    fn user_prompt_expansion_control_is_consumed_before_body_expansion() {
+        use hooks::response::{
+            AggregateHookResult, ExactHookText, HookDecision, HookOutcome, HookResponse, HookResult,
+        };
+
+        let mut aggregate = AggregateHookResult::default();
+        aggregate.all_results.push((
+            lingxi_core::types::HookId::new(),
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: ExactHookText::default(),
+                stderr: ExactHookText::default(),
+                exit_code: None,
+                response: Some(HookResponse {
+                    decision: Some(HookDecision::Block),
+                    ..HookResponse::default()
+                }),
+            },
+        ));
+        let display = user_prompt_expansion_control_result(
+            &aggregate,
+            &Utf16JsonProjection::from("skill"),
+            &Utf16JsonProjection::from(""),
+        )
+        .expect("the first blocking UPE result is handled locally");
+        assert_eq!(
+            display.string_at(""),
+            Some(
+                "UserPromptExpansion operation blocked by hook:\nBlocked by hook\n\nOriginal prompt: /skill"
+            )
+        );
+
+        aggregate.all_results[0].1.response = Some(HookResponse {
+            prevent_continuation: true,
+            reason: Some(ExactHookText::from_text("denied by policy")),
+            ..HookResponse::default()
+        });
+        let stopped = user_prompt_expansion_control_result(
+            &aggregate,
+            &Utf16JsonProjection::from("skill"),
+            &Utf16JsonProjection::from("secret args"),
+        )
+        .expect("preventContinuation also stops before expansion");
+        assert_eq!(
+            stopped.string_at(""),
+            Some("Operation stopped by hook: denied by policy")
+        );
+    }
+
     struct LiteralBundledPrompt;
 
     impl crate::model::BundledPromptFn for LiteralBundledPrompt {
@@ -1341,6 +1714,7 @@ mod tests {
             name: name.clone(),
             description: "custom prompt".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/custom.md"),
                 frontmatter: crate::model::CommandFrontmatter::default(),
@@ -1350,12 +1724,22 @@ mod tests {
         });
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
 
-        let SlashDispatchResult::RunAsTurn { prompt } =
-            dispatcher.dispatch_without_mod_hooks(&raw).await
+        let SlashDispatchResult::RunSkillAsTurn {
+            command,
+            body,
+            hook_messages,
+        } = dispatcher.dispatch_without_mod_hooks(&raw).await
         else {
             panic!("exact source command should resolve and expand")
         };
-        assert_eq!(prompt.string_units(""), Some(vec![b'x' as u16, 0xdfff]));
+        let name_units = name.string_units("").unwrap();
+        let args_units = vec![b'x' as u16, 0xdfff];
+        assert_eq!(
+            command.string_units(""),
+            Some(expected_native_prompt_header(&name_units, &args_units))
+        );
+        assert_eq!(body.string_units(""), Some(args_units));
+        assert!(hook_messages.is_empty());
     }
 
     #[tokio::test]
@@ -1371,6 +1755,7 @@ mod tests {
             name,
             description: "review".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/source-review.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -1398,15 +1783,21 @@ mod tests {
             SlashDispatchResult::NotASlashCommand
         ));
         let raw = Ujp::root_string(String::from_utf16_lossy(&raw_units), raw_units).unwrap();
-        let SlashDispatchResult::RunAsTurn { prompt } =
-            dispatcher.dispatch_without_mod_hooks(&raw).await
+        let SlashDispatchResult::RunSkillAsTurn {
+            command,
+            body,
+            hook_messages,
+        } = dispatcher.dispatch_without_mod_hooks(&raw).await
         else {
             panic!("Native namespace fallback should resolve the exact command source")
         };
+        let args_units = ["arg".encode_utf16().collect::<Vec<_>>(), vec![0xdfff]].concat();
         assert_eq!(
-            prompt.string_units(""),
-            Some(["arg".encode_utf16().collect::<Vec<_>>(), vec![0xdfff]].concat())
+            command.string_units(""),
+            Some(expected_native_prompt_header(&name_units, &args_units))
         );
+        assert_eq!(body.string_units(""), Some(args_units));
+        assert!(hook_messages.is_empty());
     }
 
     /// Pins the per-source provenance token that reaches the
@@ -1484,7 +1875,7 @@ mod tests {
             }));
         assert!(
             matches!(dispatcher.dispatch("/dataviz revenue".into()).await,
-            SlashDispatchResult::RunAsTurn { prompt } if prompt_text(&prompt).contains("revenue"))
+            SlashDispatchResult::RunSkillAsTurn { body, .. } if prompt_text(&body).contains("revenue"))
         );
         assert!(matches!(dispatcher.dispatch("/loop check".into()).await,
             SlashDispatchResult::Handled { display } if display_text(&display) == "loop expansion failed: model route is unavailable"));
@@ -1506,7 +1897,7 @@ mod tests {
                 Box::pin(async move { Ok(Some(model.read().await.clone())) })
             }));
         let get_prompt = |result| match result {
-            SlashDispatchResult::RunAsTurn { prompt } => prompt,
+            SlashDispatchResult::RunSkillAsTurn { body, .. } => body,
             other => panic!("expected model turn, got {other:?}"),
         };
         let first = get_prompt(dispatcher.dispatch("/loop check the deploy".into()).await);
@@ -1560,6 +1951,7 @@ mod tests {
             name: "demo".into(),
             description: "Demo".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/demo.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -1570,10 +1962,19 @@ mod tests {
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
         // Markdown prompt commands run AS a turn (claude-code `type: "prompt"`).
         match d.dispatch("/demo this".into()).await {
-            SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt_text(&prompt), "Use this")
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                assert_eq!(
+                    prompt_text(&command),
+                    "<command-message>demo</command-message>\n<command-name>/demo</command-name>\n<command-args>this</command-args>"
+                );
+                assert_eq!(prompt_text(&body), "Use this");
+                assert!(hook_messages.is_empty());
             }
-            other => panic!("expected markdown command to run-as-turn, got {other:?}"),
+            other => panic!("expected Native markdown prompt turn, got {other:?}"),
         }
     }
 
@@ -1606,6 +2007,7 @@ mod tests {
             name: "loop".into(),
             description: "Loop".into(),
             source: CommandSource::Bundled,
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Bundled {
                 frontmatter: CommandFrontmatter::default(),
                 prompt_fn: Some(Arc::new(B)),
@@ -1615,18 +2017,37 @@ mod tests {
             ..SlashCommand::default()
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
-        // Non-empty args → built prompt, run AS a turn (claude-code bundled
-        // skills are `type: "prompt"` / `userInvocable`).
+        // Native prompt commands preserve a separate command header and meta
+        // body in the model turn.
         match d.dispatch("/loop 5m /babysit-prs".into()).await {
-            SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt_text(&prompt), "BUILT[5m /babysit-prs]");
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                assert_eq!(
+                    prompt_text(&command),
+                    "<command-message>loop</command-message>\n<command-name>/loop</command-name>\n<command-args>5m /babysit-prs</command-args>"
+                );
+                assert_eq!(prompt_text(&body), "BUILT[5m /babysit-prs]");
+                assert!(hook_messages.is_empty());
             }
             other => panic!("expected bundled skill to run-as-turn, got {other:?}"),
         }
-        // Empty args → usage. Still RunAsTurn (the model receives the usage as
-        // its prompt and surfaces it) — never Unknown.
+        // Empty args still produce the same prompt turn, never Unknown.
         match d.dispatch("/loop".into()).await {
-            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt_text(&prompt), "USAGE"),
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                assert_eq!(
+                    prompt_text(&command),
+                    "<command-message>loop</command-message>\n<command-name>/loop</command-name>"
+                );
+                assert_eq!(prompt_text(&body), "USAGE");
+                assert!(hook_messages.is_empty());
+            }
             other => panic!("expected usage run-as-turn, got {other:?}"),
         }
     }
@@ -1650,6 +2071,7 @@ mod tests {
             name: "code-review".into(),
             description: "Review".into(),
             source: CommandSource::Bundled,
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Bundled {
                 frontmatter: CommandFrontmatter {
                     context: Some("fork".to_string()),
@@ -1698,6 +2120,7 @@ mod tests {
             name: "code-review".into(),
             description: "Review".into(),
             source: CommandSource::Bundled,
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Bundled {
                 frontmatter: CommandFrontmatter {
                     context: Some("fork".to_string()),
@@ -1729,6 +2152,7 @@ mod tests {
             name: "commit".into(),
             description: "Custom commit".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/commit.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -1738,10 +2162,19 @@ mod tests {
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
         match d.dispatch("/commit now".into()).await {
-            SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt_text(&prompt), "Custom now")
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                assert_eq!(
+                    prompt_text(&command),
+                    "<command-message>commit</command-message>\n<command-name>/commit</command-name>\n<command-args>now</command-args>"
+                );
+                assert_eq!(prompt_text(&body), "Custom now");
+                assert!(hook_messages.is_empty());
             }
-            other => panic!("expected custom markdown run-as-turn, got {other:?}"),
+            other => panic!("expected custom Native markdown turn, got {other:?}"),
         }
     }
 
@@ -1805,7 +2238,7 @@ mod tests {
         // Default: /doctor resolves to the native bundled prompt.
         std::env::remove_var(var);
         assert!(matches!(d.dispatch("/doctor".into()).await,
-            SlashDispatchResult::RunAsTurn { prompt } if prompt_text(&prompt) == "Native doctor prompt"));
+            SlashDispatchResult::RunSkillAsTurn { body, .. } if prompt_text(&body) == "Native doctor prompt"));
 
         // The gate applies after alias resolution to the canonical factory.
         std::env::set_var(var, "1");
@@ -2002,20 +2435,19 @@ mod tests {
 
     // ---- #39 UserPromptExpansion firing (R-O1) ----
     //
-    // claude-code fires `UserPromptExpansion` (`WFa`→`b$t`, BIN off 201270310)
-    // the moment a markdown / MCP-prompt slash command is expanded, with the
+    // Claude Code 2.1.295 fires `UserPromptExpansion` before every direct
+    // `type:"prompt"` command's `getPromptForCommand` (`Ajs`→`nt`→`Qe`), with
     // command metadata: `expansion_type` (`slash_command` | `mcp_prompt`),
     // `command_name`, `command_args` (the raw arg string), `command_source`
     // (the command's provenance), and `prompt` (the `/name args` line). These
-    // tests prove the dispatcher fires that event at the markdown-expansion
-    // site once an executor + context provider are wired, and is a strict
-    // no-op otherwise.
+    // tests prove prompt producers are gated before their handler runs, and
+    // that non-prompt builtins and unwired dispatchers remain no-ops.
 
     use async_trait::async_trait;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
     use hooks::events::HookEventType;
     use hooks::executor::BuiltinHookHandler;
-    use hooks::response::{HookOutcome, HookResult};
+    use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
     use hooks::HookRegistry;
     use lingxi_core::types::{HookId, HttpRequest, HttpResponse};
     use std::time::Duration;
@@ -2151,6 +2583,7 @@ mod tests {
             name: "demo".into(),
             description: "Demo".into(),
             source,
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/demo.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -2179,11 +2612,11 @@ mod tests {
 
         assert!(matches!(
             dispatcher.dispatch("/demo one".into()).await,
-            SlashDispatchResult::RunAsTurn { .. }
+            SlashDispatchResult::RunSkillAsTurn { .. }
         ));
         assert!(matches!(
             dispatcher.dispatch("/demo two".into()).await,
-            SlashDispatchResult::RunAsTurn { .. }
+            SlashDispatchResult::RunSkillAsTurn { .. }
         ));
         let usage = crate::skill_usage::read_skill_usage(&root).unwrap();
         let skill_key = "demo".encode_utf16().collect::<Vec<_>>();
@@ -2195,7 +2628,7 @@ mod tests {
         .with_skill_usage_session(crate::skill_usage::SkillUsageSession::new(root.clone()));
         assert!(matches!(
             next_session.dispatch("/demo three".into()).await,
-            SlashDispatchResult::RunAsTurn { .. }
+            SlashDispatchResult::RunSkillAsTurn { .. }
         ));
         let usage = crate::skill_usage::read_skill_usage(&root).unwrap();
         assert_eq!(usage.get(&skill_key).map(|entry| entry.count), Some(2));
@@ -2223,10 +2656,19 @@ mod tests {
 
         // Expansion still produces the body, AND the hook fires.
         match d.dispatch("/demo this and that".into()).await {
-            SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt_text(&prompt), "Use this and that")
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                assert_eq!(
+                    prompt_text(&command),
+                    "<command-message>demo</command-message>\n<command-name>/demo</command-name>\n<command-args>this and that</command-args>"
+                );
+                assert_eq!(prompt_text(&body), "Use this and that");
+                assert!(hook_messages.is_empty());
             }
-            other => panic!("expected markdown expansion, got {other:?}"),
+            other => panic!("expected Native markdown prompt turn, got {other:?}"),
         }
 
         let seen = log.lock().unwrap().clone();
@@ -2294,6 +2736,9 @@ mod tests {
     async fn mcp_prompt_dispatch_binds_arguments_and_runs_rendered_prompt() {
         let connection_id = McpConnectionId::new();
         let seen = Arc::new(std::sync::Mutex::new(None));
+        let (expansion_executor, expansion_log) = recording_expansion_executor().await;
+        let expansion_context: ExpansionHookContextProvider =
+            Arc::new(|| Box::pin(async { HookContext::default() }));
         let resolver_seen = seen.clone();
         let resolver: McpPromptResolver = Arc::new(move |id, name, arguments| {
             let seen = resolver_seen.clone();
@@ -2309,16 +2754,26 @@ mod tests {
             })
         });
         let dispatcher = RegistrySlashDispatcher::new(registry_with_mcp_prompt(connection_id))
-            .with_mcp_prompt_resolver(resolver);
+            .with_mcp_prompt_resolver(resolver)
+            .with_expansion_hooks(expansion_executor, expansion_context);
 
         match dispatcher
             .dispatch("/github review lingxi \"unsafe code\" ignored".into())
             .await
         {
-            SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt_text(&prompt), "Review src/lib.rs");
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                assert_eq!(
+                    prompt_text(&command),
+                    "<command-message>mcp__github__review</command-message>\n<command-name>/mcp__github__review</command-name>\n<command-args>lingxi \"unsafe code\" ignored</command-args>"
+                );
+                assert_eq!(prompt_text(&body), "Review src/lib.rs");
+                assert!(hook_messages.is_empty());
             }
-            other => panic!("expected MCP prompt turn, got {other:?}"),
+            other => panic!("expected Native MCP prompt turn, got {other:?}"),
         }
         let call = seen.lock().unwrap().clone().expect("resolver call");
         assert_eq!(call.0, connection_id);
@@ -2336,7 +2791,7 @@ mod tests {
             dispatcher
                 .dispatch("/github:review (MCP) lingxi focus ignored".into())
                 .await,
-            SlashDispatchResult::RunAsTurn { .. }
+            SlashDispatchResult::RunSkillAsTurn { .. }
         ));
         let marker_call = seen.lock().unwrap().clone().expect("marker resolver call");
         assert_eq!(
@@ -2347,10 +2802,19 @@ mod tests {
             }))
             .unwrap()
         );
+        let expansions = expansion_log.lock().unwrap().clone();
+        assert_eq!(
+            expansions.len(),
+            2,
+            "one Native hook run per MCP prompt: {expansions:?}"
+        );
+        assert!(expansions
+            .iter()
+            .all(|row| row.expansion_type == PromptExpansionType::McpPrompt));
     }
 
     #[tokio::test]
-    async fn mcp_prompt_missing_required_argument_fails_before_wire_call() {
+    async fn mcp_prompt_expansion_control_precedes_argument_binding() {
         let connection_id = McpConnectionId::new();
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resolver_called = called.clone();
@@ -2358,14 +2822,25 @@ mod tests {
             resolver_called.store(true, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async { unreachable!("required argument must fail before resolver") })
         });
+        let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+        hook_registry
+            .write()
+            .await
+            .register(user_prompt_expansion_hook());
+        let mut executor =
+            HookExecutorImpl::new(hook_registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        executor.register_builtin(Arc::new(BlockingExpansionHandler));
+        let context: ExpansionHookContextProvider =
+            Arc::new(|| Box::pin(async { HookContext::default() }));
         let dispatcher = RegistrySlashDispatcher::new(registry_with_mcp_prompt(connection_id))
-            .with_mcp_prompt_resolver(resolver);
+            .with_mcp_prompt_resolver(resolver)
+            .with_expansion_hooks(Arc::new(executor), context);
 
         match dispatcher.dispatch("/github:review".into()).await {
             SlashDispatchResult::Handled { display } => {
-                assert!(display_text(&display).contains("missing required argument <repository>"));
+                assert!(display_text(&display).contains("blocked before prompt generation"));
             }
-            other => panic!("expected validation error, got {other:?}"),
+            other => panic!("expected UPE block before argument binding, got {other:?}"),
         }
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
@@ -2410,8 +2885,10 @@ mod tests {
         )));
 
         match d.dispatch("/demo x".into()).await {
-            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt_text(&prompt), "Use x"),
-            other => panic!("expected markdown expansion, got {other:?}"),
+            SlashDispatchResult::RunSkillAsTurn { body, .. } => {
+                assert_eq!(prompt_text(&body), "Use x")
+            }
+            other => panic!("expected Native markdown prompt turn, got {other:?}"),
         }
 
         assert!(
@@ -2420,11 +2897,10 @@ mod tests {
         );
     }
 
-    /// A non-markdown (builtin handler) command never "expands", so it must NOT
-    /// fire `UserPromptExpansion` even when the hook is wired — faithful to
-    /// claude-code, where `b$t` fires only from the command-EXPANSION path.
+    /// A local builtin command is not a Native prompt producer, so it does not
+    /// fire `UserPromptExpansion` even when the hook is wired.
     #[tokio::test]
-    async fn builtin_command_does_not_fire_user_prompt_expansion() {
+    async fn non_prompt_builtin_does_not_fire_user_prompt_expansion() {
         let (exec, log) = recording_expansion_executor().await;
         let provider: ExpansionHookContextProvider =
             Arc::new(|| Box::pin(async { HookContext::default() }));
@@ -2443,6 +2919,193 @@ mod tests {
             log.lock().unwrap().is_empty(),
             "a builtin handler command must not fire UserPromptExpansion"
         );
+    }
+
+    struct CountedPromptHandler {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::model::BuiltinCommandHandler for CountedPromptHandler {
+        async fn handle(&self, _args: &crate::parser::ParsedSlashCommand) -> CommandResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            CommandResult::InjectMessage {
+                content: "generated prompt".into(),
+            }
+        }
+
+        fn name(&self) -> &str {
+            "prompt-producer"
+        }
+
+        fn description(&self) -> &str {
+            "Prompt producer test"
+        }
+
+        fn native_type(&self) -> Option<NativeCommandType> {
+            Some(NativeCommandType::Prompt)
+        }
+    }
+
+    struct BlockingExpansionHandler;
+
+    #[async_trait]
+    impl BuiltinHookHandler for BlockingExpansionHandler {
+        fn id(&self) -> &str {
+            "record-user-prompt-expansion"
+        }
+
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new().into(),
+                stderr: String::new().into(),
+                exit_code: None,
+                response: Some(HookResponse {
+                    decision: Some(HookDecision::Block),
+                    reason: Some("blocked before prompt generation".into()),
+                    ..Default::default()
+                }),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_expansion_block_precedes_prompt_handler_side_effects() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut commands = CommandRegistry::new();
+        commands.register_builtin_handler(Arc::new(CountedPromptHandler {
+            calls: calls.clone(),
+        }));
+
+        let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+        hook_registry
+            .write()
+            .await
+            .register(user_prompt_expansion_hook());
+        let mut executor =
+            HookExecutorImpl::new(hook_registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        executor.register_builtin(Arc::new(BlockingExpansionHandler));
+        let context: ExpansionHookContextProvider =
+            Arc::new(|| Box::pin(async { HookContext::default() }));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(commands)))
+            .with_expansion_hooks(Arc::new(executor), context);
+
+        match dispatcher.dispatch("/prompt-producer arg".into()).await {
+            SlashDispatchResult::Handled { display } => assert!(
+                display_text(&display).contains("blocked before prompt generation"),
+                "hook block must be surfaced before the producer runs"
+            ),
+            other => panic!("expected a blocked prompt command, got {other:?}"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn skill_prompt_transformer_runs_before_native_prompt_envelope_and_survives_clone() {
+        let transformed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transformer_calls = transformed.clone();
+        let transformer: SkillPromptTransformer = Arc::new(move |skill, text| {
+            let transformer_calls = transformer_calls.clone();
+            Box::pin(async move {
+                transformer_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(crate::model::source_concat([
+                    crate::model::PromptPart::Source(&skill),
+                    crate::model::PromptPart::Text(": "),
+                    crate::model::PromptPart::Source(&text),
+                ]))
+            })
+        });
+        let mut commands = CommandRegistry::new();
+        commands.register_builtin_handler(Arc::new(CountedPromptHandler {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(commands)))
+            .with_skill_prompt_transformer(transformer);
+
+        for dispatcher in [dispatcher.clone_shared(), dispatcher] {
+            match dispatcher.dispatch("/prompt-producer arg".into()).await {
+                SlashDispatchResult::RunSkillAsTurn {
+                    command,
+                    body,
+                    hook_messages,
+                } => {
+                    assert_eq!(
+                        prompt_text(&command),
+                        "<command-message>prompt-producer</command-message>\n<command-name>/prompt-producer</command-name>\n<command-args>arg</command-args>"
+                    );
+                    assert_eq!(prompt_text(&body), "prompt-producer: generated prompt");
+                    assert!(hook_messages.is_empty());
+                }
+                other => panic!("expected transformed Native prompt turn, got {other:?}"),
+            }
+        }
+        assert_eq!(transformed.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn skill_prompt_transformer_error_stays_display_only() {
+        let mut commands = CommandRegistry::new();
+        commands.register_builtin_handler(Arc::new(CountedPromptHandler {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(commands)))
+            .with_skill_prompt_transformer(Arc::new(|_, _| {
+                Box::pin(async { Err(Utf16JsonProjection::from("skill.prompt failed")) })
+            }));
+
+        match dispatcher.dispatch("/prompt-producer arg".into()).await {
+            SlashDispatchResult::Handled { display } => {
+                assert_eq!(display_text(&display), "skill.prompt failed");
+            }
+            other => panic!("transformer errors must not create a model turn: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_expansion_block_precedes_bundled_prompt_builder() {
+        struct CountedBuilder(Arc<std::sync::atomic::AtomicUsize>);
+        impl crate::model::BundledPromptFn for CountedBuilder {
+            fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                "built prompt".into()
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "prompt-builder".into(),
+            description: "Native prompt builder".into(),
+            source: CommandSource::Bundled,
+            native_type: Some(NativeCommandType::Prompt),
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter::default(),
+                prompt_fn: Some(Arc::new(CountedBuilder(calls.clone()))),
+            },
+            ..SlashCommand::default()
+        });
+
+        let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+        hook_registry
+            .write()
+            .await
+            .register(user_prompt_expansion_hook());
+        let mut executor =
+            HookExecutorImpl::new(hook_registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        executor.register_builtin(Arc::new(BlockingExpansionHandler));
+        let context: ExpansionHookContextProvider =
+            Arc::new(|| Box::pin(async { HookContext::default() }));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_expansion_hooks(Arc::new(executor), context);
+
+        match dispatcher.dispatch("/prompt-builder arg".into()).await {
+            SlashDispatchResult::Handled { display } => {
+                assert!(display_text(&display).contains("blocked before prompt generation"))
+            }
+            other => panic!("expected UPE block before bundled builder, got {other:?}"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     // ---- #3 embedded shell-expansion wiring ----
@@ -2520,6 +3183,51 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn prompt_expansion_block_precedes_markdown_shell_provider() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "prompt-shell".into(),
+            description: "Native prompt shell test".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/tmp/prompt-shell.md"),
+                frontmatter: CommandFrontmatter {
+                    allowed_tools: Some(vec!["Bash(echo:*)".to_string()]),
+                    ..CommandFrontmatter::default()
+                },
+                prompt_template: "before !`echo hi` after".into(),
+            },
+            ..SlashCommand::default()
+        });
+        let provider = Arc::new(FakeProvider {
+            deny: false,
+            seen_allowed: std::sync::Mutex::new(Vec::new()),
+        });
+        let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+        hook_registry
+            .write()
+            .await
+            .register(user_prompt_expansion_hook());
+        let mut executor =
+            HookExecutorImpl::new(hook_registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        executor.register_builtin(Arc::new(BlockingExpansionHandler));
+        let context: ExpansionHookContextProvider =
+            Arc::new(|| Box::pin(async { HookContext::default() }));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_shell_expansion(provider.clone())
+            .with_expansion_hooks(Arc::new(executor), context);
+
+        match dispatcher.dispatch("/prompt-shell".into()).await {
+            SlashDispatchResult::Handled { display } => {
+                assert!(display_text(&display).contains("blocked before prompt generation"))
+            }
+            other => panic!("expected UPE block before Markdown shell expansion, got {other:?}"),
+        }
+        assert!(provider.seen_allowed.lock().unwrap().is_empty());
+    }
+
     /// A builtin handler returning `InjectMessage` with an embedded `!`cmd`` body
     /// and a declared allow-list (mirrors `/commit`'s shape).
     struct EmbeddedInjectHandler;
@@ -2577,11 +3285,22 @@ mod tests {
     /// stdout, and the frontmatter `allowed_tools` reaches `provider.build`.
     #[tokio::test]
     async fn wired_provider_expands_markdown_embedded_shell() {
-        let reg = markdown_with(
-            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
-            "before !`echo hi` after",
-            Some(vec!["Bash(echo:*)".to_string()]),
-        );
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "demo".into(),
+            description: "Demo".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/x/demo.md"),
+                frontmatter: CommandFrontmatter {
+                    allowed_tools: Some(vec!["Bash(echo:*)".to_string()]),
+                    ..CommandFrontmatter::default()
+                },
+                prompt_template: "before !`echo hi` after".into(),
+            },
+            ..SlashCommand::default()
+        });
         let provider = Arc::new(FakeProvider {
             deny: false,
             seen_allowed: std::sync::Mutex::new(Vec::new()),
@@ -2589,10 +3308,19 @@ mod tests {
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
         match d.dispatch("/demo".into()).await {
-            SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt_text(&prompt), "before OUT[echo hi] after");
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                assert_eq!(
+                    prompt_text(&command),
+                    "<command-message>demo</command-message>\n<command-name>/demo</command-name>"
+                );
+                assert_eq!(prompt_text(&body), "before OUT[echo hi] after");
+                assert!(hook_messages.is_empty());
             }
-            other => panic!("expected expanded run-as-turn, got {other:?}"),
+            other => panic!("expected expanded Native prompt turn, got {other:?}"),
         }
         assert_eq!(
             provider.seen_allowed.lock().unwrap().as_slice(),
@@ -2608,6 +3336,7 @@ mod tests {
             name: "prompt-shell".into(),
             description: "Bundled shell test".into(),
             source: CommandSource::Bundled,
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Bundled {
                 frontmatter: CommandFrontmatter {
                     allowed_tools: Some(vec!["Bash(echo:*)".to_string()]),
@@ -2626,10 +3355,19 @@ mod tests {
             .with_shell_expansion(provider.clone());
 
         match dispatcher.dispatch("/prompt-shell".into()).await {
-            SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt_text(&prompt), "before OUT[echo hi] after");
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                assert_eq!(
+                    prompt_text(&command),
+                    "<command-message>prompt-shell</command-message>\n<command-name>/prompt-shell</command-name>"
+                );
+                assert_eq!(prompt_text(&body), "before OUT[echo hi] after");
+                assert!(hook_messages.is_empty());
             }
-            other => panic!("expected expanded bundled prompt turn, got {other:?}"),
+            other => panic!("expected expanded bundled Native prompt turn, got {other:?}"),
         }
         assert_eq!(
             provider.seen_allowed.lock().unwrap().as_slice(),
@@ -2912,6 +3650,7 @@ mod tests {
             name: "tight".into(),
             description: "d".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/tight.md"),
                 frontmatter: CommandFrontmatter {
@@ -2923,10 +3662,21 @@ mod tests {
             ..SlashCommand::default()
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
-        assert!(matches!(
-            d.dispatch("/tight".into()).await,
-            SlashDispatchResult::RunAsTurn { .. }
-        ));
+        match d.dispatch("/tight".into()).await {
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                assert_eq!(
+                    prompt_text(&command),
+                    "<command-message>tight</command-message>\n<command-name>/tight</command-name>"
+                );
+                assert_eq!(prompt_text(&body), "body");
+                assert!(hook_messages.is_empty());
+            }
+            other => panic!("expected Native prompt turn without a gate, got {other:?}"),
+        }
     }
 
     #[tokio::test]

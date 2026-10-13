@@ -9,7 +9,10 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 0 step 4 for the byte-locked literal.
 
-use crate::model::{BuiltinCommandHandler, CommandResult, NativeCommandType};
+use crate::model::{
+    BuiltinCommandHandler, CommandResult, NativeCommandPolicyGate, NativeCommandRequirements,
+    NativeCommandType,
+};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 
@@ -90,6 +93,34 @@ impl BuiltinCommandHandler for UnimplementedCommandHandler {
 
     fn supports_non_interactive(&self) -> bool {
         self.supports_non_interactive
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.name != "insights"
+    }
+
+    fn disable_model_invocation(&self) -> bool {
+        self.name == "insights"
+    }
+
+    fn content_length(&self) -> Option<usize> {
+        (self.name == "insights").then_some(0)
+    }
+
+    fn progress_message(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        (self.name == "insights").then(|| "analyzing your sessions".into())
+    }
+
+    fn requires(&self) -> Option<NativeCommandRequirements> {
+        (self.name == "insights").then_some(NativeCommandRequirements {
+            workspace: Some(true),
+        })
+    }
+
+    fn policy_gate(&self) -> Option<NativeCommandPolicyGate> {
+        (self.name == "insights").then(|| NativeCommandPolicyGate {
+            policy: "allow_insights".into(),
+        })
     }
 }
 

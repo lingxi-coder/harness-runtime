@@ -186,6 +186,17 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
                         .prepare_turn_step(ModelCallPath::Batched, None, true, true, None)
                         .await
                         .unwrap();
+                    let hot_fallback_rows = prepared
+                        .snapshot
+                        .iter()
+                        .filter(|message| message.id() == fallback_id)
+                        .collect::<Vec<_>>();
+                    assert_eq!(hot_fallback_rows.len(), 1);
+                    assert!(matches!(
+                        hot_fallback_rows[0],
+                        ConversationMessage::User { .. }
+                    ));
+                    assert!(hot_fallback_rows[0].is_meta());
                     assert!(!prepared.deferred_context_announcement_rows.is_empty());
                     assert!(orch
                         .context_attachment_history(&prepared.context_announcements.messages)
@@ -430,8 +441,9 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
         assert_eq!(resumed_fallback_rows.len(), 1);
         assert!(matches!(
             resumed_fallback_rows[0],
-            ConversationMessage::User { is_meta: false, .. }
+            ConversationMessage::User { .. }
         ));
+        assert!(resumed_fallback_rows[0].is_meta());
         assert!(
             cold_prepared.context_announcements.messages.is_empty(),
             "cold resume reuses the durable announcement cursor instead of duplicating rows"

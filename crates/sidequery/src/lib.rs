@@ -14,8 +14,8 @@
 #![forbid(unsafe_code)]
 
 pub mod cache_safe_params;
-pub mod forked_agent;
 mod fork_response;
+pub mod forked_agent;
 pub mod provider_side_query;
 pub mod purposes;
 pub mod side_query;
@@ -28,7 +28,8 @@ pub use forked_agent::{
 pub use provider_side_query::ProviderSideQueryClient;
 pub use purposes::QuerySource;
 pub use side_query::{
-    CanonicalSideQueryRequest, ForkedSideQueryOptions, ForkedSideQueryResponse, SideQueryClient, SideQueryError, SideQueryEstimate,
+    CanonicalSideQueryRequest, ForkedSideQueryOptions, ForkedSideQueryResponse,
+    NativeSideQueryPromptContext, SideQueryClient, SideQueryError, SideQueryEstimate,
     SideQueryRequest, SideQueryResponse, StrictStructuredQueryRequest,
     StrictStructuredQueryResponse,
 };

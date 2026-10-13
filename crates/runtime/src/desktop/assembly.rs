@@ -865,6 +865,17 @@ pub async fn build_with_credential_stack(
         &cwd,
         proxy_auth_global_config_path.as_deref(),
     );
+    // Local CLI hosts derive this local verdict from their existing workspace
+    // trust policy. Product/bridge hosts pass an explicit allowInsights value.
+    // Other hosts preserve unknown as None; permission mode is unrelated.
+    let native_insights_policy_gate = cfg.insights_policy_gate.or_else(|| {
+        matches!(
+            cfg.session_composition(),
+            super::DesktopSessionComposition::InteractiveCli
+                | super::DesktopSessionComposition::HeadlessCli
+        )
+        .then_some(workspace_trusted)
+    });
     let proxy_auth_workspace_trust_provider: Arc<dyn Fn() -> bool + Send + Sync> = {
         let host_trusted = cfg.host_workspace_trusted;
         let cwd = cwd.clone();
@@ -1123,6 +1134,8 @@ pub async fn build_with_credential_stack(
             UserAgentEnv::from_process_env()
         }
     });
+    let insights_native_system_prefix =
+        crate::insights::desktop_native_insights_system_prefix(&cfg, &user_agent_environment);
     // Build the provider-neutral drive service (the retry/rate-limit/betas loop),
     // then wrap it in the thin `ProviderApiAdapter` that impls the orchestrator +
     // agent seams. The `with_*` builders live on `ApiService`.
@@ -4859,6 +4872,7 @@ pub async fn build_with_credential_stack(
             }
         }
     };
+    let insights_tool_context = Arc::new(tool_ctx.clone());
     let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools_with_fusion_recorder(
         &mut tools_inner,
         tool_ctx,
@@ -5429,13 +5443,14 @@ pub async fn build_with_credential_stack(
         &orch_cfg.query_source,
         cfg.native_settings_agent_context,
     );
+    let mod_prompt_output = output.clone();
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
         streaming_api,
         tools.clone(),
         hooks,
-        perms,
+        perms.clone(),
         output,
         memory,
         cwd.clone(),
@@ -6011,6 +6026,69 @@ pub async fn build_with_credential_stack(
         shared_command_registry.clone(),
     )
     .await;
+    let insights_availability = command_api::builtins::InsightsCommandAvailability {
+        workspace_available: Some(cfg.cwd.is_dir() && workspace_trusted),
+        allow_insights: native_insights_policy_gate,
+    };
+    if insights_availability.is_available() {
+        match crate::insights_bun_worker::BunInsightsSourceExecutor::new_from_host_environment() {
+            Ok(source) => {
+                let session = orch.session();
+                let model_selector: Arc<dyn crate::insights::InsightsModelSelector> =
+                    Arc::new(crate::insights::RuntimeInsightsModelSelector {
+                        session: session.clone(),
+                        api: api_service.clone(),
+                        model_resolution: model_resolution_context_provider.clone(),
+                    });
+                let native_prompt_context: Arc<
+                    dyn crate::insights::InsightsNativeSideQueryContextProvider,
+                > = Arc::new(
+                    crate::insights::RuntimeInsightsNativeSideQueryContextProvider {
+                        api: api_service.clone(),
+                        fallback_prefix: Some(insights_native_system_prefix),
+                    },
+                );
+                let recommendation =
+                    Arc::new(crate::insights::RuntimeInsightsRecommendationProvider {
+                        permission_gate: perms.clone(),
+                        tool_context: insights_tool_context.clone(),
+                        api: api_service.clone(),
+                        session,
+                    });
+                let command_name_facts: Arc<
+                    dyn crate::insights::InsightsNativeCommandNameFactsProvider,
+                > = Arc::new(
+                    crate::insights::RuntimeInsightsNativeCommandNameFactsProvider {
+                        api: api_service.clone(),
+                        session: orch.session(),
+                        disable_agent_view_setting: super::load_merged_disable_agent_view(&cfg.cwd),
+                    },
+                );
+                let source: Arc<dyn crate::insights::InsightsSourceExecutor> = Arc::new(source);
+                let provider: Arc<dyn command_api::builtins::InsightsReportProvider> =
+                    Arc::new(crate::insights::LocalInsightsReportProvider::new(
+                        cfg.lingxi_home.clone(),
+                        insights_availability,
+                        side_query_client.clone(),
+                        model_selector,
+                        native_prompt_context,
+                        recommendation,
+                        source,
+                        command_name_facts,
+                    ));
+                if !command_api::builtins::register_insights_command(&mut reg, provider) {
+                    tracing::debug!("Insights host facts changed before command registration");
+                }
+            }
+            Err(error) => {
+                tracing::debug!(error = ?error.to_json_string(), "Insights command not registered because the configured Bun worker is unavailable");
+            }
+        }
+    } else {
+        tracing::debug!(
+            "Insights remains a metadata stub because workspace or local policy is unavailable"
+        );
+    }
     if cfg.inline_visualization {
         crate::inline_visualization::register_skill(
             &mut reg,
@@ -6587,8 +6665,14 @@ pub async fn build_with_credential_stack(
     let mcp_prompt_registry = mcp_registry.clone();
     let prompt_paths_orch = orch.clone();
     let bundled_prompt_model_orch = orch.clone();
+    let skill_prompt_transformer = crate::skill_prompt::mod_skill_prompt_transformer(
+        plugin_hook_registry.clone(),
+        mod_session.clone(),
+        mod_prompt_output,
+    );
     let mut dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_mod_command_interceptor(mod_command_executor)
+        .with_skill_prompt_transformer(skill_prompt_transformer)
         .with_prompt_paths(Arc::new(move || {
             (
                 prompt_paths_orch.project_root(),
@@ -6977,6 +7061,7 @@ pub async fn build_with_credential_stack(
         oauth_connect_driver,
         // P1-08 runtime `/add-dir` live-effect handles (captured before the
         // orchestrator builder consumed the originals).
+        native_insights_policy_gate,
         session_cwd: runtime_session_cwd,
         mcp_registry: runtime_mcp_registry,
         ide_handle,

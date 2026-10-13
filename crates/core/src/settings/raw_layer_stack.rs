@@ -544,12 +544,14 @@ mod tests {
     }
 
     #[test]
-    fn native_managed_projection_survives_when_optional_typed_view_fails() {
+    fn native_managed_projection_keeps_exact_units_with_an_admitted_typed_view() {
         let root = tempfile::tempdir().unwrap();
         let policy = managed_policy(
-            r#"{"availableModels":["allowed-\ud800"],"enabledPlugins":false,"model":"managed-model"}"#,
+            r#"{"availableModels":["allowed-\ud800"],"enabledPlugins":{"plugin@market":["1.0.0"]},"model":"managed-model"}"#,
         );
-        assert!(!policy.complete);
+        // Native accepts plugin-version arrays. Admission of a convenience
+        // typed view must not replace the authoritative source projection.
+        assert!(policy.complete);
 
         let stack = Settings::load_raw_layer_stack_from_user_path(
             LoadInputs {
@@ -583,11 +585,11 @@ mod tests {
         assert!(stack
             .admitted_typed_layers()
             .iter()
-            .all(|layer| layer.source != Source::Managed));
+            .any(|layer| layer.source == Source::Managed));
         assert!(stack
             .managed_policy_selection
             .as_ref()
-            .is_some_and(|selection| !selection.complete));
+            .is_some_and(|selection| selection.complete));
         assert_eq!(
             stack.admitted_merged().string_units("/availableModels/0"),
             Some("allowed-".encode_utf16().chain([0xd800]).collect())

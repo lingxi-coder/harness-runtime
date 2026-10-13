@@ -16,7 +16,7 @@ use thiserror::Error;
 /// This policy is intentionally producer-only. A previously persisted,
 /// schema-valid snapshot remains eligible for request projection when the
 /// current policy later changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TaskDeliveryPolicy {
     /// Effective `tengu_violin_rosin` value; defaults to `false`.
     pub feature_enabled: bool,
@@ -36,17 +36,6 @@ impl TaskDeliveryPolicy {
             && !self.windows_or_wsl
             && !self.strict_tool_result_pairing
             && !self.bare_mode
-    }
-}
-
-impl Default for TaskDeliveryPolicy {
-    fn default() -> Self {
-        Self {
-            feature_enabled: false,
-            windows_or_wsl: false,
-            strict_tool_result_pairing: false,
-            bare_mode: false,
-        }
     }
 }
 

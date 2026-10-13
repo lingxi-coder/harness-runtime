@@ -96,7 +96,6 @@ G1	crates/command-api/src/builtins/commit_push_pr.rs	LingXi
 G1	crates/command-api/src/builtins/custom_commands.rs	\.lingxi
 G1	crates/command-api/src/builtins/init.rs	LINGXI
 G1	crates/command-api/src/builtins/init_verifiers.rs	\.lingxi
-G1	crates/command-api/src/builtins/insights.rs	LingXi
 G1	crates/command-api/src/builtins/keybindings/mod.rs	\.lingxi
 G1	crates/command-api/src/builtins/memory.rs	LINGXI
 G1	crates/command-api/src/builtins/model.rs	LingXi
@@ -1050,7 +1049,6 @@ G1	crates/orchestrator/tests/effort_cold_resume_295_test.rs	LINGXI
 G1	crates/orchestrator/tests/fixtures/native_sandbox_instructions_295_goldens.json	LingXi
 G1	crates/orchestrator/tests/prompt_suggestion_background.rs	LINGXI
 G1	crates/runtime/src/headless/run/native_commands_295_replay_test.rs	LINGXI
-G1	crates/runtime/src/headless/run/native_commands_295_replay_test.rs	\.claude(?![A-Za-z0-9_.\-])
 G3	crates/runtime/src/headless/run/native_commands_295_replay_test.rs	LINGXI.md
 G1	crates/runtime/tests/fixtures/native_commands_295/capture-manifest.json	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/runtime/tests/fixtures/native_commands_295/requests/punctuation-skill-name.request-00.json	CLAUDE\.md

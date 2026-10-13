@@ -39,6 +39,15 @@ pub struct RequestContextTranscriptAttachment {
     pub rendered_role: &'static str,
 }
 
+/// Resolve `isMeta` separately from API role. Native 2.1.295's unknown-command renderer
+/// (`src_194447854.js` byte 198866158) sets it on a user-role row.
+pub(crate) fn request_context_attachment_is_meta(
+    payload: &Utf16JsonProjection,
+    rendered_role: &str,
+) -> bool {
+    payload.string_at("/type") == Some("unknown_command_fallback") || rendered_role == "system"
+}
+
 struct PromptContext {
     prompt_id: std::sync::Mutex<MessageId>,
     rows: Vec<ConversationMessage>,
@@ -1047,7 +1056,12 @@ fn context_rows(
                 MessageId::new()
             };
             let is_meta = row_attachment
-                .map(|attachment| attachment.rendered_role == "system")
+                .map(|attachment| {
+                    request_context_attachment_is_meta(
+                        &attachment.payload,
+                        attachment.rendered_role,
+                    )
+                })
                 .unwrap_or(true);
             let text_units = text.string_units("").unwrap_or_default();
             let text = text.string_at("").unwrap_or_default().to_owned();

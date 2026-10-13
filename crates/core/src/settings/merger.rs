@@ -145,7 +145,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         auto_memory_enabled: next.auto_memory_enabled.or(prev.auto_memory_enabled),
         effort_level: next.effort_level.or(prev.effort_level),
         fast_mode: next.fast_mode.or(prev.fast_mode),
-        prompt_suggestion_enabled: next.prompt_suggestion_enabled.or(prev.prompt_suggestion_enabled),
+        prompt_suggestion_enabled: next
+            .prompt_suggestion_enabled
+            .or(prev.prompt_suggestion_enabled),
         fast_mode_per_session_opt_in: next
             .fast_mode_per_session_opt_in
             .or(prev.fast_mode_per_session_opt_in),

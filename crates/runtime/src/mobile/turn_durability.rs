@@ -25,6 +25,63 @@ fn empty_source_prompt() -> Utf16JsonProjection {
     Utf16JsonProjection::from("")
 }
 
+/// The exact source projections needed to re-create a native prompt-skill
+/// batch after a process restart. The batch itself is rebuilt through the
+/// orchestrator's one source-aware factory; no row is flattened into a String.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DurableSkillPrompt {
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub(crate) command: Utf16JsonProjection,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub(crate) body: Utf16JsonProjection,
+    #[serde(with = "source_projection_vec_serde")]
+    pub(crate) hook_messages: Vec<Utf16JsonProjection>,
+}
+
+/// Serialize each history row as its source JSON value rather than as the
+/// projection arena or a replacement-safe display string.
+mod source_projection_vec_serde {
+    use lingxi_core::types::utf16_json::{raw_json_serde, Utf16JsonProjection};
+    use serde::ser::SerializeSeq;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::value::RawValue;
+
+    struct RawProjection<'a>(&'a Utf16JsonProjection);
+
+    impl Serialize for RawProjection<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            raw_json_serde::serialize(self.0, serializer)
+        }
+    }
+
+    pub(super) fn serialize<S>(
+        values: &[Utf16JsonProjection],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+        for value in values {
+            sequence.serialize_element(&RawProjection(value))?;
+        }
+        sequence.end()
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Utf16JsonProjection>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<Box<RawValue>>::deserialize(deserializer)?
+            .into_iter()
+            .map(|raw| Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DurableTurnEvent {
     pub(crate) sequence: u64,
@@ -36,6 +93,7 @@ pub(crate) struct DurableTurnCheckpoint {
     pub(crate) session_id: String,
     pub(crate) turn_id: u64,
     pub(crate) prompt: Utf16JsonProjection,
+    pub(crate) skill_prompt: Option<DurableSkillPrompt>,
     pub(crate) prompt_mode: Option<PromptModeDto>,
     pub(crate) images: Vec<ImageRefDto>,
     pub(crate) revision: u64,
@@ -56,6 +114,8 @@ struct StoredTurnMetadata {
         with = "lingxi_core::types::utf16_json::raw_json_serde"
     )]
     prompt: Utf16JsonProjection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skill_prompt: Option<DurableSkillPrompt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt_mode: Option<PromptModeDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -125,6 +185,7 @@ impl DurableTurnCheckpoint {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id,
             prompt: self.prompt.clone(),
+            skill_prompt: self.skill_prompt.clone(),
             prompt_mode: self.prompt_mode,
             images: self.images.clone(),
             revision: self.revision,
@@ -152,6 +213,7 @@ impl DurableTurnCheckpoint {
             session_id: metadata.session_id,
             turn_id: metadata.turn_id,
             prompt: metadata.prompt,
+            skill_prompt: metadata.skill_prompt,
             prompt_mode: metadata.prompt_mode,
             images: metadata.images,
             revision: metadata.revision,
@@ -336,6 +398,18 @@ impl DurableTurnStore {
         prompt_mode: Option<PromptModeDto>,
         images: Vec<ImageRefDto>,
     ) -> Result<DurableTurnCheckpoint, DurableTurnStoreError> {
+        self.begin_with_skill_prompt(session_id, turn_id, prompt, prompt_mode, images, None)
+    }
+
+    pub(crate) fn begin_with_skill_prompt(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        prompt: Utf16JsonProjection,
+        prompt_mode: Option<PromptModeDto>,
+        images: Vec<ImageRefDto>,
+        skill_prompt: Option<DurableSkillPrompt>,
+    ) -> Result<DurableTurnCheckpoint, DurableTurnStoreError> {
         let mut cache = self
             .lock
             .lock()
@@ -358,6 +432,7 @@ impl DurableTurnStore {
             session_id: session_id.to_string(),
             turn_id,
             prompt,
+            skill_prompt,
             prompt_mode,
             images,
             revision: 1,
@@ -948,6 +1023,127 @@ mod tests {
     }
 
     #[test]
+    fn cold_restart_preserves_every_source_projection_in_skill_prompt_batch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("turns");
+        let command_units = "/review "
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let body_units = "body 🚀 "
+            .encode_utf16()
+            .chain([0xdc00])
+            .collect::<Vec<_>>();
+        let command = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&command_units),
+            command_units.clone(),
+        )
+        .expect("command projection");
+        let body = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&body_units),
+            body_units.clone(),
+        )
+        .expect("body projection");
+        let hook = Utf16JsonProjection::parse(
+            r#"{"role":"user","content":[{"type":"text","text":"hook \ud800"}]}"#,
+        )
+        .expect("hook row projection");
+        let later_hook = Utf16JsonProjection::parse(
+            r#"{"role":"assistant","content":[{"type":"text","text":"later hook"}]}"#,
+        )
+        .expect("later hook row projection");
+        let skill_prompt = DurableSkillPrompt {
+            command: command.clone(),
+            body: body.clone(),
+            hook_messages: vec![hook, later_hook],
+        };
+
+        let store = DurableTurnStore::new(root.clone());
+        store
+            .begin_with_skill_prompt(
+                "session",
+                43,
+                command.clone(),
+                None,
+                Vec::new(),
+                Some(skill_prompt),
+            )
+            .expect("persist source-backed skill batch before model execution");
+        let metadata_path = root.join("session/43.json");
+        let metadata = std::fs::read_to_string(&metadata_path).expect("read checkpoint");
+        assert!(
+            !metadata.contains("Utf16JsonProjection"),
+            "checkpoint stores raw source JSON values rather than carrier internals"
+        );
+        let stored_source =
+            Utf16JsonProjection::parse(&metadata).expect("durability metadata remains source JSON");
+        let hook_units = "hook ".encode_utf16().chain([0xd800]).collect::<Vec<_>>();
+        let later_hook_units = "later hook".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            stored_source.string_units("/skill_prompt/command"),
+            Some(command_units.clone())
+        );
+        assert_eq!(
+            stored_source.string_units("/skill_prompt/body"),
+            Some(body_units.clone())
+        );
+        assert_eq!(
+            stored_source.string_units("/skill_prompt/hook_messages/0/content/0/text"),
+            Some(hook_units.clone())
+        );
+        assert_eq!(
+            stored_source.string_units("/skill_prompt/hook_messages/1/content/0/text"),
+            Some(later_hook_units.clone())
+        );
+
+        drop(store);
+        let restarted = DurableTurnStore::new(root);
+        let checkpoint = restarted
+            .load("session", 43)
+            .expect("cold-load complete skill prompt batch");
+        let restored = checkpoint
+            .skill_prompt
+            .as_ref()
+            .expect("skill batch survives process restart");
+        assert_eq!(restored.command.string_units(""), Some(command_units));
+        assert_eq!(restored.body.string_units(""), Some(body_units));
+        assert_eq!(
+            restored.hook_messages[0].string_units("/content/0/text"),
+            Some(hook_units.clone())
+        );
+        assert_eq!(
+            restored.hook_messages[1].string_units("/content/0/text"),
+            Some(later_hook_units.clone())
+        );
+
+        let (disposition, _) = restarted
+            .resume("session", 43)
+            .expect("resume from source-preserving batch checkpoint");
+        assert_eq!(disposition, ResumeDisposition::Ready);
+        let resumed = restarted
+            .load("session", 43)
+            .expect("load resumed batch checkpoint");
+        assert_eq!(
+            resumed
+                .skill_prompt
+                .as_ref()
+                .expect("batch is retained while running")
+                .hook_messages[0]
+                .string_units("/content/0/text"),
+            Some(hook_units)
+        );
+        assert_eq!(
+            resumed
+                .skill_prompt
+                .as_ref()
+                .expect("batch is retained while running")
+                .hook_messages[1]
+                .string_units("/content/0/text"),
+            Some(later_hook_units)
+        );
+    }
+
+    #[test]
     fn live_observers_preserve_a_paused_checkpoint_until_explicit_resume() {
         let (_temp, store) = store();
         store
@@ -1003,6 +1199,7 @@ mod tests {
             session_id: "session-a".to_string(),
             turn_id: 6,
             prompt: Utf16JsonProjection::from("hello"),
+            skill_prompt: None,
             prompt_mode: None,
             images: Vec::new(),
             revision: 2,
@@ -1391,6 +1588,7 @@ mod tests {
             session_id: "session-a".to_string(),
             turn_id: 13,
             prompt: Utf16JsonProjection::from("gap"),
+            skill_prompt: None,
             prompt_mode: None,
             images: Vec::new(),
             revision: 1,

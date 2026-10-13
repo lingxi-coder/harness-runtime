@@ -242,16 +242,14 @@ pub trait DesktopDiagnosticSink: Send + Sync {
 /// use harness_runtime::desktop::DesktopConfig;
 /// use std::path::PathBuf;
 ///
-/// let cfg = DesktopConfig {
-///     build_info: harness_runtime::desktop::BuildInfo::new("1.0.0", "host123"),
-///     api_base: "https://api.anthropic.com".to_string(),
-///     api_key: "sk-test".to_string(),
-///     cwd: PathBuf::from("/tmp/project"),
-///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),
-///     use_noop_permission_gate: false,
-///     is_tty: true,
-///     ..Default::default()
-/// };
+/// let mut cfg = DesktopConfig::default();
+/// cfg.build_info = harness_runtime::desktop::BuildInfo::new("1.0.0", "host123");
+/// cfg.api_base = "https://api.anthropic.com".to_string();
+/// cfg.api_key = "sk-test".to_string();
+/// cfg.cwd = PathBuf::from("/tmp/project");
+/// cfg.lingxi_home = PathBuf::from("/tmp/home/.lingxi");
+/// cfg.use_noop_permission_gate = false;
+/// cfg.is_tty = true;
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
 /// assert!(!cfg.use_noop_permission_gate);
@@ -308,6 +306,9 @@ pub struct DesktopConfig {
     /// Explicit trust decision from the host for this workspace. `None` keeps
     /// CLI trust resolution; `Some(false)` must override any persisted grant.
     pub host_workspace_trusted: Option<bool>,
+    /// Local host verdict for the `/insights` policy gate. `None` remains
+    /// unavailable and is not inferred from permission mode or account policy.
+    pub insights_policy_gate: Option<bool>,
     /// The live client surface attached to this session, if one is known.
     pub mod_render_surface: Option<orchestrator::config::ModRenderSurface>,
     /// The attached client renders inline visualizations (Electron through
@@ -961,6 +962,7 @@ impl std::fmt::Debug for DesktopConfig {
                 &self.enable_automation_scheduler,
             )
             .field("host_workspace_trusted", &self.host_workspace_trusted)
+            .field("insights_policy_gate", &self.insights_policy_gate)
             .field("mod_render_surface", &self.mod_render_surface)
             .field("inline_visualization", &self.inline_visualization)
             .field(
@@ -1144,6 +1146,7 @@ impl Default for DesktopConfig {
             defer_session_start: false,
             connect_mcp_in_background: false,
             host_workspace_trusted: None,
+            insights_policy_gate: None,
             mod_render_surface: None,
             inline_visualization: false,
             native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,

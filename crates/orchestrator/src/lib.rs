@@ -113,8 +113,8 @@ pub use config::{
     QUERY_SOURCE_SDK,
 };
 pub use conversation::{
-    realtime_history, QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd,
-    RealtimeAgentInput, RealtimeAgentLimits, ScheduledLoopFire,
+    realtime_history, skill_prompt_inputs, QueuedPromptInput, RealtimeAgentContext,
+    RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits, ScheduledLoopFire,
 };
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,

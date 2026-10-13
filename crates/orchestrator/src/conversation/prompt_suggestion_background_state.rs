@@ -1,6 +1,6 @@
 //! Suggestion-facing subset of Native's classifier job state. The classifier
 //! owns this state; composer context never supplies a guessed blocked flag.
-use serde_json::Value;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BackgroundSuggestionState {
@@ -10,14 +10,38 @@ pub(crate) struct BackgroundSuggestionState {
     pub previous_state: String,
     pub previous_state_since_ms: i64,
     pub last_result: Option<BackgroundSuggestionContext>,
-    pub persisted: Option<Value>,
+    pub persisted: Option<Utf16JsonProjection>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BackgroundSuggestionContext {
     pub session_id: String,
     pub epoch: u64,
-    pub needs: Option<String>,
+    pub needs: Option<Vec<u16>>,
+}
+
+impl BackgroundSuggestionContext {
+    /// Admit only the current classifier's blocked state when no operation
+    /// block is active, keeping `needs` in its source UTF-16 units.
+    pub(super) fn from_blocked_classifier(
+        session_id: String,
+        epoch: u64,
+        classifier_result: &Utf16JsonProjection,
+        persisted_result: &Utf16JsonProjection,
+    ) -> Option<Self> {
+        if classifier_result.string_at("/tempo") != Some("blocked")
+            || persisted_result
+                .get_property("block")
+                .is_some_and(|block| !block.is_null())
+        {
+            return None;
+        }
+        Some(Self {
+            session_id,
+            epoch,
+            needs: classifier_result.string_units("/needs"),
+        })
+    }
 }
 
 impl BackgroundSuggestionState {
@@ -32,11 +56,11 @@ impl BackgroundSuggestionState {
     pub fn mark_active(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
         self.last_result = None;
-        if let Some(state) = self.persisted.as_mut().and_then(Value::as_object_mut) {
-            state.insert("tempo".into(), Value::String("active".into()));
-            state.remove("needs");
-            state.remove("block");
-            state.remove("suggestedReply");
+        if let Some(state) = self.persisted.as_mut() {
+            let _ = state.set_field("tempo", Utf16JsonProjection::from("active"));
+            let _ = state.remove_field("needs");
+            let _ = state.remove_field("block");
+            let _ = state.remove_field("suggestedReply");
         }
     }
 
@@ -44,17 +68,18 @@ impl BackgroundSuggestionState {
         self.last_result.clone()
     }
 
-    pub fn record_reply(&mut self, text: &str, needs: Option<&str>) -> bool {
-        let Some(state) = self.persisted.as_mut().and_then(Value::as_object_mut) else {
+    pub fn record_reply(&mut self, text: &str, needs: Option<&[u16]>) -> bool {
+        let Some(state) = self.persisted.as_mut() else {
             return false;
         };
-        if state.get("tempo").and_then(Value::as_str) != Some("blocked")
-            || state.get("needs").and_then(Value::as_str) != needs
-            || state.get("suggestedReply").and_then(Value::as_str) == Some(text)
+        if state.string_at("/tempo") != Some("blocked")
+            || state.string_units("/needs").as_deref() != needs
+            || state.string_at("/suggestedReply") == Some(text)
         {
             return false;
         }
-        state.insert("suggestedReply".into(), Value::String(text.into()));
-        true
+        state
+            .set_field("suggestedReply", Utf16JsonProjection::from(text))
+            .is_ok()
     }
 }

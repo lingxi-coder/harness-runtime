@@ -611,12 +611,14 @@ impl WebFetchTool {
             crate::markdown::make_secondary_model_prompt(&truncated, prompt, is_preapproved);
         let req = SideQueryRequest {
             model_attempt: None,
+            native_prompt_context: None,
             model: self.apply_model(),
             profile: None,
             system_prompt: None,
             typed_attachment_ids: std::collections::HashSet::new(),
             task_deliveries: std::collections::HashMap::new(),
             system_prompt_input: None,
+            enable_prompt_caching: false,
             messages: vec![{
                 let mut message = ConversationMessage::user(MessageId::new(), String::new());
                 if let ConversationMessage::User { content, .. } = &mut message {

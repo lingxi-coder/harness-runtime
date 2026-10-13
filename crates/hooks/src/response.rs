@@ -1171,6 +1171,10 @@ pub struct AggregateHookResult {
     pub attachments: Vec<HookJson>,
     /// Per-hook results, in execution order — for telemetry and debugging.
     pub all_results: Vec<(HookId, HookResult)>,
+    /// Ordered Native history rows yielded by each UserPromptExpansion hook.
+    /// These are deferred until the expanded body is appended, so hook output
+    /// remains after the command's body in the same queued turn.
+    pub prompt_expansion_history_rows: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// One `hook_progress` event per matching hook, in execution order,
     /// emitted *before* each hook runs (claude-code `utils/hooks.ts:2094-2116`).
     /// Carries the per-hook `status_message` so the spinner can substitute it

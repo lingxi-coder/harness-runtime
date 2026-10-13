@@ -44,6 +44,11 @@ pub struct QueuedPromptInput {
     pub text: Utf16JsonProjection,
     /// Synthetic scheduled input stays meta even beside a human prompt.
     pub is_meta: bool,
+    /// Native `turnCompanion:true` marker for a paired meta message.
+    pub turn_companion: bool,
+    /// Ordered Native history rows to append after this input's message. Skill
+    /// dispatch puts its UserPromptExpansion rows on the body companion only.
+    pub trailing_history_rows: Vec<Utf16JsonProjection>,
     /// Host-stamped `prompt.submit` origin for this queue entry.
     pub mod_origin: Option<serde_json::Value>,
     /// Native message origin for this entry. This is independent of
@@ -70,6 +75,8 @@ impl Default for QueuedPromptInput {
             goal_retry_id: None,
             text: String::new().into(),
             is_meta: false,
+            turn_companion: false,
+            trailing_history_rows: Vec::new(),
             mod_origin: None,
             message_origin: None,
             prompt_source: None,
@@ -78,6 +85,43 @@ impl Default for QueuedPromptInput {
             queue_priority: None,
             scheduled_task_id: None,
             scheduled_fire_id: None,
+        }
+    }
+}
+
+/// Build the exact queued input pair for an inline directory Skill. Hook rows
+/// stay source projections and remain ordered after the expanded body.
+#[must_use]
+pub fn skill_prompt_inputs(
+    command: Utf16JsonProjection,
+    body: Utf16JsonProjection,
+    hook_messages: Vec<Utf16JsonProjection>,
+) -> Vec<QueuedPromptInput> {
+    vec![
+        QueuedPromptInput {
+            text: command,
+            ..Default::default()
+        },
+        QueuedPromptInput {
+            text: body,
+            is_meta: true,
+            turn_companion: true,
+            trailing_history_rows: hook_messages,
+            ..Default::default()
+        },
+    ]
+}
+
+fn apply_current_native_user_source(inputs: &mut [QueuedPromptInput]) {
+    let Some(source) = crate::native_user_message_source::current() else {
+        return;
+    };
+    if let Some(input) = inputs.iter_mut().find(|input| !input.is_meta) {
+        if input.message_origin.is_none() {
+            input.message_origin = source.message_origin;
+        }
+        if input.prompt_source.is_none() {
+            input.prompt_source = source.prompt_source;
         }
     }
 }
@@ -2533,6 +2577,7 @@ impl ConversationOrchestrator {
                                     images,
                                     message_id,
                                     cancel.clone(),
+                                    None,
                                 )
                             }),
                         )
@@ -2557,6 +2602,72 @@ impl ConversationOrchestrator {
         })
     }
 
+    /// Deliver source-projected queued entries through the non-streaming turn
+    /// driver. This is the batched twin used by SDK/headless callers that have
+    /// disabled streaming; it preserves the same ordered transcript rows as
+    /// [`Self::run_queued_prompt_batch`].
+    pub async fn run_queued_prompt_batch_batched(
+        &self,
+        mut inputs: Vec<QueuedPromptInput>,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        if inputs.is_empty() {
+            return Ok(TurnOutcome::EndTurn);
+        }
+        apply_current_native_user_source(&mut inputs);
+        if inputs.iter().any(|input| !input.is_meta) {
+            self.reset_goal_interruption();
+        }
+        let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+            return Ok(TurnOutcome::Cancelled);
+        };
+        let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
+        let prompt = inputs[primary].text.clone();
+        self.begin_turn_metrics();
+        let _activity_guard = self.main_loop_activity(true);
+        tracing::info!(
+            event = orch_events::CONVERSATION_STARTED,
+            prompt_len = prompt.string_at("").unwrap_or_default().len()
+        );
+        let result = crate::request_context::scope_if_missing(
+            crate::server_fallback::scope_query_and_flush(
+                self,
+                telemetry::otel::with_turn_span(
+                    "lingxi.orchestrator.turn.cancelable_batch",
+                    async {
+                        self.scope_api_session(
+                            !self.prompt_is_interactive(),
+                            crate::turn_loop::boxed_turn_future(|| {
+                                self.try_run_turn_cancelable(
+                                    &prompt,
+                                    Vec::new(),
+                                    None,
+                                    cancel.clone(),
+                                    Some(inputs),
+                                )
+                            }),
+                        )
+                        .await
+                    },
+                ),
+            ),
+        )
+        .await;
+        let cleanup = crate::native_computer::cleanup(self).await;
+        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+        self.fire_mod_turn_complete(
+            cancel.is_cancelled()
+                || result
+                    .as_ref()
+                    .is_ok_and(|outcome| matches!(outcome, TurnOutcome::Cancelled)),
+            result.is_err(),
+        )
+        .await;
+        self.emit_terminal_rate_limit_if_changed(&result).await;
+        self.complete_turn_metrics(None);
+        result.map_err(|error| self.enrich_api_error(error))
+    }
+
     /// Internal implementation of the REPL turn loop with cancellation.
     async fn try_run_turn_cancelable(
         &self,
@@ -2564,6 +2675,7 @@ impl ConversationOrchestrator {
         images: Vec<lingxi_core::types::ImageSource>,
         message_id: Option<MessageId>,
         cancel: CancellationToken,
+        queued_inputs: Option<Vec<QueuedPromptInput>>,
     ) -> Result<TurnOutcome, OrchestratorError> {
         // 0. Build the system prompt (same as non-cancelable path).
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else the
@@ -2576,46 +2688,167 @@ impl ConversationOrchestrator {
         // keyed to that previous prompt. Never surface it against new intent.
         self.discard_stale_prefetches().await;
 
-        let (screened_text, mod_context) =
-            match self.screen_mod_prompt_submit(prompt, &images, None).await {
-                ModPromptScreen::Admit { text, context, .. } => (text, context),
-                ModPromptScreen::Drop(reason) => {
-                    self.emit_mod_prompt_drop(&reason).await;
-                    return Ok(TurnOutcome::EndTurn);
-                }
-            };
-
         // 1. Append the user prompt to session history.
         // 2.1.266 `vSt`: a user message re-opens the idle-check-in budget that
         // `RUe`'s cap closed ("idle check-ins paused until your next message").
         // Only the deferral's idle counter is reset; the stretch itself lives on.
-        self.lifecycle_runtime
-            .goal_checkin
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear_idle_checkins();
-        let user_msg = user_message_from_projection(
-            message_id.unwrap_or_else(MessageId::new),
-            &screened_text,
-            false,
-            images,
-        );
-        {
-            let mut s = self.session.lock().await;
-            s.history.push(user_msg.clone());
-        }
-        self.persist_message_to_jsonl(&user_msg).await;
-        crate::request_context::persist_prompt_ingress_after_user(self, user_msg.id(), true).await;
-        self.append_mod_prompt_context(&mod_context).await;
+        let (screened_text, _user_msg) = if let Some(inputs) = queued_inputs {
+            let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
+            let mut admitted = Vec::with_capacity(inputs.len());
+            for (index, mut input) in inputs.into_iter().enumerate() {
+                if let Some(kind) = input
+                    .mod_origin
+                    .as_ref()
+                    .and_then(streaming::external_receive_kind)
+                {
+                    let Some(received) = self
+                        .screen_mod_queued_receive_source(&input.text, kind)
+                        .await
+                    else {
+                        continue;
+                    };
+                    input.text = received;
+                }
+                match self
+                    .screen_mod_prompt_submit(
+                        &input.text,
+                        if index == image_owner { &images } else { &[] },
+                        input.mod_origin.clone(),
+                    )
+                    .await
+                {
+                    ModPromptScreen::Admit { text, context } => {
+                        input.text = text;
+                        admitted.push((index, input, context));
+                    }
+                    ModPromptScreen::Drop(reason) => self.emit_mod_prompt_drop(&reason).await,
+                }
+            }
+            if admitted.is_empty() {
+                return Ok(TurnOutcome::EndTurn);
+            }
+            let primary = admitted
+                .iter()
+                .position(|(_, input, _)| !input.is_meta)
+                .unwrap_or(0);
+            let screened_text = admitted[primary].1.text.clone();
+            let mut attached_images = Some(images);
+            let mut submissions = Vec::with_capacity(admitted.len());
+            for (source_index, input, context) in admitted {
+                let message_images = if source_index == image_owner {
+                    attached_images.take().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let mut message = user_message_from_projection(
+                    input.message_id.unwrap_or_else(MessageId::new),
+                    &input.text,
+                    input.is_meta,
+                    message_images,
+                );
+                if input.turn_companion {
+                    if let ConversationMessage::User { turn_companion, .. } = &mut message {
+                        *turn_companion = Some(Some(true));
+                    }
+                }
+                self.apply_native_user_message_source(
+                    &mut message,
+                    &crate::native_user_message_source::NativeUserMessageSource {
+                        message_origin: input.message_origin.clone(),
+                        prompt_source: input.prompt_source.clone(),
+                    },
+                )
+                .await;
+                submissions.push((input, message, context));
+            }
+            if submissions.iter().any(|(input, _, _)| !input.is_meta) {
+                self.lifecycle_runtime
+                    .goal_checkin
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear_idle_checkins();
+            }
+            for (input, message, _) in &submissions {
+                self.session.lock().await.history.push(message.clone());
+                self.persist_queued_message_to_jsonl(message, input).await;
+            }
+            // Keep request sidecars and hook-generated history after the whole
+            // command/body pair, preserving their Native transcript position.
+            if !submissions[primary].0.is_meta {
+                crate::request_context::persist_prompt_ingress_after_user(
+                    self,
+                    submissions[primary].1.id(),
+                    true,
+                )
+                .await;
+            }
+            let user_msg = submissions[primary].1.clone();
+            if submissions.iter().any(|(input, _, _)| input.turn_companion) {
+                // Qe returns the expanded body followed immediately by its
+                // ordered UPE history rows. Keep those rows contiguous before
+                // the host-specific Mod prompt.submit contexts.
+                for (input, _, _) in &submissions {
+                    self.append_native_prompt_expansion_history_rows(&input.trailing_history_rows)
+                        .await;
+                }
+                for (_, _, context) in &submissions {
+                    self.append_mod_prompt_context(context).await;
+                }
+            } else {
+                for (input, _, context) in &submissions {
+                    self.append_mod_prompt_context(context).await;
+                    self.append_native_prompt_expansion_history_rows(&input.trailing_history_rows)
+                        .await;
+                }
+            }
+            for (_, message, _) in &submissions {
+                if let ConversationMessage::User { is_meta: false, .. } = message {
+                    let exact = projected_content::exact_message_text(message);
+                    if self.fire_user_prompt_submit(&exact, message.id()).await {
+                        return Ok(TurnOutcome::EndTurn);
+                    }
+                }
+            }
+            (screened_text, user_msg)
+        } else {
+            let (screened_text, mod_context) =
+                match self.screen_mod_prompt_submit(prompt, &images, None).await {
+                    ModPromptScreen::Admit { text, context, .. } => (text, context),
+                    ModPromptScreen::Drop(reason) => {
+                        self.emit_mod_prompt_drop(&reason).await;
+                        return Ok(TurnOutcome::EndTurn);
+                    }
+                };
+            self.lifecycle_runtime
+                .goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear_idle_checkins();
+            let user_msg = user_message_from_projection(
+                message_id.unwrap_or_else(MessageId::new),
+                &screened_text,
+                false,
+                images,
+            );
+            {
+                let mut s = self.session.lock().await;
+                s.history.push(user_msg.clone());
+            }
+            self.persist_message_to_jsonl(&user_msg).await;
+            crate::request_context::persist_prompt_ingress_after_user(self, user_msg.id(), true)
+                .await;
+            self.append_mod_prompt_context(&mod_context).await;
 
-        // hooks B4: UserPromptSubmit (cancelable REPL twin). A Block aborts the
-        // turn before any API call. No-op when unregistered.
-        if self
-            .fire_user_prompt_submit(&screened_text, user_msg.id())
-            .await
-        {
-            return Ok(TurnOutcome::EndTurn);
-        }
+            // hooks B4: UserPromptSubmit (cancelable REPL twin). A Block aborts
+            // before the first API call.
+            if self
+                .fire_user_prompt_submit(&screened_text, user_msg.id())
+                .await
+            {
+                return Ok(TurnOutcome::EndTurn);
+            }
+            (screened_text, user_msg)
+        };
 
         // 2. Turn-by-turn loop — check cancel before each API call.
         //
@@ -2984,12 +3217,13 @@ impl ConversationOrchestrator {
     /// Per-entry metadata is owned by this call, never stored as a session override.
     pub async fn run_queued_prompt_batch(
         &self,
-        inputs: Vec<QueuedPromptInput>,
+        mut inputs: Vec<QueuedPromptInput>,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         if inputs.is_empty() {
             return Ok(TurnOutcome::EndTurn);
         }
+        apply_current_native_user_source(&mut inputs);
         if inputs.iter().any(|input| !input.is_meta) {
             self.reset_goal_interruption();
         }

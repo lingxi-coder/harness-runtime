@@ -992,6 +992,27 @@ fn read_enabled(scope: WritableScope, home: &Path, cwd: &Path) -> Utf16JsonProje
     source_object_field(&settings, "enabledPlugins")
 }
 
+fn enabled_plugin_value_is_array(scope: WritableScope, home: &Path, cwd: &Path, id: &str) -> bool {
+    read_enabled(scope, home, cwd)
+        .get_property(id)
+        .is_some_and(|value| value.array_len().is_some())
+}
+
+/// Preserve Native array entries across enabledPlugins writes for the root
+/// plugin and dependency rows in the install closure.
+fn edit_enabled_after_install(
+    scope: WritableScope,
+    home: &Path,
+    cwd: &Path,
+    id: &str,
+    value: Option<bool>,
+) -> Result<(), String> {
+    if enabled_plugin_value_is_array(scope, home, cwd, id) {
+        return Ok(());
+    }
+    edit_enabled(scope, home, cwd, id, value)
+}
+
 /// Set (`Some(true/false)`) or delete (`None`) an `enabledPlugins` entry at scope.
 fn edit_enabled(
     scope: WritableScope,
@@ -1834,7 +1855,7 @@ async fn run_install_inner(
                 required_by,
             );
             installed_tx.persist()?;
-            edit_enabled(scope, home, cwd, &full_id, Some(true))?;
+            edit_enabled_after_install(scope, home, cwd, &full_id, Some(true))?;
         }
         return Ok(format!(
             "Installing plugin \"{arg}\"...✔ Plugin \"{full_id}\" is already installed (scope: {})",
@@ -1933,7 +1954,7 @@ async fn run_install_inner(
     installed_tx
         .persist()
         .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
-    edit_enabled(
+    edit_enabled_after_install(
         scope,
         home,
         cwd,
@@ -2011,6 +2032,7 @@ async fn install_declared_dependencies(
     })
     .unwrap_or_default();
 
+    let enabled_scope = parse_scope(scope)?;
     for (dependency, requirements) in dependencies {
         let dependency_id = dependency.resolved_id(owner_marketplace);
         let dependency_marketplace = marketplace_of(&dependency_id).unwrap_or(owner_marketplace);
@@ -2028,9 +2050,33 @@ async fn install_declared_dependencies(
                 .await?
                 .ok_or_else(|| format!("Plugin dependency \"{dependency_id}\" was not found"))?;
         let available = plugin_version(&dependency_source);
-        if !plugin::version_satisfies_all(&available, &requirements)? {
+        let array_enabled = enabled_plugin_value_is_array(enabled_scope, home, cwd, &dependency_id);
+        let dependency_project = project_path(enabled_scope, cwd);
+        let installed_dependency = installed_tx
+            .document()
+            .get("plugins")
+            .and_then(|plugins| plugins.get(&dependency_id))
+            .and_then(Value::as_array)
+            .and_then(|records| {
+                records
+                    .iter()
+                    .find(|record| record_matches(record, enabled_scope, &dependency_project))
+            });
+        // Native's array branch suppresses a forced update for an existing
+        // target-scope dependency. It does not erase version constraints:
+        // compare that installed version, while fresh dependencies still use
+        // the available version from their source.
+        let version_to_check = if array_enabled && installed_dependency.is_some() {
+            installed_dependency
+                .and_then(|record| record.get("version"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        } else {
+            &available
+        };
+        if !plugin::version_satisfies_all(version_to_check, &requirements)? {
             return Err(format!(
-                "Plugin dependency \"{dependency_id}\" version {available} does not satisfy {}",
+                "Plugin dependency \"{dependency_id}\" version {version_to_check} does not satisfy {}",
                 requirements.join(", ")
             ));
         }
@@ -3931,6 +3977,93 @@ mod tests {
         let error = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
         assert!(error.contains("shared@mymkt\" version 2.0.0 does not satisfy ^1"));
         assert!(!installed_path(&e.plugins).exists());
+    }
+
+    #[test]
+    fn array_enabled_dependency_keeps_satisfying_installed_version_and_utf16_settings() {
+        let e = env();
+        add_market_plugin(&e, "shared", "2.1.0", serde_json::json!([]));
+        run_install("shared@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+
+        // Source offers 3.0.0, while installed 2.1.0 satisfies the owner's
+        // ^2 requirement. The array keeps that installed copy from being
+        // replaced by the newer listing.
+        set_dependencies(&e, "shared", "3.0.0", serde_json::json!([]));
+        set_dependencies(
+            &e,
+            "hello",
+            "1.2.3",
+            serde_json::json!([{"name":"shared","version":"^2"}]),
+        );
+        std::fs::write(
+            scope_path(WritableScope::User, &e.home, &e.cwd),
+            r#"{"enabledPlugins":{"shared@mymkt":["\ud800"],"hello@mymkt":[]}}"#,
+        )
+        .unwrap();
+
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+
+        let installed = installed_db(&e);
+        assert_eq!(installed["plugins"]["shared@mymkt"][0]["version"], "2.1.0");
+        let enabled = read_enabled(WritableScope::User, &e.home, &e.cwd);
+        let pinned = enabled.get_property("shared@mymkt").unwrap();
+        assert_eq!(pinned.array_len(), Some(1));
+        assert_eq!(
+            pinned.get_index(0).unwrap().code_units(),
+            Some(&[0xd800][..])
+        );
+        assert_eq!(
+            enabled.get_property("hello@mymkt").unwrap().array_len(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn array_enabled_fresh_dependency_still_checks_available_version() {
+        let e = env();
+        add_market_plugin(&e, "shared", "2.0.0", serde_json::json!([]));
+        set_dependencies(
+            &e,
+            "hello",
+            "1.2.3",
+            serde_json::json!([{"name":"shared","version":"^1"}]),
+        );
+        std::fs::write(
+            scope_path(WritableScope::User, &e.home, &e.cwd),
+            r#"{"enabledPlugins":{"shared@mymkt":[]}}"#,
+        )
+        .unwrap();
+
+        let error = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("an array must not waive a fresh dependency's version range");
+        assert!(error.contains("shared@mymkt\" version 2.0.0 does not satisfy ^1"));
+        assert!(!installed_path(&e.plugins).exists());
+    }
+
+    #[test]
+    fn array_enabled_installed_dependency_still_checks_installed_version() {
+        let e = env();
+        add_market_plugin(&e, "shared", "1.0.0", serde_json::json!([]));
+        run_install("shared@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        set_dependencies(&e, "shared", "3.0.0", serde_json::json!([]));
+        set_dependencies(
+            &e,
+            "hello",
+            "1.2.3",
+            serde_json::json!([{"name":"shared","version":"^2"}]),
+        );
+        std::fs::write(
+            scope_path(WritableScope::User, &e.home, &e.cwd),
+            r#"{"enabledPlugins":{"shared@mymkt":[]}}"#,
+        )
+        .unwrap();
+
+        let error = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("an array must not waive the installed dependency's version range");
+        assert!(error.contains("shared@mymkt\" version 1.0.0 does not satisfy ^2"));
+        let installed = installed_db(&e);
+        assert_eq!(installed["plugins"]["shared@mymkt"][0]["version"], "1.0.0");
+        assert!(installed["plugins"].get("hello@mymkt").is_none());
     }
 
     #[test]

@@ -51,6 +51,53 @@ use super::{
     TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
 
+/// Project Native QO values from the already-merged settings. This bool map
+/// drives discovery; array source values are not rewritten by this projection.
+fn mobile_enabled_plugins_for_discovery(
+    settings: &lingxi_core::settings::SettingsJson,
+) -> std::collections::BTreeMap<String, bool> {
+    settings
+        .enabled_plugins
+        .as_ref()
+        .into_iter()
+        .flat_map(|values| values.iter())
+        .filter_map(|(name, value)| {
+            value
+                .as_bool()
+                .or_else(|| value.is_array().then_some(true))
+                .map(|enabled| (name.clone(), enabled))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod mobile_enabled_plugins_tests {
+    use super::mobile_enabled_plugins_for_discovery;
+    use lingxi_core::settings::SettingsJson;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn mobile_projection_matches_true_array_and_absent_key_semantics() {
+        let settings = SettingsJson {
+            enabled_plugins: Some(BTreeMap::from([
+                ("empty@mkt".to_string(), serde_json::json!([])),
+                (
+                    "strings@mkt".to_string(),
+                    serde_json::json!(["not-a-version-range"]),
+                ),
+                ("off@mkt".to_string(), serde_json::Value::Bool(false)),
+            ])),
+            ..SettingsJson::default()
+        };
+        let enabled = mobile_enabled_plugins_for_discovery(&settings);
+
+        assert_eq!(enabled.get("empty@mkt"), Some(&true));
+        assert_eq!(enabled.get("strings@mkt"), Some(&true));
+        assert_eq!(enabled.get("off@mkt"), Some(&false));
+        assert!(!enabled.contains_key("missing@mkt"));
+    }
+}
+
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
 /// `harness_runtime::desktop::build`).
@@ -1899,13 +1946,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         .as_ref()
         .map(plugin::PluginUserConfig::from_plugin_configs_source)
         .unwrap_or_default();
-    let enabled_plugins: std::collections::BTreeMap<String, bool> = plugin_settings
-        .enabled_plugins
-        .as_ref()
-        .into_iter()
-        .flat_map(|values| values.iter())
-        .filter_map(|(name, value)| value.as_bool().map(|enabled| (name.clone(), enabled)))
-        .collect();
+    let enabled_plugins = mobile_enabled_plugins_for_discovery(&plugin_settings);
     let plugin_agent_catalog: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>> = Arc::new(
         tokio::sync::RwLock::new(agent::builtins::builtin_agent_definitions()),
     );
@@ -2291,6 +2332,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     );
     let mod_settings_active = Arc::new(std::sync::RwLock::new(mod_settings_active));
 
+    let mod_prompt_output = output.clone();
     let mut orch_inner = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -2544,6 +2586,64 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Fill the shared registry slot so batch-8, the slash dispatcher, the
     // per-turn skill listing, and the Skill tool all observe ONE command set.
     let mut reg = mobile_command_registry(handle.clone(), auth.clone());
+    // Mobile has no bundled Bun/Node worker. A host can opt in only by
+    // injecting a complete executor and explicit local policy facts.
+    let insights_availability = command_api::builtins::InsightsCommandAvailability {
+        workspace_available: Some(cfg.cwd.is_dir() && cfg.workspace_trusted),
+        allow_insights: cfg.insights_policy_gate,
+    };
+    if insights_availability.is_available() {
+        if let Some(source) = cfg.insights_source_executor.clone() {
+            let side_queries: Arc<dyn sidequery::SideQueryClient> = Arc::new(
+                sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
+            );
+            let session = orch.session();
+            let model_selector: Arc<dyn crate::insights::InsightsModelSelector> =
+                Arc::new(crate::insights::RuntimeInsightsModelSelector {
+                    session: session.clone(),
+                    api: api_service.clone(),
+                    model_resolution: model_resolution_context_provider.clone(),
+                });
+            let native_prompt_context: Arc<
+                dyn crate::insights::InsightsNativeSideQueryContextProvider,
+            > = Arc::new(
+                crate::insights::RuntimeInsightsNativeSideQueryContextProvider {
+                    api: api_service.clone(),
+                    // Mobile has no captured NativeSystemPrefix producer. The context
+                    // provider reuses a real ApiService snapshot when present and
+                    // otherwise leaves the side query on its existing SDK behavior.
+                    fallback_prefix: None,
+                },
+            );
+            let command_name_facts: Arc<
+                dyn crate::insights::InsightsNativeCommandNameFactsProvider,
+            > = Arc::new(
+                crate::insights::RuntimeInsightsNativeCommandNameFactsProvider {
+                    api: api_service.clone(),
+                    session: session.clone(),
+                    disable_agent_view_setting: disable_agent_view,
+                },
+            );
+            let recommendation = Arc::new(crate::insights::RuntimeInsightsRecommendationProvider {
+                permission_gate: permission_policy_gate.clone(),
+                tool_context: Arc::new(initial_mcp_tool_ctx.clone()),
+                api: api_service.clone(),
+                session,
+            });
+            let provider: Arc<dyn command_api::builtins::InsightsReportProvider> =
+                Arc::new(crate::insights::LocalInsightsReportProvider::new(
+                    cfg.lingxi_home.clone(),
+                    insights_availability,
+                    side_queries,
+                    model_selector,
+                    native_prompt_context,
+                    recommendation,
+                    source,
+                    command_name_facts,
+                ));
+            command_api::builtins::register_insights_command(&mut reg, provider);
+        }
+    }
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::VersionHandler::with_build_info(cfg.build_info),
     ));
@@ -2606,7 +2706,13 @@ pub(super) async fn build_mobile_inner_with_ask(
     }
     let prompt_paths_orch = orch.clone();
     let bundled_prompt_model_orch = orch.clone();
+    let skill_prompt_transformer = crate::skill_prompt::mod_skill_prompt_transformer(
+        hook_registry.clone(),
+        mod_session.clone(),
+        mod_prompt_output,
+    );
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
+        .with_skill_prompt_transformer(skill_prompt_transformer)
         .with_prompt_paths(Arc::new(move || {
             (
                 prompt_paths_orch.project_root(),
@@ -3163,6 +3269,8 @@ pub fn build_mobile_engine_inner(
                                         goal_retry_id,
                                         text: prompt,
                                         is_meta: true,
+                                        turn_companion: false,
+                                        trailing_history_rows: Vec::new(),
                                         message_id: None,
                                         message_origin: None,
                                         prompt_source: None,

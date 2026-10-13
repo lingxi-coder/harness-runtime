@@ -9049,15 +9049,87 @@ async fn managed_model_policy_source_uses_selected_managed_snapshot_and_enforces
         allowlist::model_allowed_under(&enforcement, "claude-sonnet-4-5"),
         Some(false)
     );
-    // A malformed managed tier fails the whole source closed.
+    // Native's tolerant managed-policy parser turns a wrong-root
+    // availableModels value into an empty allowlist (only the Default choice
+    // remains available). A wrong-root field is not a failed file read.
     std::fs::write(
         root.path().join("managed-settings.json"),
         r#"{"availableModels": "not-an-array"}"#,
     )
     .unwrap();
     let bad = super::settings_watch::read_managed_settings_snapshot(root.path()).await;
+    assert!(!bad.read_failed());
+    let bad_source = super::managed_model_policy_source(&bad);
+    let PolicySource::Loaded(bad_view) = &bad_source else {
+        panic!("wrong-root availableModels must use Native's empty-list fallback");
+    };
+    let bad_allowlist = bad_view
+        .available_models
+        .as_ref()
+        .expect("present wrong-root field remains a policy-owned empty list");
+    assert_eq!(bad_allowlist.array_len(""), Some(0));
+    assert_eq!(bad_view.enforce, Some(true));
+    assert_eq!(
+        allowlist::resolve_enforcement(&bad_source, &mut |_| {}),
+        ModelEnforcement::Inactive,
+        "enforceAvailableModels has no effect for an empty allowlist"
+    );
+
+    // The empty list still restricts concrete catalog models. Preserve the
+    // concrete resolved default separately, as the production Default path
+    // does, so an empty malformed allowlist does not accidentally become an
+    // unrestricted concrete model list or a failed source.
+    let mut cfg = super::DesktopConfig::default();
+    cfg.cwd = root.path().join("project");
+    cfg.lingxi_home = root.path().join("home");
+    std::fs::create_dir_all(&cfg.cwd).unwrap();
+    std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
+    let managed_layers = bad.effective_json().into_iter().collect::<Vec<_>>();
+    let effective = super::load_effective_settings_for_config(&cfg, &managed_layers)
+        .expect("Native-normalized managed projection remains loadable");
+    let catalog_restriction = allowlist::catalog_restriction_from_settings(
+        true,
+        effective.settings.available_models.clone(),
+    );
+    let empty_catalog = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("[]").unwrap();
+    assert_eq!(
+        catalog_restriction,
+        allowlist::CatalogRestriction::Restricted(empty_catalog.clone())
+    );
+    assert!(!allowlist::model_allowed_under_catalog(
+        "claude-opus-4-5",
+        &catalog_restriction,
+        effective.settings.model_overrides.as_ref(),
+    ));
+
+    let mut orchestrator_config = orchestrator::OrchestratorConfig::default();
+    super::assembly::apply_server_fallback_model_policy(
+        &mut orchestrator_config,
+        &bad_source,
+        Some(&effective.settings),
+        "claude-opus-4-5",
+    );
+    assert_eq!(
+        orchestrator_config.server_fallback_model_enforcement,
+        Some(ModelEnforcement::Inactive)
+    );
+    assert_eq!(
+        orchestrator_config.server_fallback_regular_available_models,
+        Some(empty_catalog)
+    );
+    assert_eq!(
+        orchestrator_config.server_fallback_default_model.as_deref(),
+        Some("claude-opus-4-5"),
+        "the Default selection keeps its separately resolved concrete model"
+    );
+
+    // Keep a distinct assertion for a structurally unreadable managed file;
+    // that source really is failed and must remain fail-closed.
+    std::fs::write(root.path().join("managed-settings.json"), "not-json").unwrap();
+    let unreadable = super::settings_watch::read_managed_settings_snapshot(root.path()).await;
+    assert!(unreadable.read_failed());
     assert!(matches!(
-        super::managed_model_policy_source(&bad),
+        super::managed_model_policy_source(&unreadable),
         PolicySource::Failed
     ));
 }
@@ -9217,17 +9289,20 @@ async fn classifier_auto_mode_merges_only_trusted_raw_sources_in_source_order() 
         r#"{"autoMode":{"allow":["policy-allow"],"hard_deny":["policy-hard"],"environment":["policy-env"],"classifyAllShell":false}}"#,
     )
     .unwrap();
+    let managed_snapshot =
+        super::settings_watch::read_managed_settings_snapshot(managed.path()).await;
     let flag_raw = r#"{"autoMode":{"allow":["flag-allow"],"soft_deny":["flag-soft"],"hard_deny":["\ud800"],"environment":["flag-env"],"deny":["legacy-flag"]}}"#;
     // The typed flag object cannot represent an isolated UTF-16 unit from the
     // raw source; the AutoMode merge must use the retained source projection.
     let flag = lingxi_core::settings::SettingsJson::default();
 
-    let tiers = super::load_boot_permission_tiers_with_flag(
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
         home.path(),
         cwd.path(),
         (true, true),
         Some(&flag),
         Some(flag_raw),
+        &managed_snapshot,
     )
     .await;
     let facts = tiers
@@ -9273,12 +9348,13 @@ async fn classifier_auto_mode_merges_only_trusted_raw_sources_in_source_order() 
     );
 
     let trusted_flag_raw = r#"{"autoMode":{"classifyAllShell":true}}"#;
-    let trusted_flag_tiers = super::load_boot_permission_tiers_with_flag(
+    let trusted_flag_tiers = super::load_boot_permission_tiers_with_policy_snapshot(
         home.path(),
         cwd.path(),
         (true, true),
         Some(&flag),
         Some(trusted_flag_raw),
+        &managed_snapshot,
     )
     .await;
     assert!(
@@ -9289,12 +9365,13 @@ async fn classifier_auto_mode_merges_only_trusted_raw_sources_in_source_order() 
         "a true trusted source enables the flag"
     );
 
-    let typed_flag_without_raw_source = super::load_boot_permission_tiers_with_flag(
+    let typed_flag_without_raw_source = super::load_boot_permission_tiers_with_policy_snapshot(
         home.path(),
         cwd.path(),
         (true, true),
         Some(&flag),
         None,
+        &managed_snapshot,
     )
     .await;
     assert!(
@@ -9317,19 +9394,30 @@ async fn permission_preference_respects_flag_and_managed_default_modes() {
         r#"{"permissions":{"defaultMode":"plan"}}"#,
     )
     .unwrap();
-    let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+    let managed_snapshot =
+        super::settings_watch::read_managed_settings_snapshot(managed.path()).await;
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        None,
+        None,
+        &managed_snapshot,
+    )
+    .await;
     assert!(
         tiers.mode_preference_allowed,
         "ordinary defaults can yield to the last selection"
     );
     let flag_raw = r#"{"permissions":{"defaultMode":"default"}}"#;
     let flags = serde_json::from_str(flag_raw).unwrap();
-    let tiers = super::load_boot_permission_tiers_with_flag(
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
         home.path(),
         cwd.path(),
         (true, true),
         Some(&flags),
         Some(flag_raw),
+        &managed_snapshot,
     )
     .await;
     assert!(!tiers.mode_preference_allowed, "explicit settings must win");
@@ -9338,7 +9426,17 @@ async fn permission_preference_respects_flag_and_managed_default_modes() {
         r#"{"permissions":{"defaultMode":"default"}}"#,
     )
     .unwrap();
-    let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+    let managed_snapshot =
+        super::settings_watch::read_managed_settings_snapshot(managed.path()).await;
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        None,
+        None,
+        &managed_snapshot,
+    )
+    .await;
     assert!(!tiers.mode_preference_allowed, "managed defaults must win");
     assert_eq!(tiers.mode, permission::PermissionMode::Default);
     std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
@@ -9366,7 +9464,16 @@ async fn managed_permission_deny_rule_binds_and_cites_policy_settings() {
     )
     .expect("write user settings");
 
-    let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+    let managed_snapshot = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        None,
+        None,
+        &managed_snapshot,
+    )
+    .await;
     assert_eq!(tiers.rules.len(), 2, "user allow + managed deny both load");
     assert!(
         tiers.rules.iter().any(|r| r.source
@@ -9424,7 +9531,16 @@ async fn managed_default_mode_overrides_user_default_mode() {
     )
     .expect("write user settings");
 
-    let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+    let managed_snapshot = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        None,
+        None,
+        &managed_snapshot,
+    )
+    .await;
     assert_eq!(
         tiers.mode,
         permission::PermissionMode::Plan,
@@ -9449,7 +9565,16 @@ async fn managed_bypass_killswitch_binds() {
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
     let (home, cwd) = perm_tier_dirs();
-    let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+    let managed_snapshot = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        None,
+        None,
+        &managed_snapshot,
+    )
+    .await;
     assert!(
         tiers.bypass_disabled,
         "managed disableBypassPermissionsMode:\"disable\" must activate the killswitch"
@@ -9480,7 +9605,16 @@ async fn setting_sources_scope_cannot_exclude_managed_tier() {
     .expect("write user settings");
 
     // Scope (false, false): user + project/local tiers excluded.
-    let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (false, false)).await;
+    let managed_snapshot = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
+        home.path(),
+        cwd.path(),
+        (false, false),
+        None,
+        None,
+        &managed_snapshot,
+    )
+    .await;
     assert_eq!(tiers.rules.len(), 1, "only the managed rule loads");
     assert_eq!(
         tiers.rules[0].source,
@@ -9516,7 +9650,16 @@ async fn managed_only_lockdown_drops_non_managed_rules() {
     )
     .expect("write project settings");
 
-    let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+    let managed_snapshot = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        None,
+        None,
+        &managed_snapshot,
+    )
+    .await;
     assert_eq!(
         tiers.rules.len(),
         1,
@@ -9555,7 +9698,16 @@ async fn managed_drop_in_permission_rules_load_after_base() {
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
     let (home, cwd) = perm_tier_dirs();
-    let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+    let managed_snapshot = super::settings_watch::read_managed_settings_snapshot(tmp.path()).await;
+    let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
+        home.path(),
+        cwd.path(),
+        (true, true),
+        None,
+        None,
+        &managed_snapshot,
+    )
+    .await;
     assert_eq!(tiers.rules.len(), 2, "base + drop-in rules both accumulate");
     assert!(tiers.rules.iter().all(|r| r.source
         == permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)));
@@ -10348,6 +10500,16 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
     write_cached_plugin_with_stdio_mcp(&plugins_dir, "mkt", "plugina", "1.0.0", "acmd", "srv");
     write_enabled_plugins(&home, &[("plugina@mkt", true)]);
 
+    // This test exercises refresh serialization and ownership, not the host's
+    // MDM policy. Seed the cache from an isolated empty filesystem snapshot so
+    // the first refresh cannot consult this machine's managed preferences.
+    let managed_policy_root = tmp.path().join("managed-policy");
+    std::fs::create_dir_all(&managed_policy_root).unwrap();
+    let managed_policy_snapshot_cache =
+        super::settings_watch::ManagedPolicySnapshotCache::default();
+    managed_policy_snapshot_cache
+        .replace(super::settings_watch::read_managed_settings_snapshot(&managed_policy_root).await);
+
     let transport = Arc::new(BlockingReloadPluginTransport::new());
     let agent_catalog = Arc::new(RwLock::new(Vec::new()));
     let mcp_registry = Arc::new(mcp::McpRegistry::new(transport.clone()));
@@ -10372,7 +10534,7 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
         restricted: false,
         flag_settings: None,
         load_order: RwLock::new(Vec::new()),
-        managed_policy_snapshot_cache: Default::default(),
+        managed_policy_snapshot_cache,
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     });
 
@@ -10380,7 +10542,17 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
         let rt = rt.clone();
         tokio::spawn(async move { rt.refresh().await })
     };
-    transport.connect_started.notified().await;
+    let connect_observed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        transport.connect_started.notified(),
+    )
+    .await;
+    assert!(
+        connect_observed.is_ok(),
+        "isolated empty policy should admit the fixture plugin to MCP connect; refresh_finished={} loaded_plugin_count={}",
+        first.is_finished(),
+        manager.loaded_plugin_ids().await.len(),
+    );
 
     let second = {
         let rt = rt.clone();

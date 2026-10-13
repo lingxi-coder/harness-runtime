@@ -207,7 +207,8 @@ impl BackoffInputs {
     pub(crate) fn backing_off(self) -> bool {
         persisted_streak(self.persisted_streak) >= UNUSED_THRESHOLD
             && self.env != Some(true)
-            && !(self.now_ms - self.first_start_ms.unwrap_or(0.0) < NEW_USER_WINDOW_MS)
+            && (self.now_ms - self.first_start_ms.unwrap_or(0.0)).partial_cmp(&NEW_USER_WINDOW_MS)
+                != Some(std::cmp::Ordering::Less)
     }
 }
 
@@ -223,7 +224,7 @@ impl UnusedState {
         if !backing_off {
             return true;
         }
-        let eligible = self.eligible_turns % BACKOFF_INTERVAL == 0;
+        let eligible = self.eligible_turns.is_multiple_of(BACKOFF_INTERVAL);
         self.eligible_turns = self.eligible_turns.saturating_add(1);
         eligible
     }

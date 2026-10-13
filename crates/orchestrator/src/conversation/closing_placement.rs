@@ -268,8 +268,8 @@ mod tests {
         assert!(select_current_before_closing_line_ids(
             true,
             true,
-            &[old_closing.clone()],
-            &[attachment.clone()],
+            std::slice::from_ref(&old_closing),
+            std::slice::from_ref(&attachment),
             &typed,
             &types,
             &HashSet::from([old_closing_id]),
@@ -280,7 +280,7 @@ mod tests {
         assert!(select_current_before_closing_line_ids(
             true,
             true,
-            &[old_closing.clone()],
+            std::slice::from_ref(&old_closing),
             &[typed_non_meta_user],
             &typed,
             &types,

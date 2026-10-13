@@ -9,8 +9,14 @@
 //! Source binding: `native-nl-source/src_187673145.js` (chunk SHA-256
 //! `6fbf3e921382e88e71bd834f2034ee24a15cada553c00e95181e44fa033d22aa`),
 //! `Qo` at local byte 277602, `Bo` at 286081, `os` at 287594, and `pn` at
-//! 280595. The tests below are fixture oracles for those source branches; they
-//! do not execute Native.
+//! 280595. `enabledPlugins`' top-level schema is at 240238, its value schema
+//! `va` at 206534, and the tolerant `os` field handler at 290913. `va` accepts
+//! string arrays, booleans, and undefined (the latter is not representable in
+//! JSON); its strings are not semver-parsed by this schema. `EP` is the
+//! `ZodUndefined` helper in `src_186578912.js` (binary offset 186578912, SHA-256
+//! `8886b2923ae669a979e16ab15d7a8151571d85efcd7471e0ba226d4e2d53559f`).
+//! The tests below are fixture oracles for those source branches; they do not
+//! execute Native.
 
 use crate::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 
@@ -27,6 +33,7 @@ pub const COVERED_NATIVE_POLICY_FIELDS: &[&str] = &[
     "managedSourcesBehavior",
     "parentSettingsBehavior",
     "wslInheritsWindowsSettings",
+    "enabledPlugins",
     "sandbox",
     "sandbox.enabled",
     "sandbox.failIfUnavailable",
@@ -71,6 +78,9 @@ pub const COVERED_NATIVE_POLICY_FIELDS: &[&str] = &[
     "autoContinueAtUsageLimit",
     "disablePluginDirectory",
     "disableAutoMode",
+    "permissions.disableBypassPermissionsMode",
+    "permissions.disableAutoMode",
+    "autoMode.classifyAllShell",
     "disableDeepLinkRegistration",
 ];
 
@@ -87,7 +97,6 @@ pub const UNRESOLVED_NATIVE_POLICY_FIELDS: &[&str] = &[
     "managedMcpServers",
     "disableAllHooks",
     "strictPluginOnlyCustomization",
-    "enabledPlugins",
     "deniedModels",
     "availableModelsMatch",
     "modelProposedGoals",
@@ -100,10 +109,7 @@ pub const UNRESOLVED_NATIVE_POLICY_FIELDS: &[&str] = &[
     "allowedProviders",
     "policyHelper",
     "policyHelpers",
-    "permissions.disableBypassPermissionsMode",
-    "permissions.disableAutoMode",
     "permissions.blockReadsOutsideWorkingDirectories",
-    "autoMode.classifyAllShell",
     "worktree.bgIsolation",
     "remoteTools.allowUnattendedServing",
     "attribution.sessionUrl",
@@ -270,6 +276,7 @@ pub fn parse_policy_document(
     let mut substituted_paths = Vec::new();
     let mut synthesized_paths = Vec::new();
 
+    normalize_enabled_plugins(&mut normalized_projection, &mut diagnostics);
     normalize_available_models(&mut normalized_projection, &mut diagnostics);
     normalize_string_allowlist(
         &mut normalized_projection,
@@ -296,6 +303,18 @@ pub fn parse_policy_document(
         &mut normalized_projection,
         &mut diagnostics,
         &mut substituted_paths,
+    );
+    normalize_auto_mode(
+        &mut normalized_projection,
+        &mut diagnostics,
+        &mut substituted_paths,
+        &mut synthesized_paths,
+    );
+    normalize_permission_locks(
+        &mut normalized_projection,
+        &mut diagnostics,
+        &mut substituted_paths,
+        &mut synthesized_paths,
     );
     normalize_sandbox(
         &mut normalized_projection,
@@ -421,11 +440,290 @@ fn normalize_root_restrictions(
     }
 }
 
+fn normalize_auto_mode(
+    projection: &mut Utf16JsonProjection,
+    diagnostics: &mut Vec<NativePolicyParseDiagnostic>,
+    substituted_paths: &mut Vec<String>,
+    synthesized_paths: &mut Vec<String>,
+) {
+    if !normalize_restricted_object_root(
+        projection,
+        "autoMode",
+        Utf16JsonProjection::object(vec![("classifyAllShell".into(), bool_projection(true))])
+            .expect("autoMode restrictive skeleton is valid JSON"),
+        diagnostics,
+        substituted_paths,
+        synthesized_paths,
+    ) {
+        return;
+    }
+    normalize_bool_field(
+        projection,
+        &["autoMode", "classifyAllShell"],
+        Some(true),
+        diagnostics,
+        substituted_paths,
+    );
+}
+
+fn normalize_permission_locks(
+    projection: &mut Utf16JsonProjection,
+    diagnostics: &mut Vec<NativePolicyParseDiagnostic>,
+    substituted_paths: &mut Vec<String>,
+    synthesized_paths: &mut Vec<String>,
+) {
+    // `Bo("permissions", ...)` synthesizes these fields in the schema's
+    // order: base permissions fields, then autoMode's injected shape. Other
+    // permission fields remain the responsibility of their own parser slice.
+    let skeleton = Utf16JsonProjection::object(vec![
+        (
+            "disableBypassPermissionsMode".into(),
+            string_projection("disable"),
+        ),
+        (
+            "blockReadsOutsideWorkingDirectories".into(),
+            bool_projection(true),
+        ),
+        ("disableAutoMode".into(), string_projection("disable")),
+    ])
+    .expect("permissions restrictive skeleton is valid JSON");
+    if !normalize_restricted_object_root(
+        projection,
+        "permissions",
+        skeleton,
+        diagnostics,
+        substituted_paths,
+        synthesized_paths,
+    ) {
+        return;
+    }
+    normalize_disable_only_path(
+        projection,
+        &["permissions", "disableBypassPermissionsMode"],
+        diagnostics,
+        substituted_paths,
+    );
+    normalize_disable_only_path(
+        projection,
+        &["permissions", "disableAutoMode"],
+        diagnostics,
+        substituted_paths,
+    );
+}
+
+/// Apply `Bo`'s null-removal and invalid-root restrictive-skeleton branches
+/// for an object with Native lock fields. Returns true only when an input
+/// object remains to have its fields normalized individually.
+fn normalize_restricted_object_root(
+    projection: &mut Utf16JsonProjection,
+    field: &str,
+    skeleton: Utf16JsonProjection,
+    diagnostics: &mut Vec<NativePolicyParseDiagnostic>,
+    substituted_paths: &mut Vec<String>,
+    synthesized_paths: &mut Vec<String>,
+) -> bool {
+    let pointer = format!("/{field}");
+    let Some(value) = projection.subprojection(&pointer).ok() else {
+        return false;
+    };
+    let Some(root) = value.at_pointer("") else {
+        return false;
+    };
+    if root.is_null() {
+        let _ = projection.remove_field(field);
+        diagnostics.push(diagnostic(
+            pointer,
+            NativePolicyDiagnosticKind::Removed,
+            false,
+            false,
+            false,
+        ));
+        return false;
+    }
+    if root.object_entries().is_none() {
+        let _ = projection.set_field(field, skeleton);
+        substituted_paths.push(pointer.clone());
+        synthesized_paths.push(pointer.clone());
+        diagnostics.push(diagnostic(
+            pointer,
+            NativePolicyDiagnosticKind::Synthesized,
+            true,
+            true,
+            false,
+        ));
+        return false;
+    }
+    true
+}
+
 fn normalize_available_models(
     projection: &mut Utf16JsonProjection,
     diagnostics: &mut Vec<NativePolicyParseDiagnostic>,
 ) {
     normalize_string_array(projection, "availableModels", false, diagnostics);
+}
+
+/// Apply Native's `os` repair for `enabledPlugins`. The map retains every row
+/// whose value is either a boolean or an array consisting entirely of strings;
+/// arrays are validated as a whole. The plugin-id schema is used only to pick
+/// the diagnostic path for an invalid value and never filters a valid row.
+fn normalize_enabled_plugins(
+    projection: &mut Utf16JsonProjection,
+    diagnostics: &mut Vec<NativePolicyParseDiagnostic>,
+) {
+    let Some(value) = projection.subprojection("/enabledPlugins").ok() else {
+        return;
+    };
+    let Some(root) = value.at_pointer("") else {
+        return;
+    };
+    if root.object_entries().is_none() {
+        let _ = projection.remove_field("enabledPlugins");
+        diagnostics.push(diagnostic(
+            "/enabledPlugins".into(),
+            NativePolicyDiagnosticKind::Ignored,
+            false,
+            false,
+            false,
+        ));
+        return;
+    }
+
+    let mut retained = Vec::new();
+    let mut invalid_entries = 0;
+    for (key_units, entry_value) in object_entries_in_javascript_order(&value) {
+        if is_enabled_plugin_value(&entry_value) {
+            retained.push((key_units, entry_value));
+            continue;
+        }
+        invalid_entries += 1;
+        let path = String::from_utf16(&key_units)
+            .ok()
+            .filter(|key| native_plugin_id_is_valid(key))
+            .map(|key| format!("/enabledPlugins/{}", escape_pointer_token(&key)))
+            .unwrap_or_else(|| "/enabledPlugins/<invalid id>".into());
+        diagnostics.push(diagnostic(
+            path,
+            NativePolicyDiagnosticKind::InvalidEntryIgnored,
+            false,
+            false,
+            false,
+        ));
+    }
+
+    if invalid_entries > 0 && retained.is_empty() {
+        let _ = projection.remove_field("enabledPlugins");
+        diagnostics.push(diagnostic(
+            "/enabledPlugins".into(),
+            NativePolicyDiagnosticKind::Ignored,
+            false,
+            false,
+            false,
+        ));
+        return;
+    }
+
+    if let Ok(normalized) = Utf16JsonProjection::object_units(retained) {
+        let _ = projection.set_field("enabledPlugins", normalized);
+    }
+}
+
+fn is_enabled_plugin_value(value: &Utf16JsonProjection) -> bool {
+    let Some(root) = value.at_pointer("") else {
+        return false;
+    };
+    if root.as_bool().is_some() {
+        return true;
+    }
+    let Some(length) = root.array_len() else {
+        return false;
+    };
+    (0..length).all(|index| {
+        root.get_index(index)
+            .and_then(JsonValueView::code_units)
+            .is_some()
+    })
+}
+
+/// Native's `Object.entries` enumerates canonical array-index keys first in
+/// ascending numeric order, then other keys in source insertion order. The
+/// projection parser preserves JSON source order, so sort only index keys
+/// before applying the `enabledPlugins` record transform.
+fn object_entries_in_javascript_order(
+    value: &Utf16JsonProjection,
+) -> Vec<(Vec<u16>, Utf16JsonProjection)> {
+    let Some(entries) = value.object_entries() else {
+        return Vec::new();
+    };
+    let mut indexed = Vec::new();
+    let mut rest = Vec::new();
+    for entry in entries {
+        let key_units = entry.code_units.to_vec();
+        let entry_value = value
+            .subprojection_property_units(entry.code_units)
+            .expect("object entry exists in its source projection");
+        let array_index = String::from_utf16(&key_units).ok().and_then(|key| {
+            key.parse::<u32>()
+                .ok()
+                .filter(|index| *index != u32::MAX && index.to_string() == key)
+        });
+        if let Some(index) = array_index {
+            indexed.push((index, key_units, entry_value));
+        } else {
+            rest.push((key_units, entry_value));
+        }
+    }
+    indexed.sort_unstable_by_key(|(index, _, _)| *index);
+    indexed
+        .into_iter()
+        .map(|(_, key, value)| (key, value))
+        .chain(rest)
+        .collect()
+}
+
+/// The `fO()` plugin-id refinement only chooses the Native diagnostic path;
+/// valid map entries are retained even when this returns false.
+fn native_plugin_id_is_valid(value: &str) -> bool {
+    let match_component = |component: &str| {
+        let mut bytes = component.bytes();
+        bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || b"-._".contains(&byte))
+    };
+
+    let plugin_marketplace = value
+        .split_once('@')
+        .filter(|(plugin, marketplace)| {
+            !marketplace.contains('@') && match_component(plugin) && match_component(marketplace)
+        })
+        .is_some();
+    if plugin_marketplace {
+        return true;
+    }
+
+    let Some(package) = value.strip_suffix("@npm") else {
+        return false;
+    };
+    if package.contains("..") || package.contains("//") {
+        return false;
+    }
+    let package_component = |part: &str| {
+        let bytes = part.as_bytes();
+        !bytes.is_empty()
+            && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+            && bytes[1..].iter().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-._".contains(byte)
+            })
+    };
+    if let Some(scoped) = package.strip_prefix('@') {
+        let Some((scope, name)) = scoped.split_once('/') else {
+            return false;
+        };
+        !name.contains('/') && package_component(scope) && package_component(name)
+    } else {
+        !package.contains('/') && package_component(package)
+    }
 }
 
 fn normalize_string_allowlist(
@@ -637,7 +935,16 @@ fn normalize_disable_only_field(
     diagnostics: &mut Vec<NativePolicyParseDiagnostic>,
     substituted_paths: &mut Vec<String>,
 ) {
-    let pointer = format!("/{field}");
+    normalize_disable_only_path(projection, &[field], diagnostics, substituted_paths);
+}
+
+fn normalize_disable_only_path(
+    projection: &mut Utf16JsonProjection,
+    path: &[&str],
+    diagnostics: &mut Vec<NativePolicyParseDiagnostic>,
+    substituted_paths: &mut Vec<String>,
+) {
+    let pointer = json_pointer(path);
     let Some(value) = projection.subprojection(&pointer).ok() else {
         return;
     };
@@ -645,7 +952,7 @@ fn normalize_disable_only_field(
         return;
     };
     if root.is_null() || root.as_bool() == Some(false) || root.as_str() == Some("false") {
-        let _ = projection.remove_field(field);
+        remove_path(projection, path);
         diagnostics.push(diagnostic(
             pointer,
             NativePolicyDiagnosticKind::Removed,
@@ -658,7 +965,7 @@ fn normalize_disable_only_field(
     if root.as_str() == Some("disable") {
         return;
     }
-    let _ = projection.set_field(field, string_projection("disable"));
+    set_path(projection, path, string_projection("disable"));
     substituted_paths.push(pointer.clone());
     diagnostics.push(diagnostic(
         pointer,
@@ -748,7 +1055,7 @@ fn normalize_sandbox(
         substituted_paths,
         synthesized_paths,
     );
-    if let Some(sandbox) = projection.subprojection("/sandbox").ok() {
+    if let Ok(sandbox) = projection.subprojection("/sandbox") {
         if sandbox
             .at_pointer("")
             .and_then(JsonValueView::object_entries)
@@ -863,7 +1170,7 @@ fn collect_unresolved_fields(projection: &Utf16JsonProjection) -> Vec<String> {
             unresolved.push((*field).to_owned());
         }
     }
-    if let Some(sandbox) = projection.subprojection("/sandbox").ok() {
+    if let Ok(sandbox) = projection.subprojection("/sandbox") {
         for field in [
             "excludedCommands",
             "ripgrep",
@@ -895,7 +1202,7 @@ fn collect_unresolved_fields(projection: &Utf16JsonProjection) -> Vec<String> {
                 &["allowRead", "denyRead", "allowWrite", "denyWrite"][..],
             ),
         ] {
-            if let Some(child) = sandbox.subprojection(&format!("/{object}")).ok() {
+            if let Ok(child) = sandbox.subprojection(&format!("/{object}")) {
                 for field in fields {
                     if child.contains_property(field) {
                         unresolved.push(format!("sandbox.{object}.{field}"));
@@ -1151,6 +1458,132 @@ mod tests {
     }
 
     #[test]
+    fn source_oracle_enabled_plugins_keeps_boolean_and_utf16_string_array_values() {
+        let result = parse(
+            r#"{"enabledPlugins":{"formatter@marketplace":true,"opaque/id":false,"release@marketplace":["not-a-semver-parser-input","\ud800"]}}"#,
+        );
+        let normalized = result.normalized_projection.as_ref().unwrap();
+        let plugins = normalized.subprojection("/enabledPlugins").unwrap();
+        assert_eq!(plugins.object_entries().unwrap().len(), 3);
+        assert_eq!(
+            plugins
+                .at_pointer("/formatter@marketplace")
+                .and_then(JsonValueView::as_bool),
+            Some(true)
+        );
+        // fO() is diagnostic-only: an invalid plugin ID survives if its value
+        // passes va().
+        assert_eq!(
+            plugins
+                .at_pointer("/opaque~1id")
+                .and_then(JsonValueView::as_bool),
+            Some(false)
+        );
+        assert_eq!(plugins.array_len("/release@marketplace"), Some(2));
+        assert_eq!(
+            plugins.string_units("/release@marketplace/1"),
+            Some(vec![0xd800])
+        );
+        assert!(result
+            .unresolved_fields
+            .iter()
+            .all(|field| field != "enabledPlugins"));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn source_oracle_enabled_plugins_drops_whole_invalid_rows_and_uses_js_key_order() {
+        let result = parse(
+            r#"{"enabledPlugins":{"z@marketplace":true,"10":false,"2":true,"01":false,"broken@marketplace":["^1",17],"bad/value":null}}"#,
+        );
+        let normalized = result.normalized_projection.as_ref().unwrap();
+        let plugins = normalized.subprojection("/enabledPlugins").unwrap();
+        assert_eq!(plugins.object_entries().unwrap().len(), 4);
+        assert_eq!(
+            plugins.to_json_string().unwrap(),
+            r#"{"2":true,"10":false,"z@marketplace":true,"01":false}"#
+        );
+        assert!(result.diagnostics.iter().any(|item| {
+            item.path == "/enabledPlugins/broken@marketplace"
+                && item.kind == NativePolicyDiagnosticKind::InvalidEntryIgnored
+        }));
+        assert!(result.diagnostics.iter().any(|item| {
+            item.path == "/enabledPlugins/<invalid id>"
+                && item.kind == NativePolicyDiagnosticKind::InvalidEntryIgnored
+        }));
+    }
+
+    #[test]
+    fn source_oracle_enabled_plugins_omits_invalid_or_all_invalid_fields_but_keeps_empty_map() {
+        let all_invalid = parse(
+            r#"{"enabledPlugins":{"bad@marketplace":17,"mixed@marketplace":["^1",null]},"sibling":"retained"}"#,
+        );
+        let normalized = all_invalid.normalized_projection.as_ref().unwrap();
+        assert!(!normalized.contains_property("enabledPlugins"));
+        assert_eq!(normalized.string_at("/sibling"), Some("retained"));
+        assert_eq!(all_invalid.document_has_policy_content, Some(true));
+        assert!(all_invalid.diagnostics.iter().any(|item| {
+            item.path == "/enabledPlugins" && item.kind == NativePolicyDiagnosticKind::Ignored
+        }));
+
+        let invalid_root = parse(r#"{"enabledPlugins":null,"sibling":true}"#);
+        assert!(!invalid_root
+            .normalized_projection
+            .as_ref()
+            .unwrap()
+            .contains_property("enabledPlugins"));
+        assert_eq!(
+            invalid_root
+                .normalized_projection
+                .as_ref()
+                .unwrap()
+                .at_pointer("/sibling")
+                .and_then(JsonValueView::as_bool),
+            Some(true)
+        );
+
+        let empty = parse(r#"{"enabledPlugins":{}}"#);
+        assert_eq!(
+            empty
+                .normalized_projection
+                .as_ref()
+                .unwrap()
+                .subprojection("/enabledPlugins")
+                .unwrap()
+                .object_entries()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn source_oracle_enabled_plugins_invalid_key_diagnostic_uses_plugin_id_refinement() {
+        let result = parse(
+            r#"{"enabledPlugins":{"plugin@marketplace":17,"@scope/package@npm":null,"bad key":17}}"#,
+        );
+        let paths = result
+            .diagnostics
+            .iter()
+            .filter(|item| item.kind == NativePolicyDiagnosticKind::InvalidEntryIgnored)
+            .map(|item| item.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                "/enabledPlugins/plugin@marketplace",
+                "/enabledPlugins/@scope~1package@npm",
+                "/enabledPlugins/<invalid id>"
+            ]
+        );
+        assert!(native_plugin_id_is_valid("plugin@marketplace"));
+        assert!(native_plugin_id_is_valid("@scope/package@npm"));
+        assert!(!native_plugin_id_is_valid("bad key"));
+        assert!(!native_plugin_id_is_valid("plugin@marketplace\n"));
+        assert!(!native_plugin_id_is_valid("@scope/package\n@npm"));
+    }
+
+    #[test]
     fn source_oracle_controls_ignore_invalid_and_null_without_rejecting_document() {
         let result = parse(
             r#"{"managedSourcesBehavior":null,"parentSettingsBehavior":"invalid","wslInheritsWindowsSettings":"true"}"#,
@@ -1294,6 +1727,193 @@ mod tests {
             .is_none());
         assert_eq!(result.synthesized_paths, vec!["/sandbox"]);
         assert!(result.only_substitutes);
+    }
+
+    #[test]
+    fn source_oracle_auto_mode_classifier_coerces_removes_and_fails_closed() {
+        let valid_false = parse(
+            r#"{"autoMode":{"classifyAllShell":false,"useAutoModeDuringPlan":false},"model":"kept"}"#,
+        );
+        let valid_false_projection = valid_false.normalized_projection.as_ref().unwrap();
+        assert_eq!(
+            valid_false_projection
+                .at_pointer("/autoMode/classifyAllShell")
+                .and_then(JsonValueView::as_bool),
+            Some(false)
+        );
+        assert!(!valid_false
+            .unresolved_fields
+            .iter()
+            .any(|field| field == "autoMode.classifyAllShell"));
+        assert!(valid_false.substituted_paths.is_empty());
+
+        let coerced = parse(r#"{"autoMode":{"classifyAllShell":"false"}}"#);
+        assert_eq!(
+            coerced
+                .normalized_projection
+                .as_ref()
+                .unwrap()
+                .at_pointer("/autoMode/classifyAllShell")
+                .and_then(JsonValueView::as_bool),
+            Some(false)
+        );
+        assert!(coerced.diagnostics.iter().any(|item| {
+            item.path == "/autoMode/classifyAllShell"
+                && item.kind == NativePolicyDiagnosticKind::Coerced
+                && item.status_only
+                && !item.substituted
+        }));
+
+        let null = parse(r#"{"autoMode":{"classifyAllShell":null}}"#);
+        assert!(!null
+            .normalized_projection
+            .as_ref()
+            .unwrap()
+            .contains_property("autoMode"));
+        assert!(null.diagnostics.iter().any(|item| {
+            item.path == "/autoMode/classifyAllShell"
+                && item.kind == NativePolicyDiagnosticKind::Removed
+                && item.status_only
+        }));
+
+        let invalid = parse(
+            r#"{"model":"kept","autoMode":{"classifyAllShell":"yes","useAutoModeDuringPlan":false}}"#,
+        );
+        let normalized = invalid.normalized_projection.as_ref().unwrap();
+        assert_eq!(
+            normalized
+                .at_pointer("/autoMode/classifyAllShell")
+                .and_then(JsonValueView::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            normalized
+                .at_pointer("/autoMode/useAutoModeDuringPlan")
+                .and_then(JsonValueView::as_bool),
+            Some(false)
+        );
+        assert_eq!(normalized.string_at("/model"), Some("kept"));
+        assert_eq!(
+            invalid.substituted_paths,
+            vec!["/autoMode/classifyAllShell"]
+        );
+        assert!(!invalid.only_substitutes);
+
+        let invalid_root = parse(r#"{"model":"kept","autoMode":"bad"}"#);
+        let normalized = invalid_root.normalized_projection.as_ref().unwrap();
+        assert_eq!(
+            normalized
+                .at_pointer("/autoMode/classifyAllShell")
+                .and_then(JsonValueView::as_bool),
+            Some(true)
+        );
+        assert_eq!(invalid_root.substituted_paths, vec!["/autoMode"]);
+        assert_eq!(invalid_root.synthesized_paths, vec!["/autoMode"]);
+        assert!(!invalid_root.only_substitutes);
+
+        let absent = parse(r#"{"model":"kept"}"#);
+        assert!(!absent
+            .normalized_projection
+            .as_ref()
+            .unwrap()
+            .contains_property("autoMode"));
+        assert!(absent.substituted_paths.is_empty());
+        assert!(absent.synthesized_paths.is_empty());
+    }
+
+    #[test]
+    fn source_oracle_permission_disable_fields_remove_false_and_substitute_invalid() {
+        let normalized = parse(
+            r#"{"permissions":{"disableBypassPermissionsMode":false,"allow":["Read(*)"],"disableAutoMode":"false"},"sibling":true}"#,
+        );
+        let projection = normalized.normalized_projection.as_ref().unwrap();
+        assert_eq!(projection.array_len("/permissions/allow"), Some(1));
+        assert!(projection
+            .at_pointer("/permissions/disableBypassPermissionsMode")
+            .is_none());
+        assert!(projection
+            .at_pointer("/permissions/disableAutoMode")
+            .is_none());
+        assert_eq!(
+            projection
+                .at_pointer("/sibling")
+                .and_then(JsonValueView::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            normalized
+                .diagnostics
+                .iter()
+                .filter(|item| {
+                    item.kind == NativePolicyDiagnosticKind::Removed && item.status_only
+                })
+                .count(),
+            2
+        );
+
+        let null = parse(
+            r#"{"permissions":{"disableBypassPermissionsMode":null,"disableAutoMode":"disable","allow":[]}}"#,
+        );
+        let projection = null.normalized_projection.as_ref().unwrap();
+        assert!(projection
+            .at_pointer("/permissions/disableBypassPermissionsMode")
+            .is_none());
+        assert_eq!(
+            projection.string_at("/permissions/disableAutoMode"),
+            Some("disable")
+        );
+        assert_eq!(projection.array_len("/permissions/allow"), Some(0));
+
+        let invalid = parse(
+            r#"{"sibling":"retained","permissions":{"disableBypassPermissionsMode":true,"disableAutoMode":"enabled"}}"#,
+        );
+        let projection = invalid.normalized_projection.as_ref().unwrap();
+        assert_eq!(
+            projection.string_at("/permissions/disableBypassPermissionsMode"),
+            Some("disable")
+        );
+        assert_eq!(
+            projection.string_at("/permissions/disableAutoMode"),
+            Some("disable")
+        );
+        assert_eq!(projection.string_at("/sibling"), Some("retained"));
+        assert_eq!(
+            invalid.substituted_paths,
+            vec![
+                "/permissions/disableBypassPermissionsMode",
+                "/permissions/disableAutoMode"
+            ]
+        );
+        assert!(!invalid.only_substitutes);
+
+        let invalid_root = parse(r#"{"permissions":"bad"}"#);
+        let projection = invalid_root.normalized_projection.as_ref().unwrap();
+        assert_eq!(
+            projection.string_at("/permissions/disableBypassPermissionsMode"),
+            Some("disable")
+        );
+        assert_eq!(
+            projection
+                .at_pointer("/permissions/blockReadsOutsideWorkingDirectories")
+                .and_then(JsonValueView::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            projection.string_at("/permissions/disableAutoMode"),
+            Some("disable")
+        );
+        assert_eq!(invalid_root.substituted_paths, vec!["/permissions"]);
+        assert_eq!(invalid_root.synthesized_paths, vec!["/permissions"]);
+        assert!(invalid_root.only_substitutes);
+
+        let null_root = parse(r#"{"permissions":null}"#);
+        assert!(!null_root
+            .normalized_projection
+            .as_ref()
+            .unwrap()
+            .contains_property("permissions"));
+        assert!(null_root.substituted_paths.is_empty());
+        assert!(null_root.synthesized_paths.is_empty());
     }
 
     #[test]

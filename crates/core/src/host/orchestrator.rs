@@ -2519,12 +2519,20 @@ pub trait OrchestratorHandle: Send + Sync {
         Ok(())
     }
     /// Refresh the attached composer's transient suggestion context.
-    async fn update_prompt_suggestion_context(&self, _context: PromptSuggestionContext) -> Result<(), HandleError> {
+    async fn update_prompt_suggestion_context(
+        &self,
+        _context: PromptSuggestionContext,
+    ) -> Result<(), HandleError> {
         Ok(())
     }
 
     /// Acknowledge actual presentation/acceptance, scoped to the current proposal.
-    async fn prompt_suggestion_feedback(&self, _session_id: &str, _uuid: &str, _action: &str) -> Result<(), HandleError> {
+    async fn prompt_suggestion_feedback(
+        &self,
+        _session_id: &str,
+        _uuid: &str,
+        _action: &str,
+    ) -> Result<(), HandleError> {
         Ok(())
     }
 
@@ -4221,13 +4229,7 @@ pub trait OutputStream: Send + Sync {
     async fn emit_prompt_suggestion_state(&self, _enabled: bool, _notice: Option<&str>) {}
 
     /// Ephemeral completion of a background query, anchored to its parent reply.
-    async fn emit_prompt_suggestion(
-        &self,
-        _session_id: &str,
-        _uuid: &str,
-        _suggestion: &str,
-    ) {
-    }
+    async fn emit_prompt_suggestion(&self, _session_id: &str, _uuid: &str, _suggestion: &str) {}
 
     /// Emit when compaction has STARTED (before the summarizer call). The
     /// consumer (TUI / CLI / bridge) should display a progress indicator

@@ -3,6 +3,7 @@
 mod javascript;
 #[path = "../src/conversation/prompt_suggestion_background_state.rs"]
 mod state;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::json;
 
 #[test]
@@ -10,22 +11,106 @@ fn native_background_classifier_and_redactor_execute_in_quickjs() {
     let blocked = javascript::evaluate_result("prepare", json!({
         "text":"Which option do you prefer?", "previous":"working", "latestAsk":"Build it", "tools":"", "minutes":0
     })).expect("native regex must compile in production QuickJS");
-    assert_eq!(blocked["result"]["tempo"], "blocked");
-    assert_eq!(blocked["result"]["needs"], "Which option do you prefer?");
+    assert_eq!(blocked.value["result"]["tempo"], "blocked");
     assert_eq!(
-        javascript::evaluate("safeReply", json!({"text":"Use the first option"})),
+        blocked.value["result"]["needs"],
+        "Which option do you prefer?"
+    );
+    assert_eq!(
+        javascript::evaluate("safeReply", json!({"text":"Use the first option"}))
+            .map(|value| value.value.clone()),
         Some(json!(true))
     );
     assert_eq!(
         javascript::evaluate(
             "safeReply",
             json!({"text":"Use sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaAAAA"})
-        ),
+        ).map(|value| value.value.clone()),
         Some(json!(false))
     );
     let parsed = javascript::evaluate("parse", json!({"text":"```json\n{\"state\":\"blocked\",\"tempo\":\"blocked\",\"needs\":\"approve\",\"extra\":true}\n```", "previous":"working"})).unwrap();
-    assert_eq!(parsed["needs"], "approve");
-    assert!(parsed.get("extra").is_none());
+    assert_eq!(parsed.value["needs"], "approve");
+    assert!(parsed.value.get("extra").is_none());
+    let parsed_projection = javascript::evaluate_parse_projection(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            r#"{"state":"blocked","tempo":"blocked","needs":"Choose one option"}"#,
+        ),
+        "working",
+    )
+    .unwrap();
+    assert_eq!(parsed_projection.string_at("/tempo"), Some("blocked"));
+    assert_eq!(
+        parsed_projection.string_at("/needs"),
+        Some("Choose one option")
+    );
+}
+
+#[test]
+fn native_background_prepare_keeps_lone_need_units_in_projection() {
+    for unit in [0xd800_u16, 0xdfff_u16] {
+        let input = Utf16JsonProjection::parse(&format!(
+            r#"{{"text":"Please provide \u{unit:04x} additional information","previous":"working","latestAsk":"","tools":"","minutes":0}}"#
+        ))
+        .expect("the source JSON escape is valid and projection preserves lone UTF-16 units");
+        let result = javascript::evaluate_projection_result("prepare", input)
+            .expect("the production classifier returns a projection without a serde Value hop");
+        let expected = "Please provide "
+            .encode_utf16()
+            .chain([unit])
+            .chain(" additional information".encode_utf16())
+            .collect::<Vec<_>>();
+        assert_eq!(result.string_at("/result/state"), Some("blocked"));
+        assert_eq!(result.string_at("/result/tempo"), Some("blocked"));
+        assert_eq!(result.string_units("/result/needs"), Some(expected));
+    }
+}
+
+#[test]
+fn native_background_parse_and_admission_keep_lone_need_units() {
+    for unit in [0xd800_u16, 0xdfff_u16] {
+        let response = Utf16JsonProjection::from(format!(
+            r#"{{"state":"blocked","tempo":"blocked","needs":"\u{unit:04x}"}}"#
+        ));
+        let classifier_result = javascript::evaluate_parse_projection(response, "working")
+            .expect("Native parser result must remain a UTF-16 projection");
+        assert_eq!(classifier_result.string_at("/tempo"), Some("blocked"));
+        assert_eq!(classifier_result.string_units("/needs"), Some(vec![unit]));
+
+        let context = state::BackgroundSuggestionContext::from_blocked_classifier(
+            "session".into(),
+            7,
+            &classifier_result,
+            &classifier_result,
+        )
+        .expect("blocked, operation-free parse is eligible for suggestion focus bypass");
+        assert_eq!(context.session_id, "session");
+        assert_eq!(context.epoch, 7);
+        assert_eq!(context.needs, Some(vec![unit]));
+
+        let mut null_block = classifier_result.clone();
+        null_block
+            .set_field("block", Utf16JsonProjection::parse("null").unwrap())
+            .unwrap();
+        assert!(state::BackgroundSuggestionContext::from_blocked_classifier(
+            "session".into(),
+            7,
+            &classifier_result,
+            &null_block,
+        )
+        .is_some());
+
+        let mut operation_active = classifier_result.clone();
+        operation_active
+            .set_field("block", Utf16JsonProjection::from("permission"))
+            .unwrap();
+        assert!(state::BackgroundSuggestionContext::from_blocked_classifier(
+            "session".into(),
+            7,
+            &classifier_result,
+            &operation_active,
+        )
+        .is_none());
+    }
 }
 
 #[test]
@@ -35,14 +120,19 @@ fn background_reply_requires_unchanged_blocked_need_and_epoch_resets() {
         last_message_count: 9,
         previous_state: "blocked".into(),
         previous_state_since_ms: 123,
-        persisted: Some(json!({"tempo":"blocked", "needs":"pick one"})),
+        persisted: Some(
+            Utf16JsonProjection::from_serde_value(&json!({"tempo":"blocked", "needs":"pick one"}))
+                .unwrap(),
+        ),
         ..Default::default()
     };
-    assert!(!state.record_reply("Use the first option", Some("different")));
-    assert!(state.record_reply("Use the first option", Some("pick one")));
-    assert!(!state.record_reply("Use the first option", Some("pick one")));
+    let pick_one = "pick one".encode_utf16().collect::<Vec<_>>();
+    let different = "different".encode_utf16().collect::<Vec<_>>();
+    assert!(!state.record_reply("Use the first option", Some(&different)));
+    assert!(state.record_reply("Use the first option", Some(&pick_one)));
+    assert!(!state.record_reply("Use the first option", Some(&pick_one)));
     state.mark_active();
-    assert!(!state.record_reply("Use the second option", Some("pick one")));
+    assert!(!state.record_reply("Use the second option", Some(&pick_one)));
     let epoch = state.epoch;
     state.reset();
     assert_ne!(state.epoch, epoch);
@@ -51,6 +141,37 @@ fn background_reply_requires_unchanged_blocked_need_and_epoch_resets() {
     assert_eq!(state.last_message_count, 0);
     assert!(state.previous_state.is_empty());
     assert_eq!(state.previous_state_since_ms, 0);
+}
+
+#[test]
+fn background_reply_persistence_round_trips_lone_needs_units_exactly() {
+    for unit in [0xd800_u16, 0xdfff_u16] {
+        let source = format!(r#"{{"tempo":"blocked","needs":"\u{unit:04x}"}}"#);
+        let persisted = Utf16JsonProjection::parse(&source).unwrap();
+        let mut state = state::BackgroundSuggestionState {
+            session_id: "same-session".into(),
+            epoch: 7,
+            persisted: Some(persisted),
+            ..Default::default()
+        };
+        let expected = [unit];
+        let wrong = [if unit == 0xd800 { 0xdfff } else { 0xd800 }];
+        assert!(!state.record_reply("Use the first option", Some(&wrong)));
+        assert!(state.record_reply("Use the first option", Some(&expected)));
+
+        let serialized = state.persisted.as_ref().unwrap().to_json_string().unwrap();
+        let reloaded = Utf16JsonProjection::parse(&serialized).unwrap();
+        assert_eq!(reloaded.string_at("/tempo"), Some("blocked"));
+        assert_eq!(reloaded.string_units("/needs"), Some(expected.to_vec()));
+        assert_eq!(
+            reloaded.string_at("/suggestedReply"),
+            Some("Use the first option")
+        );
+        assert_eq!(
+            state.epoch, 7,
+            "a same-session persistence round trip keeps its epoch"
+        );
+    }
 }
 
 #[test]
@@ -69,6 +190,10 @@ fn background_pipeline_persists_only_the_classifiers_current_safe_reply() {
             .env_remove("ANTHROPIC_DEFAULT_OPUS_MODEL")
             .env_remove("ANTHROPIC_DEFAULT_MODEL")
             .env_remove("ANTHROPIC_MODEL")
+            .env_remove("DISABLE_TELEMETRY")
+            .env_remove("DO_NOT_TRACK")
+            .env_remove("LINGXI_DISABLE_NONESSENTIAL_TRAFFIC")
+            .env_remove("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
             .env(CHILD, "1")
             .env("CLAUDE_CODE_SESSION_KIND", "bg")
             .env("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "true")
@@ -95,6 +220,9 @@ async fn background_pipeline() {
     use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
     use std::sync::{Arc, Mutex};
     use tokio::sync::{Notify, Semaphore};
+    let analytics_sink = Arc::new(telemetry::InMemorySink::new());
+    let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
+    analytics_bus.attach_sink(analytics_sink.clone()).await;
     #[derive(Default)]
     struct Output {
         ready: Notify,
@@ -190,6 +318,8 @@ async fn background_pipeline() {
     }
     struct Client {
         classifiers: Mutex<Vec<sidequery::SideQueryRequest>>,
+        classifier_response: Mutex<Utf16JsonProjection>,
+        classifier_entered: Notify,
         entered: Notify,
         release: Semaphore,
     }
@@ -221,11 +351,9 @@ async fn background_pipeline() {
                     }
                 );
                 self.classifiers.lock().unwrap().push(request);
+                self.classifier_entered.notify_one();
                 sidequery::SideQueryResponse {
-                    text: Some(
-                        r#"{"state":"blocked","tempo":"blocked","needs":"Choose one option"}"#
-                            .into(),
-                    ),
+                    text: Some(self.classifier_response.lock().unwrap().clone()),
                     structured: None,
                     tool_calls: vec![],
                     usage: Default::default(),
@@ -273,11 +401,17 @@ async fn background_pipeline() {
     let output = Arc::new(Output::default());
     let client = Arc::new(Client {
         classifiers: Mutex::new(vec![]),
+        classifier_response: Mutex::new(Utf16JsonProjection::from(
+            r#"{"state":"blocked","tempo":"blocked","needs":"Choose one option"}"#,
+        )),
+        classifier_entered: Notify::new(),
         entered: Notify::new(),
         release: Semaphore::new(0),
     });
     let settings = Arc::new(Settings::default());
-    let turns = (0..5)
+    // Three heuristic turns, two model-route checks, and two UTF-16 needs
+    // cases each require their own scripted assistant response.
+    let turns = (0..7)
         .map(|i| {
             vec![
                 message_start(&format!("reply-{i}"), "claude-sonnet-4-6"),
@@ -315,6 +449,7 @@ async fn background_pipeline() {
         .with_model_resolution_context_provider(Arc::new(Routes))
         .with_mod_settings_reader(settings.clone())
         .with_config_home(home.path().into())
+        .with_analytics_bus(analytics_bus)
         .with_cache_safe_slot(Arc::new(sidequery::CacheSafeParamsSlot::new()))
         .with_recap_runner(Arc::new(
             sidequery::ForkedAgentRunner::new()
@@ -324,6 +459,10 @@ async fn background_pipeline() {
     orch.seed_initial_model_profile("claude-sonnet-4-6", "native-profile")
         .await;
     let session = orch.current_session_id().await.as_uuid().to_string();
+    let path = home
+        .path()
+        .join("prompt-suggestions")
+        .join(format!("{session}.json"));
     orch.update_prompt_suggestion_context(lingxi_core::host::PromptSuggestionContext {
         session_id: session.clone(),
         focus: "blurred".into(),
@@ -346,10 +485,6 @@ async fn background_pipeline() {
     tokio::time::timeout(std::time::Duration::from_secs(5), output.ready.notified())
         .await
         .unwrap();
-    let path = home
-        .path()
-        .join("prompt-suggestions")
-        .join(format!("{session}.json"));
     let saved: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
     assert_eq!(saved["tempo"], "blocked");
@@ -394,9 +529,12 @@ async fn background_pipeline() {
         orch.run_turn_streaming("Compare the implementation components")
             .await
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), client.entered.notified())
-            .await
-            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.classifier_entered.notified(),
+        )
+        .await
+        .unwrap();
         let requests = client.classifiers.lock().unwrap();
         assert_eq!(
             requests.last().unwrap().model,
@@ -407,12 +545,86 @@ async fn background_pipeline() {
             }
         );
         drop(requests);
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.entered.notified())
+            .await
+            .unwrap();
         client.release.add_permits(1);
         tokio::time::timeout(std::time::Duration::from_secs(5), output.ready.notified())
             .await
             .unwrap();
     }
-    assert_eq!(client.classifiers.lock().unwrap().len(), 2);
+    for unit in [0xd800_u16, 0xdfff_u16] {
+        *client.classifier_response.lock().unwrap() = Utf16JsonProjection::from(format!(
+            r#"{{"state":"blocked","tempo":"blocked","needs":"\u{unit:04x}"}}"#
+        ));
+        let event_start = analytics_sink.events().await.len();
+        orch.run_turn_streaming("Compare the implementation components")
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.classifier_entered.notified(),
+        )
+        .await
+        .unwrap();
+        if tokio::time::timeout(std::time::Duration::from_secs(5), client.entered.notified())
+            .await
+            .is_err()
+        {
+            let classifier_response = client.classifier_response.lock().unwrap().clone();
+            let disk_projection = tokio::fs::read(&path)
+                .await
+                .ok()
+                .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(ToOwned::to_owned))
+                .and_then(|text| Utf16JsonProjection::parse(&text).ok());
+            let previous_state = disk_projection
+                .as_ref()
+                .and_then(|value| value.string_at("/state"))
+                .unwrap_or("working")
+                .to_owned();
+            let classifier_result =
+                javascript::evaluate_parse_projection(classifier_response, &previous_state)
+                    .and_then(|result| {
+                        result.to_json_string().map_err(|error| {
+                            hooks::function_hook::FunctionHookError::NotSerialisable(
+                                error.to_string(),
+                            )
+                        })
+                    })
+                    .unwrap_or_else(|error| format!("<parse error: {error:?}>"));
+            let disk_state = disk_projection
+                .as_ref()
+                .and_then(|value| value.to_json_string().ok())
+                .unwrap_or_else(|| "<missing or invalid>".into());
+            let suppression_reasons = analytics_sink
+                .events()
+                .await
+                .into_iter()
+                .skip(event_start)
+                .filter(|event| event.name == "tengu_prompt_suggestion")
+                .filter_map(|event| event.metadata.get("reason").cloned())
+                .collect::<Vec<_>>();
+            panic!(
+                "D800 classifier did not start suggestion query; suppression reasons={suppression_reasons:?}; classifier result={classifier_result}; persisted state={disk_state}"
+            );
+        }
+        client.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), output.ready.notified())
+            .await
+            .unwrap();
+
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        let json_text = std::str::from_utf8(&bytes).unwrap();
+        let saved = Utf16JsonProjection::parse(json_text).unwrap();
+        assert_eq!(saved.string_at("/tempo"), Some("blocked"));
+        assert_eq!(saved.string_units("/needs"), Some(vec![unit]));
+        assert_eq!(
+            saved.string_at("/suggestedReply"),
+            Some("Use the first option"),
+            "same-epoch classifier context must survive exact disk reload"
+        );
+    }
+    assert_eq!(client.classifiers.lock().unwrap().len(), 4);
 }
 
 #[test]
@@ -424,20 +636,37 @@ fn native_background_input_preserves_tool_tie_order_whole_history_and_text_windo
     ]);
     let assembled =
         javascript::evaluate("assemble", json!({"messages":messages,"lastCount":1})).unwrap();
-    assert_eq!(assembled["text"], "Latest one\nLatest two");
-    assert_eq!(assembled["tools"], "Zulu×2, Alpha, Agent");
-    assert_eq!(assembled["count"], 3);
-    let prepared=javascript::evaluate("prepare",json!({"text":assembled["text"],"tools":assembled["tools"],"latestAsk":"<system-reminder>private system</system-reminder>  Keep ordering  ","previous":"working","minutes":2})).unwrap();
+    assert_eq!(assembled.value["text"], "Latest one\nLatest two");
+    assert_eq!(assembled.value["tools"], "Zulu×2, Alpha, Agent");
+    assert_eq!(assembled.number_at("/count"), Some(3.0));
     assert_eq!(
-        prepared["prompt"],
+        assembled.to_json_string().unwrap(),
+        r#"{"count":3,"start":1,"text":"Latest one\nLatest two","tools":"Zulu×2, Alpha, Agent"}"#,
+        "source JSON must use Native's JavaScript number rendering"
+    );
+    let text = assembled.string_at("/text").expect("assembled source text");
+    let tools = assembled
+        .string_at("/tools")
+        .expect("assembled tool summary");
+    let prepared = javascript::evaluate(
+        "prepare",
+        json!({"text":text,"tools":tools,"latestAsk":"<system-reminder>private system</system-reminder>  Keep ordering  ","previous":"working","minutes":2}),
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.string_at("/prompt"),
+        Some(
         "Current state: working (for 2m)\nTool calls so far: Zulu×2, Alpha, Agent\nUser's most recent ask: \"Keep ordering\"\n\nAssistant message tail (last 21 chars):\nLatest one\nLatest two"
+        )
     );
     assert_eq!(
         javascript::evaluate(
             "prepare",
             json!({"text":"🎉 ...","tools":"","latestAsk":"","previous":"blocked","minutes":0})
         )
-        .unwrap()["hasText"],
-        false
+        .unwrap()
+        .at_pointer("/hasText")
+        .and_then(|value| value.as_bool()),
+        Some(false)
     );
 }

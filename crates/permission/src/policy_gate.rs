@@ -2800,7 +2800,9 @@ fn is_negated_path_rule(spec: &Utf16JsonProjection) -> bool {
 
 #[async_trait]
 impl PermissionGate for PolicyPermissionGate {
-    async fn has_pending_request(&self) -> bool { self.inner.has_pending_request().await }
+    async fn has_pending_request(&self) -> bool {
+        self.inner.has_pending_request().await
+    }
 
     async fn check_classifier_only_with_context_or_abort(
         &self,

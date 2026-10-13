@@ -8,43 +8,46 @@ Historical evidence is preserved in [the archive](archive/current-matrix-before-
 
 ## Current candidate
 
-R31 is active under the user's resumed instruction. Six GPT-6 Luna max lanes
-share the fixed sibling worktrees on `codex/claude-alignment-integration`.
-Main was integrated at the initial fixed baseline. On 2026-10-12 the user authorized merging each completed stage into main and pushing main. Newly advanced main commits must be preserved and reconciled before a stage ships; they do not change the fixed 2.1.295 comparison target. No Native capture is part of this batch. Root serializes Cargo gates.
+R31 remains fixed to Native 2.1.295. The SDK stage is published at
+`404fa7fdb9ec40b1e48125239b02b5eea22d60a2`; Harness `340a355ccafe789a527f4521eb6a98ae3fa8842c`
+and Product `24f2b76fb0ee865a344489e77d232d979be804b3` are dirty integration
+candidates. Harness and Product pins, same-candidate full gates and package
+acceptance are not closed. Main advances do not change the fixed reference.
+No Native capture is part of this status.
 
 | Repository | Current committed baseline | Current state |
 | --- | --- | --- |
-| llm-client | `1da15cee0ffd21a083296969b5752165aa559889` | SDK stage merged and pushed to main; remote SHA confirmed. Current default 2601, tokenizers-all 2610 and all-features 2630 passed with 8 ignores each; full Clippy, format, deny-warning docs and five extracted production package checks passed. Harness/Product consumption still pending. |
-| Harness | `8922b25c` | Main merged at 25c99e18; all five SDK lock entries resolve canonical 1da15cee. Current source-consumer repairs compiled through Orchestrator; client event conversion is the current production-check failure. Json projection 27/27 passed. Full final gates and main publication pending. |
-| Product | `91cbbf75778868ab0d1c12803cb605c3bdc95c6a` | Main merged and SSR repairs committed. TypeScript passed; full Electron feedback 1541 passed/5 failed/2 skipped, with 3 SSR failures subsequently repaired (23 focused passes), and 2 source checks awaiting final canonical Harness pins. Full retest, package acceptance and main publication pending. |
+| llm-client | `404fa7fdb9ec40b1e48125239b02b5eea22d60a2` | Published and pushed; `sdk-insights-stage-published-20261012.json` confirms the remote SHA and 19 completed stage-gate receipts, including test/Clippy/rustdoc profiles, tokenizer checks, downstream and package/dependency-closure checks. This closes the SDK stage only; it does not close the same-candidate Harness/Product gates. |
+| Harness | `340a355ccafe789a527f4521eb6a98ae3fa8842c` | Dirty integration candidate. Insights 22/22, UPE 6/6, command-api 771/771, batch 5/5 and Runtime Mods 5/5 have focused feedback; command-api/batch receipts include candidate drift and are not final gates. Strict current Headless replay 04 passes all four fixture cases, Graphify skill listing, ordered catalog names and count 41 on an unchanged candidate with a 64 MiB test thread. Replay 06 passes under the existing 16 MiB CI environment using an explicitly allocated 64 MiB test-only thread; production and CI defaults are unchanged. Complete workspace/consumer gates and publication remain open. |
+| Product | `24f2b76fb0ee865a344489e77d232d979be804b3` | Dirty integration candidate. Canonical SDK/Harness pins are not closed. Current full Product retest, package/signing acceptance and publication remain pending; earlier focused/typecheck feedback is not final-candidate evidence. |
 
 Receipts and source binding hashes are in the sibling integration
 `acceptance/source-alignment-295-r31/`; they are not test runtime dependencies.
 The independent audit preserves all 42 contract IDs below. R31 focused results
 are repair feedback until the same committed dependency combination passes.
 
-- Historical pre-merge feedback (not current-candidate acceptance): SDK default: 2587 passed/8 ignored; tokenizers-all: 2595/8; all-features: 2617/8. Accidental vendor native-TLS workspace profile failure is retained separately from the selected rustls production/CI profile.
-- Core settings: 151 passed; permission: 1773 passed; MCP: 688 passed. Later source changes invalidate these as final-candidate receipts.
-- Orchestrator02: 1914 passed/7 failed. Exact renderer, fixture/identity and fallback interleave repairs are being validated; no failures are waived.
-- Graphify07: actual Headless replay fails because its replacement orchestrator uses an empty tool registry, suppressing `skill_listing`. The fixture's pre-existing user Skill provenance is established, 21 raw files are repository-local, and strict catalog/order assertions remain.
-- SDK check04: all targets/all features passed on unchanged source, before the final real CONNECT regression batch.
-- Electron typecheck04: passed on unchanged source; full tests require localhost-capable execution.
-- Flare signing preflight passed. No final signed artifact or packaged runtime acceptance yet.
+- Historical full-workspace feedback (not current-candidate acceptance): 19,491 passed, 43 failed, 7 ignored. Subsequent repair feedback is incomplete; no failures are waived and no full same-candidate workspace result is recorded here.
+- Latest focused receipts: `harness-insights-sdk404-tests-02.json` passed 22/22 Insights tests and `harness-final-upe-tests-02.json` passed 6/6 UPE tests. Command-api skill dispatch passed 771/771 but not on the same whole candidate; Skill-batch 03 passed 5/5 in a focused run whose candidate changed during parallel edits; Runtime `mod_skill_prompt_tests` 04 passed 5/5 on an unchanged candidate. The nonempty `hook_success` durable/hot/cold path is covered by batch 03 focused feedback; it awaits a frozen-candidate workspace rerun.
+- `headless-current-candidate-20261012-04` passes the unchanged strict replay through the actual production API normalization: four fixture cases, Graphify skill listing, exact ordered prompt catalog and count 41. Native captures and assertions are unchanged. Receipts 01/03 overflow at the existing 16 MiB CI stack; receipt 02 at 64 MiB exposed an obsolete pre-SDK/wire comparison, repaired before 04. Replay 06 passes in the original CI environment after explicit test-only thread allocation. These are focused semantic receipts; complete final gates remain pending. Historical missing-skill-listing and 45-versus-41 results do not recur in 04.
+- The SDK 2.1.295 stage is now published at `404fa7...` after 19 gate receipts. Harness and Product final pins and full acceptance remain open.
+- Flare signing preflight passed. No final signed artifact or packaged runtime acceptance is recorded.
+- Frozen Harness queue 01 completed 20 gates with unchanged input: 14 passed; six failed (one test sentinel brand leak, workspace lib-test helper scope, Core Clippy and three mobile feature checks sharing a missing futures dependency). All reported causes have been repaired. Clippy repair feedback 09 passes every workspace target with warnings denied. The next full candidate gate batch is still required; no workspace tests were executed by queue 01 because compilation failed.
+- Source review additionally closed inherited/class-getter `skill.prompt` text loss at the final JSON IPC boundary. All own JSON fields remain; the real Bun IPC regression passes three tests, including prototype text, getter text and own-extra preservation. This is focused evidence pending the full frozen candidate suite.
 
 ## Source closure by domain
 
 | Domain | Current source work | Remaining delivery |
 | --- | --- | --- |
-| SDK/request | `Ta` is an exact raw-model-key scoped memo, not a host override. Provider route gate and defaults preserved. | SDK stage published with full gates; verify Harness/Product consumers on the final shared SHA combination. |
+| SDK/request | `Ta` is an exact raw-model-key scoped memo, not a host override. Provider route gate and defaults preserved. | SDK `404fa7f` is published after 19 stage gates; five process readers use Native nonempty-string truthiness. Focused Insights tests pass with the published SDK. Final same-candidate Harness consumer and Product pin/package gates remain open. |
 | Turn/placement | Staged first attachment batch uses a single selector/append and phase-aware cancellation. | Production registry now retained in unknown-command replay; exact replay and lifecycle gates pending after the SDK pin. |
 | Tools/permissions | MCP drop permissions and Auto/Plan transitions are current. | ToolSearch Native declared pool/latches and AQo retracted/restored/surfaced/absent fields; final permission gates. |
 | Prompt/settings | Raw settings layers, UTF-16 language, forced-plugin output-style priority and source-generated Sandbox goldens wired. | Settings/Sandbox cold-path regressions pending. Skills accepted local-file and explicit CLI tiers are connected; Local MDM and source-specific parent/host policy producers are integrated; current Runtime compilation and execution acceptance remain pending. Remote service alignment is excluded by the user on 2026-10-12; the project will implement its own service separately. |
-| Sessions/tasks | Raw absent/null envelope fields, explicit human provenance, live/fork/cold task delivery implemented. | Native internal opt-in/external level belongs to CCR worker metadata; local JSONL/fork begin opted out. Full current session/compaction/agent gates pending. |
+| Sessions/tasks | Raw absent/null envelope fields, explicit human provenance, live/fork/cold task delivery implemented. | JSONL source overflow preservation repaired; session 370 and compaction 280 passed in current focused feedback. Background classifier carrier decode repair awaits execution. Final committed candidate gates remain pending. |
 | MCP | Failure/sanitizer/drop/retry scheduler and actual env proxy selection source-bound. | Shared proxyAuthHelper cache consumer, transport gates and current independent source/byte fixtures. |
-| Commands/Skills | Graphify is an isolated real Skill input; production catalog is not fabricated. | Strict actual Headless fallback replay pending. Source-confirmed Skills listing budget/override/usage/display-name chain is integrated. Offline extraction found the actual local insights report producer; Harness still needs the report-generation pipeline rather than an unexpanded template; current consumers now use the `skill` implementation crate without a legacy alias. |
-| Hooks/Mods | Raw durable versus request-only projection retained; Bun worker/UI source changes integrated. | Final Hooks/worker/runtime suites and signed package Mod UI/tool/command/restart acceptance. |
+| Commands/Skills | The Headless fixture uses a real user Skill input and strict catalog/order assertions. | Current Headless replay 04 passes all four fixture cases, Graphify skill listing, ordered names and count 41 at 64 MiB; Replay 06 also passes in the original 16 MiB CI environment with explicit test-only thread allocation; final full gates remain pending. Insights focused regression passes 22/22. Source audit hashes 139 assets; the Bun 1.3.11 source-bound comparison matches 15 actions / 92,138 bytes, including two `render_report` outputs. The separate four-case renderer oracle is a different evidence class. The Native final response frame is implemented and consumer-wired through all-Prompt Qe header/meta/companion, pre-producer UPE and actual Runtime Mods `skill.prompt`; Runtime Mods focused regression passes 5/5. The q4 host boundary is the user-accepted remote/custom-host exclusion. Current consumers use `skill` with no legacy alias; Product root pin/key closure remains pending. |
+| Hooks/Mods | Raw durable versus request-only projection retained; Bun worker/UI source changes integrated. | Focused UPE tests pass 6/6; the nonempty `hook_success` durable/hot/cold lifecycle has focused batch 03 feedback and awaits a frozen-candidate rerun. Final Hooks/worker/runtime suites and signed package Mod UI/tool/command/restart acceptance remain open. |
 | CLI/client/Product | Current provenance and Mod UI consumers present; no old protocol compatibility branch. | Complete current Rust/bridge/UniFFI consumers, canonical pins/index, frontend build/test and CLI machine output fixtures. |
-| Platforms/integration | Fixed local three-repository baseline; Flare team preflight passed. | Same committed triple full gates, available FFI/platform targets, signed macOS static/run checks. Untested platforms must remain explicit. |
+| Platforms/integration | SDK `404fa7f` is published; Harness `340a355` and Product `24f2b76` are dirty candidates. Flare team preflight passed. | Canonical pins, same-candidate three-repository full gates/package checks, available FFI/platform targets, and signed macOS static/run checks remain open. Untested platforms must remain explicit. |
 
 Allowed differences remain brand, multi-provider, Fusion and LingXi interface.
 Local Apps behavior and remote service alignment are excluded; no Electron runtime migration. Remote endpoint, authentication, gateway/WIF, remote cache/consent and signature behavior are not final gates for this task. This exclusion does not remove local managed-file or macOS MDM policy coverage. CU implementation
@@ -118,6 +121,12 @@ are reused only where the frozen 2.1.295 producer is established unchanged.
   is excluded. Optional host capabilities are not inferred from installed tools.
 - macOS requires the Flare development-channel wrapper and actual launch.
   Cross-compilation is not device or Linux/Windows runtime acceptance.
-- Deliver committed SDK → Harness → Product pins after final gates. No push,
-  no merge back to main, and no final completion claim while a known semantic
-  or integration failure remains.
+- Deliver committed SDK → Harness → Product pins after each stage passes. The user authorized main integration and main pushes on 2026-10-12. Refresh advanced main without force-pushing or discarding other work. No final completion claim while a known semantic or integration failure remains.
+
+The compiled-in local `/cron` management handler is retained as an existing project extension. It is excluded from the Native prompt catalog only for its own Builtin/Bundled metadata; custom same-name skills remain visible. Its execution is not claimed to match a Native 2.1.295 `/cron` command. Native catalog prompt names match 13 entries in preserved earlier feedback. The separate 45-versus-41 result (`harness-catalog-count-diagnostic-02`) and missing-`skill_listing` Headless failure (`graphify-headless-replay-r31-07`) are historical pre-current-candidate receipts; current replay 04 passes catalog count 41 and exact prompt names at 64 MiB; replay 06 also passes in the original CI environment with explicit test-only thread allocation. Raw Native captures and strict assertions are unchanged.
+
+### Concurrent main refresh before final gates (2026-10-12)
+
+SDK integration now includes main `e9b76f32261f2aee1f7c968d5bb099d915822e90`, retaining the published `404fa7f` fixes and adding Codex standalone search. Harness main `74507a79` and Product remote main `93eea0be` are being integrated before freezing final pins. Historical SDK404/queue03 receipts remain evidence for their recorded candidates; they do not establish that the refreshed combination passes.
+
+Queue03 workspace tests stopped at linker/objcopy ENOSPC before executing tests. Seven recovery04 consumer/Runtime feature checks passed on unchanged pre-refresh source. Full workspace tests, final Product pins and signed packaging remain open. The sole diff whitespace report is faithfully retained Native source whitespace in `src_186578912.mjs:182`, not an implementation formatting error.

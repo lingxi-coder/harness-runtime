@@ -110,6 +110,7 @@ mobile = [
     "dep:rooted-fs",
     "dep:jsonrpc",
     "dep:tool-mcp",
+    "dep:futures",
     "dep:futures-util",
     "dep:sha2",
     "dep:uuid",

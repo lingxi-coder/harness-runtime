@@ -342,7 +342,11 @@ fn install_native_skill_input(cwd: &Path, name: &str, expected_sha256: &str) {
         expected_sha256,
         "Native Skill input fixture hash"
     );
-    let destination = cwd.join(".claude/skills").join(name).join("SKILL.md");
+    let destination = cwd
+        .join(branding::DOT_DIR)
+        .join("skills")
+        .join(name)
+        .join("SKILL.md");
     std::fs::create_dir_all(destination.parent().unwrap()).expect("create isolated Skill root");
     std::fs::write(destination, raw).expect("copy checked-in Native Skill input bytes");
 }
@@ -499,8 +503,28 @@ async fn headless_catalog_rereads_live_native_usage_credits_entitlement() {
     );
 }
 
-#[tokio::test]
-async fn native_295_commands_fixture_replay_through_headless_entry() {
+#[test]
+fn native_295_commands_fixture_replay_through_headless_entry() {
+    // This end-to-end fixture keeps a large replay frame live across many
+    // awaits. Give only this test a known stack size; CI's RUST_MIN_STACK and
+    // production runtime thread sizes remain unchanged.
+    let test_thread = std::thread::Builder::new()
+        .name("native-295-command-replay".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build current-thread Tokio runtime for Native replay fixture");
+            runtime.block_on(native_295_commands_fixture_replay_body());
+        })
+        .expect("spawn Native replay fixture thread");
+    test_thread
+        .join()
+        .expect("Native replay fixture test thread panicked");
+}
+
+async fn native_295_commands_fixture_replay_body() {
     // Version guard: this is the separate public Native 2.1.295 capture.
     // The checked-in 2.1.293 baseline remains in its own fixture directory.
     let receipt = std::fs::read(fixture_root().join("native-receipt.json"))
@@ -645,17 +669,13 @@ async fn native_295_commands_fixture_replay_through_headless_entry() {
             crate::headless::io::Output::new(tokio::io::sink()),
             crate::headless::io::Output::new(tokio::io::sink()),
         );
-        let code = run_oneshot(
-            &Argv {
-                prompt: Some(case.prompt.into()),
-                max_budget_usd: Some(1.0),
-                no_stream: true,
-                ..Default::default()
-            },
-            &runtime,
-            &sink,
-        )
-        .await;
+        let argv = Argv {
+            prompt: Some(case.prompt.into()),
+            max_budget_usd: Some(1.0),
+            no_stream: true,
+            ..Default::default()
+        };
+        let code = run_oneshot(&argv, &runtime, &sink).await;
         assert_eq!(code, exit_codes::SUCCESS, "case {}", case.id);
         assert!(
             streaming.captured_calls().await.is_empty(),
@@ -672,6 +692,14 @@ async fn native_295_commands_fixture_replay_through_headless_entry() {
         );
         let outbound_bytes =
             serde_json::to_vec(&captured[0]).expect("serialize captured message seam");
+        // MockApiClient sees the separate Source rows before SDK conversion.
+        // The captured Native request includes normalizeMessagesForAPI's
+        // newline at the adjacent-user text seam, so compare that fixture only
+        // after running the same production normalizer.
+        let normalized_messages =
+            llm_runtime::convert::normalize_messages_for_api(captured[0].clone());
+        let normalized_outbound_bytes =
+            serde_json::to_vec(&normalized_messages).expect("serialize normalized API messages");
         let native_request = std::fs::read(
             fixture_root()
                 .join("requests")
@@ -734,6 +762,46 @@ async fn native_295_commands_fixture_replay_through_headless_entry() {
             case.native_response_sha256
         );
 
+        if let Some(skill_name) = case.skill_name {
+            // Qe emits a plain user command header and a separate meta body;
+            // its trailing LF is introduced only when adjacent user messages
+            // are normalized for the API.
+            let source_header = case.expected_outbound_texts[0]
+                .strip_suffix('\n')
+                .expect("Native API header fixture includes the adjacent-user seam newline");
+            assert!(
+                captured[0].iter().any(|message| {
+                    matches!(
+                        message,
+                        lingxi_core::types::ConversationMessage::User {
+                            is_meta: false,
+                            ..
+                        }
+                    ) && message.text_content() == source_header
+                }),
+                "pre-SDK command header is a non-meta source row without the API merge newline for {}",
+                case.id
+            );
+            let skill_dir = cwd.join(branding::DOT_DIR).join("skills").join(skill_name);
+            let body_prefix = format!("Base directory for this skill: {}\n\n", skill_dir.display());
+            let fixed_body = format!("Return the fixed Skill body for {skill_name}.");
+            assert!(
+                captured[0].iter().any(|message| {
+                    matches!(
+                        message,
+                        lingxi_core::types::ConversationMessage::User {
+                            is_meta: true,
+                            turn_companion: Some(Some(true)),
+                            ..
+                        }
+                    ) && message.text_content().starts_with(&body_prefix)
+                        && message.text_content().contains(&fixed_body)
+                }),
+                "pre-SDK Skill body is a meta turn-companion row with its captured body for {}",
+                case.id
+            );
+        }
+
         for expected in case.expected_outbound_texts {
             let needle = exact_text_needle(expected);
             assert!(
@@ -742,9 +810,10 @@ async fn native_295_commands_fixture_replay_through_headless_entry() {
                 case.id
             );
             assert!(
-                contains_bytes(&outbound_bytes, &needle),
-                "captured current API-client message source differs for {}: {expected:?}",
-                case.id
+                contains_bytes(&normalized_outbound_bytes, &needle),
+                "normalized API message source differs for {}: {expected:?}; raw normalized message JSON: {}",
+                case.id,
+                String::from_utf8_lossy(&normalized_outbound_bytes)
             );
         }
 
@@ -912,6 +981,18 @@ async fn native_295_commands_fixture_replay_through_headless_entry() {
                         .to_owned()
                 })
                 .collect::<Vec<_>>();
+            let command_registry = runtime.inner.shared_command_registry.read().await;
+            // `run_oneshot` has completed its shutdown boundary here. Shutdown
+            // retires builtin handler objects but preserves the ordinary
+            // command catalog, so assert only that these LingXi facade rows
+            // remain registered.
+            for name in ["connect", "worktree", "fusion"] {
+                assert!(
+                    command_registry.resolve(&name.into()).is_some(),
+                    "Product facade /{name} command remains in the ordinary registry"
+                );
+            }
+            drop(command_registry);
             assert_eq!(
                 current_catalog_names,
                 NATIVE_UNKNOWN_COMMAND_NAMES
@@ -1012,7 +1093,7 @@ async fn native_295_commands_fixture_replay_through_headless_entry() {
         }
 
         if let Some(skill_name) = case.skill_name {
-            let skill_dir = cwd.join(".claude/skills").join(skill_name);
+            let skill_dir = cwd.join(branding::DOT_DIR).join("skills").join(skill_name);
             let dynamic_base = format!("Base directory for this skill: {}", skill_dir.display());
             assert!(
                 contains_bytes(&outbound_bytes, dynamic_base.as_bytes()),

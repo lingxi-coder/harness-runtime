@@ -111,7 +111,9 @@ pub use hooks::HooksHandler;
 pub use ide::IdeHandler;
 pub use init::InitHandler;
 pub use init_verifiers::InitVerifiersHandler;
-pub use insights::InsightsHandler;
+pub use insights::{
+    InsightsCommandAvailability, InsightsHandler, InsightsReport, InsightsReportProvider,
+};
 pub use interactive_only::InteractiveOnlyHandler;
 pub use keybindings::KeybindingsHandler;
 pub use login::{LoginHandler, LoginOrgPolicy};
@@ -149,5 +151,5 @@ pub use custom_commands::{
 pub use register::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_3, register_core_batch_4, register_core_batch_5, register_core_batch_6,
-    register_core_batch_7, register_core_batch_8, register_core_connect,
+    register_core_batch_7, register_core_batch_8, register_core_connect, register_insights_command,
 };

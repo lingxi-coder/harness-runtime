@@ -5297,7 +5297,15 @@ mod prompt_dispatch_tests {
             };
             let mut aggregate = AggregateHookResult::default();
             let outputs = exec
-                .publish_run_attachment(&mut aggregate, &hook, &identity, &result, 0, Some(&guard))
+                .publish_run_attachment(
+                    &mut aggregate,
+                    &hook,
+                    &identity,
+                    &result,
+                    0,
+                    Some(&guard),
+                    false,
+                )
                 .await;
             assert_eq!(outputs.is_some(), expected_output);
             assert_eq!(

@@ -41,6 +41,9 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
             ),
         );
         reg.register_builtin_handler(h);
+        if native_builtin_is_hidden(name) {
+            reg.set_native_builtin_hidden(name, true);
+        }
     }
 
     // `/brief` is an interactive local-jsx command upstream, but its state
@@ -54,11 +57,9 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
     // pass; their real handlers are wired by `register_core_batch_1`.)
     register_core_placeholders(reg);
 
-    // Pass 3: overwrite the batch-3 (M-parity) handle-free slash commands with
-    // their real handlers. These do not need any orchestrator/auth handle, so
-    // they can be wired here unconditionally (rather than at CLI boot like
-    // batch-1/batch-2). Each call overwrites the matching pass-1 unimplemented
-    // stub entry in-place.
+    // Pass 3: overwrite the four handle-free batch-3 commands with their real
+    // handlers. `/insights` is registered separately by a composition root
+    // because it requires a live report provider and explicit host facts.
     register_core_batch_3(reg);
 
     // Pass 4: overwrite the handle-free `/skills` handler. The TUI intercepts
@@ -99,8 +100,8 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
 /// Native Headless factory facts for the corresponding 2.1.295 builtin. These
 /// rows are explicit source mappings keyed by command identity, never inferred
 /// from the Harness dispatcher. Native's missing optional properties retain
-/// their own false defaults. `None` records unresolved source facts and is
-/// preserved in the catalog rather than treated as a Native rejection.
+/// their own false defaults. `None` means the Builtin has no matching Native
+/// command type; Native `MPe` excludes it from the Headless command pool.
 fn native_builtin_metadata(name: &str) -> (Option<crate::model::NativeCommandType>, bool, bool) {
     use crate::model::NativeCommandType::{Local, LocalJsx, Prompt};
 
@@ -130,6 +131,13 @@ fn native_builtin_metadata(name: &str) -> (Option<crate::model::NativeCommandTyp
         | "tui" | "ultraplan" | "upgrade" | "workflows" => (Some(LocalJsx), false, false),
         _ => (None, false, false),
     }
+}
+
+/// Native 2.1.295 marks the removed `/agents` local command `isHidden: true`.
+/// Its Rust handler trait does not carry this source property, so keep it next
+/// to the other fixed command-object metadata and attach it after registration.
+fn native_builtin_is_hidden(name: &str) -> bool {
+    matches!(name, "agents")
 }
 
 /// Overwrite the 6 batch-1 entries (`clear`, `compact`, `exit`, `help`,
@@ -191,12 +199,15 @@ pub fn register_core_batch_2(
     auth: Arc<dyn lingxi_core::host::AuthHandle>,
 ) {
     use crate::builtins::{
-        AgentsHandler, ConfigHandler, HooksHandler, IdeHandler, LoginHandler,
-        LogoutHandler, McpHandler, ModelHandler, OutputStyleHandler, PermissionsHandler,
-        StatusHandler, VersionHandler,
+        AgentsHandler, ConfigHandler, HooksHandler, IdeHandler, LoginHandler, LogoutHandler,
+        McpHandler, ModelHandler, OutputStyleHandler, PermissionsHandler, StatusHandler,
+        VersionHandler,
     };
 
     reg.register_builtin_handler(Arc::new(AgentsHandler::new(handle.clone())));
+    if native_builtin_is_hidden("agents") {
+        reg.set_native_builtin_hidden("agents", true);
+    }
     reg.register_builtin_handler(Arc::new(ConfigHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(HooksHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(IdeHandler::new(handle.clone())));
@@ -259,11 +270,11 @@ pub fn register_core_batch_4(
     reg.register_alias("continue".into(), "resume".into());
 }
 
-/// Register the remaining handle-free builtin slash commands.
+/// Register the four remaining handle-free builtin slash commands.
 ///
-/// These 5 commands (`insights`, `release-notes`, `security-review`,
-/// `statusline`, `stickers`) carry no orchestrator or auth handle. The Native
-/// bundled prompts `/commit` and `/doctor` are registered by
+/// `/insights` is intentionally excluded: it requires a live runtime-owned
+/// report provider and is installed by [`register_insights_command`]. The
+/// Native bundled prompts `/commit` and `/doctor` are registered by
 /// [`crate::builtins::register_bundled_skills`] instead; `/commit-push-pr` and
 /// `/init-verifiers` have no reachable 2.1.295 command-pool producer.
 ///
@@ -284,15 +295,29 @@ pub fn register_core_batch_4(
 /// [`crate::builtin_support::UnimplementedCommandHandler`].
 pub fn register_core_batch_3(reg: &mut CommandRegistry) {
     use crate::builtins::{
-        InsightsHandler, ReleaseNotesHandler, SecurityReviewHandler, StatuslineHandler,
-        StickersHandler,
+        ReleaseNotesHandler, SecurityReviewHandler, StatuslineHandler, StickersHandler,
     };
 
-    reg.register_builtin_handler(Arc::new(InsightsHandler::new()));
     reg.register_builtin_handler(Arc::new(ReleaseNotesHandler::new()));
     reg.register_builtin_handler(Arc::new(SecurityReviewHandler::new()));
     reg.register_builtin_handler(Arc::new(StatuslineHandler::new()));
     reg.register_builtin_handler(Arc::new(StickersHandler::new()));
+}
+
+/// Bind `/insights` to the local report producer owned by a composition root.
+///
+/// A provider is installed only when both the workspace and explicit local
+/// policy facts are true. Otherwise the provider-free metadata stub remains.
+/// Returns whether the real handler was installed.
+pub fn register_insights_command(
+    reg: &mut CommandRegistry,
+    provider: Arc<dyn crate::builtins::InsightsReportProvider>,
+) -> bool {
+    if !provider.command_availability().is_available() {
+        return false;
+    }
+    reg.register_builtin_handler(Arc::new(crate::builtins::InsightsHandler::new(provider)));
+    true
 }
 
 /// Overwrite the batch-5 entries (`effort`, `usage`) with handle-bound real
@@ -560,7 +585,13 @@ mod registry_tests {
                 "expected command /{name} registered"
             );
         }
-        for name in ["commit", "doctor", "commit-push-pr", "files", "init-verifiers"] {
+        for name in [
+            "commit",
+            "doctor",
+            "commit-push-pr",
+            "files",
+            "init-verifiers",
+        ] {
             assert!(
                 reg.resolve(&name.into()).is_none(),
                 "/{name} must not be registered as a Native builtin"
@@ -590,7 +621,7 @@ mod registry_tests {
                 .unwrap()
                 .disable_non_interactive
         );
-
+        assert!(reg.resolve(&"agents".into()).unwrap().is_hidden);
     }
 
     /// H-BIN-11 (cc2.1.207): the five newly-registered commands resolve, and
@@ -840,8 +871,9 @@ mod batch_3_tests {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
 
-        // Sample of the InjectMessage commands still registered as Builtin.
-        for name in ["insights", "security-review"] {
+        // `/security-review` remains in batch 3. `/insights` requires an
+        // explicitly supplied runtime provider and is tested separately.
+        for name in ["security-review"] {
             let h = reg
                 .get_handler(&name.into())
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
@@ -903,21 +935,42 @@ mod batch_3_tests {
     }
 
     #[test]
-    fn all_5_remaining_batch_3_names_resolve_after_register_all() {
+    fn all_4_remaining_batch_3_names_resolve_after_register_all() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        for name in [
-            "insights",
-            "release-notes",
-            "security-review",
-            "statusline",
-            "stickers",
-        ] {
+        for name in ["release-notes", "security-review", "statusline", "stickers"] {
             assert!(reg.resolve(&name.into()).is_some(), "/{name} missing");
             assert!(
                 reg.get_handler(&name.into()).is_some(),
                 "/{name} handler missing"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn insights_without_a_live_provider_stays_disabled_metadata() {
+        use crate::model::NativeCommandType;
+
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let command = reg
+            .resolve(&"insights".into())
+            .expect("metadata row remains");
+        assert_eq!(command.native_type, Some(NativeCommandType::Prompt));
+        assert!(!command.is_enabled);
+        let handler = reg
+            .get_handler(&"insights".into())
+            .expect("placeholder remains");
+        match handler.handle(&args("ignored")).await {
+            CommandResult::Done {
+                display: Some(message),
+            } => {
+                assert_eq!(
+                    message.string_at(""),
+                    Some("insights: not implemented in v0.6.0 (M5)")
+                );
+            }
+            other => panic!("without a provider, insights must not report success: {other:?}"),
         }
     }
 

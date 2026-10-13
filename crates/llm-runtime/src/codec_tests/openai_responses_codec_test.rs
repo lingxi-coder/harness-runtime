@@ -1169,7 +1169,7 @@ fn decode_response_missing_usage_defaults_to_zero() {
 }
 
 #[test]
-fn decode_response_cost_is_none_and_metadata_is_body() {
+fn decode_response_cost_is_none_and_metadata_retains_body_and_sdk_mode() {
     let body = serde_json::json!({
         "id": "resp_1",
         "model": "gpt-5",
@@ -1179,7 +1179,12 @@ fn decode_response_cost_is_none_and_metadata_is_body() {
     });
     let decoded = decode(body.clone());
     assert!(decoded.cost.is_none());
-    assert_eq!(decoded.provider_metadata, super::json_payload(body));
+    let mut expected_metadata = body;
+    expected_metadata["llm_client"] = serde_json::json!({"non_streaming_response": true});
+    assert_eq!(
+        decoded.provider_metadata,
+        super::json_payload(expected_metadata)
+    );
 }
 
 #[test]

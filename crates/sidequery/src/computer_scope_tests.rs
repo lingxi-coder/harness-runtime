@@ -92,7 +92,9 @@ async fn direct_plain_and_strict_queries_ignore_the_parent_computer_continuation
             let messages = vec![user("early context"), user("summarize all context")];
             let plain = client
                 .query(SideQueryRequest {
+                    enable_prompt_caching: false,
                     model_attempt: None,
+                    native_prompt_context: None,
                     model: "model".into(),
                     profile: Some("test".into()),
                     system_prompt: None,
@@ -188,7 +190,7 @@ async fn session_compaction_fork_preserves_typed_attachment_bytes_and_function_c
     }];
     let typed_attachment_id = MessageId::new();
     let typed_attachment_ids: std::collections::HashSet<MessageId> =
-        [typed_attachment_id.clone()].into_iter().collect();
+        [typed_attachment_id].into_iter().collect();
     let prefix = vec![
         user("early context"),
         ConversationMessage::user(typed_attachment_id, "typed attachment".into()),
@@ -214,7 +216,9 @@ async fn session_compaction_fork_preserves_typed_attachment_bytes_and_function_c
         async {
             let estimate = client
                 .estimate_request(CanonicalSideQueryRequest::Plain(SideQueryRequest {
+                    enable_prompt_caching: false,
                     model_attempt: None,
+                    native_prompt_context: None,
                     model: "model".into(),
                     profile: Some("test".into()),
                     system_prompt: None,

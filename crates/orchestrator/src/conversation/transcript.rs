@@ -3188,6 +3188,23 @@ impl ConversationOrchestrator {
             .await;
     }
 
+    /// Persist a hook attachment under the identity of its derived model
+    /// message. This keeps the live additional-context row aligned with cold
+    /// JSONL restoration, whose renderer keys that message by attachment UUID.
+    pub(crate) async fn persist_hook_attachment_to_jsonl_with_id(
+        &self,
+        id: lingxi_core::types::MessageId,
+        payload: Source,
+    ) {
+        self.persist_attachment_to_jsonl_with_id(
+            id.as_uuid(),
+            payload,
+            source_object([]),
+            "hook_attachment",
+        )
+        .await;
+    }
+
     /// Persist a future-owned request-context sidecar with Native's rendered
     /// transcript view. The attachment stays outside conversational history.
     pub(crate) async fn persist_request_context_attachment_to_jsonl(

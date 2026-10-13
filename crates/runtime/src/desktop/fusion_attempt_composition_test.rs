@@ -167,6 +167,11 @@ fn executor(
     )
 }
 
+async fn seed_managed_policy_snapshot(cfg: &DesktopConfig, root: &std::path::Path) {
+    cfg.managed_policy_snapshot_cache
+        .replace(settings_watch::read_managed_settings_snapshot(root).await);
+}
+
 fn submission(
     session: lingxi_core::types::SessionId,
     budget: Arc<cost::BudgetEnforcer>,
@@ -251,6 +256,7 @@ fn fusion_settings(extra: serde_json::Value) -> lingxi_core::settings::SettingsJ
 #[tokio::test]
 async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare() {
     let (tmp, mut cfg) = tests::test_config(true);
+    seed_managed_policy_snapshot(&cfg, tmp.path()).await;
     cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
     let session = lingxi_core::types::SessionId::new();
     let lease =
@@ -347,6 +353,7 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
 #[tokio::test]
 async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_admission() {
     let (tmp, mut cfg) = tests::test_config(true);
+    seed_managed_policy_snapshot(&cfg, tmp.path()).await;
     // No transcript, but the ledger below still lands under a real directory:
     // production roots it at a temporary `LINGXI_HOME` removed at shutdown.
     cfg.session_persistence = false;
@@ -412,7 +419,8 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
 
 #[tokio::test]
 async fn desktop_fusion_composition_refuses_ephemeral_tracker_even_with_output_scope() {
-    let (_tmp, mut cfg) = tests::test_config(true);
+    let (tmp, mut cfg) = tests::test_config(true);
+    seed_managed_policy_snapshot(&cfg, tmp.path()).await;
     // The models must be configured for this test to still reach its subject.
     // Without them the run is refused earlier, with `NotConfigured`, and the
     // assertion below would be checking a message about a gate it never got

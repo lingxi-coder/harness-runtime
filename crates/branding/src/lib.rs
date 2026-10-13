@@ -167,6 +167,11 @@ pub const PROJECT_DIR_ENV: &str = "LINGXI_PROJECT_DIR";
 /// Human-facing product name (banners, system-prompt identity, help text).
 pub const PRODUCT_NAME: &str = "LingXi";
 
+/// Branded counterpart for the Native Agent SDK role in a source-aligned
+/// Insights side query. This describes LingXi's own implementation; it does
+/// not claim a relationship with Anthropic's Claude Agent SDK.
+pub const NATIVE_AGENT_SDK_IDENTITY: &str = "You are a LingXi agent, built on LingXi's Agent SDK.";
+
 /// Prefix for the product's own (non-protocol) environment variables, e.g.
 /// `LINGXI_ENABLE_TASKS`. Protocol env vars (`ANTHROPIC_*`, the kept
 /// `CLAUDE_CODE_*` SDK contract vars) are excluded from this prefix by design.
@@ -244,6 +249,7 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     PLUGIN_DATA_ENV,
     PROJECT_DIR_ENV,
     PRODUCT_NAME,
+    NATIVE_AGENT_SDK_IDENTITY,
     ENV_PREFIX,
     MANAGED_DIR_MACOS,
     MANAGED_DIR_WINDOWS,

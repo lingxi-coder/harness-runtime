@@ -200,6 +200,7 @@ fn core_result_projection(result: &SlashDispatchResult, run_ref: usize) -> Utf16
         // unreachable there. Keep its result shape in the no-display branch;
         // the top-level host handles syntax failure and ordinary-turn fallback.
         SlashDispatchResult::RunAsTurn { .. }
+        | SlashDispatchResult::RunSkillAsTurn { .. }
         | SlashDispatchResult::NotASlashCommand
         | SlashDispatchResult::ParseFailure { .. } => {}
     }

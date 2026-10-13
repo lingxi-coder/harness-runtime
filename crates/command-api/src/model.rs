@@ -145,6 +145,22 @@ impl std::fmt::Debug for dyn BundledPromptFn {
     }
 }
 
+/// Native workspace requirement carried from the command factory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NativeCommandRequirements {
+    /// `None` preserves an omitted Native property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<bool>,
+}
+
+/// Native static command policy-gate descriptor. The verdict remains a
+/// separate per-session host fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeCommandPolicyGate {
+    /// Policy key (for example `allow_insights`).
+    pub policy: String,
+}
+
 /// A registered slash command (built-in, markdown-defined, plugin-supplied,
 /// or MCP-derived).
 ///
@@ -257,6 +273,20 @@ pub struct SlashCommand {
     /// Raw markdown byte length for file-backed skills.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_length: Option<usize>,
+    /// Native `progressMessage`, retained as exact source text.
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub progress_message: Option<Utf16JsonProjection>,
+    /// Static Native workspace requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<NativeCommandRequirements>,
+    /// Static Native policy-gate descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_gate: Option<NativeCommandPolicyGate>,
     /// Compact UI label, absent when the full description is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menu_description: Option<String>,
@@ -290,6 +320,9 @@ impl Default for SlashCommand {
             skill_root: None,
             user_invocable: None,
             content_length: None,
+            progress_message: None,
+            requires: None,
+            policy_gate: None,
             menu_description: None,
         }
     }
@@ -692,6 +725,22 @@ pub trait BuiltinCommandHandler: Send + Sync {
     fn disable_model_invocation(&self) -> bool {
         false
     }
+    /// Native command content length, when supplied by the factory.
+    fn content_length(&self) -> Option<usize> {
+        None
+    }
+    /// Native `progressMessage` as exact source text.
+    fn progress_message(&self) -> Option<Utf16JsonProjection> {
+        None
+    }
+    /// Native `requires` descriptor.
+    fn requires(&self) -> Option<NativeCommandRequirements> {
+        None
+    }
+    /// Native static `policyGate` descriptor.
+    fn policy_gate(&self) -> Option<NativeCommandPolicyGate> {
+        None
+    }
     /// This command's declared allowed-tools (TS `command.allowedTools`), in the
     /// permission-rule syntax (e.g. `Bash(git add:*)`). Injected on top of the
     /// base policy for a fresh per-command effective policy before its embedded
@@ -827,5 +876,39 @@ mod source_tests {
         let invalid =
             r#"{"Markdown":{"file_path":"command.md","frontmatter":{},"prompt_template":{}}}"#;
         assert!(serde_json::from_str::<SlashCommandKind>(invalid).is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_insights_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn optional_native_metadata_round_trips_and_default_stays_omitted() {
+        let command = SlashCommand {
+            content_length: Some(0),
+            progress_message: Some("analyzing your sessions".into()),
+            requires: Some(NativeCommandRequirements {
+                workspace: Some(true),
+            }),
+            policy_gate: Some(NativeCommandPolicyGate {
+                policy: "allow_insights".into(),
+            }),
+            ..SlashCommand::default()
+        };
+        let encoded = serde_json::to_string(&command).unwrap();
+        let decoded: SlashCommand = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.content_length, Some(0));
+        assert_eq!(
+            decoded.progress_message.unwrap().string_at(""),
+            Some("analyzing your sessions")
+        );
+        assert_eq!(decoded.requires.unwrap().workspace, Some(true));
+        assert_eq!(decoded.policy_gate.unwrap().policy, "allow_insights");
+
+        let default_encoded = serde_json::to_string(&SlashCommand::default()).unwrap();
+        assert!(!default_encoded.contains("progress_message"));
+        assert!(!default_encoded.contains("policy_gate"));
+        assert!(!default_encoded.contains("requires"));
     }
 }

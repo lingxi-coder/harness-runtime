@@ -250,6 +250,9 @@ pub fn first_party_name_to_canonical(name: &str) -> String {
     if name.contains("claude-mythos-5-1") {
         return "claude-mythos-5-1".into();
     }
+    if name.contains("claude-opus-5-5") {
+        return "claude-opus-5-5".into();
+    }
     if name.contains("claude-opus-5") {
         return "claude-opus-5".into();
     }
@@ -276,6 +279,9 @@ pub fn first_party_name_to_canonical(name: &str) -> String {
     // `includes("sonnet-5") → "claude-sonnet-5"` precedes the sonnet-4-6 /
     // sonnet-4-5 catches; the substrings are mutually exclusive —
     // "claude-sonnet-4-5" does NOT contain "sonnet-5").
+    if name.contains("claude-sonnet-5-5") {
+        return "claude-sonnet-5-5".into();
+    }
     if name.contains("claude-sonnet-5") {
         return "claude-sonnet-5".into();
     }
@@ -406,6 +412,7 @@ impl PricingCatalog {
         // Sonnet 5 — current official $2/$10 rate, including $0.20 cache reads
         // and $2.50 five-minute cache writes.
         c.insert_anthropic("claude-sonnet-5", 2_000, 10_000, 2_500, 200);
+        c.insert_anthropic("claude-sonnet-5-5", 2_000, 10_000, 2_500, 200);
         // $3/$15 tier — prior Sonnet variants (COST_TIER_3_15).
         c.insert_anthropic("claude-sonnet-4-6", 3_000, 15_000, 3_750, 300);
         c.insert_anthropic("claude-sonnet-4-5", 3_000, 15_000, 3_750, 300);
@@ -426,6 +433,7 @@ impl PricingCatalog {
         c.insert_anthropic("claude-opus-4-8", 5_000, 25_000, 6_250, 500);
         // Opus 5 keeps the current $5/$25 Opus rate.
         c.insert_anthropic("claude-opus-5", 5_000, 25_000, 6_250, 500);
+        c.insert_anthropic("claude-opus-5-5", 4_000, 20_000, 5_000, 200);
         // $10/$50 — Fable 5.1 and invite-only Mythos 5.1. Cache reads are
         // $0.25/MTok; both keep the $12.50/MTok five-minute cache-write rate.
         c.insert_anthropic("claude-fable-5-1", 10_000, 50_000, 12_500, 250);
@@ -1490,6 +1498,14 @@ mod tests {
 
     #[test]
     fn canonicalize_new_models() {
+        for (raw, expected) in [
+            ("claude-opus-5-5", "claude-opus-5-5"),
+            ("claude-opus-5-5-20261001", "claude-opus-5-5"),
+            ("us.anthropic.claude-sonnet-5-5-v1:0", "claude-sonnet-5-5"),
+            ("claude-sonnet-5-5[1m]", "claude-sonnet-5-5"),
+        ] {
+            assert_eq!(first_party_name_to_canonical(raw), expected);
+        }
         assert_eq!(
             first_party_name_to_canonical("claude-opus-5-20260812"),
             "claude-opus-5"
@@ -1515,6 +1531,32 @@ mod tests {
             first_party_name_to_canonical("claude-opus-4-20250514"),
             "claude-opus-4"
         );
+    }
+
+    #[test]
+    fn native_295_model_tiers_include_both_cache_write_durations() {
+        let catalog = PricingCatalog::builtin_reference();
+        for (model, input, output, write_5m, write_1h, read) in [
+            ("claude-sonnet-5-5", 2_000, 10_000, 2_500, 4_000, 200),
+            ("claude-opus-5-5", 4_000, 20_000, 5_000, 8_000, 200),
+        ] {
+            let (pricing, resolution) = catalog
+                .resolve(&ModelRef {
+                    provider: ProviderId::Anthropic,
+                    model: model.into(),
+                })
+                .unwrap();
+            assert!(matches!(resolution, PricingResolution::ExactModel { .. }));
+            for (class, expected) in [
+                (TokenClass::Input, input),
+                (TokenClass::Output, output),
+                (TokenClass::CacheWrite, write_5m),
+                (TokenClass::CacheWrite1h, write_1h),
+                (TokenClass::CacheRead, read),
+            ] {
+                assert_eq!(pricing.token_rates[&class].nano_usd_per_token, expected);
+            }
+        }
     }
 
     // ----- Sonnet 5 (2.1.198) -----

@@ -210,6 +210,10 @@ pub struct ExecutionContext {
     /// account generation comes from a separate live getter, not from the SDK
     /// credential snapshot.
     pub prompt_cache: Option<PromptCacheRequestContext>,
+    /// Per-request override for automatic prompt-cache markers. `None` keeps
+    /// the existing model/process policy; side-query builders set Native's
+    /// `enablePromptCaching` option explicitly without changing main requests.
+    pub enable_prompt_caching: Option<bool>,
     /// Trusted Native Anthropic safeguards and current beta facts, outside
     /// provider input and persisted conversation metadata.
     pub native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
@@ -243,6 +247,10 @@ pub struct ExecutionContext {
     pub inherited_effort_settings: Option<Vec<lingxi_core::host::effort::EffortSettingsLayer>>,
     pub effort_table_options: lingxi_core::host::effort_table::TableOptions,
     pub session_effort: lingxi_core::host::effort_table::SessionEffort,
+    /// Side-query host explicitly opts this Native request into the SDK's
+    /// complete system prefix, including host identity. Ordinary side queries
+    /// remain attribution-only.
+    pub include_native_system_identity_for_side_query: bool,
     /// Side-query caller explicitly selected disabled thinking.
     pub side_thinking_disabled: bool,
     /// Native main/side-query body policy, independent of dispatch category.
