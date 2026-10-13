@@ -3481,6 +3481,29 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                     .hosted_search_max_uses(&request.input.model, request.profile.as_deref()),
             },
         )];
+        if self.service.uses_codex_standalone_search(&request.input.model, request.profile.as_deref()) {
+            request.input.native_options.push(sdk::protocol::NativeExtension::from_typed(
+                sdk::providers::openai::codex_search::CodexSearchRequest {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    query: input.query,
+                },
+            ).expect("Codex search options are serializable"));
+            let response = self.service.execute_non_stream_request(
+                request, llm_runtime::NonStreamingRequestClass::Auxiliary, Default::default(),
+            ).await.map_err(hosted_search_error)?;
+            let native = response.content.iter()
+                .map(|block| serde_json::to_value(block).unwrap_or_default()).collect::<Vec<_>>();
+            let mut results = sdk::hosted_search::parse_response_content(&native);
+            let observations = serde_json::Value::Array(
+                response.provider_metadata.pointer("/llm_client/web_search").cloned().into_iter().collect(),
+            );
+            sdk::hosted_search::append_citations(&mut results, Some(&observations));
+            let _ = progress.send(());
+            return Ok(tool_api::HostedSearchOutput {
+                results, searches: 1, input_tokens: response.usage.counts().input_tokens,
+                output_tokens: response.usage.counts().output_tokens.saturating_sub(response.usage.counts().reasoning_tokens),
+            });
+        }
         let usage = Arc::new(std::sync::Mutex::new(llm_runtime::ExecutionUsage::default()));
         let searches = Arc::new(std::sync::atomic::AtomicU64::new(0));
         // A failed stream may never deliver its terminal metadata snapshot.
