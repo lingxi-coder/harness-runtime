@@ -385,7 +385,9 @@ async fn regular_headless_prompt_stages_skill_listing_from_live_command_registry
     let stream = Arc::new(StreamJsonStream::new_placeholder(
         crate::headless::io::Output::new(tokio::io::sink()),
     ));
+    eprintln!("[regular-headless-skill] before fixture_runtime");
     let mut runtime = Box::pin(super::tests::fixture_runtime(stream.clone(), root.path())).await;
+    eprintln!("[regular-headless-skill] after fixture_runtime");
     let catalog = runtime.headless_command_catalog().await;
     assert!(catalog
         .prompt_command_names
@@ -450,9 +452,17 @@ async fn regular_headless_prompt_stages_skill_listing_from_live_command_registry
         no_stream: true,
         ..Default::default()
     };
-    let code = tokio::spawn(async move { run_oneshot(&argv, &runtime, &sink).await })
+    eprintln!("[regular-headless-skill] before spawn");
+    let code = tokio::spawn(async move {
+        eprintln!("[regular-headless-skill] run_oneshot entered");
+        let code = run_oneshot(&argv, &runtime, &sink).await;
+        eprintln!("[regular-headless-skill] run_oneshot completed");
+        code
+    })
         .await
         .expect("regular prompt runner task completes");
+    eprintln!("[regular-headless-skill] after spawn");
+    eprintln!("[regular-headless-skill] before assert");
     assert_eq!(code, exit_codes::SUCCESS);
     assert!(streaming.captured_calls().await.is_empty());
     let captured = batched.captured_msgs().await;
