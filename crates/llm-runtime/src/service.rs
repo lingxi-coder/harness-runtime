@@ -1488,6 +1488,10 @@ fn extra_metadata_object_uncached() -> Option<serde_json::Map<String, serde_json
 }
 
 impl ApiService {
+    pub fn uses_codex_standalone_search(&self, model: &str, profile: Option<&str>) -> bool {
+        self.client.search_profile(model, profile)
+            .is_some_and(lingxi_llm_client::providers::openai::codex_search::supports)
+    }
     pub fn supports_hosted_search(&self, model: &str, profile: Option<&str>) -> bool {
         self.client
             .search_profile(model, profile)
