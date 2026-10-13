@@ -22,7 +22,7 @@ use command_api::builtins::{
     register_insights_command,
 };
 use command_api::{
-    BuiltinCommandHandler, CommandRegistry, CommandResult, GitWorktreeContext, ParsedSlashCommand,
+    CommandRegistry, CommandResult, GitWorktreeContext,
     ShellExpansionCtx, ShellExpansionProvider, ShellOut, ShellPermissionDecision,
     ShellPermissionGate, ShellRunError, ShellRunner,
 };
