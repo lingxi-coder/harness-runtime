@@ -17,7 +17,7 @@ cd harness-runtime
 cargo check --locked -p harness-runtime
 ```
 
-Keep the two checkouts side by side. Run Cargo from the repository root: its `[patch]` redirects the pinned `lingxi-llm-client` Git dependency to the sibling `../llm-client` source.
+Sibling checkouts simplify joint development, but the current root workspace has no SDK path patch selecting ../llm-client. Ordinary Cargo builds still use the declared fixed Git revision. Working-tree validation requires an explicit complete consumer overlay and Cargo metadata checks; root patches do not propagate downstream.
 
 ## Integrate with a host
 
@@ -63,7 +63,7 @@ Model requests use `harness_runtime::models::llm` and the independent `llm-clien
 | --- | --- |
 | [`crates/runtime`](crates/runtime) | Public composition entrypoint and desktop/mobile assembly. |
 | [`crates/core`](crates/core), [`crates/agent`](crates/agent), [`crates/orchestrator`](crates/orchestrator) | State and agent execution components. |
-| [`crates/client`](crates/client), [`crates/protocol`](crates/protocol) | Client protocol, presentation, and runtime adapters. |
+| [`crates/client`](crates/client), [`crates/client`](crates/client) | Client protocol, presentation, and runtime adapters. |
 | [`crates/tools`](crates/tools), [`crates/platforms`](crates/platforms) | Tool implementations and platform capabilities. |
 | [`third_party`](third_party) | Vendored sources with their own patches and licenses. |
 | [`scripts`](scripts), [`docs`](docs) | Build/boundary checks and design/migration documents. |
@@ -82,10 +82,14 @@ cargo test --locked --workspace --all-features --no-fail-fast
 
 These commands cover minimal, desktop, mobile-binding, workspace-test, and repository-gate configurations. Native devices, complete product packaging, and signing require separate host validation. See the [validation record](docs/migration/validation.md) for completed migration checks and known limitations.
 
-Changes in `../llm-client` participate immediately in root-workspace builds. Run the SDK's own tests separately:
+Sibling `../llm-client` changes require an explicit consumer overlay to participate in runtime builds. Ordinary builds use the fixed Git revision. Run the SDK's own tests separately:
 
 ```sh
 cargo test --manifest-path ../llm-client/Cargo.toml --locked
 ```
 
 For a joint release, validate, commit, and push the SDK first; then update the pinned revision in root `[workspace.dependencies]` and `Cargo.lock`. See the [joint development workflow](docs/llm-client-upgrade.md#联合开发). The [source manifest](docs/migration/source-manifest.json) records extraction provenance.
+
+## Complete technical handbook
+
+System internals and joint integration are maintained in the LingXi bilingual handbook. The sibling local entry is `lingxi-app/docs/technical/en/README.md`; the published entry is [Harness documentation](https://lingxios.net/docs/harness). The published site may lag behind local work; inspect its source baseline.
