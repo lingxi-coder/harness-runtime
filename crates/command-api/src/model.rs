@@ -687,6 +687,19 @@ pub enum CommandResult {
     },
 }
 
+/// Source-authored preparation performed inside a Native prompt producer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativePromptPreparation {
+    /// Check the live cwd before expanding the producer's embedded shell text.
+    /// Outside a worktree, the source returns this text as the prompt body.
+    GitWorktreeShell {
+        /// Exact Native text preceding the live cwd.
+        outside_worktree_prefix: Utf16JsonProjection,
+        /// Exact Native text following the live cwd.
+        outside_worktree_suffix: Utf16JsonProjection,
+    },
+}
+
 /// Trait implemented by every built-in slash-command handler.
 #[async_trait::async_trait]
 pub trait BuiltinCommandHandler: Send + Sync {
@@ -703,6 +716,11 @@ pub trait BuiltinCommandHandler: Send + Sync {
     /// Native command object type for Headless command-pool admission. A
     /// producer without an exact Native command object returns `None`.
     fn native_type(&self) -> Option<NativeCommandType> {
+        None
+    }
+    /// Preparation explicitly owned by this prompt's source producer.
+    /// Other Native prompt bodies must not be scanned for shell expressions.
+    fn native_prompt_preparation(&self) -> Option<NativePromptPreparation> {
         None
     }
     /// Native `disableNonInteractive` property for prompt command objects.

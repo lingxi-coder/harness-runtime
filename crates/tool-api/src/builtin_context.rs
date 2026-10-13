@@ -7,6 +7,7 @@
 //! reshape (individual `Arc<dyn Platform>` handles, no god-object) will
 //! eventually slim this surface.
 
+use crate::host_git_root_cache::HostGitRootCache;
 use crate::read_file_state::ReadFileStateMap;
 use crate::sandbox_runner::SandboxRunner;
 use crate::session_cwd::SessionCwd;
@@ -126,6 +127,10 @@ pub struct BuiltinToolContext {
     /// boot values this was constructed with — byte-identical to the old
     /// frozen fields.
     pub session_cwd: Arc<SessionCwd>,
+    /// Cache of Git root-marker discovery shared by every session owned by the
+    /// same host. The config/composition owner creates this Arc; sessions must
+    /// not replace it with a session-local cache.
+    pub host_git_root_cache: Arc<HostGitRootCache>,
     /// Id of the session this tool call belongs to.
     ///
     /// Needed for session-scoped on-disk artifacts — claude-code persists

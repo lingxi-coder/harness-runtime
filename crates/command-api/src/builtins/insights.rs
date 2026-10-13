@@ -4,8 +4,8 @@
 
 use crate::builtin_support::names::core_description;
 use crate::model::{
-    source_concat, BuiltinCommandHandler, CommandResult, NativeCommandPolicyGate,
-    NativeCommandRequirements, NativeCommandType, PromptPart,
+    BuiltinCommandHandler, CommandResult, NativeCommandPolicyGate, NativeCommandRequirements,
+    NativeCommandType, PromptPart, source_concat,
 };
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
@@ -275,10 +275,12 @@ mod tests {
                  Want to dig into any section or try one of the suggestions?"
             )
         );
-        assert!(!content
-            .string_at("")
-            .expect("valid display text")
-            .contains("Additional user input"));
+        assert!(
+            !content
+                .string_at("")
+                .expect("valid display text")
+                .contains("Additional user input")
+        );
     }
 
     #[tokio::test]
@@ -295,10 +297,11 @@ mod tests {
         let CommandResult::InjectMessage { content } = with_line.handle(&args("")).await else {
             panic!("expected injected report");
         };
-        assert!(content
-            .string_at("")
-            .unwrap()
-            .contains("file:///tmp/report-2026-10-12.html\n\nTip: try auto mode.\n\nWant to dig"));
+        assert!(
+            content.string_at("").unwrap().contains(
+                "file:///tmp/report-2026-10-12.html\n\nTip: try auto mode.\n\nWant to dig"
+            )
+        );
     }
 
     #[tokio::test]
@@ -439,7 +442,12 @@ mod tests {
         use lingxi_core::host::{SlashCommandDispatcher as _, SlashDispatchResult};
 
         struct ShellExpansionMustNotRun;
+        #[async_trait]
         impl crate::shell_expansion::ShellExpansionProvider for ShellExpansionMustNotRun {
+            async fn git_worktree_context(&self) -> crate::shell_expansion::GitWorktreeContext {
+                panic!("Native getPromptForCommand does not query Git worktree state here")
+            }
+
             fn build(
                 &self,
                 _allowed_tools: &[String],

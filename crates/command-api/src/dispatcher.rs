@@ -5,15 +5,17 @@
 
 use crate::expand::{expand_markdown_command, ExpandCtx};
 use crate::model::{
-    source_concat, CommandResult, CommandSource, NativeCommandType, PromptPart, SlashCommandKind,
+    source_concat, CommandResult, CommandSource, NativeCommandType, NativePromptPreparation,
+    PromptPart, SlashCommandKind,
 };
 use crate::parser::{
     is_js_whitespace_unit, parse_slash_command, tokenize_args_source, ParsedSlashCommand,
 };
 use crate::registry::CommandRegistry;
 use crate::shell_expansion::{
-    execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionProvider, ShellOut,
-    ShellPermissionDecision, ShellPermissionGate, ShellRunError, ShellRunner,
+    execute_shell_commands_in_prompt, GitWorktreeContext, ShellExpansionCtx,
+    ShellExpansionProvider, ShellOut, ShellPermissionDecision, ShellPermissionGate, ShellRunError,
+    ShellRunner,
 };
 use crate::ModCommandRunContext;
 use async_trait::async_trait;
@@ -1166,7 +1168,43 @@ impl RegistrySlashDispatcher {
             Err(display) => return SlashDispatchResult::Handled { display },
         };
 
-        let result = handler.handle(&parsed).await;
+        let native_preparation = if command.native_type == Some(NativeCommandType::Prompt) {
+            handler.native_prompt_preparation()
+        } else {
+            None
+        };
+        let mut native_shell_expansion = false;
+        let mut outside_worktree_body = None;
+        if let Some(NativePromptPreparation::GitWorktreeShell {
+            outside_worktree_prefix,
+            outside_worktree_suffix,
+        }) = native_preparation.as_ref()
+        {
+            let Some(provider) = self.shell_expansion.as_ref() else {
+                return SlashDispatchResult::Handled {
+                    display: command_source_message(
+                        &command.name,
+                        ": Git worktree and shell preparation are unavailable in this host",
+                    ),
+                };
+            };
+            let GitWorktreeContext { cwd, inside } = provider.git_worktree_context().await;
+            if inside {
+                native_shell_expansion = true;
+            } else {
+                outside_worktree_body = Some(source_concat([
+                    PromptPart::Source(outside_worktree_prefix),
+                    PromptPart::Source(&cwd),
+                    PromptPart::Source(outside_worktree_suffix),
+                ]));
+            }
+        }
+
+        let result = if let Some(content) = outside_worktree_body {
+            CommandResult::InjectMessage { content }
+        } else {
+            handler.handle(&parsed).await
+        };
 
         match result {
             // M5-09 placeholders only ever return Done — but route the
@@ -1178,41 +1216,77 @@ impl RegistrySlashDispatcher {
             }
             CommandResult::InjectMessage { content } => {
                 // Non-Native-Prompt local injectors may own raw shell blocks.
-                // Native prompt output has already passed its source producer;
-                // do not even scan that returned text here (Native Insights is
-                // one example whose final report may contain backticks).
-                let content = match self.shell_expansion.as_ref() {
-                    Some(provider)
-                        if prompt_expansion.is_none()
-                            && !matches!(command.source, CommandSource::Mcp)
-                            && contains_embedded_shell_commands(&content) =>
+                // Native prompt output is scanned only when its source producer
+                // explicitly declares that preparation. Other Native prompts
+                // (including generated reports containing backticks) are never
+                // inspected here.
+                let content = if native_shell_expansion {
+                    let provider = self
+                        .shell_expansion
+                        .as_ref()
+                        .expect("Native shell preparation requires its provider");
+                    let allowed: Vec<String> = handler
+                        .allowed_tools()
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect();
+                    let shell_ctx = provider.build(&allowed, None);
+                    match execute_shell_commands_in_prompt(
+                        &content,
+                        &shell_ctx,
+                        &command.name,
+                        None,
+                    )
+                    .await
                     {
-                        let allowed: Vec<String> = handler
-                            .allowed_tools()
-                            .iter()
-                            .map(|s| (*s).to_string())
-                            .collect();
-                        let shell_ctx = provider.build(&allowed, None);
-                        match execute_shell_commands_in_prompt(
-                            &content,
-                            &shell_ctx,
-                            &command.name,
-                            None,
-                        )
-                        .await
+                        Ok(expanded) => expanded,
+                        Err(error) => {
+                            let source_error = error.source_message();
+                            return SlashDispatchResult::Handled {
+                                display: source_concat([
+                                    PromptPart::Source(&command.name),
+                                    PromptPart::Text(" expansion failed: "),
+                                    PromptPart::Source(&source_error),
+                                ]),
+                            };
+                        }
+                    }
+                } else {
+                    match self.shell_expansion.as_ref() {
+                        Some(provider)
+                            if prompt_expansion.is_none()
+                                && !matches!(command.source, CommandSource::Mcp)
+                                && contains_embedded_shell_commands(&content) =>
                         {
-                            Ok(expanded) => expanded,
-                            Err(e) => {
-                                return SlashDispatchResult::Handled {
-                                    display: command_source_message(
-                                        &command.name,
-                                        &format!(" expansion failed: {e}"),
-                                    ),
+                            let allowed: Vec<String> = handler
+                                .allowed_tools()
+                                .iter()
+                                .map(|s| (*s).to_string())
+                                .collect();
+                            let shell_ctx = provider.build(&allowed, None);
+                            match execute_shell_commands_in_prompt(
+                                &content,
+                                &shell_ctx,
+                                &command.name,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(expanded) => expanded,
+                                Err(error) => {
+                                    let source_error = error.source_message();
+                                    return SlashDispatchResult::Handled {
+                                        display: source_concat([
+                                            PromptPart::Source(&command.name),
+                                            PromptPart::Text(" expansion failed: "),
+                                            PromptPart::Source(&source_error),
+                                        ]),
+                                    };
                                 }
                             }
                         }
+                        _ => content,
                     }
-                    _ => content,
                 };
 
                 let content = match self.transform_native_prompt_body(&command, content).await {
@@ -1552,7 +1626,9 @@ mod tests {
     use super::*;
     use crate::builtin_support::names::{core_description, BUILTIN_COMMAND_NAMES};
     use crate::builtin_support::unimplemented::UnimplementedCommandHandler;
-    use crate::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
+    use crate::model::{
+        BuiltinCommandHandler, CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind,
+    };
     use crate::registry::CommandRegistry;
     use std::path::PathBuf;
 
@@ -3117,8 +3193,10 @@ mod tests {
     // An UNWIRED dispatcher stays a strict no-op (covered by the markdown/
     // builtin tests above, which never wire `with_shell_expansion`).
 
-    /// Echoes `OUT[<cmd>]` as stdout for any command.
-    struct EchoShellRunner;
+    /// Echoes `OUT[<cmd>]` as stdout for any command and records exact inputs.
+    struct EchoShellRunner {
+        commands: Arc<std::sync::Mutex<Vec<String>>>,
+    }
     #[async_trait]
     impl ShellRunner for EchoShellRunner {
         async fn run(
@@ -3126,6 +3204,10 @@ mod tests {
             command: &Utf16JsonProjection,
             _shell: Option<crate::FrontmatterShell>,
         ) -> Result<ShellOut, ShellRunError> {
+            self.commands
+                .lock()
+                .unwrap()
+                .push(command.string_at("").unwrap_or_default().to_owned());
             Ok(ShellOut {
                 stdout: format!("OUT[{}]", command.string_at("").unwrap_or_default()),
                 stderr: String::new(),
@@ -3143,7 +3225,9 @@ mod tests {
             ShellPermissionDecision::Allow
         }
     }
-    struct DenyGate;
+    struct DenyGate {
+        message: Utf16JsonProjection,
+    }
     impl ShellPermissionGate for DenyGate {
         fn check(
             &self,
@@ -3151,7 +3235,7 @@ mod tests {
             _s: Option<crate::FrontmatterShell>,
         ) -> ShellPermissionDecision {
             ShellPermissionDecision::Deny {
-                message: Some("not allowed".into()),
+                message: Some(self.message.clone()),
             }
         }
     }
@@ -3160,8 +3244,45 @@ mod tests {
     struct FakeProvider {
         deny: bool,
         seen_allowed: std::sync::Mutex<Vec<Vec<String>>>,
+        inside_worktree: bool,
+        cwd: Utf16JsonProjection,
+        worktree_context_calls: std::sync::atomic::AtomicUsize,
+        shell_commands: Arc<std::sync::Mutex<Vec<String>>>,
+        deny_message: Utf16JsonProjection,
     }
+    impl FakeProvider {
+        fn new(deny: bool) -> Self {
+            Self::with_worktree(deny, false, "/test/outside")
+        }
+
+        fn with_worktree(deny: bool, inside_worktree: bool, cwd: &str) -> Self {
+            Self {
+                deny,
+                seen_allowed: std::sync::Mutex::new(Vec::new()),
+                inside_worktree,
+                cwd: cwd.into(),
+                worktree_context_calls: std::sync::atomic::AtomicUsize::new(0),
+                shell_commands: Arc::new(std::sync::Mutex::new(Vec::new())),
+                deny_message: "not allowed".into(),
+            }
+        }
+
+        fn with_deny_message(mut self, message: Utf16JsonProjection) -> Self {
+            self.deny_message = message;
+            self
+        }
+    }
+    #[async_trait]
     impl ShellExpansionProvider for FakeProvider {
+        async fn git_worktree_context(&self) -> GitWorktreeContext {
+            self.worktree_context_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            GitWorktreeContext {
+                cwd: self.cwd.clone(),
+                inside: self.inside_worktree,
+            }
+        }
+
         fn build(
             &self,
             allowed_tools: &[String],
@@ -3172,15 +3293,228 @@ mod tests {
                 .unwrap()
                 .push(allowed_tools.to_vec());
             let permission_gate: Arc<dyn ShellPermissionGate> = if self.deny {
-                Arc::new(DenyGate)
+                Arc::new(DenyGate {
+                    message: self.deny_message.clone(),
+                })
             } else {
                 Arc::new(AllowGate)
             };
             ShellExpansionCtx {
-                runner: Arc::new(EchoShellRunner),
+                runner: Arc::new(EchoShellRunner {
+                    commands: self.shell_commands.clone(),
+                }),
                 permission_gate,
             }
         }
+    }
+
+    struct UnpreparedNativePromptHandler;
+    #[async_trait]
+    impl crate::model::BuiltinCommandHandler for UnpreparedNativePromptHandler {
+        async fn handle(&self, _args: &crate::parser::ParsedSlashCommand) -> CommandResult {
+            CommandResult::InjectMessage {
+                content: "Final report mentions !`git status` as text.".into(),
+            }
+        }
+
+        fn name(&self) -> &str {
+            "insights"
+        }
+
+        fn description(&self) -> &str {
+            "Native report prompt"
+        }
+
+        fn native_type(&self) -> Option<NativeCommandType> {
+            Some(NativeCommandType::Prompt)
+        }
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    fn security_review_registry() -> CommandRegistry {
+        let mut registry = CommandRegistry::new();
+        registry.register_builtin_handler(Arc::new(crate::builtins::SecurityReviewHandler::new()));
+        registry
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[tokio::test]
+    async fn security_review_outside_worktree_uses_native_message_and_skips_shell() {
+        let provider = Arc::new(FakeProvider::with_worktree(
+            false,
+            false,
+            "/tmp/security-review-outside",
+        ));
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(security_review_registry())))
+                .with_shell_expansion(provider.clone());
+
+        match dispatcher.dispatch("/security-review".into()).await {
+            SlashDispatchResult::RunSkillAsTurn { body, .. } => assert_eq!(
+                prompt_text(&body),
+                "Tell the user: /security-review needs to run inside a git repository, but the current working directory (`/tmp/security-review-outside`) is not one.\n\nIf the repository is in a subdirectory, `cd` into it first and then re-run /security-review.\n\nIf this is a self-hosted runner session created without a `git_repository` source, either add one at session creation so the runner clones it and sets the working directory, or `cd` into the cloned repo before running the review."
+            ),
+            other => panic!("expected Native outside-worktree prompt, got {other:?}"),
+        }
+
+        assert_eq!(
+            provider
+                .worktree_context_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(provider.seen_allowed.lock().unwrap().is_empty());
+        assert!(provider.shell_commands.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[tokio::test]
+    async fn security_review_worktree_expands_four_native_commands_through_policy() {
+        let provider = Arc::new(FakeProvider::with_worktree(false, true, "/repo"));
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(security_review_registry())))
+                .with_shell_expansion(provider.clone());
+
+        match dispatcher.dispatch("/security-review".into()).await {
+            SlashDispatchResult::RunSkillAsTurn { body, .. } => {
+                let text = prompt_text(&body);
+                for expected in [
+                    "OUT[git status]",
+                    "OUT[git diff --name-only origin/HEAD...]",
+                    "OUT[git log --no-decorate origin/HEAD...]",
+                    "OUT[git diff origin/HEAD...]",
+                ] {
+                    assert!(text.contains(expected), "missing {expected:?}");
+                }
+                assert!(!text.contains("!`git status`"));
+            }
+            other => panic!("expected expanded Native security-review turn, got {other:?}"),
+        }
+
+        assert_eq!(
+            provider
+                .worktree_context_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            provider.seen_allowed.lock().unwrap().as_slice(),
+            &[crate::builtins::SecurityReviewHandler::new()
+                .allowed_tools()
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect::<Vec<_>>()],
+            "Native allowed-tools must reach the per-command permission policy"
+        );
+        assert_eq!(
+            provider.shell_commands.lock().unwrap().as_slice(),
+            &[
+                "git status",
+                "git diff --name-only origin/HEAD...",
+                "git log --no-decorate origin/HEAD...",
+                "git diff origin/HEAD...",
+            ]
+        );
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[tokio::test]
+    async fn security_review_permission_denial_stops_before_running_shell() {
+        let provider = Arc::new(FakeProvider::with_worktree(true, true, "/repo"));
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(security_review_registry())))
+                .with_shell_expansion(provider.clone());
+
+        match dispatcher.dispatch("/security-review".into()).await {
+            SlashDispatchResult::Handled { display } => {
+                let display = display_text(&display);
+                assert!(display.starts_with("security-review expansion failed: "));
+                assert!(display.contains("git status"));
+                assert!(display.contains("not allowed"));
+            }
+            other => panic!("expected policy denial, got {other:?}"),
+        }
+        assert_eq!(
+            provider.shell_commands.lock().unwrap().as_slice(),
+            &[] as &[String],
+            "permission denial must prevent process execution"
+        );
+        assert_eq!(provider.seen_allowed.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[tokio::test]
+    async fn security_review_without_shell_provider_fails_closed_without_fake_cwd() {
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(security_review_registry())));
+
+        match dispatcher.dispatch("/security-review".into()).await {
+            SlashDispatchResult::Handled { display } => assert_eq!(
+                display_text(&display),
+                "security-review: Git worktree and shell preparation are unavailable in this host"
+            ),
+            other => panic!("expected explicit host-capability failure, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[tokio::test]
+    async fn security_review_upe_block_precedes_worktree_and_shell_provider() {
+        let provider = Arc::new(FakeProvider::with_worktree(true, true, "/repo"));
+        let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+        hook_registry
+            .write()
+            .await
+            .register(user_prompt_expansion_hook());
+        let mut executor =
+            HookExecutorImpl::new(hook_registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        executor.register_builtin(Arc::new(BlockingExpansionHandler));
+        let context: ExpansionHookContextProvider =
+            Arc::new(|| Box::pin(async { HookContext::default() }));
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(security_review_registry())))
+                .with_shell_expansion(provider.clone())
+                .with_expansion_hooks(Arc::new(executor), context);
+
+        match dispatcher.dispatch("/security-review".into()).await {
+            SlashDispatchResult::Handled { display } => {
+                assert!(display_text(&display).contains("blocked before prompt generation"))
+            }
+            other => panic!("expected UPE block before worktree check, got {other:?}"),
+        }
+        assert_eq!(
+            provider
+                .worktree_context_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(provider.seen_allowed.lock().unwrap().is_empty());
+        assert!(provider.shell_commands.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unprepared_native_prompt_never_queries_worktree_or_scans_body() {
+        let mut registry = CommandRegistry::new();
+        registry.register_builtin_handler(Arc::new(UnpreparedNativePromptHandler));
+        let provider = Arc::new(FakeProvider::with_worktree(true, true, "/repo"));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_shell_expansion(provider.clone());
+
+        match dispatcher.dispatch("/insights".into()).await {
+            SlashDispatchResult::RunSkillAsTurn { body, .. } => assert_eq!(
+                prompt_text(&body),
+                "Final report mentions !`git status` as text."
+            ),
+            other => panic!("expected untouched Native report turn, got {other:?}"),
+        }
+        assert_eq!(
+            provider
+                .worktree_context_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(provider.seen_allowed.lock().unwrap().is_empty());
+        assert!(provider.shell_commands.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3201,10 +3535,7 @@ mod tests {
             },
             ..SlashCommand::default()
         });
-        let provider = Arc::new(FakeProvider {
-            deny: false,
-            seen_allowed: std::sync::Mutex::new(Vec::new()),
-        });
+        let provider = Arc::new(FakeProvider::new(false));
         let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
         hook_registry
             .write()
@@ -3301,10 +3632,7 @@ mod tests {
             },
             ..SlashCommand::default()
         });
-        let provider = Arc::new(FakeProvider {
-            deny: false,
-            seen_allowed: std::sync::Mutex::new(Vec::new()),
-        });
+        let provider = Arc::new(FakeProvider::new(false));
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
         match d.dispatch("/demo".into()).await {
@@ -3347,10 +3675,7 @@ mod tests {
             },
             ..SlashCommand::default()
         });
-        let provider = Arc::new(FakeProvider {
-            deny: false,
-            seen_allowed: std::sync::Mutex::new(Vec::new()),
-        });
+        let provider = Arc::new(FakeProvider::new(false));
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
             .with_shell_expansion(provider.clone());
 
@@ -3385,10 +3710,7 @@ mod tests {
             "before !`echo hi` after",
             None,
         );
-        let provider = Arc::new(FakeProvider {
-            deny: true,
-            seen_allowed: std::sync::Mutex::new(Vec::new()),
-        });
+        let provider = Arc::new(FakeProvider::new(true));
         let d =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg))).with_shell_expansion(provider);
         match d.dispatch("/demo".into()).await {
@@ -3406,10 +3728,7 @@ mod tests {
     async fn wired_provider_expands_builtin_injectmessage() {
         let mut reg = CommandRegistry::new();
         reg.register_builtin_handler(Arc::new(EmbeddedInjectHandler));
-        let provider = Arc::new(FakeProvider {
-            deny: false,
-            seen_allowed: std::sync::Mutex::new(Vec::new()),
-        });
+        let provider = Arc::new(FakeProvider::new(false));
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
         match d.dispatch("/commit".into()).await {
@@ -3423,6 +3742,35 @@ mod tests {
             &[vec!["Bash(git status:*)".to_string()]],
             "the handler's allow-list must reach the provider"
         );
+    }
+
+    #[tokio::test]
+    async fn wired_injectmessage_shell_error_preserves_utf16_source_units() {
+        let mut reg = CommandRegistry::new();
+        reg.register_builtin_handler(Arc::new(EmbeddedInjectHandler));
+        let reason_units: Vec<u16> = "permission denied: "
+            .encode_utf16()
+            .chain([0xd800])
+            .collect();
+        let reason = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&reason_units),
+            reason_units.clone(),
+        )
+        .expect("error reason uses a root-string UTF-16 projection");
+        let provider = Arc::new(FakeProvider::new(true).with_deny_message(reason));
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg))).with_shell_expansion(provider);
+
+        match dispatcher.dispatch("/commit".into()).await {
+            SlashDispatchResult::Handled { display } => {
+                let mut expected = "commit: expansion failed: "
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                expected.extend(reason_units);
+                assert_eq!(display.string_units(""), Some(expected));
+            }
+            other => panic!("expected expansion-failed display, got {other:?}"),
+        }
     }
 
     /// An unwired builtin `InjectMessage` command delivers its RAW `!`cmd``
@@ -3461,10 +3809,7 @@ mod tests {
     #[tokio::test]
     async fn wired_provider_skips_mcp_markdown_expansion() {
         let reg = markdown_with(CommandSource::Mcp, "x !`echo hi` y", None);
-        let provider = Arc::new(FakeProvider {
-            deny: false,
-            seen_allowed: std::sync::Mutex::new(Vec::new()),
-        });
+        let provider = Arc::new(FakeProvider::new(false));
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
         match d.dispatch("/demo".into()).await {

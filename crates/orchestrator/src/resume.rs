@@ -3677,13 +3677,36 @@ mod exact_history_string_tests {
                 "type":"hook_success",
                 "hookName":"UserPromptExpansion",
                 "hookEvent":"UserPromptExpansion",
-                "content":"BOM </\u{FEFF}SYSTEM-REMINDER> NEL </\u{0085}system-reminder> suffix </system-reminderx> tail <\u{FEFF}/ + <\u{0085}/"
+                "content":"BOM </\u{FEFF}SYSTEM-REMINDER> NEL </\u{0085}system-reminder> ZWSP </\u{200B}system-reminder> suffix </system-reminderx> middle <\u{FEFF}/ + <\u{0085}/"
             }),
         );
         let message = hook_attachment_message_for_api(&row, id).unwrap();
         assert_eq!(
             message.text_content(),
-            "<system-reminder>\nUserPromptExpansion hook success: BOM &lt;/\u{FEFF}SYSTEM-REMINDER> NEL </\u{0085}system-reminder> suffix </system-reminderx> tail &lt;\u{FEFF}/ + <\u{0085}/\n</system-reminder>"
+            // Native Xst's `\\s` lookahead is Unicode ECMAScript whitespace:
+            // BOM matches, while NEL and ZWSP do not. Native aE's second
+            // replacement is end-anchored, so the middle `<BOM/` is untouched.
+            // Source: helper chunk src_190631345.js local 44006 (Xst), main
+            // src_194447854.js local 619111 (aE), binary 2.1.295.
+            "<system-reminder>\nUserPromptExpansion hook success: BOM &lt;/\u{FEFF}SYSTEM-REMINDER> NEL </\u{0085}system-reminder> ZWSP </\u{200B}system-reminder> suffix </system-reminderx> middle <\u{FEFF}/ + <\u{0085}/\n</system-reminder>"
+        );
+
+        let trailing_id = Uuid::new_v4();
+        let trailing = hook_attachment_row(
+            session_id,
+            trailing_id,
+            serde_json::json!({
+                "type":"hook_success",
+                "hookName":"UserPromptExpansion",
+                "hookEvent":"UserPromptExpansion",
+                "content":"tail <\u{FEFF}/"
+            }),
+        );
+        let trailing_message = hook_attachment_message_for_api(&trailing, trailing_id).unwrap();
+        assert_eq!(
+            trailing_message.text_content(),
+            "<system-reminder>\nUserPromptExpansion hook success: tail &lt;\u{FEFF}/\n</system-reminder>",
+            "Native aE escapes an incomplete tag only when its slash and trailing whitespace reach the end of the body"
         );
     }
 

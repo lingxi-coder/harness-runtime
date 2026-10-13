@@ -385,7 +385,7 @@ async fn regular_headless_prompt_stages_skill_listing_from_live_command_registry
     let stream = Arc::new(StreamJsonStream::new_placeholder(
         crate::headless::io::Output::new(tokio::io::sink()),
     ));
-    let mut runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
+    let mut runtime = Box::pin(super::tests::fixture_runtime(stream.clone(), root.path())).await;
     let catalog = runtime.headless_command_catalog().await;
     assert!(catalog
         .prompt_command_names
@@ -444,17 +444,15 @@ async fn regular_headless_prompt_stages_skill_listing_from_live_command_registry
         crate::headless::io::Output::new(tokio::io::sink()),
         crate::headless::io::Output::new(tokio::io::sink()),
     );
-    let code = run_oneshot(
-        &Argv {
-            prompt: Some("Summarize the project structure.".into()),
-            max_budget_usd: Some(1.0),
-            no_stream: true,
-            ..Default::default()
-        },
-        &runtime,
-        &sink,
-    )
-    .await;
+    let argv = Argv {
+        prompt: Some("Summarize the project structure.".into()),
+        max_budget_usd: Some(1.0),
+        no_stream: true,
+        ..Default::default()
+    };
+    let code = tokio::spawn(async move { run_oneshot(&argv, &runtime, &sink).await })
+        .await
+        .expect("regular prompt runner task completes");
     assert_eq!(code, exit_codes::SUCCESS);
     assert!(streaming.captured_calls().await.is_empty());
     let captured = batched.captured_msgs().await;

@@ -144,29 +144,38 @@ pub struct ShellExpansionCtx {
     pub permission_gate: Arc<dyn ShellPermissionGate>,
 }
 
-/// Factory that builds a per-command [`ShellExpansionCtx`] with that command's
-/// own allowed-tools baked into the permission gate.
+/// One live cwd snapshot and its Git-worktree status.
+pub struct GitWorktreeContext {
+    /// Exact source text of the cwd queried by the host.
+    pub cwd: Ujp,
+    /// Whether Git identifies this cwd as inside a worktree.
+    pub inside: bool,
+}
+
+/// Builds the per-command [`ShellExpansionCtx`] and supplies host context while
+/// keeping `command-api` independent of the concrete tool and policy crates.
+/// The context receives that command's declared allowed-tools list in its
+/// permission gate.
 ///
-/// Mirrors claude-code building a FRESH `toolPermissionContext` per
-/// `getPromptForCommand` call before running `executeShellCommandsInPrompt`:
-/// each command injects its own `allowedTools` into
-/// `alwaysAllowRules.command` on top of the base policy (e.g. /commit adds
-/// `Bash(git add:*)` / `Bash(git status:*)` / `Bash(git commit:*)`), rather than
-/// mutating the shared boot policy.
-///
-/// Injected as `Arc<dyn ShellExpansionProvider>` so `command-api` stays a leaf:
-/// the concrete provider (holding the live `PermissionPolicy` + runner deps)
-/// lives in `tool-api` and is constructed at each composition root. The
-/// dispatcher / TUI call [`Self::build`] per expansion with the command's
-/// declared allow-list, then run [`execute_shell_commands_in_prompt`] over the
-/// returned context.
+/// This mirrors claude-code building a fresh `toolPermissionContext` per
+/// `getPromptForCommand`: the command's allowed-tools are injected into its
+/// permission context instead of mutating shared boot policy. The concrete
+/// provider (holding the live `PermissionPolicy` and runner dependencies) lives
+/// in `tool-api` and is constructed at each composition root. Dispatchers query
+/// [`Self::git_worktree_context`] when needed, then call [`Self::build`] before
+/// running [`execute_shell_commands_in_prompt`].
+#[async_trait]
 pub trait ShellExpansionProvider: Send + Sync {
+    /// Query the current host cwd, matching Native's Git-worktree precondition.
+    /// A failed Git query is outside a worktree; this executes no prompt text.
+    async fn git_worktree_context(&self) -> GitWorktreeContext;
+
     /// Build a per-command expansion context. `allowed_tools` is that command's
     /// declared allow-list (e.g. `["Bash(git add:*)", …]`), injected on top of
     /// the base policy for this expansion only; `shell` is the
     /// frontmatter-selected shell (`None` → bash; builtins always pass `None`).
     fn build(&self, allowed_tools: &[String], shell: Option<FrontmatterShell>)
-        -> ShellExpansionCtx;
+    -> ShellExpansionCtx;
 }
 
 /// A single extracted shell command: its full matched span (for replacement)
@@ -224,8 +233,10 @@ fn format_bash_error(err: &ShellRunError, pattern: &[u16]) -> ShellExpansionErro
 }
 
 /// Execute embedded shell commands while keeping the prompt and extracted
-/// command text in exact UTF-16 units. Only the injected process runner crosses
-/// the host OS command-string boundary.
+/// command text in exact UTF-16 units. Matches are admitted and run concurrently
+/// like Native's `Promise.all`; successful completions replace the first
+/// remaining occurrence of their raw pattern in completion order. Only the
+/// injected process runner crosses the host OS command-string boundary.
 pub async fn execute_shell_commands_in_prompt(
     text: &Ujp,
     ctx: &ShellExpansionCtx,
@@ -235,8 +246,6 @@ pub async fn execute_shell_commands_in_prompt(
     let source_units = text
         .string_units("")
         .expect("shell expansion input must be a root-string projection");
-    let mut result = source_units.to_vec();
-
     // Same ordering as TS: block matches, then (gated) inline matches.
     let mut matches = extract_block_commands(&source_units);
     if source_units
@@ -246,39 +255,109 @@ pub async fn execute_shell_commands_in_prompt(
         matches.extend(extract_inline_commands(&source_units));
     }
 
-    for command in &matches {
-        if command
-            .command
-            .string_units("")
-            .is_some_and(|units| units.is_empty())
-        {
-            continue;
-        }
-        match ctx.permission_gate.check(&command.command, shell) {
-            ShellPermissionDecision::Allow => {}
-            ShellPermissionDecision::Deny { message } => {
-                let _ = slash_command_name; // mirrors TS debug log; no-op here.
-                let reason = message.unwrap_or_else(|| Ujp::from("Permission denied"));
-                return Err(malformed_with_pattern_and_source(
-                    "Shell command permission check failed for pattern \"",
-                    &command.full,
-                    "\": ",
-                    &reason,
-                ));
-            }
-        }
+    // Native invokes `Fu` synchronously while mapping matches, in match order,
+    // before awaiting the resulting promises. This gate is synchronous in the
+    // current host contract, so capture every decision in that same order
+    // before starting any runner tasks (including decisions following a deny).
+    let matches = matches
+        .into_iter()
+        .filter(|command| {
+            !command
+                .command
+                .string_units("")
+                .is_some_and(|units| units.is_empty())
+        })
+        .map(|command| {
+            let decision = ctx.permission_gate.check(&command.command, shell);
+            (command, decision)
+        })
+        .collect::<Vec<_>>();
 
-        let output = match ctx.runner.run(&command.command, shell).await {
-            Ok(data) => Ujp::from(format_bash_output(&data.stdout, &data.stderr, false)),
-            Err(error) => return Err(format_bash_error(&error, &command.full)),
-        };
-        result = replace_first_units(
-            &result,
-            &command.full,
-            &output.string_units("").unwrap_or_default(),
-        );
+    let result = Arc::new(std::sync::Mutex::new(source_units.to_vec()));
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut previous_launch = None;
+    for (command, decision) in matches {
+        let (launch_next, launch_next_rx) = tokio::sync::oneshot::channel();
+        let launch_previous = previous_launch.take();
+        previous_launch = Some(launch_next_rx);
+        let command_name = slash_command_name.clone();
+        let runner = ctx.runner.clone();
+        let result = result.clone();
+        tasks.spawn(async move {
+            if let Some(launch_previous) = launch_previous {
+                let _ = launch_previous.await;
+            }
+
+            match decision {
+                ShellPermissionDecision::Allow => {}
+                ShellPermissionDecision::Deny { message } => {
+                    let _ = command_name; // mirrors TS debug log; no-op here.
+                    let _ = launch_next.send(());
+                    let reason = message.unwrap_or_else(|| Ujp::from("Permission denied"));
+                    return Err(malformed_with_pattern_and_source(
+                        "Shell command permission check failed for pattern \"",
+                        &command.full,
+                        "\": ",
+                        &reason,
+                    ));
+                }
+            }
+
+            // Polling once starts each runner in source match order, then the
+            // launch baton is passed while any asynchronous process work stays
+            // concurrent. Native's ready permission continuations are queued
+            // FIFO; only the subsequent I/O completion order is nondeterministic.
+            let mut run = runner.run(&command.command, shell);
+            let first_poll = std::future::poll_fn(|cx| {
+                use std::future::Future as _;
+                match run.as_mut().poll(cx) {
+                    std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
+                    std::task::Poll::Pending => std::task::Poll::Ready(None),
+                }
+            })
+            .await;
+            let _ = launch_next.send(());
+            let data = match first_poll {
+                Some(result) => result,
+                None => run.await,
+            }
+            .map_err(|error| format_bash_error(&error, &command.full))?;
+            let output = format_bash_output(&data.stdout, &data.stderr, false);
+            let mut current = result
+                .lock()
+                .expect("shell expansion result lock is not poisoned");
+            *current = replace_first_units(
+                &current,
+                &command.full,
+                &output.encode_utf16().collect::<Vec<_>>(),
+            );
+            Ok::<(), ShellExpansionError>(())
+        });
     }
 
+    while let Some(completion) = tasks.join_next().await {
+        match completion {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                // JavaScript Promise.all rejects on the first failed promise,
+                // but does not cancel the other already-started promises.
+                tasks.detach_all();
+                return Err(error);
+            }
+            Err(error) => {
+                tasks.detach_all();
+                if error.is_panic() {
+                    std::panic::resume_unwind(error.into_panic());
+                }
+                panic!("embedded shell expansion task was cancelled unexpectedly");
+            }
+        }
+    }
+
+    let result = Arc::try_unwrap(result)
+        .expect("all shell expansion tasks completed before reading the result")
+        .into_inner()
+        .expect("shell expansion result lock is not poisoned");
     Ok(source_from_units(result))
 }
 
@@ -454,6 +533,7 @@ fn trim_js_whitespace_units(input: &[u16]) -> &[u16] {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use tokio::sync::{Semaphore, watch};
 
     struct ScriptRunner {
         calls: Mutex<Vec<Ujp>>,
@@ -622,6 +702,233 @@ mod tests {
             Some("OUT[one] then OUT[two] then OUT[three]")
         );
         assert_eq!(runner.calls.lock().unwrap().len(), 3);
+    }
+
+    struct ControlledRunner {
+        started: watch::Sender<Vec<String>>,
+        finished: watch::Sender<Vec<usize>>,
+        next_call: std::sync::atomic::AtomicUsize,
+        release: [Semaphore; 2],
+    }
+
+    impl ControlledRunner {
+        fn new() -> (
+            Arc<Self>,
+            watch::Receiver<Vec<String>>,
+            watch::Receiver<Vec<usize>>,
+        ) {
+            let (started, started_rx) = watch::channel(Vec::<String>::new());
+            let (finished, finished_rx) = watch::channel(Vec::new());
+            (
+                Arc::new(Self {
+                    started,
+                    finished,
+                    next_call: std::sync::atomic::AtomicUsize::new(0),
+                    release: [Semaphore::new(0), Semaphore::new(0)],
+                }),
+                started_rx,
+                finished_rx,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl ShellRunner for ControlledRunner {
+        async fn run(
+            &self,
+            command: &Ujp,
+            _shell: Option<FrontmatterShell>,
+        ) -> Result<ShellOut, ShellRunError> {
+            let call = self
+                .next_call
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.started.send_modify(|calls| {
+                calls.push(command.string_at("").unwrap_or_default().to_owned())
+            });
+            self.release[call]
+                .acquire()
+                .await
+                .expect("test runner semaphore remains open")
+                .forget();
+            self.finished.send_modify(|calls| calls.push(call));
+            Ok(ShellOut {
+                stdout: format!("OUT[{call}]"),
+                stderr: String::new(),
+                interrupted: false,
+            })
+        }
+    }
+
+    async fn wait_for_len<T>(receiver: &mut watch::Receiver<Vec<T>>, expected: usize) {
+        loop {
+            if receiver.borrow_and_update().len() >= expected {
+                return;
+            }
+            receiver
+                .changed()
+                .await
+                .expect("test watch sender remains open");
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_raw_patterns_replace_first_remaining_match_in_completion_order() {
+        let (runner, mut started, mut finished) = ControlledRunner::new();
+        let ctx = Arc::new(ctx_with(runner.clone(), Arc::new(AllowAll)));
+        let text = Ujp::from("!`same` and !`same`");
+        let execution = tokio::spawn(async move {
+            execute_shell_commands_in_prompt(&text, &ctx, &Ujp::from("/x"), None).await
+        });
+
+        // Both calls must have reached the runner while neither is released.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_len(&mut started, 2),
+        )
+        .await
+        .expect("shell command calls start concurrently");
+
+        // Resolve the second promise first. Its output replaces the first raw
+        // occurrence; the first promise then replaces the remaining one.
+        runner.release[1].add_permits(1);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_len(&mut finished, 1),
+        )
+        .await
+        .expect("second shell call completes before the first is released");
+        runner.release[0].add_permits(1);
+
+        let output = execution.await.unwrap().unwrap();
+        assert_eq!(output.string_at(""), Some("OUT[1] and OUT[0]"));
+    }
+
+    struct RecordingAllowGate(Arc<Mutex<Vec<String>>>);
+
+    impl ShellPermissionGate for RecordingAllowGate {
+        fn check(
+            &self,
+            command: &Ujp,
+            _shell: Option<FrontmatterShell>,
+        ) -> ShellPermissionDecision {
+            self.0
+                .lock()
+                .unwrap()
+                .push(command.string_at("").unwrap_or_default().to_owned());
+            ShellPermissionDecision::Allow
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_and_runner_start_order_matches_native_block_then_inline_order() {
+        let runner = Arc::new(ScriptRunner::echoing());
+        let permission_checks = Arc::new(Mutex::new(Vec::new()));
+        let ctx = ctx_with(
+            runner.clone(),
+            Arc::new(RecordingAllowGate(permission_checks.clone())),
+        );
+        let output = expand(
+            "!`inline-first`\n```!\nblock-command\n```\n!`inline-last`",
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            output.string_at(""),
+            Some("OUT[inline-first]\nOUT[block-command]\nOUT[inline-last]")
+        );
+        let expected = vec![
+            "block-command".to_owned(),
+            "inline-first".to_owned(),
+            "inline-last".to_owned(),
+        ];
+        let checks = permission_checks.lock().unwrap();
+        assert_eq!(*checks, expected);
+        let starts = runner.calls.lock().unwrap();
+        let starts = starts
+            .iter()
+            .map(|command| command.string_at("").unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(starts, expected);
+    }
+
+    struct DenyOneAndRecord {
+        checked: watch::Sender<Vec<String>>,
+    }
+
+    impl ShellPermissionGate for DenyOneAndRecord {
+        fn check(
+            &self,
+            command: &Ujp,
+            _shell: Option<FrontmatterShell>,
+        ) -> ShellPermissionDecision {
+            let command = command.string_at("").unwrap_or_default().to_owned();
+            self.checked
+                .send_modify(|commands| commands.push(command.clone()));
+            if command == "deny" {
+                ShellPermissionDecision::Deny {
+                    message: Some(Ujp::from("denied by test")),
+                }
+            } else {
+                ShellPermissionDecision::Allow
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_rejection_returns_early_without_cancelling_started_sibling() {
+        let (runner, mut started, mut finished) = ControlledRunner::new();
+        let (checked_tx, mut checked) = watch::channel(Vec::new());
+        let gate = Arc::new(DenyOneAndRecord {
+            checked: checked_tx,
+        });
+        let ctx = Arc::new(ctx_with(runner.clone(), gate));
+        let text = Ujp::from("!`slow` then !`other` then !`deny`");
+        let execution = tokio::spawn(async move {
+            execute_shell_commands_in_prompt(&text, &ctx, &Ujp::from("/x"), None).await
+        });
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_len(&mut checked, 3),
+        )
+        .await
+        .expect("each command receives its own permission check");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_len(&mut started, 2),
+        )
+        .await
+        .expect("permitted sibling started before permission rejection is observed");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), execution)
+            .await
+            .expect("permission failure rejects without waiting for the sibling")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error.source_message().string_at(""),
+            Some("Shell command permission check failed for pattern \"!`deny`\": denied by test")
+        );
+        assert_eq!(
+            checked.borrow_and_update().clone(),
+            vec!["slow".to_owned(), "other".to_owned(), "deny".to_owned()]
+        );
+        assert_eq!(
+            started.borrow_and_update().clone(),
+            vec!["slow".to_owned(), "other".to_owned()]
+        );
+
+        // Promise.all rejection does not cancel already-started promises.
+        runner.release[0].add_permits(1);
+        runner.release[1].add_permits(1);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_len(&mut finished, 2),
+        )
+        .await
+        .expect("the detached siblings finish after the outer call rejects");
     }
 
     #[tokio::test]

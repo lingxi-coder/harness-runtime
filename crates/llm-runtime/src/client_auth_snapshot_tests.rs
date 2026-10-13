@@ -1301,7 +1301,10 @@ async fn chatgpt_host_seal_keeps_exact_text_and_applies_final_body_policy() {
     assert!(wire.contains("\\ud800"), "{wire}");
     assert!(wire.contains("\"store\":false"), "{wire}");
     assert!(wire.contains("\"instructions\":\"\\ud801\""), "{wire}");
-    assert!(wire.contains("\\ud802"), "{wire}");
+    // ChatGPT OAuth's final Responses policy removes the whole metadata field,
+    // including a host-added exact-string override below it.
+    assert!(!wire.contains("\\ud802"), "{wire}");
+    assert!(!wire.contains("\"metadata\""), "{wire}");
     assert!(!wire.contains("\\ud803"), "{wire}");
     assert!(!wire.contains("\\ud804"), "{wire}");
     for removed in ["max_output_tokens", "temperature", "top_p"] {

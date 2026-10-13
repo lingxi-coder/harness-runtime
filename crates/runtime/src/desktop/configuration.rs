@@ -258,6 +258,9 @@ pub trait DesktopDiagnosticSink: Send + Sync {
 /// ```
 #[derive(Clone)]
 pub struct DesktopConfig {
+    /// Host-owned Git root-marker cache shared by cloned configs and every
+    /// session the host builds from them.
+    pub host_git_root_cache: Arc<tool_api::HostGitRootCache>,
     /// Session-scoped managed-policy snapshot shared by async and synchronous
     /// consumers. Its explicit uninitialized state is never treated as a
     /// successfully loaded empty policy.
@@ -933,6 +936,7 @@ impl std::fmt::Debug for DesktopConfig {
         // only as presence/count markers so `{cfg:?}` remains safe for host
         // diagnostics. Trait objects use the same presence-only convention.
         f.debug_struct("DesktopConfig")
+            .field("host_git_root_cache", &"<host-owned cache>")
             .field(
                 "managed_policy_snapshot_cache_initialized",
                 &self.managed_policy_snapshot_cache.is_initialized(),
@@ -1130,6 +1134,7 @@ impl std::fmt::Debug for DesktopConfig {
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
+            host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             managed_policy_snapshot_cache:
                 super::settings_watch::ManagedPolicySnapshotCache::default(),
             diagnostics: None,

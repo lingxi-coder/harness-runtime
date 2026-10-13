@@ -20,6 +20,9 @@ use super::MobileEngineError;
 // Mirrors the `DesktopConfig` pattern (harness-runtime::desktop/src/lib.rs:799-846).
 #[derive(Clone)]
 pub struct MobileConfig {
+    /// Host-owned Git root-marker cache shared by cloned configs and every
+    /// session the host builds from them.
+    pub host_git_root_cache: Arc<tool_api::HostGitRootCache>,
     /// Host package identity used by `/version` (never part of the FFI DTO).
     pub build_info: command_api::builtins::BuildInfo,
     /// API base URL (default `https://api.anthropic.com`).
@@ -111,6 +114,7 @@ impl std::fmt::Debug for MobileConfig {
         // host logging (copies the `DesktopConfig` Debug pattern at
         // harness-runtime::desktop/src/lib.rs:799-846).
         f.debug_struct("MobileConfig")
+            .field("host_git_root_cache", &"<host-owned cache>")
             .field("build_info", &self.build_info)
             .field("api_base", &self.api_base)
             .field("api_key", &self.api_key)
@@ -160,6 +164,7 @@ impl std::fmt::Debug for MobileConfig {
 impl Default for MobileConfig {
     fn default() -> Self {
         Self {
+            host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             build_info: command_api::builtins::BuildInfo::default(),
             api_base: "https://api.anthropic.com".to_string(),
             projects_session_startup_url: None,

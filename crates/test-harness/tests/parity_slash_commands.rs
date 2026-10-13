@@ -11,21 +11,28 @@
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
 //! - Unknown literal template = "Unknown command: /{name}"
 
+use command_api::RegistrySlashDispatcher;
 use command_api::builtin_support::names::{
     BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES, CORRECT_BY_DESIGN_STUBS, HOST_BOUND_DEFERRED_GAPS,
 };
 use command_api::builtins::{
+    INIT_PROMPT, InsightsCommandAvailability, InsightsReport, InsightsReportProvider,
     register_all_builtin_commands, register_bundled_skills, register_core_batch_1,
     register_core_batch_2, register_core_batch_4, register_core_batch_5, register_core_batch_8,
+    register_insights_command,
 };
-use command_api::CommandRegistry;
-use command_api::RegistrySlashDispatcher;
+use command_api::{
+    BuiltinCommandHandler, CommandRegistry, CommandResult, GitWorktreeContext, ParsedSlashCommand,
+    ShellExpansionCtx, ShellExpansionProvider, ShellOut, ShellPermissionDecision,
+    ShellPermissionGate, ShellRunError, ShellRunner,
+};
 use lingxi_core::host::{
     AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::test_support::MockOrchestratorHandle;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tempfile::TempDir;
@@ -34,6 +41,151 @@ use tokio::sync::RwLock;
 
 struct MockAuth {
     result: StdMutex<Result<LoginInfo, AuthError>>,
+}
+
+const PARITY_INSIGHTS_JSON: &str = r#"{"total_sessions":2}"#;
+const PARITY_INSIGHTS_URL: &str = "file:///tmp/report-2026-10-12.html";
+const PARITY_INSIGHTS_HTML_PATH: &str = "/tmp/report-2026-10-12.html";
+const PARITY_INSIGHTS_FACETS: &str = "/tmp/usage-data/facets";
+const PARITY_INSIGHTS_RECOMMENDATION: &str = "Try Auto Mode for this project.";
+
+struct ParityInsightsProvider;
+
+#[async_trait::async_trait]
+impl InsightsReportProvider for ParityInsightsProvider {
+    fn command_availability(&self) -> InsightsCommandAvailability {
+        InsightsCommandAvailability {
+            workspace_available: Some(true),
+            allow_insights: Some(true),
+        }
+    }
+
+    async fn generate_report(&self) -> Result<InsightsReport, Utf16JsonProjection> {
+        Ok(InsightsReport {
+            insights_json: PARITY_INSIGHTS_JSON.into(),
+            report_url: PARITY_INSIGHTS_URL.into(),
+            html_path: PARITY_INSIGHTS_HTML_PATH.into(),
+            facets_directory: PARITY_INSIGHTS_FACETS.into(),
+            summary_header: "HEADER\n".into(),
+            summary_text: "SUMMARY".into(),
+            auto_mode_recommendation: Some(PARITY_INSIGHTS_RECOMMENDATION.into()),
+        })
+    }
+}
+
+fn expected_insights_body() -> String {
+    format!(
+        "The user just ran /insights to generate a usage report analyzing their LingXi sessions.\n\n\
+         Here is the full insights data:\n{PARITY_INSIGHTS_JSON}\n\n\
+         Report URL: {PARITY_INSIGHTS_URL}\n\
+         HTML file: {PARITY_INSIGHTS_HTML_PATH}\n\
+         Facets directory: {PARITY_INSIGHTS_FACETS}\n\n\
+         At-a-glance summary (for your context only — the user has not seen any output yet):\n\
+         HEADER\nSUMMARY\n\n\
+         Respond with exactly the following, and nothing else. Do not add, omit, or reword any line:\n\n\
+         Your shareable insights report is ready:\n{PARITY_INSIGHTS_URL}\n\n\
+         {PARITY_INSIGHTS_RECOMMENDATION}\n\n\
+         Want to dig into any section or try one of the suggestions?"
+    )
+}
+
+const SECURITY_REVIEW_SHELL_OUTPUTS: [(&str, &str); 4] = [
+    (
+        "git status",
+        "On branch parity-fixture\nnothing to commit, working tree clean",
+    ),
+    (
+        "git diff --name-only origin/HEAD...",
+        "crates/command-api/src/shell_expansion.rs\ncrates/test-harness/tests/parity_slash_commands.rs",
+    ),
+    (
+        "git log --no-decorate origin/HEAD...",
+        "abc1234 parity fixture commit",
+    ),
+    (
+        "git diff origin/HEAD...",
+        "diff --git a/parity-fixture b/parity-fixture\n+fixed source output",
+    ),
+];
+
+fn expected_security_review_body() -> String {
+    let mut body =
+        include_str!("../../command-api/tests/fixtures/native_295/security_review_body.md")
+            .to_owned();
+    for (command, output) in SECURITY_REVIEW_SHELL_OUTPUTS {
+        body = body.replace(&format!("!`{command}`"), output);
+    }
+    body
+}
+
+struct ParityShellExpansionProvider {
+    cwd: Utf16JsonProjection,
+    commands: Arc<StdMutex<Vec<String>>>,
+}
+
+struct ParityShellRunner {
+    commands: Arc<StdMutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl ShellRunner for ParityShellRunner {
+    async fn run(
+        &self,
+        command: &Utf16JsonProjection,
+        _shell: Option<command_api::FrontmatterShell>,
+    ) -> Result<ShellOut, ShellRunError> {
+        let command = command.string_at("").unwrap_or_default().to_owned();
+        self.commands.lock().unwrap().push(command.clone());
+        let Some((_, stdout)) = SECURITY_REVIEW_SHELL_OUTPUTS
+            .iter()
+            .find(|(expected, _)| *expected == command)
+        else {
+            return Err(ShellRunError {
+                generic_message: Some(format!("unexpected parity shell command: {command}")),
+                ..ShellRunError::default()
+            });
+        };
+        Ok(ShellOut {
+            stdout: (*stdout).to_owned(),
+            stderr: String::new(),
+            interrupted: false,
+        })
+    }
+}
+
+struct ParityAllowShell;
+
+impl ShellPermissionGate for ParityAllowShell {
+    fn check(
+        &self,
+        _command: &Utf16JsonProjection,
+        _shell: Option<command_api::FrontmatterShell>,
+    ) -> ShellPermissionDecision {
+        ShellPermissionDecision::Allow
+    }
+}
+
+#[async_trait::async_trait]
+impl ShellExpansionProvider for ParityShellExpansionProvider {
+    async fn git_worktree_context(&self) -> GitWorktreeContext {
+        GitWorktreeContext {
+            cwd: self.cwd.clone(),
+            inside: true,
+        }
+    }
+
+    fn build(
+        &self,
+        _allowed_tools: &[String],
+        _shell: Option<command_api::FrontmatterShell>,
+    ) -> ShellExpansionCtx {
+        ShellExpansionCtx {
+            runner: Arc::new(ParityShellRunner {
+                commands: self.commands.clone(),
+            }),
+            permission_gate: Arc::new(ParityAllowShell),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -88,6 +240,10 @@ fn fully_wired_registry(cwd: &std::path::Path) -> CommandRegistry {
         false,
     );
     register_bundled_skills(&mut reg, false);
+    assert!(register_insights_command(
+        &mut reg,
+        Arc::new(ParityInsightsProvider)
+    ));
     reg
 }
 
@@ -284,22 +440,68 @@ fn fixture_names_match_constant_order() {
 
 #[tokio::test]
 async fn every_fixture_command_dispatches_to_handled() {
-    // Parity lock: every builtin command name is REGISTERED and dispatches to
-    // `Handled`. The original M5-era assertion that each returns the stub
-    // literal ("{name}: not implemented in v0.6.0 (M5)") is obsolete — later
-    // parity batches (merged from main) implemented many commands with real
-    // output (e.g. /commit), so this locks the full name surface dispatches,
-    // not the exact body.
+    // The Native prompt commands enter the model as a separate command header,
+    // body companion, and ordered hook rows. Other builtin command types keep
+    // their host-visible Handled result.
     let f = fixture();
     let export_dir = TempDir::new().expect("temporary export directory");
     let reg = fully_wired_registry(export_dir.path());
-    let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+
+    let mut expected_prompt_bodies = BTreeMap::new();
+    for entry in &f.commands {
+        let command = reg
+            .resolve(&Utf16JsonProjection::from(entry.name.as_str()))
+            .unwrap_or_else(|| panic!("/{} command missing", entry.name));
+        if !command.is_prompt() {
+            continue;
+        }
+        let expected_body = match entry.name.as_str() {
+            "init" => INIT_PROMPT.as_str().to_owned(),
+            "insights" => expected_insights_body(),
+            "statusline" => "Create an Agent with subagent_type \"statusline-setup\" and the prompt \"Configure my statusLine from my shell PS1 configuration\"".to_owned(),
+            "security-review" => expected_security_review_body(),
+            other => panic!("add an exact body expectation for Native prompt /{other}"),
+        };
+        expected_prompt_bodies.insert(entry.name.clone(), expected_body);
+    }
+
+    let shell_commands = Arc::new(StdMutex::new(Vec::new()));
+    let shell_provider = Arc::new(ParityShellExpansionProvider {
+        cwd: export_dir.path().to_string_lossy().into_owned().into(),
+        commands: shell_commands.clone(),
+    });
+    let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+        .with_shell_expansion(shell_provider);
 
     for entry in &f.commands {
         let raw = format!("/{}", entry.name);
         match d.dispatch(Utf16JsonProjection::from(raw)).await {
-            SlashDispatchResult::Handled { .. } => {}
-            other => panic!("/{} must dispatch to Handled, got {other:?}", entry.name),
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => {
+                let expected_body = expected_prompt_bodies
+                    .get(&entry.name)
+                    .unwrap_or_else(|| panic!("non-prompt /{} ran as a prompt", entry.name));
+                let expected_header = format!(
+                    "<command-message>{0}</command-message>\n<command-name>/{0}</command-name>",
+                    entry.name
+                );
+                assert_eq!(command.string_at(""), Some(expected_header.as_str()));
+                assert_eq!(body.string_at(""), Some(expected_body.as_str()));
+                assert!(
+                    hook_messages.is_empty(),
+                    "/{} has no configured hooks",
+                    entry.name
+                );
+            }
+            SlashDispatchResult::Handled { .. } => assert!(
+                !expected_prompt_bodies.contains_key(&entry.name),
+                "Native prompt /{} was flattened into a display result",
+                entry.name
+            ),
+            other => panic!("/{} unexpected dispatch result: {other:?}", entry.name),
         }
     }
 
@@ -313,6 +515,14 @@ async fn every_fixture_command_dispatches_to_handled() {
                 .starts_with("conversation-")),
         "/export should write its default output inside the isolated command cwd"
     );
+    let mut actual_shell_commands = shell_commands.lock().unwrap().clone();
+    actual_shell_commands.sort();
+    let mut expected_shell_commands = SECURITY_REVIEW_SHELL_OUTPUTS
+        .iter()
+        .map(|(command, _)| (*command).to_owned())
+        .collect::<Vec<_>>();
+    expected_shell_commands.sort();
+    assert_eq!(actual_shell_commands, expected_shell_commands);
 }
 
 #[tokio::test]
@@ -459,10 +669,11 @@ fn reload_plugins_tracks_the_live_interactive_refresh_path() {
     assert_eq!(row.target_status, "implemented");
     assert_eq!(row.rust_status, "interactive_only");
     assert!(row.requires_tui);
-    assert!(row
-        .defer_reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains("PluginRuntime")));
+    assert!(
+        row.defer_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("PluginRuntime"))
+    );
 }
 
 #[test]
@@ -510,6 +721,20 @@ async fn target_implemented_commands_do_not_return_m5_stub() {
             raw_args: Utf16JsonProjection::from(""),
             positional_args: vec![],
         };
+        if *name == "insights" {
+            match h.handle(&args).await {
+                CommandResult::InjectMessage { content } => {
+                    assert_eq!(
+                        content.string_at(""),
+                        Some(expected_insights_body().as_str())
+                    );
+                }
+                other => {
+                    panic!("/insights must render the explicitly provided Native report: {other:?}")
+                }
+            }
+            continue;
+        }
         if let command_api::CommandResult::Done { display: Some(s) } = h.handle(&args).await {
             assert_ne!(
                 s.string_at(""),

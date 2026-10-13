@@ -24,6 +24,7 @@ pub mod builtin_context;
 pub mod content_replacement;
 pub mod context;
 pub mod defer;
+pub mod host_git_root_cache;
 pub mod hosted_search;
 pub mod model_prompt_gate;
 pub mod native_output;
@@ -59,6 +60,7 @@ pub use defer::{
     DeferredMcpServerStatus, DeferredToolNativeContext, DeferredToolRevocation, ToolSearchMode,
     ENTER_WORKTREE_TOOL_NAME,
 };
+pub use host_git_root_cache::HostGitRootCache;
 pub use hosted_search::{
     HostedSearchError, HostedSearchOutput, HostedSearchRequest, HostedWebSearchClient,
     McpTokenCounter,

@@ -827,6 +827,7 @@ pub fn ctx_for_file_tools(
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
     super::BuiltinToolContext {
+        host_git_root_cache: Arc::new(crate::HostGitRootCache::new()),
         // No session: this context never persists tool output.
         session_id: None,
         fs,
@@ -904,6 +905,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
     use telemetry::AnalyticsBus;
 
     super::BuiltinToolContext {
+        host_git_root_cache: Arc::new(crate::HostGitRootCache::new()),
         // No session: this context never persists tool output.
         session_id: None,
         fs: make_dummy_fs(),

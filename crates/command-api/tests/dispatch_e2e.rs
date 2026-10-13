@@ -6,9 +6,9 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 7.
 
-use command_api::builtins::register_all_builtin_commands;
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
+use command_api::builtins::register_all_builtin_commands;
 use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -26,15 +26,25 @@ async fn dataviz_dispatches_bundled_body_and_optional_user_request() {
     let outcome = d
         .dispatch("/dataviz make the revenue chart keyboard accessible".into())
         .await;
-    let SlashDispatchResult::RunAsTurn { prompt } = outcome else {
+    let SlashDispatchResult::RunSkillAsTurn {
+        command,
+        body,
+        hook_messages,
+    } = outcome
+    else {
         panic!("expected /dataviz to run as a prompt turn, got {outcome:?}");
     };
-    let text = prompt.string_at("").unwrap();
-    assert!(text.starts_with("# Data Visualization\n"));
-    assert!(text.contains("references/palette.md"));
-    assert!(text.contains("references/marks-and-anatomy.md"));
-    assert!(text.contains("references/interaction.md"));
-    assert!(text.ends_with("## User Request\n\nmake the revenue chart keyboard accessible"));
+    assert_eq!(
+        command.string_at(""),
+        Some(
+            "<command-message>dataviz</command-message>\n<command-name>/dataviz</command-name>\n<command-args>make the revenue chart keyboard accessible</command-args>"
+        )
+    );
+    let dataviz_body = include_str!("../src/builtins/bundled/dataviz_body.md");
+    let expected_body =
+        format!("{dataviz_body}\n\n## User Request\n\nmake the revenue chart keyboard accessible");
+    assert_eq!(body.string_at(""), Some(expected_body.as_str()));
+    assert!(hook_messages.is_empty());
 }
 
 #[tokio::test]
@@ -79,13 +89,22 @@ async fn known_command_with_args_ignored_by_stub() {
 async fn native_doctor_dispatches_the_bundled_prompt() {
     let d = build_dispatcher();
     let outcome = d.dispatch("/doctor".into()).await;
-    let SlashDispatchResult::RunAsTurn { prompt } = outcome else {
+    let SlashDispatchResult::RunSkillAsTurn {
+        command,
+        body,
+        hook_messages,
+    } = outcome
+    else {
         panic!("expected /doctor bundled prompt turn, got {outcome:?}");
     };
-    assert!(prompt
-        .string_at("")
-        .unwrap()
-        .starts_with("# LingXi Checkup\n"));
+    assert_eq!(
+        command.string_at(""),
+        Some("<command-message>doctor</command-message>\n<command-name>/doctor</command-name>")
+    );
+    let expected_body =
+        include_str!("../src/builtins/bundled/checkup_body.md").trim_end_matches('\n');
+    assert_eq!(body.string_at(""), Some(expected_body));
+    assert!(hook_messages.is_empty());
 }
 
 #[tokio::test]

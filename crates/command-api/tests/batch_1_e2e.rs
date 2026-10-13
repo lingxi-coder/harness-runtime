@@ -6,9 +6,9 @@
 //!
 //! M5-10 Task 12.
 
-use command_api::builtins::{register_all_builtin_commands, register_core_batch_1};
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
+use command_api::builtins::{INIT_PROMPT, register_all_builtin_commands, register_core_batch_1};
 use lingxi_core::host::{CompactionSummary, SlashCommandDispatcher, SlashDispatchResult};
 use orchestrator::test_support::MockOrchestratorHandle;
 use std::sync::Arc;
@@ -105,17 +105,21 @@ async fn memory_dispatch() {
 }
 
 #[tokio::test]
-async fn init_dispatch_returns_handled_with_template_text() {
-    // /init returns InjectMessage; the dispatcher maps InjectMessage to
-    // Handled { display: content } per M5-09 Task 5 step 4.
+async fn init_dispatch_preserves_native_prompt_envelope_and_locked_template() {
     let (d, _) = fresh();
     let r = d.dispatch("/init".into()).await;
     match r {
-        SlashDispatchResult::Handled { display } => {
-            assert!(display
-                .string_at("")
-                .unwrap()
-                .starts_with("Please analyze this codebase"));
+        SlashDispatchResult::RunSkillAsTurn {
+            command,
+            body,
+            hook_messages,
+        } => {
+            assert_eq!(
+                command.string_at(""),
+                Some("<command-message>init</command-message>\n<command-name>/init</command-name>")
+            );
+            assert_eq!(body.string_at(""), Some(INIT_PROMPT.as_str()));
+            assert!(hook_messages.is_empty());
         }
         other => panic!("{other:?}"),
     }

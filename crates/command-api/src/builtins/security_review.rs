@@ -11,22 +11,34 @@
 //! its `_args`, so there is no user-arg interpolation here.
 
 use crate::builtin_support::names::core_description;
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{BuiltinCommandHandler, CommandResult, NativePromptPreparation};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 
+const OUTSIDE_WORKTREE_PREFIX: &str = "Tell the user: /security-review needs to run inside a git repository, but the current working directory (`";
+const OUTSIDE_WORKTREE_SUFFIX: &str = r#"`) is not one.
+
+If the repository is in a subdirectory, `cd` into it first and then re-run /security-review.
+
+If this is a self-hosted runner session created without a `git_repository` source, either add one at session creation so the runner clones it and sets the working directory, or `cd` into the cloned repo before running the review."#;
+
 /// Per-command allowed-tools for `/security-review`, adapted to current registry names from the TS
-/// `security-review.ts:7` frontmatter `allowed-tools` line
-/// (`Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git show:*),
-/// Bash(git remote show:*), Read, Glob, Grep, LS, Agent`). Injected into a fresh
-/// per-command effective policy before the embedded `!`git …`` bodies are
-/// expanded. Surfaced via [`SecurityReviewHandler::allowed_tools`].
+/// `security-review.ts:7` frontmatter `allowed-tools` line. Both shell tool
+/// families are retained in Native order; `Task` maps to the current `Agent`
+/// registry name. Injected into a fresh per-command effective policy before
+/// the embedded `!`git …`` bodies are expanded. Surfaced via
+/// [`SecurityReviewHandler::allowed_tools`].
 pub const ALLOWED_TOOLS: &[&str] = &[
     "Bash(git diff:*)",
+    "PowerShell(git diff:*)",
     "Bash(git status:*)",
+    "PowerShell(git status:*)",
     "Bash(git log:*)",
+    "PowerShell(git log:*)",
     "Bash(git show:*)",
+    "PowerShell(git show:*)",
     "Bash(git remote show:*)",
+    "PowerShell(git remote show:*)",
     "Read",
     "Glob",
     "Grep",
@@ -262,6 +274,13 @@ impl BuiltinCommandHandler for SecurityReviewHandler {
         Some(crate::model::NativeCommandType::Prompt)
     }
 
+    fn native_prompt_preparation(&self) -> Option<NativePromptPreparation> {
+        Some(NativePromptPreparation::GitWorktreeShell {
+            outside_worktree_prefix: OUTSIDE_WORKTREE_PREFIX.into(),
+            outside_worktree_suffix: OUTSIDE_WORKTREE_SUFFIX.into(),
+        })
+    }
+
     fn allowed_tools(&self) -> &'static [&'static str] {
         ALLOWED_TOOLS
     }
@@ -271,6 +290,7 @@ impl BuiltinCommandHandler for SecurityReviewHandler {
 mod tests {
     use super::*;
     use crate::model::SourceTextTestExt;
+    use sha2::{Digest, Sha256};
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
@@ -289,6 +309,36 @@ mod tests {
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn prompt_matches_independent_native_295_body_fixture() {
+        let native_body = include_str!("../../tests/fixtures/native_295/security_review_body.md");
+        assert_eq!(SECURITY_REVIEW_PROMPT.as_bytes(), native_body.as_bytes());
+        assert_eq!(SECURITY_REVIEW_PROMPT.len(), 10_589);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(SECURITY_REVIEW_PROMPT.as_bytes())),
+            "a781b24682c1b58a326c7bae854f66cdc149823f03cfe3fa85100f4093f23ef8"
+        );
+    }
+
+    #[test]
+    fn preparation_preserves_native_outside_worktree_text_around_dynamic_cwd() {
+        let Some(NativePromptPreparation::GitWorktreeShell {
+            outside_worktree_prefix,
+            outside_worktree_suffix,
+        }) = SecurityReviewHandler::new().native_prompt_preparation()
+        else {
+            panic!("security-review declares its Native producer preparation");
+        };
+        assert_eq!(
+            outside_worktree_prefix.string_at(""),
+            Some("Tell the user: /security-review needs to run inside a git repository, but the current working directory (`")
+        );
+        assert_eq!(
+            outside_worktree_suffix.string_at(""),
+            Some(OUTSIDE_WORKTREE_SUFFIX)
+        );
     }
 
     #[tokio::test]
@@ -333,10 +383,15 @@ mod tests {
             h.allowed_tools(),
             &[
                 "Bash(git diff:*)",
+                "PowerShell(git diff:*)",
                 "Bash(git status:*)",
+                "PowerShell(git status:*)",
                 "Bash(git log:*)",
+                "PowerShell(git log:*)",
                 "Bash(git show:*)",
+                "PowerShell(git show:*)",
                 "Bash(git remote show:*)",
+                "PowerShell(git remote show:*)",
                 "Read",
                 "Glob",
                 "Grep",

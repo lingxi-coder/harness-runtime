@@ -1072,7 +1072,7 @@ fn json_type_name(value: &Value) -> &'static str {
 }
 
 fn anthropic_metadata(model: &str) -> lingxi_core::host::ModelMetadata {
-    use crate::model::context_window::{context_window_for_model, max_output_tokens_for_model};
+    use crate::model::context_window::{context_window_for_model, output_token_limit_for_model};
 
     let rates = match model {
         "claude-sonnet-5" => Some((2.0, 10.0, 0.2, 2.5)),
@@ -1088,22 +1088,7 @@ fn anthropic_metadata(model: &str) -> lingxi_core::host::ModelMetadata {
         input_modalities: vec!["text".to_string(), "image".to_string(), "pdf".to_string()],
         output_modalities: vec!["text".to_string()],
         context_window_tokens: Some(context_window_for_model(model, &[])),
-        max_output_tokens: Some(
-            if matches!(
-                model,
-                "claude-fable-5-1"
-                    | "claude-mythos-5-1"
-                    | "claude-opus-5"
-                    | "claude-opus-5-5"
-                    | "claude-sonnet-5"
-            ) {
-                128_000
-            } else if model == "claude-haiku-4-5" {
-                64_000
-            } else {
-                max_output_tokens_for_model(model)
-            },
-        ),
+        max_output_tokens: Some(output_token_limit_for_model(model)),
         pricing: rates.map(|(input, output, cache_read, cache_write)| {
             lingxi_core::host::ModelPricing {
                 billing_mode: lingxi_core::host::ModelBillingMode::PerToken,
@@ -1385,6 +1370,19 @@ mod tests {
 
     #[test]
     fn native_provider_opus_defaults_keep_exact_request_ids_and_model_metadata() {
+        use crate::model::context_window::{
+            default_output_tokens_for_model, output_token_limit_for_model,
+        };
+
+        // Listing metadata carries the hard cap; normal turn construction
+        // keeps the distinct, smaller native default for Opus 4.6.
+        assert_eq!(output_token_limit_for_model("claude-opus-4-6"), 128_000);
+        assert_eq!(output_token_limit_for_model("claude-opus-5-5"), 128_000);
+        if std::env::var_os("LINGXI_MAX_OUTPUT_TOKENS").is_none() {
+            assert_eq!(default_output_tokens_for_model("claude-opus-4-6"), 64_000);
+            assert_eq!(default_output_tokens_for_model("claude-opus-5-5"), 128_000);
+        }
+
         let providers = BTreeMap::from([
             (
                 "bedrock".to_string(),

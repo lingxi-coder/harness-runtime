@@ -228,6 +228,23 @@ async fn background_pipeline() {
         ready: Notify,
         rows: Mutex<Vec<String>>,
     }
+    impl Output {
+        fn row_count(&self) -> usize {
+            self.rows.lock().unwrap().len()
+        }
+
+        async fn wait_for_row_count(&self, target: usize) {
+            loop {
+                let notified = self.ready.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.row_count() >= target {
+                    return;
+                }
+                notified.await;
+            }
+        }
+    }
     #[async_trait]
     impl OutputStream for Output {
         async fn emit_text(&self, _: &Utf16JsonProjection) {}
@@ -321,7 +338,81 @@ async fn background_pipeline() {
         classifier_response: Mutex<Utf16JsonProjection>,
         classifier_entered: Notify,
         entered: Notify,
+        suggestion_query_count: std::sync::atomic::AtomicUsize,
+        active_suggestion_queries: std::sync::atomic::AtomicUsize,
+        suggestion_queries_idle: Notify,
         release: Semaphore,
+    }
+    impl Client {
+        fn classifier_count(&self) -> usize {
+            self.classifiers.lock().unwrap().len()
+        }
+
+        fn suggestion_query_count(&self) -> usize {
+            self.suggestion_query_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        async fn wait_for_classifier_count(&self, target: usize) {
+            loop {
+                let notified = self.classifier_entered.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.classifier_count() >= target {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        async fn wait_for_suggestion_query_count(&self, target: usize) {
+            loop {
+                let notified = self.entered.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.suggestion_query_count() >= target {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        async fn wait_for_suggestion_queries_idle(&self) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let notified = self.suggestion_queries_idle.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if self
+                        .active_suggestion_queries
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        == 0
+                    {
+                        return;
+                    }
+                    notified.await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "timed out waiting for suggestion queries to become idle; active={}",
+                    self.active_suggestion_queries
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                )
+            });
+        }
+    }
+    struct ActiveSuggestionQuery<'a> {
+        active: &'a std::sync::atomic::AtomicUsize,
+        idle: &'a Notify,
+    }
+    impl Drop for ActiveSuggestionQuery<'_> {
+        fn drop(&mut self) {
+            self.active
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            self.idle.notify_waiters();
+        }
     }
     #[async_trait]
     impl sidequery::SideQueryClient for Client {
@@ -351,7 +442,7 @@ async fn background_pipeline() {
                     }
                 );
                 self.classifiers.lock().unwrap().push(request);
-                self.classifier_entered.notify_one();
+                self.classifier_entered.notify_waiters();
                 sidequery::SideQueryResponse {
                     text: Some(self.classifier_response.lock().unwrap().clone()),
                     structured: None,
@@ -385,7 +476,15 @@ async fn background_pipeline() {
                 sidequery::QuerySource::PromptSuggestion,
                 "explicit question must use native preclassification without a paid classifier request"
             );
-            self.entered.notify_one();
+            self.active_suggestion_queries
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _active = ActiveSuggestionQuery {
+                active: &self.active_suggestion_queries,
+                idle: &self.suggestion_queries_idle,
+            };
+            self.suggestion_query_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.notify_waiters();
             self.release.acquire().await.unwrap().forget();
             Ok(sidequery::SideQueryResponse {
                 text: Some("Use the first option".into()),
@@ -406,6 +505,9 @@ async fn background_pipeline() {
         )),
         classifier_entered: Notify::new(),
         entered: Notify::new(),
+        suggestion_query_count: std::sync::atomic::AtomicUsize::new(0),
+        active_suggestion_queries: std::sync::atomic::AtomicUsize::new(0),
+        suggestion_queries_idle: Notify::new(),
         release: Semaphore::new(0),
     });
     let settings = Arc::new(Settings::default());
@@ -472,19 +574,37 @@ async fn background_pipeline() {
     })
     .await
     .unwrap();
+    let first_query = client.suggestion_query_count() + 1;
     orch.run_turn_streaming("Prepare alternatives")
         .await
         .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.wait_for_suggestion_query_count(first_query),
+    )
+    .await
+    .unwrap();
+    // Keep the first generation pending and start a newer turn. Its cancellation
+    // must not be confused with a stale `Notify` permit from the first query.
+    let second_query = first_query + 1;
+    let first_output = output.row_count() + 1;
     orch.run_turn_streaming("Explain those options")
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), client.entered.notified())
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.wait_for_suggestion_query_count(second_query),
+    )
+    .await
+    .unwrap();
     client.release.add_permits(1);
-    tokio::time::timeout(std::time::Duration::from_secs(5), output.ready.notified())
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        output.wait_for_row_count(first_output),
+    )
+    .await
+    .unwrap();
+    client.wait_for_suggestion_queries_idle().await;
     let saved: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
     assert_eq!(saved["tempo"], "blocked");
@@ -496,12 +616,17 @@ async fn background_pipeline() {
         "unfocused bg may show a classifier-backed reply"
     );
 
+    let changed_query = client.suggestion_query_count() + 1;
+    let changed_output = output.row_count() + 1;
     orch.run_turn_streaming("Consider another option")
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), client.entered.notified())
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.wait_for_suggestion_query_count(changed_query),
+    )
+    .await
+    .unwrap();
     let mut changed: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
     changed["needs"] = json!("An external permission now needs attention");
@@ -509,9 +634,13 @@ async fn background_pipeline() {
         .await
         .unwrap();
     client.release.add_permits(1);
-    tokio::time::timeout(std::time::Duration::from_secs(5), output.ready.notified())
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        output.wait_for_row_count(changed_output),
+    )
+    .await
+    .unwrap();
+    client.wait_for_suggestion_queries_idle().await;
     let saved: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
     assert!(
@@ -526,12 +655,15 @@ async fn background_pipeline() {
         if denied {
             *settings.0.lock().unwrap() = json!({"deniedModels":["haiku"]});
         }
+        let classifier_target = client.classifier_count() + 1;
+        let suggestion_target = client.suggestion_query_count() + 1;
+        let output_target = output.row_count() + 1;
         orch.run_turn_streaming("Compare the implementation components")
             .await
             .unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.classifier_entered.notified(),
+            client.wait_for_classifier_count(classifier_target),
         )
         .await
         .unwrap();
@@ -545,31 +677,44 @@ async fn background_pipeline() {
             }
         );
         drop(requests);
-        tokio::time::timeout(std::time::Duration::from_secs(5), client.entered.notified())
-            .await
-            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.wait_for_suggestion_query_count(suggestion_target),
+        )
+        .await
+        .unwrap();
         client.release.add_permits(1);
-        tokio::time::timeout(std::time::Duration::from_secs(5), output.ready.notified())
-            .await
-            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            output.wait_for_row_count(output_target),
+        )
+        .await
+        .unwrap();
+        client.wait_for_suggestion_queries_idle().await;
     }
     for unit in [0xd800_u16, 0xdfff_u16] {
         *client.classifier_response.lock().unwrap() = Utf16JsonProjection::from(format!(
             r#"{{"state":"blocked","tempo":"blocked","needs":"\u{unit:04x}"}}"#
         ));
         let event_start = analytics_sink.events().await.len();
+        let classifier_target = client.classifier_count() + 1;
+        let suggestion_target = client.suggestion_query_count() + 1;
+        let output_target = output.row_count() + 1;
         orch.run_turn_streaming("Compare the implementation components")
             .await
             .unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.classifier_entered.notified(),
+            client.wait_for_classifier_count(classifier_target),
         )
         .await
         .unwrap();
-        if tokio::time::timeout(std::time::Duration::from_secs(5), client.entered.notified())
-            .await
-            .is_err()
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.wait_for_suggestion_query_count(suggestion_target),
+        )
+        .await
+        .is_err()
         {
             let classifier_response = client.classifier_response.lock().unwrap().clone();
             let disk_projection = tokio::fs::read(&path)
@@ -605,13 +750,17 @@ async fn background_pipeline() {
                 .filter_map(|event| event.metadata.get("reason").cloned())
                 .collect::<Vec<_>>();
             panic!(
-                "D800 classifier did not start suggestion query; suppression reasons={suppression_reasons:?}; classifier result={classifier_result}; persisted state={disk_state}"
+                "UTF-16 need U+{unit:04X} classifier did not start suggestion query; suppression reasons={suppression_reasons:?}; classifier result={classifier_result}; persisted state={disk_state}"
             );
         }
         client.release.add_permits(1);
-        tokio::time::timeout(std::time::Duration::from_secs(5), output.ready.notified())
-            .await
-            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            output.wait_for_row_count(output_target),
+        )
+        .await
+        .unwrap();
+        client.wait_for_suggestion_queries_idle().await;
 
         let bytes = tokio::fs::read(&path).await.unwrap();
         let json_text = std::str::from_utf8(&bytes).unwrap();

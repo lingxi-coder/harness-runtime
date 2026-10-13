@@ -4318,6 +4318,7 @@ pub async fn build_with_credential_stack(
     // later edit could let drift apart.
     let desktop_audio = cfg.audio.clone();
     let tool_ctx = BuiltinToolContext {
+        host_git_root_cache: cfg.host_git_root_cache.clone(),
         // The live session, so tools that persist oversized output can write to
         // claude-code's session-scoped `<projects>/<session-id>/tool-results/`
         // instead of dropping artifacts inside the user's repository. Same

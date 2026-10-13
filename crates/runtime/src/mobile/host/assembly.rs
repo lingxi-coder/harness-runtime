@@ -1783,6 +1783,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     local_agent_status_sink.bind(task_registry.clone());
     let tool_ctx = BuiltinToolContext {
+        host_git_root_cache: cfg.host_git_root_cache.clone(),
         // No session: this context never persists tool output.
         session_id: None,
         // FILE.B / P1-06: file tools share the ONE per-session read-state map

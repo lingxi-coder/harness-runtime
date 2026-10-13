@@ -8,12 +8,12 @@
 //! M5-11 Task 15.
 
 use async_trait::async_trait;
+use command_api::CommandRegistry;
+use command_api::RegistrySlashDispatcher;
 use command_api::builtins::{
     register_all_builtin_commands, register_bundled_skills, register_core_batch_1,
     register_core_batch_2,
 };
-use command_api::CommandRegistry;
-use command_api::RegistrySlashDispatcher;
 use lingxi_core::host::{
     AgentInfo, AuthError, AuthHandle, HookInfo, LoginInfo, McpServerInfo, McpStatus,
     SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
@@ -287,11 +287,20 @@ async fn status_dispatch() {
 async fn doctor_dispatch() {
     let (d, _) = fresh();
     let r = d.dispatch("/doctor".into()).await;
-    let SlashDispatchResult::RunAsTurn { prompt } = r else {
+    let SlashDispatchResult::RunSkillAsTurn {
+        command,
+        body,
+        hook_messages,
+    } = r
+    else {
         panic!("Native /doctor is a bundled prompt, got {r:?}");
     };
-    assert!(prompt
-        .string_at("")
-        .unwrap()
-        .starts_with("# LingXi Checkup\n"));
+    assert_eq!(
+        command.string_at(""),
+        Some("<command-message>doctor</command-message>\n<command-name>/doctor</command-name>")
+    );
+    let expected_body =
+        include_str!("../src/builtins/bundled/checkup_body.md").trim_end_matches('\n');
+    assert_eq!(body.string_at(""), Some(expected_body));
+    assert!(hook_messages.is_empty());
 }

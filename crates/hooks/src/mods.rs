@@ -15807,8 +15807,11 @@ mod tests {
         host.load("spin", dir.path(), &module, test_mod_options(json!({})))
             .await
             .unwrap();
+        // Let the Rust watchdog report its distinct failure if the VM budget
+        // does not interrupt the loop; the successful core result below is
+        // still required to prove this hook alone expired first.
         let answer = tokio::time::timeout(
-            Duration::from_secs(16),
+            WORKER_RESPONSE_BUDGET + Duration::from_secs(1),
             host.dispatch(
                 "tool.call",
                 test_projection(json!({"tool":"Bash"})),
