@@ -36,8 +36,10 @@ pub(crate) fn token_hash(access_token: &Secret<String>) -> TokenHash {
 }
 
 /// Minimal token access needed to perform the double-check under a read lock.
-pub(crate) trait RefreshableToken {
+pub trait RefreshableToken {
+    /// The bearer sent with requests.
     fn access_token(&self) -> &Secret<String>;
+    /// The token that redeems the next session, if the provider issued one.
     fn refresh_token(&self) -> Option<&Secret<String>>;
 }
 

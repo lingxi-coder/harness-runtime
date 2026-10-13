@@ -261,36 +261,6 @@ impl RuntimeSpawner for InstantSpawner {
     }
 }
 
-/// Spawner that parks every proactive loop: `spawn` drops the task and
-/// `sleep` never resolves, so a test observes install and release only.
-/// Tracks cancels.
-#[derive(Default)]
-pub struct ParkedSpawner {
-    next_id: AtomicU64,
-    pub canceled: Mutex<Vec<u64>>,
-}
-
-#[async_trait]
-impl RuntimeSpawner for ParkedSpawner {
-    async fn spawn(
-        &self,
-        name: &str,
-        _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<BackgroundTaskHandle, RuntimeError> {
-        Ok(BackgroundTaskHandle {
-            task_name: name.to_string(),
-            task_id: self.next_id.fetch_add(1, Ordering::SeqCst) + 1,
-        })
-    }
-    async fn sleep(&self, _duration: Duration) {
-        std::future::pending::<()>().await;
-    }
-    async fn cancel(&self, handle: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
-        self.canceled.lock().unwrap().push(handle.task_id);
-        Ok(())
-    }
-}
-
 /// Serialize tests that compete for a FIXED loopback port (OpenAI 1455/1457,
 /// Anthropic 45321).
 ///

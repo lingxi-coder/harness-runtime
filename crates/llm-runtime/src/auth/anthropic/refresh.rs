@@ -14,15 +14,16 @@
 #![allow(dead_code)]
 
 use crate::auth::anthropic::login::OAuthError;
-use crate::auth::lifecycle::{
-    self, BearerToken, OAuthHookError, Preflight, RefreshableToken, TokenHash,
+use crate::auth::lifecycle::{self, OAuthHookError, RefreshableToken, TokenHash};
+use crate::auth::token_manager::{
+    self, OAuthSession, OAuthTokenManager, RefreshEvents, SharedRefreshLock, SESSION_EXPIRED,
 };
 use async_trait::async_trait;
 use lingxi_core::types::Secret;
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::anthropic::{self as sdk, RefreshResponse, TokenError};
 use lingxi_llm_client::transport::Transport;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
@@ -88,6 +89,8 @@ pub struct AuthState {
     /// Optional credential manager for keychain persistence. `None` in tests
     /// that only exercise the in-memory token rotation.
     pub(crate) credentials: Option<Arc<secret::CredentialManager>>,
+    /// Shared with other processes that store this session.
+    pub(crate) shared_refresh: OnceLock<Arc<dyn SharedRefreshLock>>,
 }
 
 impl AuthState {
@@ -123,6 +126,7 @@ impl AuthState {
             clock,
             bus,
             credentials,
+            shared_refresh: OnceLock::new(),
         })
     }
 
@@ -150,6 +154,7 @@ impl AuthState {
             clock: Arc::new(NullClock),
             bus: None,
             credentials: None,
+            shared_refresh: OnceLock::new(),
         })
     }
 
@@ -166,31 +171,20 @@ impl AuthState {
     /// if a different one is passed, the handle may not be recognized and
     /// `cancel` returns `RuntimeError::NotFound` which we treat as a no-op.
     pub async fn shutdown(&self, spawner: &dyn lingxi_core::host::RuntimeSpawner) {
-        let handle = self.proactive_handle.write().await.take();
-        let Some(handle) = handle else {
-            // Already shut down — emit no event; matches v3 §16.4 idempotency.
-            return;
-        };
-        if let Err(e) = spawner.cancel(&handle).await {
-            tracing::warn!(
-                target: "lingxi::anthropic_oauth::shutdown",
-                error = ?e,
-                task_name = %handle.task_name,
-                "proactive task cancel returned error; treating as no-op",
-            );
-        }
-        emit_proactive_canceled(&self.bus, "engine_shutdown").await;
+        token_manager::shutdown(self, spawner).await;
     }
 
     /// Invalidate the in-memory token after persisted credentials are removed.
     /// This prevents an already-built engine from continuing to authenticate
     /// until its source is rebuilt.
     pub async fn invalidate(&self) {
-        let mut token = self.token.write().await;
-        token.access_token = Secret::new(String::new());
-        token.refresh_token = None;
-        token.expires_at = SystemTime::UNIX_EPOCH;
-        token.scopes.clear();
+        token_manager::invalidate(self).await;
+    }
+
+    /// Refresh only under `lock`, and adopt a session another process sharing
+    /// the store already rotated. The first lock wins.
+    pub fn share_refresh_across_processes(&self, lock: Arc<dyn SharedRefreshLock>) {
+        let _ = self.shared_refresh.set(lock);
     }
 
     /// Perform the actual HTTP refresh POST. Returns the parsed response on
@@ -274,152 +268,109 @@ impl lingxi_core::host::Clock for NullClock {
     }
 }
 
-/// Concrete `OAuthRefreshHook` impl: drives reactive + proactive refresh.
-///
-/// Construction is cheap — actual refresh work happens in `refresh()` (Task 4)
-/// and `spawn_proactive()` (Task 5).
-pub struct RefreshDriver {
-    pub(crate) state: Arc<AuthState>,
-}
+/// The Anthropic half of a Claude.ai session; [`OAuthTokenManager`] does the
+/// rest.
+#[async_trait]
+impl OAuthSession for AuthState {
+    type Token = TokenInfo;
 
-impl RefreshDriver {
-    /// Construct a driver over a shared `AuthState`.
-    #[must_use]
-    pub fn new(state: Arc<AuthState>) -> Self {
-        Self { state }
+    fn events(&self) -> &'static RefreshEvents {
+        &EVENTS
     }
 
-    /// Stop proactive refresh and invalidate this driver's in-memory token.
-    pub async fn invalidate(&self, spawner: &dyn lingxi_core::host::RuntimeSpawner) {
-        self.state.shutdown(spawner).await;
-        self.state.invalidate().await;
+    fn token(&self) -> &RwLock<TokenInfo> {
+        &self.token
     }
-}
 
-impl RefreshDriver {
-    /// Perform a single-flight OAuth token refresh.
-    ///
-    /// Inherent method (replaces the former `OAuthRefreshHook` trait impl from
-    /// api-client, removed in Plan 3a/3b). All callers within this crate
-    /// (`credential_provider.rs`, `proactive_loop`) and tests call this
-    /// directly without trait indirection.
-    ///
-    /// **Single-flight contract (v3 §16.3):** acquires `refresh_lock`, then
-    /// double-checks the `prev_token_hash`. If another task already rotated
-    /// the token under the lock, returns the current token without making an
-    /// HTTP call.
-    pub async fn refresh(&self, prev_token_hash: TokenHash) -> Result<BearerToken, OAuthHookError> {
-        // Keep this guard through the network request and state rotation.
-        let _guard = self.state.refresh_lock.lock().await;
-        let refresh_token = match lifecycle::preflight(&self.state.token, prev_token_hash).await? {
-            Preflight::AlreadyRotated(bearer) => return Ok(bearer),
-            Preflight::RefreshWith(token) => token,
-        };
+    fn refresh_lock(&self) -> &Arc<Mutex<()>> {
+        &self.refresh_lock
+    }
 
-        let started = std::time::Instant::now();
-        emit_refresh_started(&self.state.bus, "reactive_401").await;
+    fn proactive_task(&self) -> &RwLock<Option<lingxi_core::host::BackgroundTaskHandle>> {
+        &self.proactive_handle
+    }
 
-        // 4. Perform the HTTP refresh.
-        let body = match self.state.do_refresh_http(&refresh_token).await {
-            Ok(b) => b,
+    fn now(&self) -> SystemTime {
+        self.clock.now()
+    }
+
+    fn bus(&self) -> &Option<Arc<telemetry::AnalyticsBus>> {
+        &self.bus
+    }
+
+    fn shared_lock(&self) -> Option<&Arc<dyn SharedRefreshLock>> {
+        self.shared_refresh.get()
+    }
+
+    fn expires_at(token: &TokenInfo) -> SystemTime {
+        token.expires_at
+    }
+
+    /// `min(remaining/2, 5min)` before expiry (spec §7 line 721).
+    fn refresh_due_in(token: &TokenInfo, now: SystemTime) -> Duration {
+        let remaining = token
+            .expires_at
+            .duration_since(now)
+            .unwrap_or(Duration::ZERO);
+        remaining
+            .checked_sub(proactive_lead(remaining))
+            .unwrap_or(Duration::ZERO)
+    }
+
+    async fn exchange(&self, refresh_token: Secret<String>) -> Result<TokenInfo, OAuthHookError> {
+        let body = match self.do_refresh_http(&refresh_token).await {
+            Ok(body) => body,
             Err(OAuthError::RefreshExpired) => {
-                emit_refresh_failed(&self.state.bus, "reactive_401", "refresh_expired").await;
-                return Err(OAuthHookError::RefreshFailed(
-                    "Session expired. Re-authenticate?".into(),
-                ));
+                return Err(OAuthHookError::RefreshFailed(SESSION_EXPIRED.into()));
             }
-            Err(e) => {
-                emit_refresh_failed(&self.state.bus, "reactive_401", "provider_unreachable").await;
-                return Err(OAuthHookError::ProviderUnreachable(format!("{e}")));
-            }
+            Err(e) => return Err(OAuthHookError::ProviderUnreachable(format!("{e}"))),
         };
-
-        // 5. Build the new `TokenInfo`.
-        let now = self.state.clock.now();
-        let new_expiry = now + Duration::from_secs(body.expires_in);
-        let scopes = body.granted_scopes(&self.state.config);
-
-        let new_access_token_str = body.access_token.clone();
-        let new_info = TokenInfo {
+        let now = self.clock.now();
+        let scopes = body.granted_scopes(&self.config);
+        Ok(TokenInfo {
             access_token: Secret::new(body.access_token),
             refresh_token: body.refresh_token.map(Secret::new).or(Some(refresh_token)),
-            expires_at: new_expiry,
+            expires_at: now + Duration::from_secs(body.expires_in),
             scopes,
-        };
+        })
+    }
 
-        // 6. Atomic swap. The double-check-after-acquire above guarantees we're
-        //    the only writer in flight.
-        {
-            let mut guard = self.state.token.write().await;
-            *guard = new_info;
-        }
-
-        // 7. Persist to keychain (best-effort — never fails the refresh on a
-        //    keychain write error; the in-memory rotation succeeded).
-        if let Err(e) = self
-            .state
-            .persist_to_keychain(&*self.state.token.read().await)
+    async fn persist(&self, token: &TokenInfo) -> Result<(), String> {
+        self.persist_to_keychain(token)
             .await
-        {
-            tracing::warn!(
-                target: "lingxi::anthropic_oauth::refresh",
-                error = %e,
-                "keychain persistence failed; in-memory token is still rotated",
-            );
-        }
+            .map_err(|e| e.to_string())
+    }
 
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let new_expiry_unix = i64::try_from(
-            new_expiry
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        )
-        .unwrap_or(i64::MAX);
-        emit_refresh_succeeded(
-            &self.state.bus,
-            "reactive_401",
-            new_expiry_unix,
-            duration_ms,
-        )
-        .await;
+    async fn stored(&self) -> Option<TokenInfo> {
+        let stored = self.credentials.as_ref()?.get_oauth_tokens().await.ok()??;
+        Some(TokenInfo {
+            access_token: stored.access_token,
+            refresh_token: stored.refresh_token,
+            expires_at: stored.expires_at,
+            scopes: stored.scopes,
+        })
+    }
 
-        Ok(BearerToken(Secret::new(new_access_token_str)))
+    fn clear(token: &mut TokenInfo) {
+        token.access_token = Secret::new(String::new());
+        token.refresh_token = None;
+        token.expires_at = SystemTime::UNIX_EPOCH;
+        token.scopes.clear();
     }
 }
 
 // Provider event names stay distinct; metadata construction is shared.
-async fn emit_refresh_started(bus: &Option<Arc<telemetry::AnalyticsBus>>, trigger: &str) {
-    lifecycle::emit_refresh_started(bus, "tengu_oauth_refresh_started", trigger).await;
-}
+static EVENTS: RefreshEvents = RefreshEvents {
+    started: "tengu_oauth_refresh_started",
+    succeeded: "tengu_oauth_refresh_succeeded",
+    failed: "tengu_oauth_refresh_failed",
+    proactive_canceled: "tengu_oauth_proactive_canceled",
+    proactive_task: "lingxi-oauth-proactive-refresh",
+    provider: "anthropic",
+};
 
-async fn emit_refresh_succeeded(
-    bus: &Option<Arc<telemetry::AnalyticsBus>>,
-    trigger: &str,
-    new_expiry_unix: i64,
-    duration_ms: u64,
-) {
-    lifecycle::emit_refresh_succeeded(
-        bus,
-        "tengu_oauth_refresh_succeeded",
-        trigger,
-        new_expiry_unix,
-        duration_ms,
-    )
-    .await;
-}
-
-async fn emit_refresh_failed(
-    bus: &Option<Arc<telemetry::AnalyticsBus>>,
-    trigger: &str,
-    error_kind: &str,
-) {
-    lifecycle::emit_refresh_failed(bus, "tengu_oauth_refresh_failed", trigger, error_kind).await;
-}
-
-async fn emit_proactive_canceled(bus: &Option<Arc<telemetry::AnalyticsBus>>, reason: &str) {
-    lifecycle::emit_proactive_canceled(bus, "tengu_oauth_proactive_canceled", reason).await;
-}
+/// Drives reactive + proactive refresh of a Claude.ai session.
+pub type RefreshDriver = OAuthTokenManager<AuthState>;
 
 /// Maximum lead time before token expiry that the proactive refresh task wakes.
 ///
@@ -438,88 +389,6 @@ pub const PROACTIVE_LEAD_CAP: Duration = Duration::from_secs(5 * 60);
 #[must_use]
 pub fn proactive_lead(remaining: Duration) -> Duration {
     lifecycle::proactive_lead(remaining, PROACTIVE_LEAD_CAP)
-}
-
-impl RefreshDriver {
-    /// Spawn the proactive refresh task. Returns once the spawn handle is
-    /// stored in `state.proactive_handle`. The task itself loops until canceled
-    /// by `AuthState::shutdown`.
-    ///
-    /// Wake interval is `min(remaining_lifetime / 2, PROACTIVE_LEAD_CAP)`
-    /// before expiry (spec §7 line 721).
-    pub async fn spawn_proactive(
-        state: Arc<AuthState>,
-        spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
-    ) -> Result<(), OAuthError> {
-        let task_state = state.clone();
-        let task_spawner = spawner.clone();
-        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> =
-            Box::pin(async move {
-                proactive_loop(task_state, task_spawner).await;
-            });
-        let handle = spawner
-            .spawn("lingxi-oauth-proactive-refresh", fut)
-            .await
-            .map_err(|e| OAuthError::TokenExchange(format!("spawn failed: {e}")))?;
-        *state.proactive_handle.write().await = Some(handle);
-        Ok(())
-    }
-}
-
-/// The proactive task loop. Wakes at `min(remaining/2, 5min)` before expiry,
-/// calls `RefreshDriver::refresh`, and reschedules against the new expiry.
-async fn proactive_loop(
-    state: Arc<AuthState>,
-    spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
-) {
-    let driver = RefreshDriver::new(state.clone());
-    loop {
-        // Read current expiry + token_hash.
-        let (expires_at, prev_hash) = {
-            let t = state.token.read().await;
-            (t.expires_at, t.token_hash())
-        };
-        let now = state.clock.now();
-        let remaining = expires_at.duration_since(now).unwrap_or(Duration::ZERO);
-        let lead = proactive_lead(remaining);
-        let sleep_for = remaining.checked_sub(lead).unwrap_or(Duration::ZERO);
-
-        emit_refresh_started(&state.bus, "proactive_timer").await;
-
-        // Sleep until the wake instant. `RuntimeSpawner::sleep` lets tests
-        // virtualize time.
-        spawner.sleep(sleep_for).await;
-
-        // Fire a refresh. If it fails we emit a `_failed` event and back off
-        // for 30 seconds; on hard failure (RefreshExpired) we exit the loop —
-        // the next API call will surface the auth error to the user.
-        match driver.refresh(prev_hash).await {
-            Ok(_) => {
-                // Success — loop continues against the freshly-rotated token.
-                continue;
-            }
-            Err(OAuthHookError::RefreshFailed(msg))
-                if msg == "Session expired. Re-authenticate?" =>
-            {
-                tracing::error!(
-                    target: "lingxi::anthropic_oauth::proactive",
-                    "refresh_token expired; exiting proactive loop"
-                );
-                emit_refresh_failed(&state.bus, "proactive_timer", "refresh_expired").await;
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "lingxi::anthropic_oauth::proactive",
-                    error = ?e,
-                    "transient refresh failure; backing off 30s",
-                );
-                emit_refresh_failed(&state.bus, "proactive_timer", "provider_unreachable").await;
-                spawner.sleep(Duration::from_secs(30)).await;
-                continue;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
