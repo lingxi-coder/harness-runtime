@@ -11,20 +11,19 @@
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
 //! - Unknown literal template = "Unknown command: /{name}"
 
-use command_api::RegistrySlashDispatcher;
 use command_api::builtin_support::names::{
     BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES, CORRECT_BY_DESIGN_STUBS, HOST_BOUND_DEFERRED_GAPS,
 };
 use command_api::builtins::{
-    INIT_PROMPT, InsightsCommandAvailability, InsightsReport, InsightsReportProvider,
     register_all_builtin_commands, register_bundled_skills, register_core_batch_1,
     register_core_batch_2, register_core_batch_4, register_core_batch_5, register_core_batch_8,
-    register_insights_command,
+    register_insights_command, InsightsCommandAvailability, InsightsReport, InsightsReportProvider,
+    INIT_PROMPT,
 };
+use command_api::RegistrySlashDispatcher;
 use command_api::{
-    CommandRegistry, CommandResult, GitWorktreeContext,
-    ShellExpansionCtx, ShellExpansionProvider, ShellOut, ShellPermissionDecision,
-    ShellPermissionGate, ShellRunError, ShellRunner,
+    CommandRegistry, CommandResult, GitWorktreeContext, ShellExpansionCtx, ShellExpansionProvider,
+    ShellOut, ShellPermissionDecision, ShellPermissionGate, ShellRunError, ShellRunner,
 };
 use lingxi_core::host::{
     AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
@@ -669,11 +668,10 @@ fn reload_plugins_tracks_the_live_interactive_refresh_path() {
     assert_eq!(row.target_status, "implemented");
     assert_eq!(row.rust_status, "interactive_only");
     assert!(row.requires_tui);
-    assert!(
-        row.defer_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("PluginRuntime"))
-    );
+    assert!(row
+        .defer_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("PluginRuntime")));
 }
 
 #[test]
