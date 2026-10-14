@@ -81,6 +81,7 @@ llm_runtime::impl_fixture_transport!(Transport);
 
 fn identity_policy_request(query_source: QuerySource, system_prompt: &str) -> SideQueryRequest {
     SideQueryRequest {
+        model_source: None,
         enable_prompt_caching: false,
         model_attempt: None,
         native_prompt_context: None,
@@ -220,6 +221,7 @@ async fn session_prompt_suggestion_streams_with_parent_prefix_candidates_and_htt
         let result = client
             .query_fork(
                 SideQueryRequest {
+                    model_source: None,
                     enable_prompt_caching: true,
                     model_attempt: None,
                     native_prompt_context: None,

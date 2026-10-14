@@ -26,8 +26,9 @@ use async_trait::async_trait;
 use hooks::mods::ModSessionContext;
 use lingxi_core::host::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
-    HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome,
-    SkillInfo, StatusSnapshot,
+    HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, ModelRouteAnchor,
+    ModelSelectionOrigin, ModelSelectionRequest, ModelSourceBinding, ModelValidationMode,
+    OrchestratorHandle, RecapOutcome, SkillInfo, StatusSnapshot,
 };
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -50,6 +51,123 @@ fn source_text_block(
         utf16_code_units,
         citations: None,
     })
+}
+
+fn validation_failure_to_handle_error(
+    failure: crate::model_validation::NativeModelValidationFailure,
+) -> HandleError {
+    let message = failure
+        .message
+        .string_at("")
+        .unwrap_or("Unable to validate model")
+        .to_owned();
+    HandleError::ActionFailed(message)
+}
+
+fn model_selection_is_reset(request: &ModelSelectionRequest) -> bool {
+    match request {
+        ModelSelectionRequest::Reset { .. } => true,
+        ModelSelectionRequest::Select { origin, source, .. } => {
+            let Some(name) = crate::model_validation::TrimmedModelSource::from_projection(source)
+                .ok()
+                .and_then(|trimmed| {
+                    trimmed
+                        .source()
+                        .string_units("")
+                        .and_then(|units| String::from_utf16(&units).ok())
+                })
+            else {
+                return false;
+            };
+            match origin {
+                ModelSelectionOrigin::Command => name == "default",
+                ModelSelectionOrigin::Sdk => name.eq_ignore_ascii_case("default"),
+                ModelSelectionOrigin::Picker => false,
+            }
+        }
+    }
+}
+
+/// Strip a provider qualifier only when the entire remainder is an exact
+/// current catalog entry. Unknown slash-bearing IDs and invalid UTF-16 remain
+/// byte-for-byte source projections.
+fn verified_qualified_model_source(
+    source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    listings: &[lingxi_core::host::ModelListing],
+) -> (
+    lingxi_core::types::utf16_json::Utf16JsonProjection,
+    Option<ModelRouteAnchor>,
+) {
+    let Some(units) = source.string_units("") else {
+        return (source.clone(), None);
+    };
+    let Ok(text) = String::from_utf16(&units) else {
+        return (source.clone(), None);
+    };
+    let (model, Some(profile)) = lingxi_core::host::parse_model_ref(&text, listings) else {
+        return (source.clone(), None);
+    };
+    (
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from(model.clone()),
+        Some(ModelRouteAnchor {
+            model,
+            profile: Some(profile),
+        }),
+    )
+}
+
+fn native_display_model_name(model: &[u16]) -> String {
+    // Native `vw` removes every code unit outside `A-Za-z0-9._:/@[]-`, then
+    // substitutes an explicit placeholder for an empty result and truncates at
+    // 128 UTF-16 code units. The accepted set is ASCII, so filtering units is
+    // lossless even when the incoming source contains unpaired surrogates.
+    let filtered = model
+        .iter()
+        .copied()
+        .filter(|unit| {
+            matches!(
+                *unit,
+                0x41..=0x5a
+                    | 0x61..=0x7a
+                    | 0x30..=0x39
+                    | 0x2e
+                    | 0x5f
+                    | 0x3a
+                    | 0x2f
+                    | 0x40
+                    | 0x5b
+                    | 0x5d
+                    | 0x2d
+            )
+        })
+        .take(129)
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        return "(unrecognized model name)".to_owned();
+    }
+    let truncated = filtered.len() > 128;
+    let mut label = String::from_utf16(&filtered[..filtered.len().min(128)])
+        .expect("Native model display labels contain ASCII only");
+    if truncated {
+        label.push('…');
+    }
+    label
+}
+
+fn model_validation_timeout_error(mode: ModelValidationMode, model: &[u16]) -> HandleError {
+    let model = native_display_model_name(model);
+    let message = match mode {
+        ModelValidationMode::SlashOuterRaceDetached => format!(
+            "Couldn't confirm model '{model}' is available (the check timed out) · try again"
+        ),
+        ModelValidationMode::GzrAbortAfterFiveSeconds => {
+            format!("Couldn't confirm model {model} with the API")
+        }
+        ModelValidationMode::ServerProbeDisabled => {
+            "model validation timed out while server probing was disabled".to_owned()
+        }
+    };
+    HandleError::ActionFailed(message)
 }
 
 fn user_message_from_source(
@@ -82,6 +200,12 @@ fn assistant_message_from_source(
         resumable: None,
         per_turn_effort: None,
     })
+}
+
+fn model_switch_requested_model_source(
+    binding: Option<&ModelSourceBinding>,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    binding.map(|binding| binding.effective_source.clone())
 }
 
 /// Keep the session's provider-local wire model separate from the
@@ -193,6 +317,321 @@ impl ConversationOrchestrator {
         self.prompt_runtime.prepare_session_scoped_reset().await;
     }
 
+    async fn resolve_explicit_model_source(
+        &self,
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        route_hint: Option<ModelRouteAnchor>,
+        validation: ModelValidationMode,
+    ) -> Result<(String, Option<String>, ModelSourceBinding), HandleError> {
+        use crate::model_validation::{
+            prepare_native_model_validation, NativeModelProbeWait, NativeModelValidationDecision,
+            NativeModelValidationFacts,
+        };
+        use agent::model_resolution::ModelProviderKind;
+
+        let trimmed = crate::model_validation::TrimmedModelSource::from_projection(source)
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        let source = trimmed.source().clone();
+        let source_text = source
+            .string_units("")
+            .and_then(|units| String::from_utf16(&units).ok());
+        let route_listings = self.api.list_model_listings();
+        let (validation_source, qualified_route) =
+            verified_qualified_model_source(&source, &route_listings);
+        let validation_source_text = validation_source
+            .string_units("")
+            .and_then(|units| String::from_utf16(&units).ok());
+        let (current_model, current_profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        let fallback = qualified_route
+            .or_else(|| {
+                route_hint.filter(|hint| {
+                    route_listings.iter().any(|listing| {
+                        listing.request_model == hint.model
+                            && hint.profile.as_deref() == Some(listing.provider_id.as_str())
+                    })
+                })
+            })
+            .unwrap_or(ModelRouteAnchor {
+                model: current_model,
+                profile: current_profile,
+            });
+
+        let mut binding = None;
+        if let Some(source_text) = validation_source_text.as_deref() {
+            // Concrete catalog entries take their real provider route first.
+            // Relative aliases are resolved against the selected parent below.
+            let direct_route = self
+                .api
+                .resolve_media_route(source_text, fallback.profile.as_deref())
+                .or_else(|_| self.api.resolve_media_route(source_text, None));
+            if let Ok(route) = direct_route {
+                let registered_native_route = !Self::route_uses_native_model_catalog(&route)
+                    || route_listings.iter().any(|listing| {
+                        listing.request_model == route.main.request_model
+                            && listing.provider_id == route.main.profile_name
+                    });
+                if registered_native_route {
+                    binding = Some(ModelSourceBinding {
+                        source: source.clone(),
+                        effective_source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                            route.main.request_model.clone(),
+                        ),
+                        route_anchor: ModelRouteAnchor {
+                            model: route.main.request_model,
+                            profile: Some(route.main.profile_name),
+                        },
+                    });
+                }
+            }
+            if binding.is_none() {
+                if let Some(provider) = self.model_resolution_context_provider.as_ref() {
+                    if let Ok(parent) =
+                        provider.context_for_route(&fallback.model, fallback.profile.as_deref())
+                    {
+                        if let Ok(selection) = agent::model_resolution::resolve_user_model_selection(
+                            source_text,
+                            fallback.profile.as_deref(),
+                            &parent,
+                            provider.as_ref(),
+                        ) {
+                            if let Ok(route) = self.api.resolve_media_route(
+                                &selection.model,
+                                selection.model_profile.as_deref(),
+                            ) {
+                                binding = Some(ModelSourceBinding {
+                                    source: source.clone(),
+                                    effective_source:
+                                        lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                                            route.main.request_model.clone(),
+                                        ),
+                                    route_anchor: ModelRouteAnchor {
+                                        model: route.main.request_model,
+                                        profile: Some(route.main.profile_name),
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let was_resolved = binding.is_some();
+        let mut binding = match binding {
+            Some(binding) => binding,
+            None => {
+                let route = self
+                    .api
+                    .resolve_media_route(&fallback.model, fallback.profile.as_deref())
+                    .map_err(|error| {
+                        HandleError::ActionFailed(format!(
+                            "model selection has no routable provider anchor: {error}"
+                        ))
+                    })?;
+                ModelSourceBinding {
+                    source: source.clone(),
+                    effective_source: source.clone(),
+                    route_anchor: ModelRouteAnchor {
+                        model: route.main.request_model,
+                        profile: Some(route.main.profile_name),
+                    },
+                }
+            }
+        };
+
+        let route = self
+            .api
+            .resolve_media_route(
+                &binding.route_anchor.model,
+                binding.route_anchor.profile.as_deref(),
+            )
+            .map_err(|error| {
+                HandleError::ActionFailed(format!("model route is unavailable: {error}"))
+            })?;
+        if Self::route_uses_native_model_catalog(&route) {
+            if let Some(generation) = self.api.model_validation_account_generation() {
+                self.model_runtime
+                    .reset_native_model_validation_for_account(generation);
+            } else {
+                self.model_runtime.native_model_validation_cache.clear();
+            }
+            let policy_allowed = self
+                .model_catalog_allows_source(&validation_source)
+                .await
+                .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+            let route_context =
+                self.model_resolution_context_provider
+                    .as_ref()
+                    .and_then(|provider| {
+                        provider
+                            .context_for_route(
+                                &binding.route_anchor.model,
+                                binding.route_anchor.profile.as_deref(),
+                            )
+                            .ok()
+                    });
+            let provider = route_context
+                .as_ref()
+                .and_then(|context| context.route.provider)
+                .unwrap_or_else(|| match route.main.provider_id {
+                    llm_runtime::ProviderId::AnthropicFirstParty => ModelProviderKind::FirstParty,
+                    llm_runtime::ProviderId::BedrockClaude => ModelProviderKind::Bedrock,
+                    llm_runtime::ProviderId::VertexClaude => ModelProviderKind::Vertex,
+                    llm_runtime::ProviderId::FoundryClaude => ModelProviderKind::Foundry,
+                    _ => ModelProviderKind::Other,
+                });
+            let endpoint_is_native_host = route_context
+                .as_ref()
+                .and_then(|context| context.route.endpoint.as_deref())
+                .and_then(|endpoint| url::Url::parse(endpoint).ok())
+                .is_some_and(|endpoint| {
+                    let Some(host) = endpoint.host_str() else {
+                        return false;
+                    };
+                    let host_with_nondefault_port = endpoint
+                        .port()
+                        .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
+                    host_with_nondefault_port == "anthropic.com"
+                        || host_with_nondefault_port.ends_with(".anthropic.com")
+                });
+            let classifier_route_facts = self
+                .api
+                .classifier_model_route_facts(
+                    &binding.route_anchor.model,
+                    binding.route_anchor.profile.as_deref(),
+                )
+                .await
+                .ok();
+            let first_party_base_url = endpoint_is_native_host
+                || classifier_route_facts
+                    .as_ref()
+                    .is_some_and(|facts| facts.native_base_url);
+            // H has no observed owner for Native's `yfo(model)` and live
+            // `dSe()?.picker.options` facts. A route listing is not proof that
+            // Native offered a matching picker option, so keep this fast path
+            // closed until that exact producer is wired.
+            let picker_model_option_is_valid = false;
+            let custom_model_option_matches = self
+                .api
+                .model_validation_custom_model_option()
+                .is_some_and(|option| {
+                    crate::model_validation::TrimmedModelSource::from_projection(&validation_source)
+                        .is_ok_and(|trimmed| trimmed.code_units() == option.as_slice())
+                });
+            let decision = prepare_native_model_validation(
+                &validation_source,
+                NativeModelValidationFacts {
+                    policy_allowed,
+                    force_server_probe: false,
+                    server_probe: !matches!(validation, ModelValidationMode::ServerProbeDisabled),
+                    custom_model_option_matches,
+                    picker_model_option_is_valid,
+                    provider,
+                    first_party_base_url,
+                    // H has not yet connected Native's current per-catalog
+                    // post-overrides/default observations; keep suggestion
+                    // facts explicitly unknown instead of substituting family
+                    // defaults or inventing a mapping.
+                    suggestion_facts:
+                        lingxi_llm_client::protocol::NativeModelSuggestionFacts::unobserved(),
+                },
+                &self.model_runtime.native_model_validation_cache,
+            )
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+            match decision {
+                NativeModelValidationDecision::Accepted { model, .. } => {
+                    if !was_resolved {
+                        binding.effective_source = model.source().clone();
+                    }
+                }
+                NativeModelValidationDecision::Rejected(failure) => {
+                    return Err(validation_failure_to_handle_error(failure));
+                }
+                NativeModelValidationDecision::ProbeRequired(payload) => {
+                    let starting_generation =
+                        if validation == ModelValidationMode::GzrAbortAfterFiveSeconds {
+                            Some(self.api.model_validation_account_generation().ok_or_else(
+                                || {
+                                    HandleError::ActionFailed(
+                                        "model validation account generation is unavailable".into(),
+                                    )
+                                },
+                            )?)
+                        } else {
+                            None
+                        };
+                    let api = self.api.clone();
+                    let probe_model = binding.route_anchor.model.clone();
+                    let probe_profile = binding.route_anchor.profile.clone();
+                    let probe_source = validation_source.clone();
+                    let mut task = self
+                        .model_runtime
+                        .native_model_validation_cache
+                        .spawn_probe(&payload, async move {
+                            api.probe_model(&probe_model, probe_profile.as_deref(), &probe_source)
+                                .await
+                        });
+                    let result = match validation {
+                        ModelValidationMode::SlashOuterRaceDetached => task.wait().await,
+                        ModelValidationMode::GzrAbortAfterFiveSeconds => {
+                            let api = self.api.clone();
+                            task.abort_and_join(
+                                std::time::Duration::from_secs(5),
+                                starting_generation.expect(
+                                    "Gzr selection captured its authoritative account generation",
+                                ),
+                                move || {
+                                    api.model_validation_account_generation()
+                                        .unwrap_or(u64::MAX)
+                                },
+                            )
+                            .await
+                        }
+                        ModelValidationMode::ServerProbeDisabled => {
+                            return Err(HandleError::ActionFailed(
+                                "Native model selection unexpectedly requested a disabled probe"
+                                    .into(),
+                            ));
+                        }
+                    };
+                    match result {
+                        NativeModelProbeWait::Validated => {}
+                        NativeModelProbeWait::Rejected(failure) => {
+                            return Err(validation_failure_to_handle_error(failure));
+                        }
+                        NativeModelProbeWait::TimedOutDetached
+                        | NativeModelProbeWait::TimedOutAborted
+                        | NativeModelProbeWait::AccountGenerationChanged => {
+                            return Err(model_validation_timeout_error(
+                                validation,
+                                payload.model.code_units(),
+                            ));
+                        }
+                        NativeModelProbeWait::AlreadyReaped => {
+                            return Err(HandleError::ActionFailed(
+                                "model validation probe completed before it could be observed"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if !was_resolved {
+            return Err(HandleError::ActionFailed(format!(
+                "model {:?} is not available on the selected provider",
+                source_text.unwrap_or_else(|| "<non-UTF-16 model source>".into())
+            )));
+        }
+
+        Ok((
+            binding.route_anchor.model.clone(),
+            binding.route_anchor.profile.clone(),
+            binding,
+        ))
+    }
+
     /// Apply a model selection with Claude Code's pre/post model-switch hook
     /// ordering. The pre hook is only valid for user/requested sources; post is
     /// best-effort because the model mutation has already happened.
@@ -201,6 +640,8 @@ impl ConversationOrchestrator {
         model: &str,
         profile: Option<&str>,
         source: &str,
+        model_binding: Option<lingxi_core::host::ModelSourceBinding>,
+        clear_user_selection: bool,
     ) -> Result<(), HandleError> {
         // Unknown provenance must not become an accidental pre-hook bypass.
         // Legacy/third-party handle callers are SDK callers unless they use one
@@ -214,18 +655,29 @@ impl ConversationOrchestrator {
         // the next request snapshots the selection under the session lock.
         let _switch_guard = self.model_switch_gate.lock().await;
         let listings = self.api.list_model_listings();
-        let default_sentinel =
-            lingxi_core::host::effort::trim_js_whitespace(model).eq_ignore_ascii_case("default");
-        let model_for_route = if default_sentinel {
+        let default_sentinel = match source {
+            "command" => lingxi_core::host::effort::trim_js_whitespace(model) == "default",
+            "sdk" => {
+                lingxi_core::host::effort::trim_js_whitespace(model).eq_ignore_ascii_case("default")
+            }
+            _ => false,
+        };
+        let clear_user_selection = clear_user_selection || default_sentinel;
+        let model_for_route = if clear_user_selection {
             self.default_model()
         } else {
             model.to_owned()
         };
-        let profile_for_route = if default_sentinel { None } else { profile };
+        let profile_for_route = if clear_user_selection { None } else { profile };
         let (target_model, target_profile) =
             normalize_session_model_ref(&model_for_route, profile_for_route, &listings);
         let user_selection = matches!(source, "command" | "picker" | "sdk");
-        if user_selection && !default_sentinel {
+        if user_selection && !clear_user_selection && model_binding.is_none() {
+            return Err(HandleError::ActionFailed(
+                "model selection source is required for an explicit model pick".into(),
+            ));
+        }
+        if user_selection && !clear_user_selection {
             if let Ok(route) = self
                 .api
                 .resolve_media_route(&target_model, target_profile.as_deref())
@@ -242,21 +694,49 @@ impl ConversationOrchestrator {
                 }
             }
         }
-        let (from_model, from_profile) = {
+        let (from_model, from_profile, current_binding) = {
             let session = self.session.lock().await;
-            (session.model.clone(), session.model_profile.clone())
+            let current_binding = match session.user_model_setting_source {
+                lingxi_core::session::SessionModelSettingSource::Configured => self
+                    .model_runtime
+                    .configured_model_source
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+                lingxi_core::session::SessionModelSettingSource::UserSelection => {
+                    session.user_model_setting.clone()
+                }
+            };
+            (
+                session.model.clone(),
+                session.model_profile.clone(),
+                current_binding,
+            )
         };
-        if from_model == target_model && from_profile == target_profile {
+        let same_binding = match (&current_binding, &model_binding) {
+            (Some(current), Some(next)) => {
+                current.source.string_units("") == next.source.string_units("")
+                    && current.effective_source.string_units("")
+                        == next.effective_source.string_units("")
+                    && current.route_anchor == next.route_anchor
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if from_model == target_model
+            && from_profile == target_profile
+            && (!user_selection || same_binding)
+        {
             if user_selection {
                 let mut session = self.session.lock().await;
-                if default_sentinel {
+                if clear_user_selection {
                     session.user_model_setting = None;
                     session.user_model_setting_provenance =
                         lingxi_core::host::ModelProvenance::default();
                     session.user_model_setting_source =
                         lingxi_core::session::SessionModelSettingSource::Configured;
                 } else {
-                    session.user_model_setting = Some(model.to_owned());
+                    session.user_model_setting = model_binding.clone();
                     session.user_model_setting_provenance =
                         lingxi_core::host::ModelProvenance::UserOrEnv;
                     session.user_model_setting_source =
@@ -278,6 +758,7 @@ impl ConversationOrchestrator {
             return Ok(());
         }
 
+        let requested_model = model_switch_requested_model_source(model_binding.as_ref());
         if matches!(source, "command" | "picker" | "sdk") {
             self.model_runtime
                 .refusal_selection
@@ -288,7 +769,7 @@ impl ConversationOrchestrator {
                 .run_pre_model_switch_hooks(
                     &from_model,
                     &target_model,
-                    (!default_sentinel).then_some(model),
+                    requested_model.as_ref(),
                     target_profile.as_deref(),
                     source,
                 )
@@ -331,14 +812,14 @@ impl ConversationOrchestrator {
             session.model = target_model.clone();
             session.model_profile = target_profile.clone();
             if user_selection {
-                if default_sentinel {
+                if clear_user_selection {
                     session.user_model_setting = None;
                     session.user_model_setting_provenance =
                         lingxi_core::host::ModelProvenance::default();
                     session.user_model_setting_source =
                         lingxi_core::session::SessionModelSettingSource::Configured;
                 } else {
-                    session.user_model_setting = Some(model.to_owned());
+                    session.user_model_setting = model_binding.clone();
                     session.user_model_setting_provenance =
                         lingxi_core::host::ModelProvenance::UserOrEnv;
                     session.user_model_setting_source =
@@ -354,7 +835,7 @@ impl ConversationOrchestrator {
         self.run_post_model_switch_hooks(
             &from_model,
             &target_model,
-            (!default_sentinel).then_some(model),
+            requested_model.as_ref(),
             target_profile.as_deref(),
             source,
         )
@@ -638,7 +1119,9 @@ impl ConversationOrchestrator {
                 session.model_profile.clone(),
             )
         };
-        let requested_model = (!runtime.model.is_empty()).then(|| runtime.model.clone());
+        let requested_model = (!runtime.model.is_empty()).then(|| {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from(runtime.model.clone())
+        });
         let (target_model, target_profile) = if runtime.model.is_empty() {
             let profile = from_profile.clone().or_else(|| {
                 crate::query_model::server_session_serving_profile(&history, &from_model).flatten()
@@ -941,7 +1424,7 @@ impl ConversationOrchestrator {
             self.run_post_model_switch_hooks(
                 &from_model,
                 &to_model,
-                requested_model.as_deref(),
+                requested_model.as_ref(),
                 to_profile.as_deref(),
                 "resume",
             )
@@ -1619,18 +2102,73 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {
-        self.switch_model_with_hook_source(model, profile, "sdk")
+        self.switch_model_with_hook_source(model, profile, "auto", None, false)
             .await
     }
 
-    async fn switch_model_with_source(
+    async fn validate_model_selection(
         &self,
-        model: &str,
-        profile: Option<&str>,
-        source: &str,
+        request: &ModelSelectionRequest,
     ) -> Result<(), HandleError> {
-        self.switch_model_with_hook_source(model, profile, source)
-            .await
+        if model_selection_is_reset(request) {
+            return Ok(());
+        }
+        match request {
+            ModelSelectionRequest::Reset { .. } => Ok(()),
+            ModelSelectionRequest::Select {
+                source,
+                route_hint,
+                validation,
+                ..
+            } => self
+                .resolve_explicit_model_source(source, route_hint.clone(), *validation)
+                .await
+                .map(|_| ()),
+        }
+    }
+
+    async fn select_model(&self, request: ModelSelectionRequest) -> Result<(), HandleError> {
+        let origin = match &request {
+            ModelSelectionRequest::Reset { origin }
+            | ModelSelectionRequest::Select { origin, .. } => *origin,
+        };
+        let native_origin = match origin {
+            ModelSelectionOrigin::Command => "command",
+            ModelSelectionOrigin::Picker => "picker",
+            ModelSelectionOrigin::Sdk => "sdk",
+        };
+        if model_selection_is_reset(&request) {
+            return self
+                .switch_model_with_hook_source(
+                    &self.default_model(),
+                    None,
+                    native_origin,
+                    None,
+                    true,
+                )
+                .await;
+        }
+
+        let ModelSelectionRequest::Select {
+            source,
+            route_hint,
+            validation,
+            ..
+        } = request
+        else {
+            unreachable!("reset requests returned above")
+        };
+        let (model, profile, binding) = self
+            .resolve_explicit_model_source(&source, route_hint, validation)
+            .await?;
+        self.switch_model_with_hook_source(
+            &model,
+            profile.as_deref(),
+            native_origin,
+            Some(binding),
+            false,
+        )
+        .await
     }
 
     async fn fast_mode(&self) -> bool {
@@ -2671,9 +3209,23 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 ..CostSnapshot::default()
             }
         };
+        let source_binding = match s.user_model_setting_source {
+            lingxi_core::session::SessionModelSettingSource::Configured => self
+                .model_runtime
+                .configured_model_source
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            lingxi_core::session::SessionModelSettingSource::UserSelection => {
+                s.user_model_setting.clone()
+            }
+        };
         StatusSnapshot {
             session_id: s.session_id.to_string(),
             model: s.model.clone(),
+            model_source: source_binding.and_then(|binding| {
+                binding.effective_source_for_route(&s.model, s.model_profile.as_deref())
+            }),
             model_profile: s.model_profile.clone(),
             n_messages: u32::try_from(s.history.len()).unwrap_or(u32::MAX),
             total_cost_usd: cost.total_usd,
@@ -2956,7 +3508,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .model_context_keys()
     }
 
-    async fn context_usage_snapshot(&self) -> lingxi_core::host::ContextUsageSnapshot {
+    async fn context_usage_snapshot(
+        &self,
+    ) -> Result<lingxi_core::host::ContextUsageSnapshot, lingxi_core::settings::SettingsError> {
         use lingxi_core::host::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
 
         // Snapshot the live model and history together. The history component
@@ -2977,15 +3531,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // The system prompt and tool schemas are the bytes the next main-loop
         // request will advertise. Keep MCP definitions separate from ordinary
         // tools so both renderers can expose the same category split.
-        let system_prompt = self.effective_system_prompt_source().await;
-        let wire_tools = self.build_wire_tools().await.0;
+        let system_prompt = self.effective_system_prompt_source().await?;
+        let (wire_tools, _) = self.build_wire_tools().await?;
         let (mcp_tools, system_tools): (Vec<_>, Vec<_>) =
             wire_tools.into_iter().partition(is_mcp_wire_tool);
 
-        let memory_files = self.main_instruction_files().await.unwrap_or_else(|error| {
-            tracing::warn!(%error, "instruction context usage snapshot failed");
-            Arc::new(Vec::new())
-        });
+        let memory_files = self
+            .main_instruction_files()
+            .await
+            .map_err(|error| Self::source_settings_failure("instruction_context", error))?;
         let memory_tokens =
             estimate_bytes_as_tokens(crate::prompt::memory_block::format(&memory_files).len());
         let system_prompt_tokens = estimate_bytes_as_tokens(
@@ -3002,7 +3556,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // command/settings snapshot, then use the same budgeted lines as the
         // model-facing listing producer.
         let skill_listing = if let Some(provider) = self.skill_listing_provider() {
-            let listing = provider.skill_listing_snapshot().await;
+            let listing = provider.skill_listing_snapshot().await?;
             let (line_model, _) = self
                 .effective_main_loop_selection_for(&model, model_profile.as_deref(), &history, true)
                 .await;
@@ -3060,7 +3614,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .saturating_sub(live_context_tokens)
             .saturating_sub(autocompact_buffer);
 
-        lingxi_core::host::ContextUsageSnapshot {
+        Ok(lingxi_core::host::ContextUsageSnapshot {
             live_context_tokens,
             max_context_tokens,
             breakdown: vec![
@@ -3075,12 +3629,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
             ],
             skill_listing,
             cumulative_cost: self.snapshot_cost().await,
-        }
+        })
     }
 
-    async fn context_window_usage(&self) -> (u64, u64) {
-        let snapshot = self.context_usage_snapshot().await;
-        (snapshot.live_context_tokens, snapshot.max_context_tokens)
+    async fn context_window_usage(
+        &self,
+    ) -> Result<(u64, u64), lingxi_core::settings::SettingsError> {
+        let snapshot = self.context_usage_snapshot().await?;
+        Ok((snapshot.live_context_tokens, snapshot.max_context_tokens))
     }
 
     async fn list_resumable_sessions(&self) -> Vec<(String, String)> {
@@ -3410,6 +3966,111 @@ mod tests {
         StaticMemoryProvider,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn model_switch_requested_model_source_preserves_unpaired_utf16_and_absence() {
+        let units = "claude-custom-"
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let effective_source = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&units),
+            units.clone(),
+        )
+        .expect("source projection preserves the JavaScript string");
+        let binding = ModelSourceBinding {
+            source: effective_source.clone(),
+            effective_source,
+            route_anchor: ModelRouteAnchor {
+                model: "claude-haiku-4-5".into(),
+                profile: Some("anthropic".into()),
+            },
+        };
+
+        let requested = model_switch_requested_model_source(Some(&binding))
+            .expect("selection carries its exact effective source to hooks");
+        assert_eq!(requested.string_units(""), Some(units));
+        assert!(
+            model_switch_requested_model_source(None).is_none(),
+            "a Native reset with null requested_model must not synthesize a model string"
+        );
+    }
+
+    #[derive(Default)]
+    struct ModelSelectionApi {
+        probed_sources: std::sync::Mutex<Vec<Vec<u16>>>,
+    }
+
+    fn model_selection_route(model: &str) -> llm_runtime::MediaRoute {
+        llm_runtime::MediaRoute {
+            main: llm_runtime::ResolvedRoute {
+                provider_id: llm_runtime::ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".into(),
+                request_model: model.into(),
+                display_model: model.into(),
+                pricing_model: llm_runtime::PricingModelRef {
+                    pricing_provider_id: llm_runtime::ProviderId::AnthropicFirstParty,
+                    billing_model: model.into(),
+                    request_model: model.into(),
+                    display_model: model.into(),
+                },
+                capabilities: llm_runtime::Capabilities::default(),
+                connection_chain: Vec::new(),
+                failover: Default::default(),
+            },
+            vision_delegate: None,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::OrchestratorApiClient for ModelSelectionApi {
+        async fn messages_create(
+            &self,
+            _request: crate::OrchestratorApiRequest,
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+            Err(llm_runtime::LlmError::ModelUnavailable)
+        }
+
+        fn resolve_media_route(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+        ) -> Result<llm_runtime::MediaRoute, llm_runtime::LlmError> {
+            if model == "claude-known" && profile.is_none_or(|profile| profile == "anthropic") {
+                Ok(model_selection_route(model))
+            } else {
+                Err(llm_runtime::LlmError::ModelUnavailable)
+            }
+        }
+
+        fn list_model_listings(&self) -> Vec<lingxi_core::host::ModelListing> {
+            vec![lingxi_core::host::ModelListing {
+                request_model: "claude-known".into(),
+                display_model: "Friendly Claude".into(),
+                provider_id: "anthropic".into(),
+                ..Default::default()
+            }]
+        }
+
+        fn model_validation_account_generation(&self) -> Option<u64> {
+            Some(7)
+        }
+
+        async fn probe_model(
+            &self,
+            _route_model: &str,
+            _profile: Option<&str>,
+            source_model: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> Result<(), llm_runtime::LlmError> {
+            let units = source_model.string_units("").ok_or_else(|| {
+                llm_runtime::LlmError::InvalidRequest {
+                    message: "model source was not a JSON string".into(),
+                }
+            })?;
+            self.probed_sources.lock().unwrap().push(units);
+            Ok(())
+        }
+    }
 
     fn memory_warning_orchestrator() -> ConversationOrchestrator {
         let file = crate::prompt::MemoryFile {
@@ -3848,6 +4509,299 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verified_model_qualifier_strips_only_exact_registered_profile_references() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        let listings = vec![lingxi_core::host::ModelListing {
+            request_model: "claude-known".into(),
+            provider_id: "anthropic".into(),
+            ..Default::default()
+        }];
+        let qualified = Utf16JsonProjection::from("anthropic/claude-known");
+        let (native_source, route) = verified_qualified_model_source(&qualified, &listings);
+        assert_eq!(native_source.string_at(""), Some("claude-known"));
+        let route = route.expect("exact current catalog pair establishes the route");
+        assert_eq!(route.model, "claude-known");
+        assert_eq!(route.profile.as_deref(), Some("anthropic"));
+
+        for input in ["openrouter/openai/gpt-custom", "anthropic/claude-unknown"] {
+            let source = Utf16JsonProjection::from(input);
+            let (native_source, route) = verified_qualified_model_source(&source, &listings);
+            assert_eq!(native_source.string_units(""), source.string_units(""));
+            assert!(
+                route.is_none(),
+                "unregistered source must remain exact: {input}"
+            );
+        }
+
+        let invalid_units = "anthropic/claude-"
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let invalid = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&invalid_units),
+            invalid_units.clone(),
+        )
+        .expect("exact invalid UTF-16 source");
+        let (native_source, route) = verified_qualified_model_source(&invalid, &listings);
+        assert_eq!(
+            native_source.string_units("").as_deref(),
+            Some(invalid_units.as_slice())
+        );
+        assert!(route.is_none());
+    }
+
+    #[test]
+    fn reset_sentinel_is_caller_specific_and_shared_by_preflight_and_selection() {
+        use lingxi_core::host::{ModelSelectionOrigin, ModelSelectionRequest, ModelValidationMode};
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        let request = |name: &str, origin| ModelSelectionRequest::Select {
+            source: Utf16JsonProjection::from(name),
+            route_hint: None,
+            origin,
+            validation: ModelValidationMode::GzrAbortAfterFiveSeconds,
+        };
+        assert!(model_selection_is_reset(&request(
+            "default",
+            ModelSelectionOrigin::Command
+        )));
+        assert!(!model_selection_is_reset(&request(
+            "DEFAULT",
+            ModelSelectionOrigin::Command
+        )));
+        assert!(model_selection_is_reset(&request(
+            " DEFAULT ",
+            ModelSelectionOrigin::Sdk
+        )));
+        assert!(model_selection_is_reset(&request(
+            "default",
+            ModelSelectionOrigin::Sdk
+        )));
+        assert!(!model_selection_is_reset(&request(
+            "default",
+            ModelSelectionOrigin::Picker
+        )));
+        assert!(model_selection_is_reset(&ModelSelectionRequest::Reset {
+            origin: ModelSelectionOrigin::Picker,
+        }));
+    }
+
+    #[tokio::test]
+    async fn sdk_default_preflight_skips_probe_and_does_not_mutate_until_selection() {
+        use lingxi_core::host::{
+            ModelRouteAnchor, ModelSelectionOrigin, ModelSelectionRequest, ModelSourceBinding,
+            ModelValidationMode,
+        };
+        use lingxi_core::session::SessionModelSettingSource;
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        let api = Arc::new(ModelSelectionApi::default());
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "claude-known".into(),
+                ..Default::default()
+            },
+            api.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let previous = Utf16JsonProjection::from("claude-previous");
+        {
+            let mut session = orch.session.lock().await;
+            session.user_model_setting = Some(ModelSourceBinding {
+                source: previous.clone(),
+                effective_source: previous,
+                route_anchor: ModelRouteAnchor {
+                    model: "claude-known".into(),
+                    profile: Some("anthropic".into()),
+                },
+            });
+            session.user_model_setting_source = SessionModelSettingSource::UserSelection;
+        }
+        let session_id = orch.current_session_id().await;
+        let request = ModelSelectionRequest::Select {
+            source: Utf16JsonProjection::from("  DEFAULT  "),
+            route_hint: None,
+            origin: ModelSelectionOrigin::Sdk,
+            validation: ModelValidationMode::GzrAbortAfterFiveSeconds,
+        };
+
+        orch.validate_model_selection(&request)
+            .await
+            .expect("SDK default reset does not validate or probe a model");
+        assert_eq!(orch.current_session_id().await, session_id);
+        assert_eq!(
+            orch.session.lock().await.user_model_setting_source,
+            SessionModelSettingSource::UserSelection,
+            "preflight keeps the old session selection intact"
+        );
+        assert!(api.probed_sources.lock().unwrap().is_empty());
+
+        orch.select_model(request)
+            .await
+            .expect("apply the default reset after the session boundary");
+        let session = orch.session.lock().await;
+        assert_eq!(
+            session.user_model_setting_source,
+            SessionModelSettingSource::Configured
+        );
+        assert!(session.user_model_setting.is_none());
+        assert!(api.probed_sources.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn display_label_does_not_admit_native_picker_fast_path() {
+        use lingxi_core::host::{ModelSelectionOrigin, ModelSelectionRequest, ModelValidationMode};
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        let api = Arc::new(ModelSelectionApi::default());
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "claude-known".into(),
+                ..Default::default()
+            },
+            api.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let request = ModelSelectionRequest::Select {
+            source: Utf16JsonProjection::from("Friendly Claude"),
+            route_hint: None,
+            origin: ModelSelectionOrigin::Sdk,
+            validation: ModelValidationMode::GzrAbortAfterFiveSeconds,
+        };
+
+        orch.validate_model_selection(&request)
+            .await
+            .expect("the mock probe succeeds after the display label misses the local fast path");
+        assert_eq!(
+            api.probed_sources.lock().unwrap().as_slice(),
+            &["Friendly Claude".encode_utf16().collect::<Vec<_>>()],
+            "a display label is not Native's observed picker option model string"
+        );
+    }
+
+    #[test]
+    fn model_validation_timeout_message_preserves_native_caller_mode() {
+        use lingxi_core::host::HandleError;
+        use lingxi_core::host::ModelValidationMode;
+
+        let units = "claude-custom".encode_utf16().collect::<Vec<_>>();
+        let slash =
+            model_validation_timeout_error(ModelValidationMode::SlashOuterRaceDetached, &units);
+        assert!(matches!(
+            slash,
+            HandleError::ActionFailed(message)
+                if message == "Couldn't confirm model 'claude-custom' is available (the check timed out) · try again"
+        ));
+        let sdk =
+            model_validation_timeout_error(ModelValidationMode::GzrAbortAfterFiveSeconds, &units);
+        assert!(matches!(
+            sdk,
+            HandleError::ActionFailed(message)
+                if message == "Couldn't confirm model claude-custom with the API"
+        ));
+
+        let hostile_units = "claude custom'🦄".encode_utf16().collect::<Vec<_>>();
+        let slash = model_validation_timeout_error(
+            ModelValidationMode::SlashOuterRaceDetached,
+            &hostile_units,
+        );
+        assert!(matches!(
+            slash,
+            HandleError::ActionFailed(message)
+                if message == "Couldn't confirm model 'claudecustom' is available (the check timed out) · try again"
+        ));
+        let long_units = "x".repeat(129).encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            native_display_model_name(&long_units),
+            format!("{}…", "x".repeat(128))
+        );
+        assert_eq!(
+            native_display_model_name(&[0xd800]),
+            "(unrecognized model name)"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_selection_preflight_preserves_exact_source_and_reuses_validation_after_clear() {
+        use lingxi_core::host::{ModelSelectionOrigin, ModelSelectionRequest, ModelValidationMode};
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        let api = Arc::new(ModelSelectionApi::default());
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "claude-known".into(),
+                ..Default::default()
+            },
+            api.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let session_before = orch.current_session_id().await;
+        let source_units = "claude-custom-"
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let source = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&source_units),
+            source_units.clone(),
+        )
+        .expect("exact SDK source projection");
+        let request = ModelSelectionRequest::Select {
+            source,
+            route_hint: None,
+            origin: ModelSelectionOrigin::Sdk,
+            validation: ModelValidationMode::GzrAbortAfterFiveSeconds,
+        };
+
+        orch.validate_model_selection(&request)
+            .await
+            .expect("non-mutating model validation");
+        assert_eq!(orch.current_session_id().await, session_before);
+        assert_eq!(orch.session.lock().await.model, "claude-known");
+        assert_eq!(
+            api.probed_sources.lock().unwrap().as_slice(),
+            &[source_units.clone()]
+        );
+
+        orch.select_model(request)
+            .await
+            .expect("apply validated source after session boundary");
+        let snapshot = orch.get_status_snapshot().await;
+        assert_eq!(
+            snapshot.model, "claude-known",
+            "routing retains its known anchor"
+        );
+        assert_eq!(
+            snapshot
+                .model_source
+                .as_ref()
+                .and_then(|source| source.string_units("")),
+            Some(source_units.clone()),
+            "status exposes the exact logical model independently of the route anchor"
+        );
+        assert_eq!(
+            api.probed_sources.lock().unwrap().as_slice(),
+            &[source_units],
+            "the second policy/account check reuses the same-account validation cache"
+        );
+    }
+
     #[tokio::test]
     async fn accepted_same_route_selection_updates_raw_main_setting() {
         let api = Arc::new(MockApiClient::new(Vec::new()));
@@ -3867,17 +4821,45 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        orch.switch_model_with_hook_source("provider-a/wire-model", None, "command")
-            .await
-            .expect("qualified user selection");
-        orch.switch_model_with_hook_source("wire-model", Some("provider-a"), "picker")
-            .await
-            .expect("same route selection");
+        let binding = lingxi_core::host::ModelSourceBinding {
+            source: lingxi_core::types::utf16_json::Utf16JsonProjection::from("wire-model"),
+            effective_source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "wire-model",
+            ),
+            route_anchor: lingxi_core::host::ModelRouteAnchor {
+                model: "wire-model".into(),
+                profile: Some("provider-a".into()),
+            },
+        };
+        orch.switch_model_with_hook_source(
+            "provider-a/wire-model",
+            None,
+            "command",
+            Some(binding.clone()),
+            false,
+        )
+        .await
+        .expect("qualified user selection");
+        orch.switch_model_with_hook_source(
+            "wire-model",
+            Some("provider-a"),
+            "picker",
+            Some(binding),
+            false,
+        )
+        .await
+        .expect("same route selection");
 
         let session = orch.session.lock().await;
         assert_eq!(session.model, "wire-model");
         assert_eq!(session.model_profile.as_deref(), Some("provider-a"));
-        assert_eq!(session.user_model_setting.as_deref(), Some("wire-model"));
+        assert_eq!(
+            session
+                .user_model_setting
+                .as_ref()
+                .and_then(|binding| binding.source.string_at("")),
+            Some("wire-model")
+        );
         assert_eq!(
             session.user_model_setting_provenance,
             lingxi_core::host::ModelProvenance::UserOrEnv
@@ -3888,12 +4870,24 @@ mod tests {
         );
         drop(session);
 
-        orch.switch_model_with_hook_source("fallback-model", Some("provider-a"), "auto")
-            .await
-            .expect("automatic route fallback");
+        orch.switch_model_with_hook_source(
+            "fallback-model",
+            Some("provider-a"),
+            "auto",
+            None,
+            false,
+        )
+        .await
+        .expect("automatic route fallback");
         let session = orch.session.lock().await;
         assert_eq!(session.model, "fallback-model");
-        assert_eq!(session.user_model_setting.as_deref(), Some("wire-model"));
+        assert_eq!(
+            session
+                .user_model_setting
+                .as_ref()
+                .and_then(|binding| binding.source.string_at("")),
+            Some("wire-model")
+        );
         assert_eq!(
             session.user_model_setting_source,
             lingxi_core::session::SessionModelSettingSource::UserSelection
@@ -3924,6 +4918,15 @@ mod tests {
             message_id: id,
             context_tokens: 200_001.0,
         };
+        let selection_units = "opusplan"
+            .encode_utf16()
+            .chain([0xD800])
+            .collect::<Vec<_>>();
+        let selection_source = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&selection_units),
+            selection_units.clone(),
+        )
+        .expect("hot-resume model selection source");
         lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
             lingxi_core::types::SessionId::new(),
@@ -3932,7 +4935,16 @@ mod tests {
             None,
             lingxi_core::host::ResumeRuntimeSnapshot {
                 main_loop_latest_assistant_usage: Some(usage.clone()),
-                user_model_setting: Some("opusplan".into()),
+                user_model_setting: Some(lingxi_core::host::ModelSourceBinding {
+                    source: selection_source.clone(),
+                    effective_source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                        "claude-opus",
+                    ),
+                    route_anchor: lingxi_core::host::ModelRouteAnchor {
+                        model: "claude-opus".into(),
+                        profile: None,
+                    },
+                }),
                 user_model_setting_provenance: Some(lingxi_core::host::ModelProvenance::UserOrEnv),
                 user_model_setting_source: Some(
                     lingxi_core::session::SessionModelSettingSource::UserSelection,
@@ -3944,7 +4956,14 @@ mod tests {
         .expect("hot resume");
 
         let session = orch.session.lock().await;
-        assert_eq!(session.user_model_setting.as_deref(), Some("opusplan"));
+        assert_eq!(
+            session
+                .user_model_setting
+                .as_ref()
+                .and_then(|binding| binding.source.string_units("")),
+            Some(selection_units),
+            "hot resume retains an unpaired source unit without UTF-8 conversion"
+        );
         assert_eq!(
             session.user_model_setting_source,
             lingxi_core::session::SessionModelSettingSource::UserSelection
@@ -5182,7 +6201,7 @@ mod tests {
             let s = orch.session.lock().await;
             compaction::grouping::estimate_tokens_for_range(&s.history)
         };
-        let snapshot = orch.context_usage_snapshot().await;
+        let snapshot = orch.context_usage_snapshot().await.unwrap();
         let used = snapshot.live_context_tokens;
         let max = snapshot.max_context_tokens;
         let messages = snapshot
@@ -5233,7 +6252,7 @@ mod tests {
         };
         let provider = Arc::new(LazySkillListingProvider::new(move || {
             let listing = listing.clone();
-            async move { listing }
+            async move { Ok(listing) }
         }));
         let orch = crate::ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),
@@ -5247,7 +6266,7 @@ mod tests {
         )
         .with_skill_listing(provider);
 
-        let snapshot = orch.context_usage_snapshot().await;
+        let snapshot = orch.context_usage_snapshot().await.unwrap();
         let listing = snapshot
             .skill_listing
             .expect("the wired listing provider supplies /context diagnostics");

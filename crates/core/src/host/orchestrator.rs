@@ -811,11 +811,12 @@ pub struct ResumeRuntimeSnapshot {
     /// preserves compatibility with transcripts written before profile
     /// metadata was recorded and lets the registry resolve globally by id.
     pub model_profile: Option<String>,
-    /// Raw user model setting used by Native Plan-mode selection, when the
-    /// resume source has an authoritative value. `None` keeps the live
+    /// Exact UTF-16 user model-selection source plus original route anchor,
+    /// when the resume source has an authoritative value. `None` keeps the live
     /// configured setting; cold JSONL replay uses the current CLI/settings
     /// value because transcripts store only the resolved wire model.
-    pub user_model_setting: Option<String>,
+    #[serde(default)]
+    pub user_model_setting: Option<ModelSourceBinding>,
     /// Provenance and precedence for a carried raw model setting. These fields
     /// are paired with `user_model_setting` and ignored when it is absent.
     pub user_model_setting_provenance: Option<ModelProvenance>,
@@ -1034,6 +1035,17 @@ pub enum HandleError {
     /// path) don't need to override.
     #[error("operation not implemented: {0}")]
     Unimplemented(String),
+    /// A settings/source projection failed while preparing a host operation.
+    /// The structured projection preserves source values such as an invalid
+    /// sparse-array length across the host boundary.
+    #[error("settings operation failed")]
+    Settings(crate::types::utf16_json::Utf16JsonProjection),
+}
+
+impl From<crate::settings::SettingsError> for HandleError {
+    fn from(error: crate::settings::SettingsError) -> Self {
+        Self::Settings(error.diagnostic_projection())
+    }
 }
 
 /// Outcome of a TUI-driven turn invoked via
@@ -1277,6 +1289,106 @@ pub struct DoctorSummary {
     pub failed: u32,
 }
 
+/// A provider-local route that is known to the current model registry.
+/// Session and host routing always use this pair, never an unregistered source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRouteAnchor {
+    /// Provider-local model identifier used for endpoint and capability routing.
+    pub model: String,
+    /// Provider profile paired with `model`.
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+/// Exact model-source identity paired with the known route that carries it.
+/// `display_model` is the current Native-resolved target for known aliases and
+/// the display-safe trimmed source for an accepted unregistered Claude model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSourceBinding {
+    /// Exact user/configured source used by Native relative-model selection.
+    #[serde(
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize",
+        deserialize_with = "crate::session::deserialize_todo_source_text"
+    )]
+    pub source: Utf16JsonProjection,
+    /// Effective Native-selected model source used for requests and client
+    /// presentation. Known aliases contain their resolved canonical model;
+    /// unregistered Claude sources retain their exact UTF-16 units.
+    #[serde(
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize",
+        deserialize_with = "crate::session::deserialize_todo_source_text"
+    )]
+    pub effective_source: Utf16JsonProjection,
+    /// Known provider route used for authentication and SDK endpoint selection.
+    pub route_anchor: ModelRouteAnchor,
+}
+
+impl ModelSourceBinding {
+    /// Return the effective logical identity for client presentation and
+    /// request-source projection when the known route anchor cannot represent
+    /// it. The exact UTF-16 carrier is preserved for unregistered sources.
+    #[must_use]
+    pub fn effective_source_for_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<Utf16JsonProjection> {
+        if self.route_anchor.model != model || self.route_anchor.profile.as_deref() != profile {
+            return None;
+        }
+        let units = self.effective_source.string_units("")?;
+        if units == model.encode_utf16().collect::<Vec<_>>() {
+            None
+        } else {
+            Some(self.effective_source.clone())
+        }
+    }
+}
+
+/// Explicit user-selection provenance, kept separate from route-only lifecycle
+/// changes performed by `switch_model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSelectionOrigin {
+    /// Interactive `/model` command.
+    Command,
+    /// Explicit model-picker selection.
+    Picker,
+    /// SDK or control-plane `set_model` request.
+    Sdk,
+}
+
+/// Network-probe behavior observed for the Native selection caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelValidationMode {
+    /// Native `serverProbe: false`; apply local validation and do not dispatch.
+    ServerProbeDisabled,
+    /// Native slash `sve` probe; the outer 15-second race does not cancel the
+    /// underlying request, so a late success remains cacheable.
+    SlashOuterRaceDetached,
+    /// Native `Gzr` deadline; abort the request after five seconds and join it.
+    GzrAbortAfterFiveSeconds,
+}
+
+/// Input to current user-model selection. Explicit `source` is provider-local;
+/// any profile qualifier belongs in `route_hint`, never in the Native model.
+#[derive(Debug, Clone)]
+pub enum ModelSelectionRequest {
+    /// Reset to the configured default using the caller's Native default rules.
+    Reset { origin: ModelSelectionOrigin },
+    /// Select an exact source using a known route hint or the current Claude
+    /// route as a provider-local anchor for an accepted unknown model.
+    Select {
+        /// Exact requested model source, retained as UTF-16.
+        source: Utf16JsonProjection,
+        /// Optional already-known route selected by a catalog or picker.
+        route_hint: Option<ModelRouteAnchor>,
+        /// Native hook provenance for this explicit selection.
+        origin: ModelSelectionOrigin,
+        /// Whether Native probes, and the caller-specific probe lifetime.
+        validation: ModelValidationMode,
+    },
+}
+
 /// Snapshot returned by [`OrchestratorHandle::get_status_snapshot`] for the
 /// `/status` panel. All fields are populated synchronously at snapshot time.
 ///
@@ -1288,11 +1400,20 @@ pub struct StatusSnapshot {
     pub session_id: String,
     /// Active model name (e.g. `"claude-opus-4-7"`).
     pub model: String,
+    /// Exact effective Native model identity when the known route anchor cannot
+    /// represent it. Clients display this projection while retaining `model`
+    /// and `model_profile` for routing and capability lookups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<Utf16JsonProjection>,
     /// Active model's provider profile (e.g. `Some("copilot")`), disambiguating a
     /// model id shared across providers (e.g. `gpt-5.6-sol` on both OpenAI and
     /// Copilot). `None` when routing resolves the id by-provider (e.g. after a
     /// cross-provider resume that clears the profile).
     pub model_profile: Option<String>,
+    /// Exact selected logical model when it differs from the routed anchor.
+    /// The route remains in `model`/`model_profile`; this value is for display
+    /// and the source-preserving Native SDK request only.
+    pub model_source: Option<Utf16JsonProjection>,
     /// Total messages in the session history.
     pub n_messages: u32,
     /// Cumulative cost in USD.
@@ -2662,18 +2783,18 @@ pub trait OrchestratorHandle: Send + Sync {
 
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError>;
 
-    /// Switch the active model while preserving the operation's provenance for
-    /// model-switch hooks. Existing handles may use the legacy
-    /// [`Self::switch_model`] implementation; the default delegates to it so
-    /// adding this seam does not break lightweight hosts or test doubles.
-    async fn switch_model_with_source(
+    /// Validate and apply an explicit Native user model selection. Automatic
+    /// and resume route changes continue through `switch_model` and do not
+    /// acquire user-source ownership.
+    async fn select_model(&self, request: ModelSelectionRequest) -> Result<(), HandleError>;
+
+    /// Validate an explicit model selection without applying hooks or changing
+    /// session state. Hosts use this before destructive session transitions;
+    /// `select_model` repeats current route and policy checks when applying.
+    async fn validate_model_selection(
         &self,
-        model: &str,
-        profile: Option<&str>,
-        _source: &str,
-    ) -> Result<(), HandleError> {
-        self.switch_model(model, profile).await
-    }
+        request: &ModelSelectionRequest,
+    ) -> Result<(), HandleError>;
 
     /// Read the session's fast-mode flag (`/fast`; the priority `speed:"fast"`
     /// tier). The DEFAULT is `false` so existing impls/mocks compile unchanged.
@@ -3505,11 +3626,13 @@ pub trait OrchestratorHandle: Send + Sync {
     /// counters. The default keeps lightweight handles source-compatible while
     /// production handles project the current history through the same
     /// estimator used by auto-compaction.
-    async fn context_usage_snapshot(&self) -> ContextUsageSnapshot {
-        ContextUsageSnapshot {
+    async fn context_usage_snapshot(
+        &self,
+    ) -> Result<ContextUsageSnapshot, crate::settings::SettingsError> {
+        Ok(ContextUsageSnapshot {
             cumulative_cost: self.snapshot_cost().await,
             ..ContextUsageSnapshot::default()
-        }
+        })
     }
 
     /// `(used_tokens, max_tokens)` for the current context window.
@@ -3521,9 +3644,9 @@ pub trait OrchestratorHandle: Send + Sync {
     /// [`Self::get_status_snapshot`], so no new struct is needed.
     ///
     /// Default returns `(0, 0)` when no usage is recorded.
-    async fn context_window_usage(&self) -> (u64, u64) {
-        let snapshot = self.context_usage_snapshot().await;
-        (snapshot.live_context_tokens, snapshot.max_context_tokens)
+    async fn context_window_usage(&self) -> Result<(u64, u64), crate::settings::SettingsError> {
+        let snapshot = self.context_usage_snapshot().await?;
+        Ok((snapshot.live_context_tokens, snapshot.max_context_tokens))
     }
 
     /// `Vec<(session_id, label)>` of prior on-disk sessions, newest-first.

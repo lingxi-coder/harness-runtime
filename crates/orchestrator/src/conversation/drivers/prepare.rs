@@ -50,6 +50,53 @@ pub(crate) struct PreparedTurnStep {
     pub(crate) date_change_reminder: Option<ConversationMessage>,
 }
 
+fn classify_prompt_ingress_history(
+    history: &[ConversationMessage],
+    mut is_injected: impl FnMut(&lingxi_core::types::MessageId) -> bool,
+) -> crate::request_context::PromptIngressKind {
+    use crate::request_context::PromptIngressKind::{LocalSkill, Other, RegularUser};
+
+    for message in history.iter().rev() {
+        match message {
+            ConversationMessage::User {
+                id,
+                content,
+                is_meta,
+                is_compact_summary,
+                turn_companion,
+                ..
+            } => {
+                if content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+                {
+                    return Other;
+                }
+                // A native Skill body is marked by trusted turnCompanion
+                // metadata. Never infer this class from its command header text.
+                if *turn_companion == Some(Some(true)) {
+                    return LocalSkill;
+                }
+                if *is_meta {
+                    continue;
+                }
+                if is_injected(id) || *is_compact_summary {
+                    return Other;
+                }
+                return RegularUser;
+            }
+            ConversationMessage::Assistant { .. } => return Other,
+            ConversationMessage::System { subtype, .. }
+                if subtype.as_deref() == Some("compact_boundary") =>
+            {
+                return Other;
+            }
+            ConversationMessage::System { .. } => {}
+        }
+    }
+    Other
+}
+
 impl ConversationOrchestrator {
     /// Model-chain advancement keeps consume-once context from the same step,
     /// while model-aware preparation receives the new serving route.
@@ -107,41 +154,50 @@ impl ConversationOrchestrator {
     }
 
     /// Capture the step's prompt origin before preparation can compact history
-    /// or append durable attachments. Meta messages and tool-injected prompts
-    /// do not turn a continuation into a regular user submission.
+    /// or append durable attachments. The companion bit is trusted structured
+    /// history metadata: it makes a LocalSkill step non-regular even when the
+    /// preceding command header is an ordinary user row.
     pub(crate) async fn regular_user_prompt_for_model_step(&self) -> bool {
+        if crate::request_context::pending_model_step_ingress_kind()
+            == Some(crate::request_context::PromptIngressKind::DirectBash)
+            || crate::request_context::unknown_command_fallback_pending()
+        {
+            return false;
+        }
+        self.current_prompt_ingress_kind_from_history().await
+            == crate::request_context::PromptIngressKind::RegularUser
+    }
+
+    async fn current_prompt_ingress_kind_from_history(
+        &self,
+    ) -> crate::request_context::PromptIngressKind {
         let session = self.session.lock().await;
-        session
-            .history
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                ConversationMessage::User {
-                    id,
-                    content,
-                    is_meta,
-                    is_compact_summary,
-                    ..
-                } => {
-                    if *is_meta || session.injected_message_sources.contains_key(id) {
-                        return None;
-                    }
-                    Some(
-                        !*is_compact_summary
-                            && !content
-                                .iter()
-                                .any(|block| matches!(block, ContentBlock::ToolResult { .. })),
-                    )
-                }
-                ConversationMessage::Assistant { .. } => Some(false),
-                ConversationMessage::System { subtype, .. }
-                    if subtype.as_deref() == Some("compact_boundary") =>
-                {
-                    Some(false)
-                }
-                ConversationMessage::System { .. } => None,
-            })
-            .unwrap_or(false)
+        classify_prompt_ingress_history(&session.history, |id| {
+            session.injected_message_sources.contains_key(id)
+        })
+    }
+
+    async fn prompt_ingress_kind_for_model_step(
+        &self,
+        captured_regular_user_prompt: bool,
+    ) -> crate::request_context::PromptIngressKind {
+        use crate::request_context::PromptIngressKind::{LocalSkill, Other, RegularUser};
+
+        if let Some(kind) = crate::request_context::take_model_step_ingress_kind() {
+            return kind;
+        }
+        let detected = self.current_prompt_ingress_kind_from_history().await;
+        if detected == LocalSkill {
+            return LocalSkill;
+        }
+        if crate::request_context::unknown_command_fallback_pending() {
+            return Other;
+        }
+        if captured_regular_user_prompt {
+            RegularUser
+        } else {
+            Other
+        }
     }
 
     /// The per-step preparation both turn drivers share.
@@ -169,8 +225,12 @@ impl ConversationOrchestrator {
         is_regular_user_prompt: bool,
         user_cancel: Option<&CancellationToken>,
     ) -> Result<PreparedTurnStep, OrchestratorError> {
-        let native_nar_ingress =
-            crate::request_context::is_native_nar_ingress(is_regular_user_prompt);
+        let prompt_ingress_kind = self
+            .prompt_ingress_kind_for_model_step(is_regular_user_prompt)
+            .await;
+        let is_regular_user_prompt =
+            prompt_ingress_kind == crate::request_context::PromptIngressKind::RegularUser;
+        let native_nar_ingress = crate::request_context::is_native_nar_ingress(prompt_ingress_kind);
         if !is_regular_user_prompt {
             crate::request_context::clear_turn_projection();
         }
@@ -216,8 +276,7 @@ impl ConversationOrchestrator {
         let (instruction_key, instruction_load) = self.main_instruction_load().await;
         let scalar_context = self
             .additional_context_message_from_load(instruction_key, &instruction_load)
-            .await
-            .map_err(OrchestratorError::Internal)?;
+            .await?;
         let inline_context = if self.uses_announced_context().await {
             None
         } else {
@@ -225,7 +284,7 @@ impl ConversationOrchestrator {
         };
         let instruction_reason = self.frozen_instruction_refresh_reason();
 
-        self.seed_compact_cache_safe_params(system).await;
+        self.seed_compact_cache_safe_params(system).await?;
         self.maybe_compact_before_call().await;
         // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
         // before the outgoing snapshot is cloned from history.
@@ -307,32 +366,33 @@ impl ConversationOrchestrator {
         // final tool filters; if it did not produce a row, retry the typed
         // producer now against the exact pool used for this request.
         let (wire_tools, skip_global_cache_for_system_prompt, complete_wire_tools) =
-            self.build_wire_tools_with_complete().await;
+            self.build_wire_tools_with_complete().await?;
         if native_nar_ingress
             && !crate::request_context::prompt_ingress_batch_finalized()
             && crate::request_context::staged_prompt_ingress_attachments().is_some()
             && crate::request_context::staged_prompt_ingress_attachment("skill_listing").is_none()
         {
-            let _ = crate::request_context::prompt_ingress_producer_rows_or_else(
+            crate::request_context::prompt_ingress_producer_rows_or_else_fallible(
                 self,
                 "skill_listing",
                 || async {
-                    self.skill_listing_prompt_ingress_attachment()
-                        .await
+                    Ok(self
+                        .skill_listing_prompt_ingress_attachment()
+                        .await?
                         .into_iter()
-                        .collect::<Vec<crate::request_context::PromptIngressAttachment>>()
+                        .collect())
                 },
             )
-            .await;
+            .await?;
         }
         let reminders = self
-            .collect_turn_reminders(
+            .collect_turn_reminders_for_prompt_ingress(
                 in_human_turn,
-                is_regular_user_prompt,
+                prompt_ingress_kind,
                 user_cancel,
                 &collector_context_attachments,
             )
-            .await;
+            .await?;
         let mut guarded_async_hook_reminders = reminders.guarded_async_hook_reminders;
         let transient_reminders = reminders.transient;
         // Durable completions first: they now live in history, so they belong
@@ -635,7 +695,14 @@ impl ConversationOrchestrator {
                 None
             }
         };
-        if is_regular_user_prompt {
+        // The one-shot unknown-command fallback has no regular-user ingress,
+        // but Native still places its request-owned row after the initial NAr
+        // reminders and before shared context. Later tool steps keep the
+        // durable history order instead of moving that row again.
+        if is_regular_user_prompt
+            || (native_nar_ingress
+                && prompt_ingress_kind == crate::request_context::PromptIngressKind::Other)
+        {
             crate::request_context::set_turn_projection(
                 task_notification_ids
                     .into_iter()
@@ -803,19 +870,48 @@ impl ConversationOrchestrator {
         })
     }
 
-    /// Collect reminder producers in their model-facing order exactly once.
+    /// Bool adapter retained only for existing unit tests that exercise the
+    /// non-Native reminder collector directly. Production preparation passes
+    /// the source-classified per-step kind below.
+    #[cfg(test)]
     pub(crate) fn collect_turn_reminders<'a>(
         &'a self,
         in_human_turn: bool,
         is_regular_user_prompt: bool,
         user_cancel: Option<&'a CancellationToken>,
         context_attachments: &'a [lingxi_core::types::utf16_json::Utf16JsonProjection],
-    ) -> futures::future::BoxFuture<'a, TurnReminders> {
+    ) -> futures::future::BoxFuture<'a, Result<TurnReminders, lingxi_core::settings::SettingsError>>
+    {
+        let kind = if is_regular_user_prompt {
+            crate::request_context::PromptIngressKind::RegularUser
+        } else {
+            crate::request_context::PromptIngressKind::Other
+        };
+        self.collect_turn_reminders_for_prompt_ingress(
+            in_human_turn,
+            kind,
+            user_cancel,
+            context_attachments,
+        )
+    }
+
+    /// Collect reminder producers in their model-facing order exactly once
+    /// using the current model step's source-derived ingress class.
+    pub(crate) fn collect_turn_reminders_for_prompt_ingress<'a>(
+        &'a self,
+        in_human_turn: bool,
+        prompt_ingress_kind: crate::request_context::PromptIngressKind,
+        user_cancel: Option<&'a CancellationToken>,
+        context_attachments: &'a [lingxi_core::types::utf16_json::Utf16JsonProjection],
+    ) -> futures::future::BoxFuture<'a, Result<TurnReminders, lingxi_core::settings::SettingsError>>
+    {
         // Reminder fan-out has a large state machine; allocate it here so
         // preparing a turn does not embed or copy that state through its callers.
         Box::pin(async move {
+            let is_regular_user_prompt =
+                prompt_ingress_kind == crate::request_context::PromptIngressKind::RegularUser;
             let native_nar_ingress =
-                crate::request_context::is_native_nar_ingress(is_regular_user_prompt);
+                crate::request_context::is_native_nar_ingress(prompt_ingress_kind);
             // Native 2.1.293 SIMPLE returns only the queued task attachments
             // before entering the ordinary reminder producer fan-out.
             if self.config.bare {
@@ -840,12 +936,12 @@ impl ConversationOrchestrator {
                     .into_iter()
                     .map(|row| row.message)
                     .collect();
-                return TurnReminders {
+                return Ok(TurnReminders {
                     transient: Vec::new(),
                     task_notifications,
                     model_reminders: Vec::new(),
                     guarded_async_hook_reminders: Vec::new(),
-                };
+                });
             }
             let mut transient = Vec::new();
             let mut model_reminders = Vec::new();
@@ -941,7 +1037,7 @@ impl ConversationOrchestrator {
             if let Some(reminder) = staged("skill_listing") {
                 transient.push(reminder);
             } else if staged_ingress.is_none() {
-                if let Some(reminder) = self.skill_listing_reminder_message().await {
+                if let Some(reminder) = self.skill_listing_reminder_message().await? {
                     self.push_engine_attachment(&mut transient, "skill_listing", reminder)
                         .await;
                 }
@@ -1183,12 +1279,12 @@ impl ConversationOrchestrator {
                 self.persist_prompt_ingress_reminder(&row).await;
             }
 
-            TurnReminders {
+            Ok(TurnReminders {
                 transient,
                 task_notifications,
                 model_reminders,
                 guarded_async_hook_reminders,
-            }
+            })
         })
     }
 
@@ -1287,6 +1383,130 @@ fn total_token_reminder_source(
         )
         .ok(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod prompt_ingress_classifier_tests {
+    use super::*;
+    use crate::request_context::PromptIngressKind::{DirectBash, LocalSkill, Other, RegularUser};
+    use lingxi_core::types::{ContentBlock, MessageId};
+
+    fn user(text: &str) -> ConversationMessage {
+        ConversationMessage::user(MessageId::new(), text.to_owned())
+    }
+
+    fn meta(text: &str) -> ConversationMessage {
+        ConversationMessage::user_meta(MessageId::new(), text.to_owned())
+    }
+
+    fn skill_body() -> ConversationMessage {
+        let mut body = meta("expanded skill body");
+        if let ConversationMessage::User { turn_companion, .. } = &mut body {
+            *turn_companion = Some(Some(true));
+        }
+        body
+    }
+
+    fn assistant() -> ConversationMessage {
+        ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "skill response".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+        }
+    }
+
+    fn tool_result() -> ConversationMessage {
+        ConversationMessage::User {
+            api_message_override: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: lingxi_core::types::ToolUseId::from("toolu_skill"),
+                content: "done".into(),
+                is_error: Some(false),
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
+        }
+    }
+
+    #[test]
+    fn direct_bash_header_text_alone_does_not_change_history_classification() {
+        assert_eq!(
+            classify_prompt_ingress_history(&[user("<bash-input>echo hi</bash-input>")], |_| false),
+            RegularUser,
+            "only the host-stamped queue source marks DirectBash; XML-like text is not authority"
+        );
+        assert_ne!(DirectBash, RegularUser);
+    }
+
+    #[test]
+    fn trusted_companion_body_classifies_typed_and_cold_skill_rows_as_nonregular() {
+        let rows = vec![
+            user("/review"),
+            skill_body(),
+            meta("UserPromptExpansion additional context"),
+            meta("environment metadata"),
+        ];
+        assert_eq!(
+            classify_prompt_ingress_history(&rows, |_| false),
+            LocalSkill,
+            "metadata rows are skipped back to the trusted companion body, not its header text"
+        );
+        assert_eq!(
+            classify_prompt_ingress_history(&rows, |_| false),
+            LocalSkill,
+            "the same persisted row shape is sufficient after cold reconstruction"
+        );
+    }
+
+    #[test]
+    fn assistant_tool_result_and_new_ordinary_user_end_the_skill_classifier_window() {
+        let prefix = vec![user("/review"), skill_body()];
+        let mut after_assistant = prefix.clone();
+        after_assistant.push(assistant());
+        assert_eq!(
+            classify_prompt_ingress_history(&after_assistant, |_| false),
+            Other
+        );
+
+        let mut after_tool_result = prefix.clone();
+        after_tool_result.push(tool_result());
+        assert_eq!(
+            classify_prompt_ingress_history(&after_tool_result, |_| false),
+            Other
+        );
+
+        let mut after_new_user = prefix;
+        after_new_user.push(user("new human prompt"));
+        assert_eq!(
+            classify_prompt_ingress_history(&after_new_user, |_| false),
+            RegularUser
+        );
+    }
+
+    #[test]
+    fn an_injected_user_row_stops_instead_of_inheriting_an_old_companion() {
+        let mut rows = vec![user("/review"), skill_body()];
+        let injected = user("tool supplied prompt");
+        let injected_id = injected.id();
+        rows.push(injected);
+        assert_eq!(
+            classify_prompt_ingress_history(&rows, |id| *id == injected_id),
+            Other
+        );
     }
 }
 

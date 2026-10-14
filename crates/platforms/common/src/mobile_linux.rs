@@ -10,12 +10,15 @@ use lingxi_core::host::{
 use mobile_linux_api::{
     LinuxCommandRequest, LinuxProcessHandle, MobileLinuxError, MobileLinuxRuntime,
     MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskStatus, MountSpec, ProcessError,
-    ProcessOutput, ProcessStreamSink, SandboxBackend,
+    ProcessOutput, ProcessStreamSink, RawStdioOpenRequest, RawStdioReadResult,
+    RawStdioSessionHandle, SandboxBackend,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 pub use mobile_linux_core::*;
 const ALLOWED_WRITABLE_GUEST_PATHS: &[&str] = &[
@@ -523,7 +526,33 @@ pub struct MobileLinuxProcessRunner {
     runtime: Arc<dyn MobileLinuxRuntime>,
     backend: SandboxBackend,
     background_handles: Arc<Mutex<HashMap<String, LinuxProcessHandle>>>,
+    foreground_owners: Arc<Mutex<HashMap<String, ForegroundOwner>>>,
 }
+
+#[derive(Default)]
+struct ForegroundOwner {
+    cancelled: bool,
+    sessions: HashMap<String, Arc<OwnedRawStdio>>,
+}
+
+struct OwnedRawStdio {
+    handle: RawStdioSessionHandle,
+    close_state: AsyncMutex<RawStdioCloseState>,
+    close_notify: Notify,
+}
+
+#[derive(Clone)]
+enum RawStdioCloseState {
+    Open,
+    Closing,
+    Closed(Result<(), String>),
+}
+
+const RAW_STDIO_READ_CHUNK_BYTES: usize = 64 * 1024;
+const RAW_STDIO_IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+const RAW_STDIO_DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const RAW_STDIO_DEFAULT_CAPTURE_BYTES: usize = 1024 * 1024;
+static NEXT_UNOWNED_FOREGROUND_ID: AtomicU64 = AtomicU64::new(1);
 
 impl MobileLinuxProcessRunner {
     #[must_use]
@@ -532,6 +561,97 @@ impl MobileLinuxProcessRunner {
             backend: runtime.backend(),
             runtime,
             background_handles: Arc::new(Mutex::new(HashMap::new())),
+            foreground_owners: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn begin_foreground_owner(&self, owner: &str) -> Result<(), ProcessError> {
+        let mut owners = self
+            .foreground_owners
+            .lock()
+            .expect("mobile-linux foreground owner map poisoned");
+        match owners.get(owner) {
+            Some(existing) if existing.cancelled || !existing.sessions.is_empty() => {
+                Err(ProcessError::Io(format!(
+                    "foreground owner is already active or cancelled: {owner}"
+                )))
+            }
+            Some(_) => Ok(()),
+            None => {
+                owners.insert(owner.to_string(), ForegroundOwner::default());
+                Ok(())
+            }
+        }
+    }
+
+    fn register_foreground_session(
+        &self,
+        owner: &str,
+        session: Arc<OwnedRawStdio>,
+    ) -> Result<(), ProcessError> {
+        let mut owners = self
+            .foreground_owners
+            .lock()
+            .expect("mobile-linux foreground owner map poisoned");
+        let Some(owner_state) = owners.get_mut(owner) else {
+            return Err(ProcessError::Io(
+                "foreground owner disappeared before raw session registration".into(),
+            ));
+        };
+        if owner_state.cancelled {
+            return Err(ProcessError::Io(
+                "foreground command was cancelled before raw session registration".into(),
+            ));
+        }
+        owner_state
+            .sessions
+            .insert(session.handle.id.clone(), session);
+        Ok(())
+    }
+
+    fn unregister_foreground_session(&self, owner: &str, session_id: &str) {
+        let mut owners = self
+            .foreground_owners
+            .lock()
+            .expect("mobile-linux foreground owner map poisoned");
+        if let Some(owner_state) = owners.get_mut(owner) {
+            owner_state.sessions.remove(session_id);
+            if owner_state.sessions.is_empty() {
+                owners.remove(owner);
+            }
+        }
+    }
+
+    async fn close_raw_session(&self, session: &OwnedRawStdio) -> Result<(), ProcessError> {
+        loop {
+            let notified = session.close_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let should_close = {
+                let mut state = session.close_state.lock().await;
+                match &*state {
+                    RawStdioCloseState::Open => {
+                        *state = RawStdioCloseState::Closing;
+                        true
+                    }
+                    RawStdioCloseState::Closing => false,
+                    RawStdioCloseState::Closed(result) => {
+                        return result.clone().map_err(ProcessError::Io);
+                    }
+                }
+            };
+            if !should_close {
+                notified.await;
+                continue;
+            }
+            let result = self
+                .runtime
+                .close_raw_stdio(&session.handle)
+                .await
+                .map_err(|error| error.to_string());
+            *session.close_state.lock().await = RawStdioCloseState::Closed(result.clone());
+            session.close_notify.notify_waiters();
+            return result.map_err(ProcessError::Io);
         }
     }
 
@@ -614,6 +734,145 @@ impl MobileLinuxProcessRunner {
         validate_linux_request(&plan.request).map_err(to_process_error)?;
         Ok(plan)
     }
+
+    async fn run_raw_stdio_foreground(
+        &self,
+        plan: &MobileLinuxSandboxPlan,
+        owner: &str,
+        max_output_bytes: Option<usize>,
+    ) -> Result<ProcessOutput, ProcessError> {
+        if plan.request.stdin.is_some() {
+            // Raw-stdio's current pinned API has no stdin EOF/write mode. Do
+            // not silently drop a caller's input; the shell-only EOF wrapper
+            // below is valid exclusively for an absent payload.
+            return Err(ProcessError::Unsupported);
+        }
+
+        let requested = &plan.request;
+        // Keep the target argv as data. The constant shell program implements
+        // EOF redirection without interpolating user command text.
+        let mut args = vec![
+            "-c".to_string(),
+            "exec \"$@\" </dev/null".to_string(),
+            "lingxi-mobile-foreground".to_string(),
+            requested.command.clone(),
+        ];
+        args.extend(requested.args.iter().cloned());
+        let opened = self
+            .runtime
+            .open_raw_stdio(RawStdioOpenRequest {
+                command: "/bin/sh".to_string(),
+                args,
+                cwd: requested.cwd.clone(),
+                env: requested.env.clone(),
+                network: requested.network,
+                resource_limits: requested.resource_limits,
+                mounts: plan.mounts.clone(),
+            })
+            .await
+            .map_err(to_process_error)?;
+        if let Err(error) = opened
+            .enforcement
+            .ensure_for(requested.network, requested.resource_limits)
+        {
+            let _ = self.runtime.close_raw_stdio(&opened).await;
+            return Err(to_process_error(error));
+        }
+
+        let session_id = opened.id.clone();
+        let session = Arc::new(OwnedRawStdio {
+            handle: opened,
+            close_state: AsyncMutex::new(RawStdioCloseState::Open),
+            close_notify: Notify::new(),
+        });
+        if let Err(error) = self.register_foreground_session(owner, session.clone()) {
+            let _ = self.close_raw_session(&session).await;
+            return Err(error);
+        }
+
+        let capture_limit = max_output_bytes.unwrap_or(RAW_STDIO_DEFAULT_CAPTURE_BYTES);
+        let expose_truncation = max_output_bytes.is_some();
+        let timeout = requested
+            .timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(RAW_STDIO_DEFAULT_TIMEOUT);
+        let capture = async {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut stdout_truncated = false;
+            let mut stderr_truncated = false;
+            let mut exit_code = -1;
+            loop {
+                let result: RawStdioReadResult = self
+                    .runtime
+                    .read_raw_stdio(&session.handle, RAW_STDIO_READ_CHUNK_BYTES)
+                    .await
+                    .map_err(to_process_error)?;
+                append_bounded(
+                    &mut stdout,
+                    &result.stdout,
+                    capture_limit,
+                    &mut stdout_truncated,
+                );
+                append_bounded(
+                    &mut stderr,
+                    &result.stderr,
+                    capture_limit,
+                    &mut stderr_truncated,
+                );
+                if let Some(code) = result.exit_code {
+                    exit_code = code;
+                }
+                if result.closed {
+                    break;
+                }
+                if result.stdout.is_empty() && result.stderr.is_empty() {
+                    tokio::time::sleep(RAW_STDIO_IDLE_POLL).await;
+                }
+            }
+
+            let mut stdout = String::from_utf8_lossy(&stdout).into_owned();
+            let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+            // ShellMobileTool's normal character truncator consumes these
+            // non-display tails and emits its existing truncation marker.
+            // The byte budget is four times the character budget, so the
+            // retained UTF-8 prefix always reaches the marker boundary.
+            if expose_truncation {
+                let truncation_sentinel_len = capture_limit / 4 + 1;
+                if stdout_truncated {
+                    stdout.extend(std::iter::repeat('\0').take(truncation_sentinel_len));
+                }
+                if stderr_truncated {
+                    stderr.extend(std::iter::repeat('\0').take(truncation_sentinel_len));
+                }
+            }
+            Ok::<_, ProcessError>(ProcessOutput {
+                stdout,
+                stderr,
+                exit_code,
+                timed_out: false,
+            })
+        };
+        let result = match tokio::time::timeout(timeout, capture).await {
+            Ok(result) => result,
+            Err(_) => Err(ProcessError::Timeout),
+        };
+        let close_result = self.close_raw_session(&session).await;
+        self.unregister_foreground_session(owner, &session_id);
+        if let Err(error) = close_result {
+            return Err(error);
+        }
+        result
+    }
+}
+
+fn append_bounded(target: &mut Vec<u8>, bytes: &[u8], limit: usize, truncated: &mut bool) {
+    let remaining = limit.saturating_sub(target.len());
+    let keep = remaining.min(bytes.len());
+    target.extend_from_slice(&bytes[..keep]);
+    if keep < bytes.len() {
+        *truncated = true;
+    }
 }
 
 #[async_trait]
@@ -626,6 +885,83 @@ impl ProcessRunner for MobileLinuxProcessRunner {
             .await
             .map_err(to_process_error)?;
         Ok(result.into())
+    }
+
+    async fn run_foreground(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<lingxi_core::host::ForegroundOutcome, ProcessError> {
+        Ok(self
+            .run_foreground_with_output_limit(cmd, None)
+            .await?
+            .outcome)
+    }
+
+    async fn run_foreground_with_output_limit(
+        &self,
+        cmd: &SandboxedCommand,
+        max_output_bytes: Option<usize>,
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        let plan = self.admitted_plan(cmd)?;
+        if plan.request.stdin.is_some() {
+            // Refuse before opening any child because the pinned raw-stdio
+            // contract cannot currently feed a complete stdin payload and EOF.
+            return Err(ProcessError::Unsupported);
+        }
+        let owner = cmd.process_owner().map(str::to_string).unwrap_or_else(|| {
+            format!(
+                "mobile-linux-unowned:{}",
+                NEXT_UNOWNED_FOREGROUND_ID.fetch_add(1, Ordering::Relaxed)
+            )
+        });
+        self.begin_foreground_owner(&owner)?;
+        let result = self
+            .run_raw_stdio_foreground(&plan, &owner, max_output_bytes)
+            .await;
+        let mut owners = self
+            .foreground_owners
+            .lock()
+            .expect("mobile-linux foreground owner map poisoned");
+        if owners
+            .get(&owner)
+            .is_some_and(|owner_state| owner_state.sessions.is_empty())
+        {
+            owners.remove(&owner);
+        }
+        result.map(|output| lingxi_core::host::ForegroundRunResult {
+            outcome: lingxi_core::host::ForegroundOutcome::Completed(output),
+            output_file: None,
+        })
+    }
+
+    async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+        let sessions = {
+            let mut owners = self
+                .foreground_owners
+                .lock()
+                .expect("mobile-linux foreground owner map poisoned");
+            owners
+                .iter_mut()
+                .filter(|(registered_owner, _)| {
+                    registered_owner.as_str() == owner
+                        || registered_owner
+                            .strip_prefix(owner)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .flat_map(|(_, state)| {
+                    state.cancelled = true;
+                    state.sessions.values().cloned().collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for session in sessions {
+            if let Err(error) = self.close_raw_session(&session).await {
+                tracing::warn!(%error, session_id = %session.handle.id, "mobile-linux foreground reap failed");
+            }
+        }
+        // Raw stdio deliberately does not expose a host PID. Its close method
+        // synchronously reaps the complete guest process tree.
+        Vec::new()
     }
 
     async fn run_streaming(
@@ -710,6 +1046,8 @@ mod tests {
         MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, PtyOpenRequest, PtySessionHandle,
         ResourceLimits, RootfsStatus,
     };
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicBool;
 
     #[derive(Default)]
     struct RecordingSink {
@@ -739,6 +1077,12 @@ mod tests {
         killed: Mutex<Vec<String>>,
         kill_error: Mutex<Option<MobileLinuxError>>,
         task_statuses: Mutex<HashMap<String, MobileLinuxTaskStatus>>,
+        raw_stdio_requests: Mutex<Vec<RawStdioOpenRequest>>,
+        raw_stdio_reads: Mutex<VecDeque<RawStdioReadResult>>,
+        raw_stdio_closed: Mutex<Vec<String>>,
+        raw_stdio_never_close: AtomicBool,
+        raw_stdio_open_gate: Mutex<Option<Arc<Notify>>>,
+        raw_stdio_open_started: Notify,
     }
 
     impl MockRuntime {
@@ -762,6 +1106,12 @@ mod tests {
                 killed: Mutex::new(Vec::new()),
                 kill_error: Mutex::new(None),
                 task_statuses: Mutex::new(HashMap::new()),
+                raw_stdio_requests: Mutex::new(Vec::new()),
+                raw_stdio_reads: Mutex::new(VecDeque::new()),
+                raw_stdio_closed: Mutex::new(Vec::new()),
+                raw_stdio_never_close: AtomicBool::new(false),
+                raw_stdio_open_gate: Mutex::new(None),
+                raw_stdio_open_started: Notify::new(),
             }
         }
 
@@ -885,6 +1235,85 @@ mod tests {
             Err(MobileLinuxError::Unsupported)
         }
 
+        async fn open_raw_stdio(
+            &self,
+            request: RawStdioOpenRequest,
+        ) -> Result<RawStdioSessionHandle, MobileLinuxError> {
+            self.raw_stdio_requests
+                .lock()
+                .expect("raw stdio request mutex")
+                .push(request.clone());
+            self.raw_stdio_open_started.notify_one();
+            let gate = self
+                .raw_stdio_open_gate
+                .lock()
+                .expect("raw stdio open gate mutex")
+                .clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            let id = format!(
+                "raw-session-{}",
+                NEXT_UNOWNED_FOREGROUND_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            Ok(RawStdioSessionHandle {
+                id,
+                enforcement: LinuxEnforcementReceipt {
+                    network_policy_enforced: !matches!(
+                        request.network,
+                        mobile_linux_api::NetworkPolicy::Allowed
+                    ),
+                    memory_limit_enforced: request.resource_limits.max_memory_mb.is_some(),
+                },
+            })
+        }
+
+        async fn write_raw_stdio(
+            &self,
+            _handle: &RawStdioSessionHandle,
+            _input: Vec<u8>,
+        ) -> Result<(), MobileLinuxError> {
+            Err(MobileLinuxError::Unsupported)
+        }
+
+        async fn read_raw_stdio(
+            &self,
+            _handle: &RawStdioSessionHandle,
+            _max_bytes: usize,
+        ) -> Result<RawStdioReadResult, MobileLinuxError> {
+            if self.raw_stdio_never_close.load(Ordering::Acquire) {
+                return Ok(RawStdioReadResult {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    closed: false,
+                    exit_code: None,
+                });
+            }
+            Ok(self
+                .raw_stdio_reads
+                .lock()
+                .expect("raw stdio read mutex")
+                .pop_front()
+                .unwrap_or(RawStdioReadResult {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    closed: true,
+                    exit_code: Some(0),
+                }))
+        }
+
+        async fn close_raw_stdio(
+            &self,
+            handle: &RawStdioSessionHandle,
+        ) -> Result<(), MobileLinuxError> {
+            self.raw_stdio_never_close.store(false, Ordering::Release);
+            self.raw_stdio_closed
+                .lock()
+                .expect("raw stdio closed mutex")
+                .push(handle.id.clone());
+            Ok(())
+        }
+
         async fn rootfs_status(&self) -> Result<RootfsStatus, MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }
@@ -970,6 +1399,164 @@ mod tests {
             allow_subprocess: true,
             limits: ResourceLimits::default(),
         }
+    }
+
+    fn foreground_fixture(
+        runtime: Arc<MockRuntime>,
+        stdin: Option<String>,
+        timeout: std::time::Duration,
+        owner: &str,
+    ) -> (MobileLinuxProcessRunner, SandboxedCommand) {
+        let runtime_trait: Arc<dyn MobileLinuxRuntime> = runtime.clone();
+        let sandbox = MobileLinuxSandbox::new(runtime_trait.clone(), Vec::new()).expect("sandbox");
+        let command = ProcessCommand {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf safe".into(), "arg with spaces".into()],
+            cwd: None,
+            env: HashMap::from([("SHELL_FIXTURE".into(), "kept".into())]),
+            timeout: Some(timeout),
+            stdin,
+        };
+        let policy = SandboxPolicy {
+            network: mobile_linux_api::NetworkPolicy::Disabled,
+            writable_paths: Vec::new(),
+            denied_paths: Vec::new(),
+            allow_subprocess: true,
+            limits: ResourceLimits::default(),
+        };
+        let sandboxed = sandbox
+            .prepare(command, &policy)
+            .expect("sandboxed command")
+            .with_process_owner(Some(owner.to_string()));
+        (MobileLinuxProcessRunner::new(runtime_trait), sandboxed)
+    }
+
+    #[tokio::test]
+    async fn foreground_raw_stdio_preserves_argv_environment_and_split_utf8() {
+        let runtime = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        runtime.raw_stdio_reads.lock().expect("raw reads").extend([
+            RawStdioReadResult {
+                stdout: vec![0xE2],
+                stderr: b"err".to_vec(),
+                closed: false,
+                exit_code: None,
+            },
+            RawStdioReadResult {
+                stdout: vec![0x82, 0xAC],
+                stderr: Vec::new(),
+                closed: true,
+                exit_code: Some(7),
+            },
+        ]);
+        let (runner, command) = foreground_fixture(
+            runtime.clone(),
+            None,
+            std::time::Duration::from_secs(1),
+            "main/shell-utf8",
+        );
+
+        let result = runner
+            .run_foreground_with_output_limit(&command, Some(4096))
+            .await
+            .expect("foreground command");
+        let lingxi_core::host::ForegroundOutcome::Completed(output) = result.outcome else {
+            panic!("raw stdio does not background commands");
+        };
+        assert_eq!(output.stdout, "€");
+        assert_eq!(output.stderr, "err");
+        assert_eq!(output.exit_code, 7);
+
+        let requests = runtime.raw_stdio_requests.lock().expect("raw requests");
+        let request = requests.first().expect("one raw process");
+        assert_eq!(request.command, "/bin/sh");
+        assert_eq!(request.args[0], "-c");
+        assert_eq!(request.args[1], "exec \"$@\" </dev/null");
+        assert_eq!(request.args[2], "lingxi-mobile-foreground");
+        assert_eq!(request.args[3], "/bin/sh");
+        assert_eq!(
+            request.args[4..]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["-c", "printf safe", "arg with spaces"]
+        );
+        assert_eq!(
+            request.env.get("SHELL_FIXTURE").map(String::as_str),
+            Some("kept")
+        );
+        assert_eq!(request.network, mobile_linux_api::NetworkPolicy::Disabled);
+        assert_eq!(runtime.raw_stdio_closed.lock().expect("closed").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn foreground_timeout_closes_and_reaps_raw_session() {
+        let runtime = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        runtime.raw_stdio_never_close.store(true, Ordering::Release);
+        let (runner, command) = foreground_fixture(
+            runtime.clone(),
+            None,
+            std::time::Duration::from_millis(20),
+            "main/shell-timeout",
+        );
+
+        assert!(matches!(
+            runner
+                .run_foreground_with_output_limit(&command, Some(64))
+                .await,
+            Err(ProcessError::Timeout)
+        ));
+        assert_eq!(runtime.raw_stdio_closed.lock().expect("closed").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn foreground_with_stdin_fails_before_opening_raw_session() {
+        let runtime = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        let (runner, command) = foreground_fixture(
+            runtime.clone(),
+            Some("input".into()),
+            std::time::Duration::from_secs(1),
+            "main/shell-stdin",
+        );
+        assert!(matches!(
+            runner
+                .run_foreground_with_output_limit(&command, Some(64))
+                .await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(runtime
+            .raw_stdio_requests
+            .lock()
+            .expect("raw requests")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn owner_cancel_before_raw_session_registration_closes_the_late_session() {
+        let runtime = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        let open_gate = Arc::new(Notify::new());
+        *runtime.raw_stdio_open_gate.lock().expect("open gate") = Some(open_gate.clone());
+        let (runner, command) = foreground_fixture(
+            runtime.clone(),
+            None,
+            std::time::Duration::from_secs(1),
+            "agent:42/shell-cancel-race",
+        );
+        let runner = Arc::new(runner);
+        let task_runner = runner.clone();
+        let run = tokio::spawn(async move {
+            task_runner
+                .run_foreground_with_output_limit(&command, Some(64))
+                .await
+        });
+        runtime.raw_stdio_open_started.notified().await;
+
+        // The owner is registered before the async open. Cancellation latches
+        // there, so the session returned afterward is closed before execution
+        // can be reported as accepted.
+        assert!(runner.kill_owner_processes("agent:42").await.is_empty());
+        open_gate.notify_one();
+        assert!(run.await.expect("runner task").is_err());
+        assert_eq!(runtime.raw_stdio_closed.lock().expect("closed").len(), 1);
     }
 
     #[test]

@@ -842,7 +842,7 @@ fn classifier_query_error(error: llm_runtime::LlmError) -> QueryError {
     };
     QueryError::UnavailableDetails {
         http_status: error.http_status(),
-        message: error.to_string(),
+        message: llm_runtime::error_display_text(&error),
         error_kind,
     }
 }

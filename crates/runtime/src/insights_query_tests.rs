@@ -6,12 +6,18 @@
 
 use super::{
     InsightsModelSelector, InsightsNativeSideQueryContextProvider, InsightsSelectedModel,
-    InsightsSideQueryExecutor, RuntimeInsightsNativeSideQueryContextProvider,
+    InsightsSideQueryExecutor, RuntimeInsightsModelSelector,
+    RuntimeInsightsNativeSideQueryContextProvider,
+};
+use agent::model_resolution::{
+    FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionContextProvider,
+    ModelRouteFacts,
 };
 use async_trait::async_trait;
 use lingxi_core::host::session_flags::effective_non_interactive_session;
+use lingxi_core::session::{SessionModelSettingSource, SessionState};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use lingxi_core::types::{ConversationMessage, MessageId};
+use lingxi_core::types::{ConversationMessage, MessageId, SessionId};
 use llm_runtime::test_support::FixtureTransport;
 use llm_runtime::{
     ApiService, BoxFuture, ClientConfig, LlmError, ModelRuntime, ProviderRequest, ProviderResponse,
@@ -24,7 +30,8 @@ use sidequery::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
+use tokio::sync::Mutex as AsyncMutex;
 
 // Source oracle from Native bNn. LingXi intentionally maps only this identity
 // block to its own product wording; the acceptance request must preserve the
@@ -41,9 +48,58 @@ impl InsightsModelSelector for FixedModelSelector {
     async fn selected_model(&self) -> Result<InsightsSelectedModel, Utf16JsonProjection> {
         Ok(InsightsSelectedModel {
             model: "claude-haiku-4-5".into(),
+            model_source: None,
             profile: Some("insights-test".into()),
         })
     }
+}
+
+struct FixedSourceModelSelector(Utf16JsonProjection);
+
+#[async_trait]
+impl InsightsModelSelector for FixedSourceModelSelector {
+    async fn selected_model(&self) -> Result<InsightsSelectedModel, Utf16JsonProjection> {
+        Ok(InsightsSelectedModel {
+            model: "claude-haiku-4-5".into(),
+            model_source: Some(self.0.clone()),
+            profile: Some("insights-test".into()),
+        })
+    }
+}
+
+fn selector_test_model_resolution(
+    provider: ModelProviderKind,
+) -> Arc<dyn ModelResolutionContextProvider> {
+    Arc::new(move |model: &str, profile: Option<&str>| -> Result<
+        ModelResolutionContext,
+        agent::model_resolution::ModelResolutionError,
+    > {
+        let route_model = if model == "opus" {
+            "claude-opus-4-8"
+        } else {
+            model
+        };
+        let mut family_defaults = FamilyModelDefaults::default();
+        family_defaults.opus = Some("claude-opus-4-8".into());
+        family_defaults.sonnet = Some("claude-sonnet-4-5-20250929".into());
+        family_defaults.haiku = Some("claude-haiku-4-5".into());
+        Ok(ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: route_model.into(),
+                profile: profile.map(str::to_owned),
+                provider: Some(provider),
+                ..Default::default()
+            },
+            family_defaults,
+            ..Default::default()
+        })
+    })
+}
+
+fn selector_test_session(model: &str) -> Arc<AsyncMutex<SessionState>> {
+    let mut state = SessionState::empty(SessionId::new(), model.to_owned());
+    state.model_profile = Some("insights-test".into());
+    Arc::new(AsyncMutex::new(state))
 }
 
 fn configured_native_prefix(
@@ -220,6 +276,58 @@ fn insights_model_runtime_for(route: NativeAnthropicRoute) -> ModelRuntime {
                 "reasoning":true,
                 "structured_output":false
             }
+        },{
+            "display_model":"claude-sonnet-4-5-20250929",
+            "request_model":"claude-sonnet-4-5-20250929",
+            "billing_model":"claude-sonnet-4-5-20250929",
+            "capabilities":{
+                "streaming":true,
+                "tools":true,
+                "vision":false,
+                "documents":false,
+                "reasoning":true,
+                "structured_output":false
+            }
+        }]
+    },{
+        "provider_id":provider_id,
+        "profile_name":"insights-other-test",
+        "protocol":protocol,
+        "base_url":base_url,
+        "auth":"none",
+        "credential":{"type":"none"},
+        "models":[{
+            "display_model":"claude-other-profile-model",
+            "request_model":"claude-other-profile-model",
+            "billing_model":"claude-other-profile-model",
+            "capabilities":{
+                "streaming":true,
+                "tools":true,
+                "vision":false,
+                "documents":false,
+                "reasoning":true,
+                "structured_output":false
+            }
+        }]
+    },{
+        "provider_id":"open_ai",
+        "profile_name":"insights-openai-test",
+        "protocol":"open_ai_chat",
+        "base_url":"https://api.openai.com/v1",
+        "auth":"none",
+        "credential":{"type":"none"},
+        "models":[{
+            "display_model":"gpt-insights-test",
+            "request_model":"gpt-insights-test",
+            "billing_model":"gpt-insights-test",
+            "capabilities":{
+                "streaming":true,
+                "tools":true,
+                "vision":false,
+                "documents":false,
+                "reasoning":true,
+                "structured_output":false
+            }
         }]
     }]}))
     .expect("fixture provider config is valid");
@@ -269,6 +377,41 @@ fn side_query_client(service: Arc<ApiService>) -> Arc<dyn SideQueryClient> {
 
 fn source_string(value: &str) -> Utf16JsonProjection {
     Utf16JsonProjection::plain(json!(value))
+}
+
+fn model_source_binding(
+    source: Utf16JsonProjection,
+    effective_source: Utf16JsonProjection,
+    route_model: &str,
+    route_profile: Option<&str>,
+) -> lingxi_core::host::ModelSourceBinding {
+    lingxi_core::host::ModelSourceBinding {
+        source,
+        effective_source,
+        route_anchor: lingxi_core::host::ModelRouteAnchor {
+            model: route_model.to_owned(),
+            profile: route_profile.map(str::to_owned),
+        },
+    }
+}
+
+fn configured_binding_handle(
+    binding: Option<lingxi_core::host::ModelSourceBinding>,
+) -> Arc<StdRwLock<Option<lingxi_core::host::ModelSourceBinding>>> {
+    Arc::new(StdRwLock::new(binding))
+}
+
+fn configured_source_handle(
+    source: Option<Utf16JsonProjection>,
+) -> Arc<StdRwLock<Option<lingxi_core::host::ModelSourceBinding>>> {
+    configured_binding_handle(source.map(|source| {
+        model_source_binding(
+            source.clone(),
+            source,
+            "claude-haiku-4-5",
+            Some("insights-test"),
+        )
+    }))
 }
 
 fn success_response(text: &str) -> ProviderResponse {
@@ -393,6 +536,7 @@ fn insights_request(
         model_attempt: None,
         native_prompt_context,
         model: "claude-haiku-4-5".into(),
+        model_source: None,
         profile: Some("insights-test".into()),
         system_prompt,
         typed_attachment_ids: HashSet::new(),
@@ -495,6 +639,396 @@ async fn insights_executor_emits_native_caps_source_and_branded_system_context()
             Some(telemetry::AnalyticsValue::String(source)) if source == "insights"
         ));
     }
+}
+
+#[tokio::test]
+async fn insights_executor_preserves_source_until_native_generation_normalization() {
+    struct SourceRecordingClient {
+        inner: Arc<dyn SideQueryClient>,
+        selected: Arc<Mutex<Vec<Option<Utf16JsonProjection>>>>,
+    }
+
+    #[async_trait]
+    impl SideQueryClient for SourceRecordingClient {
+        async fn query(
+            &self,
+            request: SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            self.selected
+                .lock()
+                .unwrap()
+                .push(request.model_source.clone());
+            self.inner.query(request).await
+        }
+    }
+
+    let transport = Arc::new(ScriptedTransport::new([success_response("source carried")]));
+    let service = service(transport.clone(), None, Some(0));
+    let units = "claude-configured-model"
+        .encode_utf16()
+        .chain([0xD800])
+        .collect::<Vec<_>>();
+    let source = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("fixture is a root string projection");
+    let selected = Arc::new(Mutex::new(Vec::new()));
+    let executor = InsightsSideQueryExecutor::new(
+        Arc::new(SourceRecordingClient {
+            inner: side_query_client(service.clone()),
+            selected: selected.clone(),
+        }),
+        Arc::new(FixedSourceModelSelector(source.clone())),
+        native_side_query_context_provider(service),
+    );
+
+    executor
+        .query(source_string("configured model source fixture"), 4096)
+        .await
+        .expect("fixture side query succeeds");
+
+    assert_eq!(
+        *selected.lock().unwrap(),
+        vec![Some(source)],
+        "Insights must retain exact source through the SideQuery producer"
+    );
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 1);
+    let body = Utf16JsonProjection::parse(&requests[0].body_source).unwrap();
+    let expected_wire_units = "claude-configured-model"
+        .encode_utf16()
+        .chain([0xfffd])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        body.string_units("/model"),
+        Some(expected_wire_units),
+        "Native generation applies toWellFormed at the physical request boundary"
+    );
+}
+
+#[tokio::test]
+async fn insights_executor_observes_live_configured_source_refresh() {
+    let transport = Arc::new(ScriptedTransport::new([
+        success_response("old source response"),
+        success_response("new source response"),
+        success_response("cross-profile source response"),
+    ]));
+    let service = service_for_route(
+        transport.clone(),
+        None,
+        Some(0),
+        NativeAnthropicRoute::Foundry,
+    );
+    let configured_source =
+        configured_source_handle(Some(source_string("claude-configured-old-custom")));
+    let selector = RuntimeInsightsModelSelector {
+        session: selector_test_session("claude-haiku-4-5"),
+        api: service.clone(),
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_source.clone(),
+    };
+    let executor = InsightsSideQueryExecutor::new(
+        side_query_client(service.clone()),
+        Arc::new(selector),
+        native_side_query_context_provider(service),
+    );
+
+    executor
+        .query(source_string("old configured source"), 4096)
+        .await
+        .expect("initial configured source query succeeds");
+    let refreshed_source = source_string("claude-configured-new-custom");
+    *configured_source.write().expect("source lock is healthy") = Some(model_source_binding(
+        refreshed_source.clone(),
+        refreshed_source,
+        "claude-haiku-4-5",
+        Some("insights-test"),
+    ));
+    executor
+        .query(source_string("refreshed configured source"), 4096)
+        .await
+        .expect("refreshed configured source query succeeds");
+    let other_profile_source = source_string("claude-other-profile-model");
+    *configured_source.write().expect("source lock is healthy") = Some(model_source_binding(
+        other_profile_source.clone(),
+        other_profile_source,
+        "claude-other-profile-model",
+        Some("insights-other-test"),
+    ));
+    executor
+        .query(source_string("cross-profile source is refused"), 4096)
+        .await
+        .expect("cross-profile source does not change the active request route");
+
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].url, requests[1].url,
+        "session route stays fixed"
+    );
+    assert_eq!(
+        requests[1].url, requests[2].url,
+        "session route stays fixed"
+    );
+    let first: Value =
+        serde_json::from_str(&requests[0].body_source).expect("first SDK request is JSON");
+    let second: Value =
+        serde_json::from_str(&requests[1].body_source).expect("second SDK request is JSON");
+    let third: Value =
+        serde_json::from_str(&requests[2].body_source).expect("third SDK request is JSON");
+    assert_eq!(first["model"], "claude-configured-old-custom");
+    assert_eq!(second["model"], "claude-configured-new-custom");
+    assert_eq!(
+        third["model"], "claude-haiku-4-5",
+        "a source from another Claude profile cannot rewrite the active session route"
+    );
+}
+
+#[tokio::test]
+async fn runtime_selector_uses_configured_source_owner_and_resolved_route_identity() {
+    let transport = Arc::new(ScriptedTransport::new([success_response("unused")]));
+    let api = service_for_route(
+        transport.clone(),
+        None,
+        Some(0),
+        NativeAnthropicRoute::Foundry,
+    );
+    let session = selector_test_session("claude-haiku-4-5");
+    let source = source_string("claude-configured-unresolved-model");
+    let configured_source = configured_source_handle(Some(source.clone()));
+    let selector = RuntimeInsightsModelSelector {
+        session: session.clone(),
+        api: api.clone(),
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_source,
+    };
+
+    let selected = selector.selected_model().await.expect("route resolves");
+    assert_eq!(selected.model_source, Some(source));
+
+    let units = "claude-configured-model"
+        .encode_utf16()
+        .chain([0xD800])
+        .collect::<Vec<_>>();
+    let lone_surrogate_source =
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("fixture is a root string projection");
+    let selector = RuntimeInsightsModelSelector {
+        session: session.clone(),
+        api: api.clone(),
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_source_handle(Some(lone_surrogate_source.clone())),
+    };
+    let selected = selector
+        .selected_model()
+        .await
+        .expect("lone-surrogate source does not prevent route selection");
+    assert_eq!(selected.model_source, Some(lone_surrogate_source));
+
+    // A registered configured model whose resolved route is already the same
+    // provider/profile/model needs no source carrier.
+    let selector = RuntimeInsightsModelSelector {
+        session: session.clone(),
+        api: api.clone(),
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_source_handle(Some(source_string("claude-haiku-4-5"))),
+    };
+    let selected = selector.selected_model().await.expect("route resolves");
+    assert!(selected.model_source.is_none());
+
+    // A Native family alias already mapped by the current configured route is
+    // not sent to the provider as the literal "sonnet" selector.
+    let canonical_sonnet = source_string("claude-sonnet-4-5-20250929");
+    let selector = RuntimeInsightsModelSelector {
+        session: selector_test_session("claude-sonnet-4-5-20250929"),
+        api: service_for_route(
+            transport.clone(),
+            None,
+            Some(0),
+            NativeAnthropicRoute::Foundry,
+        ),
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_binding_handle(Some(model_source_binding(
+            source_string("sonnet"),
+            canonical_sonnet.clone(),
+            "claude-sonnet-4-5-20250929",
+            Some("insights-test"),
+        ))),
+    };
+    let selected = selector
+        .selected_model()
+        .await
+        .expect("alias route resolves");
+    assert!(selected.model_source.is_none());
+
+    // The 1M alias resolves to its concrete Native model id while preserving
+    // the suffix needed by the provider request.
+    let selector = RuntimeInsightsModelSelector {
+        session: selector_test_session("claude-sonnet-4-5-20250929"),
+        api: service_for_route(
+            transport.clone(),
+            None,
+            Some(0),
+            NativeAnthropicRoute::Foundry,
+        ),
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_binding_handle(Some(model_source_binding(
+            source_string("sonnet[1m]"),
+            source_string("claude-sonnet-4-5-20250929[1m]"),
+            "claude-sonnet-4-5-20250929",
+            Some("insights-test"),
+        ))),
+    };
+    let selected = selector
+        .selected_model()
+        .await
+        .expect("1M alias route resolves");
+    assert_eq!(
+        selected.model_source,
+        Some(source_string("claude-sonnet-4-5-20250929[1m]"))
+    );
+
+    // A source resolving to a different provider remains provider-owned; it
+    // must not be attached to the current Native Claude request.
+    let selector = RuntimeInsightsModelSelector {
+        session: session.clone(),
+        api: api.clone(),
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_binding_handle(Some(model_source_binding(
+            source_string("gpt-insights-test"),
+            source_string("gpt-insights-test"),
+            "gpt-insights-test",
+            Some("insights-openai-test"),
+        ))),
+    };
+    let selected = selector.selected_model().await.expect("route resolves");
+    assert!(selected.model_source.is_none());
+
+    // A second Native-Claude profile is still a separate provider route. A live
+    // source refresh must not attach that profile's model id to this session's
+    // currently selected profile.
+    let other_profile_route = api
+        .resolve_media_route("claude-other-profile-model", None)
+        .expect("the alternate-profile model resolves independently");
+    assert_eq!(other_profile_route.main.profile_name, "insights-other-test");
+    assert!(matches!(
+        other_profile_route.main.provider_id,
+        llm_runtime::ProviderId::FoundryClaude
+    ));
+    let selector = RuntimeInsightsModelSelector {
+        session: session.clone(),
+        api: api.clone(),
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_binding_handle(Some(model_source_binding(
+            source_string("claude-other-profile-model"),
+            source_string("claude-other-profile-model"),
+            "claude-other-profile-model",
+            Some("insights-other-test"),
+        ))),
+    };
+    let selected = selector
+        .selected_model()
+        .await
+        .expect("session route resolves");
+    assert_eq!(selected.profile.as_deref(), Some("insights-test"));
+    assert!(selected.model_source.is_none());
+
+    let user_source = source_string("claude-user-selected-unregistered-model");
+    {
+        let mut session = session.lock().await;
+        session.user_model_setting_source = SessionModelSettingSource::UserSelection;
+        session.user_model_setting = Some(model_source_binding(
+            user_source.clone(),
+            user_source.clone(),
+            "claude-haiku-4-5",
+            Some("insights-test"),
+        ));
+    }
+    let selector = RuntimeInsightsModelSelector {
+        session,
+        api,
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_source_handle(Some(source_string(
+            "claude-configured-unresolved-model",
+        ))),
+    };
+    let selected = selector.selected_model().await.expect("route resolves");
+    assert_eq!(
+        selected.model_source,
+        Some(user_source),
+        "an explicit session pick owns its binding instead of inheriting the configured source"
+    );
+}
+
+#[tokio::test]
+async fn insights_does_not_apply_configured_source_after_session_route_change() {
+    let transport = Arc::new(ScriptedTransport::new([
+        success_response("configured route"),
+        success_response_for("claude-sonnet-4-5-20250929", "fallback route"),
+    ]));
+    let service = service_for_route(
+        transport.clone(),
+        None,
+        Some(0),
+        NativeAnthropicRoute::Foundry,
+    );
+    let session = selector_test_session("claude-haiku-4-5");
+    let configured_source =
+        configured_source_handle(Some(source_string("claude-configured-parent-model")));
+    let selector = RuntimeInsightsModelSelector {
+        session: session.clone(),
+        api: service.clone(),
+        model_resolution: selector_test_model_resolution(ModelProviderKind::Foundry),
+        main_model_source: configured_source,
+    };
+    let executor = InsightsSideQueryExecutor::new(
+        side_query_client(service.clone()),
+        Arc::new(selector),
+        native_side_query_context_provider(service),
+    );
+
+    executor
+        .query(source_string("configured route query"), 4096)
+        .await
+        .expect("configured-route query succeeds");
+    // Simulate the post-fallback route while the configured binding remains
+    // anchored to the original Haiku route.
+    session.lock().await.model = "claude-sonnet-4-5-20250929".into();
+    executor
+        .query(source_string("fallback route query"), 4096)
+        .await
+        .expect("changed-route query succeeds");
+
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 2);
+    let configured: Value =
+        serde_json::from_str(&requests[0].body_source).expect("configured request JSON");
+    let fallback: Value =
+        serde_json::from_str(&requests[1].body_source).expect("fallback request JSON");
+    assert_eq!(configured["model"], "claude-configured-parent-model");
+    assert_eq!(
+        fallback["model"], "claude-sonnet-4-5-20250929",
+        "the configured source remains anchored to Haiku and cannot override the new route"
+    );
+}
+
+#[tokio::test]
+async fn runtime_selector_drops_parent_source_for_native_opus_override() {
+    let transport = Arc::new(ScriptedTransport::new([success_response("unused")]));
+    let api = service_for_route(transport, None, Some(0), NativeAnthropicRoute::FirstParty);
+    let selector = RuntimeInsightsModelSelector {
+        session: selector_test_session("claude-haiku-4-5"),
+        api,
+        model_resolution: selector_test_model_resolution(ModelProviderKind::FirstParty),
+        main_model_source: configured_source_handle(Some(source_string(
+            "claude-configured-parent-model",
+        ))),
+    };
+
+    let selected = selector
+        .selected_model()
+        .await
+        .expect("Opus selection resolves");
+    assert_eq!(selected.model, "claude-opus-4-8");
+    assert!(selected.model_source.is_none());
 }
 
 #[tokio::test]

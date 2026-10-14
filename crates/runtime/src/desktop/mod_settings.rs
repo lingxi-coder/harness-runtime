@@ -61,8 +61,10 @@ async fn read_file(path: &Path) -> Utf16JsonProjection {
     parse_valid_settings_source(raw).unwrap_or_else(empty)
 }
 
-fn fold(target: &mut Utf16JsonProjection, source: &Utf16JsonProjection) {
-    let _ = lingxi_core::settings::merger::merge_raw_source_layer(target, source);
+fn fold(target: &mut Utf16JsonProjection, source: &Utf16JsonProjection) -> Result<(), ModError> {
+    lingxi_core::settings::merger::merge_raw_source_layer(target, source)
+        .map(|_| ())
+        .map_err(|error| ModError::Hook(error.to_string()))
 }
 
 fn managed_view(
@@ -89,48 +91,85 @@ fn settings_source(
 fn catalog_restriction_for_settings(
     cfg: &DesktopConfig,
     snapshot: &settings_watch::ManagedSettingsSnapshot,
-) -> (
-    llm_runtime::model::allowlist::CatalogRestriction,
-    Option<BTreeMap<String, String>>,
-) {
+) -> Result<
+    (
+        llm_runtime::model::allowlist::CatalogRestriction,
+        Option<BTreeMap<String, String>>,
+    ),
+    ModError,
+> {
     use llm_runtime::model::allowlist::{catalog_restriction_from_settings, CatalogRestriction};
 
     if snapshot.read_failed() {
-        return (CatalogRestriction::Refused, None);
+        return Ok((CatalogRestriction::Refused, None));
     }
-    let managed = snapshot.effective_json().into_iter().collect::<Vec<_>>();
-    let Some(effective) = super::load_effective_settings_for_config(cfg, &managed) else {
-        return (CatalogRestriction::Refused, None);
-    };
-    (
+    let effective =
+        super::load_effective_settings_for_config(cfg, Some(snapshot)).map_err(|error| {
+            ModError::Hook(
+                error
+                    .diagnostic_projection()
+                    .to_json_string()
+                    .expect("valid diagnostic JSON"),
+            )
+        })?;
+    Ok((
         catalog_restriction_from_settings(true, effective.settings.available_models.clone()),
         Some(effective.settings.model_overrides.unwrap_or_default()),
-    )
+    ))
 }
 
 fn model_allowed_in_settings(
     cfg: &DesktopConfig,
     snapshot: &settings_watch::ManagedSettingsSnapshot,
     model: &str,
-) -> Option<bool> {
+) -> Result<Option<bool>, ModError> {
     use llm_runtime::model::allowlist::{model_allowed_under_catalog, CatalogRestriction};
 
-    let (restriction, overrides) = catalog_restriction_for_settings(cfg, snapshot);
-    match restriction {
+    let (restriction, overrides) = catalog_restriction_for_settings(cfg, snapshot)?;
+    Ok(match restriction {
         CatalogRestriction::Unrestricted => None,
         restriction => Some(model_allowed_under_catalog(
             model,
             &restriction,
             overrides.as_ref(),
         )),
-    }
+    })
+}
+
+fn model_allowed_in_settings_projection(
+    cfg: &DesktopConfig,
+    snapshot: &settings_watch::ManagedSettingsSnapshot,
+    model: &Utf16JsonProjection,
+) -> Result<Option<bool>, ModError> {
+    use llm_runtime::model::allowlist::{model_allowed_under_catalog_utf16, CatalogRestriction};
+
+    let units = model
+        .string_units("")
+        .ok_or_else(|| ModError::Hook("model source must be a JSON string".into()))?;
+    let (restriction, overrides) = catalog_restriction_for_settings(cfg, snapshot)?;
+    Ok(match restriction {
+        CatalogRestriction::Unrestricted => None,
+        restriction => Some(model_allowed_under_catalog_utf16(
+            &units,
+            &restriction,
+            overrides.as_ref(),
+        )),
+    })
 }
 
 #[async_trait::async_trait]
 impl ModSettingsReader for DesktopModSettingsReader {
     async fn model_allowed(&self, model: &str) -> Result<Option<bool>, ModError> {
         let snapshot = settings_watch::managed_settings_snapshot_for_config(&self.cfg).await;
-        Ok(model_allowed_in_settings(&self.cfg, &snapshot, model))
+        model_allowed_in_settings(&self.cfg, &snapshot, model)
+    }
+
+    async fn model_allowed_projection(
+        &self,
+        model: &Utf16JsonProjection,
+    ) -> Result<Option<bool>, ModError> {
+        let snapshot = settings_watch::managed_settings_snapshot_for_config(&self.cfg).await;
+        model_allowed_in_settings_projection(&self.cfg, &snapshot, model)
     }
 
     async fn read(&self, input: Utf16JsonProjection) -> Result<Utf16JsonProjection, ModError> {
@@ -192,19 +231,19 @@ impl ModSettingsReader for DesktopModSettingsReader {
                 let managed = settings_watch::managed_settings_snapshot_for_config(&self.cfg).await;
                 let mut raw = empty();
                 if user_allowed {
-                    fold(&mut raw, &read_file(&user).await);
+                    fold(&mut raw, &read_file(&user).await)?;
                 }
                 if project_allowed {
-                    fold(&mut raw, &read_file(&project).await);
-                    fold(&mut raw, &read_file(&local).await);
+                    fold(&mut raw, &read_file(&project).await)?;
+                    fold(&mut raw, &read_file(&local).await)?;
                 }
-                fold(&mut raw, &flag);
-                fold(&mut raw, &managed_view(&managed)?);
+                fold(&mut raw, &flag)?;
+                fold(&mut raw, &managed_view(&managed)?)?;
                 let env: BTreeMap<String, String> = std::env::vars().collect();
                 let (env_settings, _) = lingxi_core::settings::env_parser::parse_env(&env)
                     .map_err(|error| ModError::Hook(error.to_string()))?;
                 let env_source = settings_source(&env_settings)?;
-                fold(&mut raw, &env_source);
+                fold(&mut raw, &env_source)?;
                 Ok(raw)
             }
             Some(_) => unreachable!("source validated above"),
@@ -250,11 +289,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            model_allowed_in_settings(&cfg, &absent, "claude-opus-4-6"),
+            model_allowed_in_settings(&cfg, &absent, "claude-opus-4-6").unwrap(),
             Some(true)
         );
         assert_eq!(
-            model_allowed_in_settings(&cfg, &absent, "claude-sonnet-4-6"),
+            model_allowed_in_settings(&cfg, &absent, "claude-sonnet-4-6").unwrap(),
             Some(false)
         );
 
@@ -265,18 +304,18 @@ mod tests {
         .unwrap();
         let managed = settings_watch::read_managed_settings_snapshot(root.path()).await;
         assert_eq!(
-            model_allowed_in_settings(&cfg, &managed, "claude-opus-4-6"),
+            model_allowed_in_settings(&cfg, &managed, "claude-opus-4-6").unwrap(),
             Some(false)
         );
         assert_eq!(
-            model_allowed_in_settings(&cfg, &managed, "claude-sonnet-4-6"),
+            model_allowed_in_settings(&cfg, &managed, "claude-sonnet-4-6").unwrap(),
             Some(true)
         );
 
         std::fs::write(&settings, "{").unwrap();
         let unresolved = settings_watch::read_managed_settings_snapshot(root.path()).await;
         assert_eq!(
-            model_allowed_in_settings(&cfg, &unresolved, "claude-opus-4-6"),
+            model_allowed_in_settings(&cfg, &unresolved, "claude-opus-4-6").unwrap(),
             Some(false)
         );
     }
@@ -314,11 +353,13 @@ mod tests {
         fold(
             &mut merged,
             &source(&json!({"enabledPlugins":{"a@org":true},"custom":{"lower":true},"model":"a"})),
-        );
+        )
+        .expect("fixture settings layers are mergeable");
         fold(
             &mut merged,
             &source(&json!({"enabledPlugins":{"b@org":true},"custom":{"upper":true},"model":null})),
-        );
+        )
+        .expect("fixture settings layers are mergeable");
         assert_eq!(
             view(&merged),
             json!({

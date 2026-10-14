@@ -417,6 +417,88 @@ where
     }
 }
 
+fn deserialize_optional_policy_helper_projection<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_policy_object_projection(deserializer, "policyHelper")
+}
+
+fn deserialize_optional_policy_helpers_projection<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_policy_object_projection(deserializer, "policyHelpers")
+}
+
+fn deserialize_optional_policy_object_projection<'de, D>(
+    deserializer: D,
+    field: &'static str,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    if projection
+        .at_pointer("")
+        .and_then(|root| root.object_entries())
+        .is_some()
+    {
+        Ok(Some(projection))
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "{field} must be an object"
+        )))
+    }
+}
+
+fn serialize_optional_policy_helper_projection<S>(
+    value: &Option<Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serialize_optional_policy_object_projection(value, serializer, "policyHelper")
+}
+
+fn serialize_optional_policy_helpers_projection<S>(
+    value: &Option<Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serialize_optional_policy_object_projection(value, serializer, "policyHelpers")
+}
+
+fn serialize_optional_policy_object_projection<S>(
+    value: &Option<Utf16JsonProjection>,
+    serializer: S,
+    field: &'static str,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if let Some(projection) = value {
+        if projection
+            .at_pointer("")
+            .and_then(|root| root.object_entries())
+            .is_none()
+        {
+            return Err(serde::ser::Error::custom(format!(
+                "{field} must be an object"
+            )));
+        }
+    }
+    crate::types::utf16_json::raw_json_serde::serialize_option(value, serializer)
+}
+
 fn deserialize_optional_sandbox<'de, D>(
     deserializer: D,
 ) -> Result<Option<BTreeMap<String, Value>>, D::Error>
@@ -977,10 +1059,31 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_user_question_timeout: Option<String>,
 
-    /// Object-merge field (deep-merge). Managed helper commands keyed by OS /
-    /// fallback scope. Kept opaque until the helper-resolution consumer lands.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_helpers: Option<BTreeMap<String, Value>>,
+    /// Native's singular managed policy helper config. This is retained as an
+    /// exact UTF-16 object projection; it is not executable authority. Only
+    /// `NativePolicySelection` may hand an admitted admin-source config to a
+    /// host executor.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_policy_helper_projection",
+        serialize_with = "serialize_optional_policy_helper_projection"
+    )]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub policy_helper: Option<Utf16JsonProjection>,
+
+    /// Native's per-OS managed policy helper map and static fallbacks. The
+    /// exact UTF-16 projection remains source data; NativePolicySelection
+    /// selects only the highest admitted admin source and never authorizes a
+    /// command merely because this typed settings view contains the field.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_policy_helpers_projection",
+        serialize_with = "serialize_optional_policy_helpers_projection"
+    )]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub policy_helpers: Option<Utf16JsonProjection>,
 
     /// Scalar field (later source wins). Whether Claude.ai skill sync is
     /// enabled. Schema-only until the marketplace sync consumer lands.
@@ -2761,7 +2864,9 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(
-                crate::settings::merger::merge(previous, parsed).include_code_review_suggestion,
+                crate::settings::merger::merge(previous, parsed)
+                    .expect("test settings layers remain mergeable")
+                    .include_code_review_suggestion,
                 Some(value == "true")
             );
         }
@@ -3094,6 +3199,31 @@ mod tests {
     }
 
     #[test]
+    fn policy_helper_projections_preserve_nested_utf16_without_authorizing_them() {
+        let source = r#"{"model":"kept","policyHelper":{"path":"/helper/\ud800"},"policyHelpers":{"macos":{"path":"/macos/\ud800","defaultSettings":{"model":"opus"}},"default":{"model":"sonnet"}}}"#;
+        let parsed: SettingsJson = serde_json::from_str(source).expect("helper projections parse");
+        assert_eq!(parsed.model.as_deref(), Some("kept"));
+        assert_eq!(
+            parsed
+                .policy_helper
+                .as_ref()
+                .and_then(|value| value.string_units("/path")),
+            Some("/helper/".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            parsed
+                .policy_helpers
+                .as_ref()
+                .and_then(|value| value.string_units("/macos/path")),
+            Some("/macos/".encode_utf16().chain([0xd800]).collect())
+        );
+        let serialized = serde_json::to_string(&parsed).expect("source projections serialize");
+        assert!(serialized.contains(r#"\ud800"#));
+        assert!(serde_json::from_str::<SettingsJson>(r#"{"policyHelper":null}"#).is_err());
+        assert!(serde_json::from_str::<SettingsJson>(r#"{"policyHelpers":null}"#).is_err());
+    }
+
+    #[test]
     fn response_language_keeps_lone_surrogates_without_dropping_the_tier() {
         let parsed: SettingsJson =
             serde_json::from_str(r#"{"language":"\ud800","model":"sibling-model"}"#)
@@ -3385,8 +3515,8 @@ mod tests {
     fn new_238_settings_keys_parse_roundtrip_and_validate() {
         let json = r#"{
             "policyHelpers": {
-                "defaultSettings": { "command": "/usr/local/bin/policy-helper" },
-                "darwin": { "command": "/opt/policy-helper" }
+                "default": { "model": "opus" },
+                "macos": { "path": "/opt/policy-helper" }
             },
             "syncClaudeAiSkills": true,
             "additionalMarketplaces": {

@@ -5,8 +5,52 @@ use lingxi_core::host::instructions::{
     InstructionContext, InstructionContextProvider, InstructionFile, InstructionFileType,
     InstructionReadContext, InstructionRendering, InstructionScope,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
 use std::path::Path;
+
+fn ordered_user_context(
+    values: &std::collections::BTreeMap<String, String>,
+    order: &[String],
+) -> Utf16JsonProjection {
+    let mut keys = order.to_vec();
+    for key in values.keys() {
+        if !keys.contains(key) {
+            keys.push(key.clone());
+        }
+    }
+    Utf16JsonProjection::object(
+        keys.into_iter()
+            .filter_map(|key| {
+                values
+                    .get(&key)
+                    .map(|value| (key, Utf16JsonProjection::from(value.clone())))
+            })
+            .collect(),
+    )
+    .expect("fixture userContext is an object")
+}
+
+fn user_context_from_json(value: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("fixture userContext is JSON")
+}
+
+fn user_context_json(value: &Utf16JsonProjection) -> Value {
+    serde_json::from_str(&value.to_json_string().expect("userContext is valid JSON"))
+        .expect("userContext is a JSON value")
+}
+
+fn user_context_string(context: &InstructionContext, key: &str) -> Option<String> {
+    context.user_context_utf8(key)
+}
+
+fn user_context_order(context: &InstructionContext) -> Vec<String> {
+    context
+        .user_context_entries()
+        .into_iter()
+        .map(|(key, _)| String::from_utf16(&key).expect("fixture userContext key is valid UTF-16"))
+        .collect()
+}
 
 /// The checked-in 2.1.286 fixture is immutable and predates the current
 /// `omitInstructions`/`instructions` field names. Adapt only its test copy so
@@ -65,31 +109,35 @@ impl InstructionContextProvider for InstructionFixture {
         let mut context = InstructionContext::default();
         // Both scopes project the same complete root Gv result; omit policy
         // does not rediscover fields from the child's inherited snapshot.
-        context.user_context = self.root_user_context.clone();
-        context.user_context_order = self.root_user_context_order.clone();
-        context.user_context.remove("instructions");
+        context.user_context =
+            ordered_user_context(&self.root_user_context, &self.root_user_context_order);
+        context
+            .remove_user_context_text("instructions")
+            .expect("userContext remains an object");
         context.managed_instructions_only = self.configured_managed_only;
         let managed = scope == InstructionScope::ManagedOnly || self.configured_managed_only;
         let mut files = Vec::new();
         if let Ok(body) = &self.managed {
             if !body.is_empty() {
-                files.push(InstructionFile {
-                    path: "/managed/LINGXI.md".into(),
-                    kind: InstructionFileType::Managed,
-                    content: body.clone(),
-                });
+                files.push(InstructionFile::new(
+                    "/managed/LINGXI.md",
+                    InstructionFileType::Managed,
+                    body.clone(),
+                ));
             }
         }
         if !managed {
-            files.push(InstructionFile {
-                path: "/project/LINGXI.md".into(),
-                kind: InstructionFileType::Project,
-                content: "FULL POLICY".into(),
-            });
+            files.push(InstructionFile::new(
+                "/project/LINGXI.md",
+                InstructionFileType::Project,
+                "FULL POLICY",
+            ));
         }
         context.eager_instructions = Some(files);
         if !body.is_empty() {
-            context.user_context.insert("instructions".into(), body);
+            context
+                .set_user_context_text("instructions", body)
+                .expect("userContext remains an object");
         }
         Ok(context)
     }
@@ -182,6 +230,7 @@ fn model_text(messages: &[ConversationMessage]) -> String {
                     .iter()
                     .filter_map(|b| match b {
                         ContentBlock::Text { text, .. } => Some(text.as_str()),
+                        ContentBlock::TextJsUtf16 { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -206,8 +255,7 @@ async fn omit_instruction_requests_match_native_oracle() {
             "plugin" => AgentSource::Plugin,
             _ => AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
-        ctx.instruction_context.user_context =
-            serde_json::from_value(case["original"].clone()).unwrap();
+        ctx.instruction_context.user_context = user_context_from_json(&case["original"]);
         ctx.instruction_provider = Some(provider);
         let selected = crate::instructions::resolve(&ctx).await.unwrap();
         let messages = capture(ctx, vec![Ok(text_response("done", Some("end_turn")))]).await;
@@ -275,21 +323,13 @@ async fn current_root_full_context_replaces_stale_parent_fields_and_order() {
                 let mut ctx = fresh_subagent_ctx();
                 ctx.agent_definition.source = AgentSource::Plugin;
                 ctx.agent_definition.omit_instructions = omit;
-                ctx.instruction_context.user_context = serde_json::from_value(serde_json::json!({
+                ctx.instruction_context.user_context = user_context_from_json(&serde_json::json!({
                     "instructions": "STALE INHERITED POLICY",
                     "userEmail": "logged-out@example.test",
                     "attachedProject": "DETACHED PARENT PROJECT",
                     "customParentField": "STALE PARENT VALUE",
                     "currentDate": "2026-09-30"
-                }))
-                .unwrap();
-                ctx.instruction_context.user_context_order = vec![
-                    "userEmail".into(),
-                    "attachedProject".into(),
-                    "customParentField".into(),
-                    "currentDate".into(),
-                    "instructions".into(),
-                ];
+                }));
                 ctx.instruction_provider = Some(provider);
                 if cold_resume {
                     ctx.resumed_history = Some(vec![ConversationMessage::user(
@@ -300,11 +340,27 @@ async fn current_root_full_context_replaces_stale_parent_fields_and_order() {
                 }
 
                 let selected = crate::instructions::resolve(&ctx).await.unwrap();
-                assert_eq!(selected.user_context_order, root_order);
-                assert_eq!(selected.user_context["currentDate"], "2026-10-01");
-                assert_eq!(selected.user_context["rootField"], "CURRENT ROOT VALUE");
+                let expected_order = if root_order.is_empty() {
+                    vec!["currentDate", "rootField", "instructions"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                } else {
+                    root_order.clone()
+                };
+                assert_eq!(user_context_order(&selected), expected_order);
                 assert_eq!(
-                    selected.user_context["instructions"],
+                    user_context_string(&selected, "currentDate").as_deref(),
+                    Some("2026-10-01")
+                );
+                assert_eq!(
+                    user_context_string(&selected, "rootField").as_deref(),
+                    Some("CURRENT ROOT VALUE")
+                );
+                assert_eq!(
+                    user_context_string(&selected, "instructions")
+                        .as_deref()
+                        .unwrap(),
                     if omit {
                         "MANAGED POLICY"
                     } else {
@@ -312,7 +368,9 @@ async fn current_root_full_context_replaces_stale_parent_fields_and_order() {
                     }
                 );
                 for stale_key in ["userEmail", "attachedProject", "customParentField"] {
-                    assert!(!selected.user_context.contains_key(stale_key));
+                    assert!(selected
+                        .user_context_value(&stale_key.encode_utf16().collect::<Vec<_>>())
+                        .is_none());
                 }
                 let messages =
                     capture(ctx, vec![Ok(text_response("done", Some("end_turn")))]).await;
@@ -411,8 +469,20 @@ async fn managed_projection_changes_only_instruction_body_after_account_change()
         } else {
             expected.remove("instructions");
         }
-        assert_eq!(selected.user_context, expected);
-        assert_eq!(selected.user_context_order, full.root_user_context_order);
+        assert_eq!(
+            user_context_json(&selected.user_context),
+            user_context_json(&ordered_user_context(
+                &expected,
+                &full.root_user_context_order,
+            ))
+        );
+        let expected_order = full
+            .root_user_context_order
+            .iter()
+            .filter(|key| expected.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(user_context_order(&selected), expected_order);
         assert_eq!(selected.managed_instructions_only, outcome == "managed");
         assert_eq!(
             selected.sent_paths,
@@ -478,8 +548,8 @@ async fn failed_full_load_aborts_before_startup_and_releases_restore_gate() {
             ctx.agent_definition.source = AgentSource::Plugin;
             ctx.agent_definition.omit_instructions = omit;
             ctx.instruction_context
-                .user_context
-                .insert("instructions".into(), "STALE INHERITED POLICY".into());
+                .set_user_context_text("instructions", "STALE INHERITED POLICY")
+                .unwrap();
             ctx.instruction_provider = Some(provider.clone());
             ctx.api_client = Some(api.clone());
             ctx.transcript_subdir = directory.path().to_path_buf();
@@ -674,11 +744,14 @@ async fn failed_managed_projection_retains_the_successful_full_load() {
     ctx.agent_definition.source = AgentSource::Plugin;
     ctx.agent_definition.omit_instructions = true;
     ctx.instruction_context
-        .user_context
-        .insert("instructions".into(), "STALE INHERITED POLICY".into());
+        .set_user_context_text("instructions", "STALE INHERITED POLICY")
+        .unwrap();
     ctx.instruction_provider = Some(provider.clone());
     let selected = crate::instructions::resolve(&ctx).await.unwrap();
-    assert_eq!(selected.user_context["instructions"], "FULL POLICY");
+    assert_eq!(
+        user_context_string(&selected, "instructions").as_deref(),
+        Some("FULL POLICY")
+    );
     assert!(!selected.managed_instructions_only);
     assert_eq!(
         *provider.loads.lock().unwrap(),
@@ -695,8 +768,8 @@ async fn absent_provider_preserves_explicit_context_without_discovery() {
     let mut ctx = fresh_subagent_ctx();
     ctx.instruction_context.rendering = InstructionRendering::Inline;
     ctx.instruction_context
-        .user_context
-        .insert("instructions".into(), "CALLER SUPPLIED POLICY".into());
+        .set_user_context_text("instructions", "CALLER SUPPLIED POLICY")
+        .unwrap();
     let messages = capture(ctx, vec![Ok(text_response("done", Some("end_turn")))]).await;
     assert!(model_text(&messages).contains("CALLER SUPPLIED POLICY"));
 }
@@ -712,8 +785,8 @@ async fn explicit_fork_context_bypasses_omit_and_preserves_sent_cursor() {
     ctx.instruction_context.rendering = InstructionRendering::Inline;
     ctx.instruction_context.managed_instructions_only = true;
     ctx.instruction_context
-        .user_context
-        .insert("instructions".into(), "EXPLICIT FORK POLICY".into());
+        .set_user_context_text("instructions", "EXPLICIT FORK POLICY")
+        .unwrap();
     ctx.instruction_context
         .sent_paths
         .insert("/project/nested/AGENTS.md".into());
@@ -756,8 +829,8 @@ async fn cold_resume_reloads_current_managed_policy_without_persisted_selection(
     resumed.instruction_context.managed_instructions_only = true;
     resumed
         .instruction_context
-        .user_context
-        .insert("instructions".into(), "OLD MANAGED POLICY".into());
+        .set_user_context_text("instructions", "OLD MANAGED POLICY")
+        .unwrap();
     resumed
         .instruction_context
         .sent_paths
@@ -799,8 +872,8 @@ async fn fork_of_main_session_injects_its_outgoing_only_instruction_prefix() {
     ctx.instruction_context_is_override = true;
     ctx.instruction_context.rendering = InstructionRendering::Inline;
     ctx.instruction_context
-        .user_context
-        .insert("instructions".into(), "MAIN SNAPSHOT POLICY".into());
+        .set_user_context_text("instructions", "MAIN SNAPSHOT POLICY")
+        .unwrap();
     ctx.fork_context_messages = Some(vec![ConversationMessage::user(
         MessageId::new(),
         "fork directive".into(),
@@ -826,14 +899,13 @@ async fn fresh_child_scope_selection_matches_native_lv_oracle() {
         ctx.instruction_context_is_override = case["explicit"].as_bool().unwrap();
         ctx.instruction_context.managed_instructions_only =
             case["inheritedManaged"].as_bool().unwrap();
-        ctx.instruction_context.user_context =
-            serde_json::from_value(case["original"].clone()).unwrap();
+        ctx.instruction_context.user_context = user_context_from_json(&case["original"]);
         ctx.instruction_provider = Some(provider.clone());
         let selected = crate::instructions::resolve(&ctx).await.unwrap();
         provider.loads.lock().unwrap().clear();
         let messages = capture(ctx, vec![Ok(text_response("done", Some("end_turn")))]).await;
         assert_eq!(
-            serde_json::to_value(&selected.user_context).unwrap(),
+            user_context_json(&selected.user_context),
             case["expected"]["userContext"],
             "{case}"
         );
@@ -845,11 +917,15 @@ async fn fresh_child_scope_selection_matches_native_lv_oracle() {
             "{case}"
         );
         let text = model_text(&messages);
-        for (key, value) in &selected.user_context {
+        for (key_units, value) in selected.user_context_entries() {
+            let key = String::from_utf16(&key_units).expect("fixture key is valid UTF-16");
+            let value =
+                String::from_utf16(&value.string_units("").expect("fixture value is a string"))
+                    .expect("fixture value is valid UTF-16");
             if key == "currentDate" {
                 assert!(text.contains("Today's date is"), "{case}");
             } else if key == "instructions" {
-                assert!(text.contains(value), "{case}");
+                assert!(text.contains(&value), "{case}");
             } else {
                 assert!(text.contains(&format!("# {key}\n{value}")), "{case}");
             }
@@ -1097,8 +1173,8 @@ fn instruction_fork_carrier_is_private_to_the_live_process() {
     let mut context = InstructionContext::default();
     context.rendering = InstructionRendering::Inline;
     context
-        .user_context
-        .insert("instructions".into(), "FROZEN LIVE POLICY".into());
+        .set_user_context_text("instructions", "FROZEN LIVE POLICY")
+        .unwrap();
     context.sent_paths.insert("/project/pkg/AGENTS.md".into());
     let request = SubagentSpawnRequest {
         parent_native_query_depth: None,
@@ -1131,8 +1207,8 @@ async fn cold_child_recovers_native_inline_hint_without_persisting_its_prefix() 
         })).unwrap(),
     );
     ctx.instruction_context
-        .user_context
-        .insert("instructions".into(), "STALE PRIVATE POLICY".into());
+        .set_user_context_text("instructions", "STALE PRIVATE POLICY")
+        .unwrap();
     ctx.instruction_provider = Some(fixture("managed"));
     let messages = capture(ctx, vec![Ok(text_response("done", Some("end_turn")))]).await;
     let text = model_text(&messages);
@@ -1254,8 +1330,8 @@ fn outgoing_instruction_prefix_preserves_the_mandatory_task_under_input_cap() {
     let mut context = InstructionContext::default();
     context.rendering = InstructionRendering::Inline;
     context
-        .user_context
-        .insert("instructions".into(), "POLICY".into());
+        .set_user_context_text("instructions", "POLICY")
+        .unwrap();
     let task = ConversationMessage::user(MessageId::new(), "TASK".into());
     let newest = ConversationMessage::user(MessageId::new(), "LATEST".into());
     let history = vec![

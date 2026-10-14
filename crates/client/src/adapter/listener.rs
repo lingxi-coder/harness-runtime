@@ -183,7 +183,7 @@ mod tests {
         let sink: Arc<dyn ClientEventSink> = ListenerSink::arc(listener);
         sink.emit(ClientEvent::Error {
             kind: ErrorKindDto::Internal,
-            message: "probe".to_string(),
+            message: "probe".into(),
         })
         .await;
     }

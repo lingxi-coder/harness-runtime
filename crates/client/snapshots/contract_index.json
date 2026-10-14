@@ -347,7 +347,7 @@
   "ClientEvent::DoctorReport.report": "DoctorReportDto",
   "ClientEvent::Error": "error",
   "ClientEvent::Error.kind": "ErrorKindDto",
-  "ClientEvent::Error.message": "String",
+  "ClientEvent::Error.message": "ClientTextDto",
   "ClientEvent::FastModeChanged": "fast_mode_changed",
   "ClientEvent::FastModeChanged.enabled": "bool",
   "ClientEvent::Hooks": "hooks",

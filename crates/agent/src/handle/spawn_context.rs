@@ -865,6 +865,8 @@ impl PoolSubagentSpawner {
             task_registry: None,
             refusal_fallback_chain: Vec::new(),
             agent_id,
+            cancellation_token: lingxi_core::host::CancellationToken::new(),
+            preload_lifecycle: Arc::new(crate::context::AgentPreloadLifecycle::new()),
             parent_agent_id: None,
             agent_spawn_provenance: Default::default(),
             agent_name: None,

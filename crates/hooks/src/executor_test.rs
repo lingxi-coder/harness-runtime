@@ -2015,6 +2015,93 @@ mod command_arm_tests {
         assert!(post.contains(r#""requested_model":"opus""#));
         assert!(post.contains(r#""source":"resume""#));
         assert!(post.contains(r#""cache_ttl":"1h""#));
+
+        let post_without_request = dispatch_and_capture(
+            HookEventType::PostModelSwitch,
+            HookEvent::PostModelSwitch {
+                from_model: "claude-sonnet-4-6".into(),
+                to_model: "claude-opus-4-6".into(),
+                requested_model: None,
+                source: "sdk".into(),
+                context_tokens: 12_345,
+                prompt_cache_warm: false,
+                cache_ttl: "5m".into(),
+                estimated_cache_write_usd: 0.0,
+                pricing: "default".into(),
+            },
+        )
+        .await;
+        assert!(
+            post_without_request.contains(r#""requested_model":null"#),
+            "Native's nullable model-reset value must stay present in PostModelSwitch"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_switch_event_payloads_preserve_unpaired_requested_model_units() {
+        let requested_units = "claude-custom-"
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let requested_model = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&requested_units),
+            requested_units.clone(),
+        )
+        .expect("requested model keeps its exact JavaScript string units");
+
+        let pre = dispatch_and_capture(
+            HookEventType::PreModelSwitch,
+            HookEvent::PreModelSwitch {
+                from_model: "claude-sonnet-4-6".into(),
+                to_model: "claude-opus-4-6".into(),
+                requested_model: Some(requested_model.clone()),
+                source: "sdk".into(),
+                context_tokens: 0,
+                prompt_cache_warm: false,
+                cache_ttl: "5m".into(),
+                estimated_cache_write_usd: 0.0,
+                pricing: "default".into(),
+            },
+        )
+        .await;
+        let pre_payload = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&pre)
+            .expect("PreModelSwitch hook receives valid JSON");
+        assert_eq!(
+            pre_payload.string_units("/requested_model"),
+            Some(requested_units.clone())
+        );
+        assert_eq!(
+            pre_payload.string_at("/to_model"),
+            Some("claude-opus-4-6"),
+            "the route identity remains the requested route while source keeps its raw alias"
+        );
+
+        let post = dispatch_and_capture(
+            HookEventType::PostModelSwitch,
+            HookEvent::PostModelSwitch {
+                from_model: "claude-sonnet-4-6".into(),
+                to_model: "claude-opus-4-6".into(),
+                requested_model: Some(requested_model),
+                source: "sdk".into(),
+                context_tokens: 0,
+                prompt_cache_warm: false,
+                cache_ttl: "5m".into(),
+                estimated_cache_write_usd: 0.0,
+                pricing: "default".into(),
+            },
+        )
+        .await;
+        let post_payload = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&post)
+            .expect("PostModelSwitch hook receives valid JSON");
+        assert_eq!(
+            post_payload.string_units("/requested_model"),
+            Some(requested_units)
+        );
+        assert_eq!(
+            post_payload.string_at("/to_model"),
+            Some("claude-opus-4-6"),
+            "the post-hook sees exact raw request identity independently of resolved route"
+        );
     }
 
     #[tokio::test]

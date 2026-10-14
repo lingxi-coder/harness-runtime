@@ -95,8 +95,13 @@ pub struct ToolRegistry {
 }
 
 type BashPrecommitSkillsProvider = Arc<
-    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = BashPrecommitSkills> + Send>>
-        + Send
+    dyn Fn() -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<BashPrecommitSkills, lingxi_core::settings::SettingsError>,
+                    > + Send,
+            >,
+        > + Send
         + Sync,
 >;
 
@@ -142,7 +147,10 @@ impl ToolRegistry {
     pub fn set_bash_precommit_skills_provider<F, Fut>(&self, provider: F)
     where
         F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = BashPrecommitSkills> + Send + 'static,
+        Fut: std::future::Future<
+                Output = Result<BashPrecommitSkills, lingxi_core::settings::SettingsError>,
+            > + Send
+            + 'static,
     {
         *self
             .bash_precommit_skills_provider
@@ -152,7 +160,9 @@ impl ToolRegistry {
     }
 
     /// Read the session's skill suggestions without holding a registry lock across await.
-    pub async fn bash_precommit_skills(&self) -> BashPrecommitSkills {
+    pub async fn bash_precommit_skills(
+        &self,
+    ) -> Result<BashPrecommitSkills, lingxi_core::settings::SettingsError> {
         let provider = self
             .bash_precommit_skills_provider
             .read()
@@ -160,7 +170,7 @@ impl ToolRegistry {
             .clone();
         match provider {
             Some(provider) => provider().await,
-            None => BashPrecommitSkills::default(),
+            None => Ok(BashPrecommitSkills::default()),
         }
     }
 
@@ -318,6 +328,8 @@ impl ToolRegistry {
         &self,
         wire: &[lingxi_core::host::SourceToolWireDefinition],
     ) {
+        let wire_names: std::collections::HashSet<&str> =
+            wire.iter().map(|entry| entry.name.as_str()).collect();
         let descriptions: std::collections::HashMap<&str, &Utf16JsonProjection> = wire
             .iter()
             .map(|entry| (entry.name.as_str(), &entry.description))
@@ -327,7 +339,8 @@ impl ToolRegistry {
             .available_tools(&ctx)
             .iter()
             .filter(|tool| {
-                self.deferral.keeps_deferred_tools()
+                wire_names.contains(tool.name())
+                    && self.deferral.keeps_deferred_tools()
                     && self.deferral.wants_defer(tool.name(), tool.should_defer())
             })
             .map(|tool| ToolSearchEntry {
@@ -1319,6 +1332,65 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(names, vec!["mcp__srv__do".to_string()]);
+    }
+
+    #[test]
+    fn tool_search_view_uses_the_filtered_complete_request_tool_pool() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(DeferNamedTool {
+            name: "ToolSearch",
+            defer: false,
+            hint: None,
+        }));
+        registry.register_builtin(Arc::new(DeferNamedTool {
+            name: "Visible",
+            defer: true,
+            hint: None,
+        }));
+        registry.register_builtin(Arc::new(DeferNamedTool {
+            name: "Hidden",
+            defer: true,
+            hint: None,
+        }));
+        let deferral = Arc::new(crate::defer::DeferralState::new(
+            crate::defer::ToolSearchMode::Enabled,
+            false,
+        ));
+        registry.set_deferral(deferral.clone());
+
+        // This is the complete pre-deferral tool vector supplied to request
+        // assembly after policy/agent filtering. `Hidden` remains registered,
+        // but was removed before this snapshot.
+        let wire = [
+            lingxi_core::host::SourceToolWireDefinition {
+                name: "ToolSearch".into(),
+                description: Utf16JsonProjection::from("search deferred tools"),
+                input_schema: source_schema_fixture(serde_json::json!({"type":"object"})),
+                strict: false,
+                defer_loading: false,
+            },
+            lingxi_core::host::SourceToolWireDefinition {
+                name: "Visible".into(),
+                description: Utf16JsonProjection::from("visible deferred tool"),
+                input_schema: source_schema_fixture(serde_json::json!({"type":"object"})),
+                strict: false,
+                defer_loading: true,
+            },
+        ];
+
+        registry.refresh_tool_search_view_from_wire(&wire);
+
+        let names = registry
+            .tool_search_view()
+            .entries()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Visible"]);
+        assert!(!names.iter().any(|name| name == "Hidden"));
+        // The ToolSearch consumer can only mark a returned view match loaded;
+        // an omitted filtered tool stays unavailable to both search and wire.
+        assert!(!deferral.is_loaded("Hidden"));
     }
 
     #[test]

@@ -148,10 +148,10 @@ async fn unwired_manual_compact_is_an_error_not_fake_success() {
 async fn compacts_50_message_history() {
     let orch = make_orch();
     seed_history(&orch, 50).await;
-    let usage_before = orch.context_usage_snapshot().await;
+    let usage_before = orch.context_usage_snapshot().await.unwrap();
 
     let summary = orch.force_compact().await.expect("force_compact ok");
-    let usage_after = orch.context_usage_snapshot().await;
+    let usage_after = orch.context_usage_snapshot().await.unwrap();
 
     assert_eq!(summary.messages_before, 50);
     assert!(

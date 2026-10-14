@@ -83,7 +83,9 @@ pub(crate) async fn resolve(ctx: &SubagentContext) -> Result<InstructionContext,
         ctx.agent_definition.source,
         AgentSource::BuiltIn | AgentSource::Settings(SettingsScope::Managed)
     ) {
-        original.user_context.remove("instructions");
+        original
+            .remove_user_context_text("instructions")
+            .map_err(|error| error.to_string())?;
         return Ok(original);
     }
     let Some(provider) = &ctx.instruction_provider else {
@@ -95,15 +97,18 @@ pub(crate) async fn resolve(ctx: &SubagentContext) -> Result<InstructionContext,
     // Fl changes only instructions on the already-selected Full object. A root
     // account/project change while the managed projection awaits must not
     // replace the other fields or their insertion order in this child.
+    let instruction_key = "instructions".encode_utf16().collect::<Vec<_>>();
     let managed_body = managed
-        .user_context
-        .get("instructions")
-        .filter(|body| !body.is_empty())
-        .cloned();
+        .user_context_value(&instruction_key)
+        .filter(|body| body.string_units("").is_some_and(|units| !units.is_empty()));
     let has_managed = managed_body.is_some();
-    original.user_context.remove("instructions");
+    original
+        .remove_user_context_value(&instruction_key)
+        .map_err(|error| error.to_string())?;
     if let Some(body) = managed_body {
-        original.user_context.insert("instructions".into(), body);
+        original
+            .set_user_context_value(&instruction_key, body)
+            .map_err(|error| error.to_string())?;
     }
     original.sent_paths = managed.sent_paths;
     original.project_instruction_bodies = managed.project_instruction_bodies;

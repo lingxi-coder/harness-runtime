@@ -2172,6 +2172,8 @@ fn fresh_subagent_ctx() -> SubagentContext {
         task_registry: None,
         model_resolution_context_provider: None,
         agent_id: AgentId::new(),
+        cancellation_token: lingxi_core::host::CancellationToken::new(),
+        preload_lifecycle: Arc::new(crate::context::AgentPreloadLifecycle::new()),
         parent_agent_id: None,
         agent_spawn_provenance: Default::default(),
         agent_name: None,
@@ -8835,6 +8837,7 @@ impl lingxi_core::host::skill_loader::SkillLoader for MockSkillLoader {
         _agent_type: &str,
         _cwd: Option<&std::path::Path>,
         model: Option<&str>,
+        _cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
         if let Some(expected) = &self.expected_model {
             assert_eq!(model, Some(expected.as_str()));
@@ -12314,6 +12317,7 @@ async fn skill_preload_read_error_fails_before_model_request() {
             _: &str,
             _cwd: Option<&std::path::Path>,
             _model: Option<&str>,
+            _cancellation: lingxi_core::host::CancellationToken,
         ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
             Err("loop.md denied".into())
         }

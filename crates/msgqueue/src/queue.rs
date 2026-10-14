@@ -429,6 +429,27 @@ impl MessageQueueManager {
     /// Consume the same batch while retaining each command's source for
     /// session.receive screening at the host boundary.
     pub async fn take_mid_turn_commands(&self) -> Option<Vec<QueuedCommand>> {
+        self.take_mid_turn_commands_until(|_| true).await
+    }
+
+    /// Consume only the eligible mid-turn commands accepted by `filter`.
+    /// Hosts with durable side ledgers use this to keep those entries distinct
+    /// from unrelated volatile queue work while preserving the same priority
+    /// and FIFO selection rules.
+    pub async fn take_mid_turn_commands_matching(
+        &self,
+        filter: impl Fn(&QueuedCommand) -> bool,
+    ) -> Option<Vec<QueuedCommand>> {
+        self.take_mid_turn_commands_until(filter).await
+    }
+
+    /// Peek the next canonical mid-turn prompt prefix while stopping at the
+    /// first command the host does not own. This preserves barriers between
+    /// durable Mobile prompts and other queue producers.
+    pub async fn peek_mid_turn_commands_until(
+        &self,
+        accept: impl Fn(&QueuedCommand) -> bool,
+    ) -> Option<Vec<QueuedCommand>> {
         let batch = self
             .get_by_max_priority(QueuePriority::Next, |command| {
                 command.is_main_thread()
@@ -437,8 +458,21 @@ impl MessageQueueManager {
                     && !matches!(command.content, QueuedCommandContent::HandbackWake { .. })
             })
             .await;
-        let (_, consumed) = join_prompt_values(&batch)?;
-        let selected = batch.into_iter().take(consumed.len()).collect();
+        let prefix = batch.into_iter().take_while(accept).collect::<Vec<_>>();
+        let (_, consumed) = join_prompt_values(&prefix)?;
+        Some(prefix.into_iter().take(consumed.len()).collect())
+    }
+
+    /// Consume the next canonical prompt prefix accepted by `accept`.
+    pub async fn take_mid_turn_commands_until(
+        &self,
+        accept: impl Fn(&QueuedCommand) -> bool,
+    ) -> Option<Vec<QueuedCommand>> {
+        let selected = self.peek_mid_turn_commands_until(accept).await?;
+        let consumed = selected
+            .iter()
+            .map(|command| command.uuid.clone())
+            .collect::<Vec<_>>();
         self.consume(&consumed, "drained mid-turn into running turn")
             .await;
         Some(selected)
@@ -658,10 +692,12 @@ impl MessageQueueManager {
     }
 }
 
-/// Coalesce consecutive prompt-mode commands into ONE joined text payload, twin
-/// of claude-code's `canBatchWith` / `joinPromptValues` (print.ts:1949-1961):
-/// adjacent main-thread `UserInput` commands that are NOT slash commands are
-/// merged into a single follow-up turn (their texts joined with `\n`).
+/// Coalesce consecutive prompt-mode commands into ONE joined text payload,
+/// matching Claude Code 2.1.295's `Mu`/`sM` all-string branch in
+/// `src_221001555.js`: adjacent main-thread `UserInput` commands that are NOT
+/// slash commands are merged into one follow-up turn with a newline between
+/// their root-string values. Structured `message.content` arrays do not enter
+/// this helper; the SDK source-projection queue has its own per-frame path.
 ///
 /// Returns `(joined_text, consumed_uuids)`. `commands` must already be in
 /// drain order. Stops at the first non-batchable command so a slash command or
@@ -873,6 +909,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_mid_turn_prefix_peek_is_non_consuming_and_stops_at_foreign_work() {
+        let queue = MessageQueueManager::new();
+        queue
+            .enqueue(mk(QueuePriority::Next, "mobile-prompt:s:1"))
+            .await;
+        queue.enqueue(mk(QueuePriority::Next, "foreign")).await;
+        queue
+            .enqueue(mk(QueuePriority::Next, "mobile-prompt:s:2"))
+            .await;
+
+        let first = queue
+            .peek_mid_turn_commands_until(|command| command.uuid.starts_with("mobile-prompt:s:"))
+            .await
+            .expect("first durable prefix");
+        assert_eq!(
+            first
+                .iter()
+                .map(|command| command.uuid.as_str())
+                .collect::<Vec<_>>(),
+            ["mobile-prompt:s:1"]
+        );
+        assert_eq!(
+            queue.snapshot().await.len(),
+            3,
+            "peek does not acknowledge work"
+        );
+
+        let drained = queue
+            .take_mid_turn_commands_until(|command| command.uuid.starts_with("mobile-prompt:s:"))
+            .await
+            .expect("consume first durable prefix");
+        assert_eq!(drained[0].uuid, "mobile-prompt:s:1");
+        let remaining = queue.snapshot().await;
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].uuid, "foreign");
+        assert_eq!(remaining[1].uuid, "mobile-prompt:s:2");
+    }
+
+    #[tokio::test]
     async fn fifo_within_priority_level() {
         // Parity with claude-code: append order preserved; best-priority FIFO.
         let q = MessageQueueManager::new();
@@ -1076,7 +1151,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn join_prompt_values_batches_consecutive_prompts() {
+    async fn join_prompt_values_matches_native_mu_string_batch() {
         let cmds = vec![
             mk(QueuePriority::Next, "first"),
             mk(QueuePriority::Next, "second"),

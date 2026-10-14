@@ -1657,7 +1657,7 @@ async fn system_prompt_model_identity_follows_switch_model() {
         std::env::temp_dir(),
     );
 
-    let before = orch.build_system_prompt().await;
+    let before = orch.build_system_prompt().await.unwrap();
     assert!(
         before
             .contains("powered by the model named Opus 4.8. The exact model ID is claude-opus-4-8"),
@@ -1672,7 +1672,7 @@ async fn system_prompt_model_identity_follows_switch_model() {
     .await
     .expect("switch_model");
 
-    let after = orch.build_system_prompt().await;
+    let after = orch.build_system_prompt().await.unwrap();
     assert!(
         after.contains(
             "powered by the model named Fable 5.1. The exact model ID is claude-fable-5-1"
@@ -1715,7 +1715,7 @@ async fn non_claude_switch_uses_the_named_identity_form_not_id_only() {
     .await
     .expect("switch_model");
 
-    let sp = orch.build_system_prompt().await;
+    let sp = orch.build_system_prompt().await.unwrap();
     assert!(
         sp.contains(" - You are powered by the model named ")
             && sp.contains("The exact model ID is deepseek-v4-pro."),
@@ -1754,7 +1754,7 @@ async fn system_prompt_reflects_session_cwd_swap() {
     )
     .with_session_cwd(session_cwd.clone());
 
-    let before = orch.build_system_prompt().await;
+    let before = orch.build_system_prompt().await.unwrap();
     assert!(
         before.contains(&format!(
             "Primary working directory: {}",
@@ -1766,7 +1766,7 @@ async fn system_prompt_reflects_session_cwd_swap() {
     let worktree_cwd = std::path::PathBuf::from("/tmp/lingxi-session-cwd-worktree-fixture");
     session_cwd.swap(worktree_cwd.clone(), vec![worktree_cwd.clone()]);
 
-    let after = orch.build_system_prompt().await;
+    let after = orch.build_system_prompt().await.unwrap();
     assert!(
         after.contains(&format!(
             "Primary working directory: {}",
@@ -1800,7 +1800,7 @@ async fn system_prompt_cwd_stays_at_boot_cwd_when_never_swapped() {
         boot_cwd.clone(),
     );
 
-    let sp = orch.build_system_prompt().await;
+    let sp = orch.build_system_prompt().await.unwrap();
     assert!(
         sp.contains(&format!(
             "Primary working directory: {}",
@@ -1865,10 +1865,13 @@ async fn git_status_stays_frozen_after_session_cwd_swap() {
     );
     let after = orch.instruction_context_snapshot().await;
     assert_eq!(
-        after.user_context.get("gitStatus").map(String::as_str),
+        after.user_context_utf8("gitStatus").as_deref(),
         before_context.string_at("/context/gitStatus")
     );
-    assert!(!after.user_context["gitStatus"].contains("worktree-only.txt"));
+    assert!(!after
+        .user_context_utf8("gitStatus")
+        .unwrap()
+        .contains("worktree-only.txt"));
 }
 
 /// The PROMPT half of the interactive-session wiring.
@@ -1900,7 +1903,7 @@ async fn interactive_session_flag_drives_prompt_guidance() {
         std::env::temp_dir(),
     );
 
-    let prompt = orch.build_system_prompt().await;
+    let prompt = orch.build_system_prompt().await.unwrap();
     assert!(
         prompt.contains("If you need the user to run a shell command themselves"),
         "interactive CLI prompt guidance must follow the explicit interactive-session flag, \

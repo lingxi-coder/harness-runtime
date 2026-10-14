@@ -1478,12 +1478,18 @@ pub(super) fn desktop_fusion_runtime_config(
 ) -> Result<fusion::FusionRuntimeConfig, lingxi_core::host::FusionError> {
     // The session cache is updated by the actual policy watcher; sync config
     // reads never run an independent filesystem fold or nested event loop.
-    let managed_layers = settings_watch::managed_policy_layers_sync(cfg).map_err(|error| {
-        tracing::warn!(?error, "managed policy unavailable for Fusion settings");
-        lingxi_core::host::FusionError::InvalidConfiguration("managed settings unavailable".into())
+    let snapshot = settings_watch::managed_settings_snapshot_sync(cfg).ok_or_else(|| {
+        lingxi_core::host::FusionError::InvalidConfiguration(
+            "managed policy snapshot is not initialized".into(),
+        )
     })?;
-    let effective = load_effective_settings_for_config(cfg, &managed_layers).ok_or_else(|| {
-        lingxi_core::host::FusionError::InvalidConfiguration("settings failed to load".into())
+    let effective = load_effective_settings_for_config(cfg, Some(&snapshot)).map_err(|error| {
+        let diagnostic = error
+            .diagnostic_projection()
+            .to_json_string()
+            .expect("settings diagnostics are valid JSON");
+        tracing::warn!(diagnostic = %diagnostic, "settings merge failed for Fusion settings");
+        lingxi_core::host::FusionError::InvalidConfiguration(diagnostic)
     })?;
     match effective.settings.fusion {
         Some(settings) => fusion::FusionRuntimeConfig::from_settings(&settings),

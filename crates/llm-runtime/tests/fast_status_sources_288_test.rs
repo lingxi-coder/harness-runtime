@@ -100,7 +100,7 @@ fn service_with_credential(
         Some(0),
         None,
     )
-    .with_fast_policy_source(Arc::new(move || policy.clone()))
+    .with_fast_policy_source(Arc::new(move || Ok(policy.clone())))
     .with_interactive_session(false)
     .with_thinking(ThinkingConfig::Disabled)
 }

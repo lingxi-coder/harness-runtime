@@ -32,7 +32,7 @@
 use crate::tool_trait::Tool;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 
 /// Byte-locked name of the worktree-entry tool (claude-code `k9e`), the sole
 /// `shouldDefer` tool that is NOT deferred inside a `bg` session.
@@ -215,6 +215,9 @@ pub struct DeferralState {
     /// the active Mod catalog. Request assembly replaces this map atomically.
     mod_overrides: RwLock<HashMap<String, bool>>,
     auto_active: AtomicBool,
+    /// Native `GCe()` kept-deferred-tools result, cached once for this shared
+    /// ToolRegistry context and inherited by its child tool dispatchers.
+    native_kept_deferred_tools_enabled: OnceLock<bool>,
     request_supported: AtomicBool,
     /// Deferred-tool names already ANNOUNCED to the model as available this
     /// session (claude-code `A1s` accumulator `s`, replayed from prior
@@ -255,6 +258,7 @@ impl DeferralState {
             loaded: RwLock::new(HashSet::new()),
             mod_overrides: RwLock::new(HashMap::new()),
             auto_active: AtomicBool::new(false),
+            native_kept_deferred_tools_enabled: OnceLock::new(),
             request_supported: AtomicBool::new(true),
             announced: RwLock::new(HashSet::new()),
             ever_added: RwLock::new(HashSet::new()),
@@ -290,7 +294,21 @@ impl DeferralState {
         self.mode
     }
 
-    /// Whether deferral is active.
+    /// Return Native's host-scoped `GCe()` result, initializing it from the
+    /// first reachable source check. The state belongs to the shared registry,
+    /// not a process-global static, so independent host registries do not share
+    /// this latch.
+    #[must_use]
+    pub fn native_kept_deferred_tools_enabled_with(
+        &self,
+        initialize: impl FnOnce() -> bool,
+    ) -> bool {
+        *self
+            .native_kept_deferred_tools_enabled
+            .get_or_init(initialize)
+    }
+
+    /// Whether deferral is active for the current request.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         if !self.request_supported.load(Ordering::Acquire) {
@@ -734,7 +752,12 @@ impl DeferralState {
         let mut surfaced = if native.tool_search_absent {
             current_deferred_names
                 .iter()
-                .filter(|name| !surfaced_before.contains(name.as_str()))
+                // AQo `Ro = Ft + qt`: include never-added names, plus
+                // ever-added names not surfaced by a non-name-only row.
+                .filter(|name| {
+                    !ever_added_before.contains(name.as_str())
+                        || !surfaced_before.contains(name.as_str())
+                })
                 .cloned()
                 .collect::<Vec<_>>()
         } else if declared_pool_defined {
@@ -751,6 +774,30 @@ impl DeferralState {
         };
         surfaced.sort();
         surfaced.dedup();
+
+        if native.tool_search_absent {
+            // Native AQo's absent-ToolSearch path rebuilds `addedLines` from
+            // `Ro = Ft + qt`, not only from the generic current-minus-ever-added
+            // delta. In particular, a name-only announcement has been added
+            // before but is intentionally absent from `surfaced_before`; Native
+            // reannounces that name when ToolSearch is unavailable.
+            let mut added_lines = current_deferred_names
+                .iter()
+                .filter(|name| {
+                    !ever_added_before.contains(name.as_str())
+                        || !surfaced_before.contains(name.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            added_lines.sort();
+            added_lines.dedup();
+            let mut added_names = delta.added_names.clone();
+            added_names.extend(added_lines.iter().cloned());
+            added_names.sort();
+            added_names.dedup();
+            delta.added_lines = added_lines;
+            delta.added_names = added_names;
+        }
 
         delta.retracted_tools = newly_retracted.clone();
         delta.restored_names = restored.clone();
@@ -1436,6 +1483,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_kept_deferred_tools_latches_per_shared_state_not_process() {
+        let host = std::sync::Arc::new(DeferralState::new(ToolSearchMode::Enabled, false));
+        let child = host.clone();
+        assert!(host.native_kept_deferred_tools_enabled_with(|| true));
+        // A later feature/env snapshot cannot replace the first host result.
+        assert!(child.native_kept_deferred_tools_enabled_with(|| false));
+
+        let independent_host = DeferralState::new(ToolSearchMode::Enabled, false);
+        assert!(!independent_host.native_kept_deferred_tools_enabled_with(|| false));
+        assert!(!independent_host.native_kept_deferred_tools_enabled_with(|| true));
+    }
+
+    #[test]
     fn mode_defaults_on_when_unset() {
         assert_eq!(mode_from_values(None, false), ToolSearchMode::Enabled);
     }
@@ -1845,6 +1905,43 @@ mod tests {
             .read()
             .unwrap()
             .contains("mcp__srv__first"));
+    }
+
+    #[test]
+    fn tool_search_absence_reannounces_name_only_pool_entries() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+
+        let state = DeferralState::new(ToolSearchMode::Enabled, false);
+        let name_only_record = Source::parse(
+            r#"{"type":"deferred_tools_record","nameOnlyAnnouncements":["delta-1"]}"#,
+        )
+        .unwrap();
+        let name_only_delta = Source::parse(
+            r#"{"type":"deferred_tools_delta","addedNames":["Hidden"],"addedLines":["Hidden"],"surfacedNames":["Hidden"]}"#,
+        )
+        .unwrap();
+        state.replay_deferred_tool_state_attachment(&name_only_record, "record-1");
+        state.replay_deferred_tool_state_attachment(&name_only_delta, "delta-1");
+        assert!(state.ever_added.read().unwrap().contains("Hidden"));
+        assert!(!state.surfaced_names.read().unwrap().contains("Hidden"));
+
+        let delta = state.compute_deferred_delta_with_native_state(
+            &["Hidden".into()],
+            DeferredMcpServerStatus::default(),
+            DeferredToolNativeContext {
+                current_tool_names: vec!["Hidden".into()],
+                declared_pool_available: true,
+                tool_search_absent: true,
+                ..DeferredToolNativeContext::default()
+            },
+        );
+        let payload: serde_json::Value =
+            serde_json::from_str(&delta.attachment_payload().to_json_string().unwrap()).unwrap();
+        assert_eq!(payload["addedNames"], serde_json::json!(["Hidden"]));
+        assert_eq!(payload["addedLines"], serde_json::json!(["Hidden"]));
+        assert_eq!(payload["surfacedNames"], serde_json::json!(["Hidden"]));
+        assert_eq!(payload["toolSearchAbsent"], true);
+        assert!(delta.render_reminder().unwrap().contains("Hidden"));
     }
 
     #[test]

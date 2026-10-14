@@ -398,16 +398,18 @@ impl lingxi_core::host::instructions::InstructionContextProvider for ChildInstru
             InstructionContext, InstructionFile, InstructionFileType,
         };
         let body = self.0.lock().unwrap().clone();
-        Ok(InstructionContext {
-            user_context: BTreeMap::from([("instructions".into(), body.clone())]),
-
-            eager_instructions: Some(vec![InstructionFile {
-                path: "/managed/LINGXI.md".into(),
-                kind: InstructionFileType::Managed,
-                content: body,
-            }]),
+        let mut context = InstructionContext {
+            eager_instructions: Some(vec![InstructionFile::new(
+                "/managed/LINGXI.md",
+                InstructionFileType::Managed,
+                body.clone(),
+            )]),
             ..Default::default()
-        })
+        };
+        context
+            .set_user_context_text("instructions", body)
+            .expect("userContext remains an object");
+        Ok(context)
     }
 }
 

@@ -5,7 +5,7 @@ use plugin::discover_recorded_plugins;
 use plugin::plugin_source_sha256;
 use serde::Serialize;
 
-use crate::settings_bridge::{apply_patch_source, build_snapshot, SettingsContext};
+use crate::settings_bridge::{apply_patch_source, settings_error_message, SettingsContext};
 use client::protocol::commands::WritableScopeDto;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 
@@ -58,11 +58,9 @@ pub async fn catalog_json(
     context: &SettingsContext,
     credentials: Option<&secret::CredentialManager>,
 ) -> Result<String, String> {
-    let snapshot = build_snapshot(
-        &context.paths,
-        context.active_snapshot(),
-        context.managed.clone(),
-    );
+    let snapshot = context
+        .snapshot()
+        .map_err(|error| settings_error_message(&error))?;
     let plugins_dir = context.paths.lingxi_home.join("plugins");
     let discovered = discover_recorded_plugins(&plugins_dir).await;
     let mut installed_versions = BTreeMap::new();
@@ -394,11 +392,9 @@ pub async fn save_config(
     let payload = parse_payload(payload_json)?;
     let scope = required_string(&payload, "scope")?;
     let destination = destination(scope)?;
-    let snapshot = build_snapshot(
-        &context.paths,
-        context.active_snapshot(),
-        context.managed.clone(),
-    );
+    let snapshot = context
+        .snapshot()
+        .map_err(|error| settings_error_message(&error))?;
     check_scope_revision(&snapshot.layers, scope, revision_sha256)?;
     validate_config_payload(context, &payload).await?;
     let mut patch = Vec::new();
@@ -661,11 +657,9 @@ fn ensure_scope_revision(
     scope: &str,
     expected: &str,
 ) -> Result<(), String> {
-    let snapshot = build_snapshot(
-        &context.paths,
-        context.active_snapshot(),
-        context.managed.clone(),
-    );
+    let snapshot = context
+        .snapshot()
+        .map_err(|error| settings_error_message(&error))?;
     check_scope_revision(&snapshot.layers, scope, expected)
 }
 
@@ -848,8 +842,9 @@ mod tests {
                     lingxi_home: home,
                     project_dir: project,
                 },
-                active: Arc::new(RwLock::new(BTreeMap::new())),
-                managed: BTreeMap::new(),
+                active: Arc::new(RwLock::new(crate::settings_bridge::empty_settings_source())),
+                managed: crate::settings_bridge::empty_settings_source(),
+                managed_diagnostics: None,
             },
             root,
         )

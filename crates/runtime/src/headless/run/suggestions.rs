@@ -97,20 +97,50 @@ impl SdkPromptSuggestions {
             ) == Some(false);
         let latest_origin = runtime.orchestrator.latest_prompt_suggestion_turn_origin();
         let turn_origin = latest_origin.as_deref().or(turn_origin);
-        let action = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(action) = self.admit_after_result(
+            runtime,
+            stream,
+            turn_origin,
+            environment_disabled,
+            telemetry::feature_flags::flag_bool("tengu_chomp_sable", false),
+        ) else {
+            return;
+        };
+        if action == AfterResult::Disabled {
+            return;
+        }
+        if let AfterResult::Suppressed(reason) = action {
+            runtime.orchestrator.record_prompt_suggestion_event(json!({"source":"sdk","outcome":"suppressed","reason":reason,"prompt_id":"user_intent"})).await;
+        }
+    }
+
+    /// Atomically admit the synchronous suggestion transition with respect to
+    /// terminal policy refusal. The lock order matches `place_generated`:
+    /// suggestion state first, then refusal watch. No watch borrow crosses an
+    /// await; a generation admitted here is owned work and is cancelled/joined
+    /// by the runtime shutdown path.
+    pub(super) fn admit_after_result(
+        self: &Arc<Self>,
+        runtime: &Runtime,
+        stream: &Arc<StreamJsonStream>,
+        turn_origin: Option<&str>,
+        environment_disabled: bool,
+        sable: bool,
+    ) -> Option<AfterResult> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        runtime.policy_helper_refusal.with_not_refused(|| {
             let action = state.machine.after_result(
                 true,
                 runtime.shutdown.is_cancelled(),
                 environment_disabled,
-                telemetry::feature_flags::flag_bool("tengu_chomp_sable", false),
+                sable,
                 turn_origin,
             );
             if action == AfterResult::Disabled {
-                return;
+                return action;
             }
             if let Some((cancel, _)) = state.inflight.as_ref() {
                 cancel.cancel();
@@ -139,10 +169,7 @@ impl SdkPromptSuggestions {
                 state.inflight = Some((cancel, handle));
             }
             action
-        };
-        if let AfterResult::Suppressed(reason) = action {
-            runtime.orchestrator.record_prompt_suggestion_event(json!({"source":"sdk","outcome":"suppressed","reason":reason,"prompt_id":"user_intent"})).await;
-        }
+        })
     }
 
     fn place_generated(
@@ -196,6 +223,15 @@ impl SdkPromptSuggestions {
         state.machine.discard();
     }
 
+    #[cfg(test)]
+    pub(super) fn has_inflight_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .inflight
+            .is_some()
+    }
+
     pub(super) async fn settle(&self) {
         let task = self
             .state
@@ -229,6 +265,62 @@ pub(super) fn now_ms() -> u64 {
 #[cfg(test)]
 mod sdk_controller_tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retained_refusal_blocks_prompt_suggestion_admission_after_result() {
+        use super::super::tests::fixture_runtime;
+        let root = tempfile::tempdir().unwrap();
+        let stream = Arc::new(StreamJsonStream::new_placeholder(
+            crate::headless::io::Output::new(tokio::io::sink()),
+        ));
+        let runtime = Arc::new(fixture_runtime(stream.clone(), root.path()).await);
+
+        let control = SdkPromptSuggestions::new(true);
+        let control_action = control.admit_after_result(&runtime, &stream, None, false, false);
+        assert!(matches!(control_action, Some(AfterResult::Generate(_))));
+        assert!(
+            control.has_inflight_for_test(),
+            "with refusal, environment, and suppression gates off, the fixture admits a query"
+        );
+        control.discard();
+        control.settle().await;
+
+        let suggestions = SdkPromptSuggestions::new(true);
+        let suggestions_for_lock = suggestions.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let lock_holder = tokio::task::spawn_blocking(move || {
+            let guard = suggestions_for_lock
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = locked_tx.send(());
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        locked_rx.await.unwrap();
+
+        let suggestions_for_task = suggestions.clone();
+        let stream_for_task = stream.clone();
+        let runtime_for_task = runtime.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let admission = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            suggestions_for_task
+                .after_result(&runtime_for_task, &stream_for_task, None)
+                .await;
+        });
+        started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        runtime.policy_helper_refusal.trigger_refusal_for_test();
+        release_tx.send(()).unwrap();
+        lock_holder.await.unwrap();
+        admission.await.unwrap();
+        assert!(
+            !suggestions.has_inflight_for_test(),
+            "a refusal retained while result admission is waiting for state must prevent query spawn"
+        );
+    }
 
     #[tokio::test]
     async fn sdk_suggestion_follows_held_result_after_live_task_notification_is_consumed() {

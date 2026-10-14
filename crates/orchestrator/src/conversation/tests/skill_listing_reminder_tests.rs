@@ -17,11 +17,13 @@ use tool_api::tool_trait::{
 struct FixtureSkills(Vec<SkillListingEntry>);
 #[async_trait]
 impl SkillListingProvider for FixtureSkills {
-    async fn skill_listing_snapshot(&self) -> SkillListingSnapshot {
-        SkillListingSnapshot {
+    async fn skill_listing_snapshot(
+        &self,
+    ) -> Result<SkillListingSnapshot, lingxi_core::settings::SettingsError> {
+        Ok(SkillListingSnapshot {
             entries: self.0.clone(),
             budget_settings: Default::default(),
-        }
+        })
     }
 }
 
@@ -163,6 +165,7 @@ async fn reminder_present_when_provider_and_skill_tool_wired() {
     let msg = orch
         .skill_listing_reminder_message()
         .await
+        .unwrap()
         .expect("reminder present");
     let text = msg.text_content();
     assert!(text.starts_with("<system-reminder>"), "got: {text}");
@@ -174,7 +177,11 @@ async fn reminder_present_when_provider_and_skill_tool_wired() {
 async fn no_reminder_when_skill_tool_absent() {
     // Provider wired, but the Skill tool is not in the registry this turn.
     let orch = orch_with(ToolRegistry::new(), Some(fixture()));
-    assert!(orch.skill_listing_reminder_message().await.is_none());
+    assert!(orch
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -182,7 +189,11 @@ async fn no_reminder_when_provider_absent() {
     let mut reg = ToolRegistry::new();
     reg.register_builtin(Arc::new(NamedTool("Skill")));
     let orch = orch_with(reg, None);
-    assert!(orch.skill_listing_reminder_message().await.is_none());
+    assert!(orch
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .is_none());
 }
 
 // ── PLANMODE (plan_mode_turn_messages) ────────────────────────────────
@@ -225,7 +236,10 @@ async fn mod_attachment_receives_native_plan_details_for_entry_and_exit() {
         orch.session_plan_file_path(&session.session_id)
     };
     let has_plan = std::path::Path::new(&plan_path).exists();
-    let entry = orch.collect_turn_reminders(true, true, None, &[]).await;
+    let entry = orch
+        .collect_turn_reminders(true, true, None, &[])
+        .await
+        .unwrap();
     assert!(entry.transient.iter().any(|message| {
         message.text_content()
             == format!("<system-reminder>\nfull:{plan_path}:{has_plan}\n</system-reminder>")
@@ -237,7 +251,10 @@ async fn mod_attachment_receives_native_plan_details_for_entry_and_exit() {
         session.plan_mode = false;
         session.plan_mode_exit_pending = true;
     }
-    let exit = orch.collect_turn_reminders(true, true, None, &[]).await;
+    let exit = orch
+        .collect_turn_reminders(true, true, None, &[])
+        .await
+        .unwrap();
     assert!(exit.transient.iter().any(|message| {
         message.text_content()
             == format!("<system-reminder>\nexit:{plan_path}:{has_plan}\n</system-reminder>")
@@ -516,11 +533,13 @@ async fn plan_mode_reminder_uses_custom_instructions() {
 struct MutableSkills(std::sync::Arc<std::sync::Mutex<Vec<SkillListingEntry>>>);
 #[async_trait]
 impl SkillListingProvider for MutableSkills {
-    async fn skill_listing_snapshot(&self) -> SkillListingSnapshot {
-        SkillListingSnapshot {
+    async fn skill_listing_snapshot(
+        &self,
+    ) -> Result<SkillListingSnapshot, lingxi_core::settings::SettingsError> {
+        Ok(SkillListingSnapshot {
             entries: self.0.lock().unwrap().clone(),
             budget_settings: Default::default(),
-        }
+        })
     }
 }
 
@@ -566,6 +585,7 @@ async fn skill_listing_delta_turn0_full_then_none_when_no_new() {
     let t0 = orch
         .skill_listing_reminder_message()
         .await
+        .unwrap()
         .expect("turn-0 full listing");
     let t0 = t0.text_content();
     assert!(t0.contains("- alpha:"), "turn-0 missing alpha: {t0}");
@@ -573,7 +593,10 @@ async fn skill_listing_delta_turn0_full_then_none_when_no_new() {
 
     // Turn 1: no NEW skills since both were already sent → None.
     assert!(
-        orch.skill_listing_reminder_message().await.is_none(),
+        orch.skill_listing_reminder_message()
+            .await
+            .unwrap()
+            .is_none(),
         "turn-1 must emit nothing when no new skill appeared"
     );
 }
@@ -589,6 +612,7 @@ async fn skill_listing_delta_emits_only_new_skill_on_later_turn() {
     let t0 = orch
         .skill_listing_reminder_message()
         .await
+        .unwrap()
         .expect("turn-0")
         .text_content();
     assert!(t0.contains("- alpha:"));
@@ -601,6 +625,7 @@ async fn skill_listing_delta_emits_only_new_skill_on_later_turn() {
     let t1 = orch
         .skill_listing_reminder_message()
         .await
+        .unwrap()
         .expect("turn-1 new-only")
         .text_content();
     assert!(
@@ -659,6 +684,7 @@ async fn skill_listing_deduplicates_names_by_exact_utf16_units() {
     let message = orch
         .skill_listing_reminder_message()
         .await
+        .unwrap()
         .expect("the two distinct source names both appear");
     let lingxi_core::types::ConversationMessage::User { content, .. } = message else {
         panic!("skill listing should be a user meta message");
@@ -672,7 +698,10 @@ async fn skill_listing_deduplicates_names_by_exact_utf16_units() {
     assert!(utf16_code_units.contains(&0xd800));
     assert!(utf16_code_units.contains(&0xfffd));
     assert!(
-        orch.skill_listing_reminder_message().await.is_none(),
+        orch.skill_listing_reminder_message()
+            .await
+            .unwrap()
+            .is_none(),
         "both exact names are remembered after emission"
     );
 }
@@ -750,7 +779,10 @@ async fn mod_attachment_receives_each_async_hook_event_origin() {
     let orch = orch_with(ToolRegistry::new(), None)
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)))
         .with_async_hook_responses(provider);
-    let reminders = orch.collect_turn_reminders(true, true, None, &[]).await;
+    let reminders = orch
+        .collect_turn_reminders(true, true, None, &[])
+        .await
+        .unwrap();
     let texts: Vec<_> = reminders
         .transient
         .iter()
@@ -1018,7 +1050,10 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     )));
 
     let before = orch.session.lock().await.history.len();
-    let reminders = orch.collect_turn_reminders(true, false, None, &[]).await;
+    let reminders = orch
+        .collect_turn_reminders(true, false, None, &[])
+        .await
+        .unwrap();
     assert_eq!(
         reminders.task_notifications.len(),
         1,
@@ -1053,6 +1088,7 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     assert!(
         orch.collect_turn_reminders(true, false, None, &[])
             .await
+            .unwrap()
             .task_notifications
             .is_empty(),
         "a drained completion must not surface again",
@@ -1089,9 +1125,17 @@ async fn hidden_skill_does_not_emit_or_consume_listing() {
         .with_coordinator_mode(mode)
         .with_coordinator_simple_mode_for_test(false);
     assert!(orch.tools.find_registered("Skill").is_some());
-    assert!(orch.skill_listing_reminder_message().await.is_none());
+    assert!(orch
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .is_none());
     Arc::get_mut(&mut orch.tools)
         .expect("fixture exclusively owns registry")
         .set_session_tool_allowlist(&["Skill".to_string()]);
-    assert!(orch.skill_listing_reminder_message().await.is_some());
+    assert!(orch
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .is_some());
 }

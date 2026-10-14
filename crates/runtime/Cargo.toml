@@ -8,6 +8,7 @@ autotests = false
 
 [features]
 realtime-websocket = ["llm-runtime/realtime-websocket"]
+test-support = []
 default = [
     "engine",
 ]

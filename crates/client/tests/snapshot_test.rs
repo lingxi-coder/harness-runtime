@@ -197,7 +197,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/error.json",
             ClientEvent::Error {
                 kind: ErrorKindDto::Transport,
-                message: "connection reset".to_string(),
+                message: "connection reset".into()
             },
         ),
         (
@@ -703,6 +703,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     "openai/gpt-5.5".to_string(),
                 ],
                 current: "anthropic/claude-opus-4-8".to_string(),
+                current_model_source: None,
                 details: Vec::new(),
             },
         ),
@@ -710,6 +711,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/model_changed.json",
             ClientEvent::ModelChanged {
                 model: "openai/gpt-5.5".to_string(),
+                model_source: None,
             },
         ),
         (
@@ -1399,7 +1401,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/set_model.json",
             ClientCommand::SetModel {
-                model: "claude-sonnet-4-5".to_string(),
+                model: ClientTextDto::from_utf8("claude-sonnet-4-5"),
             },
         ),
         ("command/list_models.json", ClientCommand::ListModels),
@@ -1444,7 +1446,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/new_session.json",
             ClientCommand::NewSession {
                 cwd: Some("/home/dev/project".to_string()),
-                model: Some("claude-opus-4-7".to_string()),
+                model: Some(ClientTextDto::from_utf8("claude-opus-4-7")),
             },
         ),
         (
@@ -2088,6 +2090,7 @@ fn canonical_status() -> StatusSnapshotDto {
     StatusSnapshotDto {
         session_id: "11111111-1111-4111-8111-111111111111".to_string(),
         model: "claude-opus-4-7".to_string(),
+        model_source: None,
         n_messages: 17,
         total_cost_usd: 0.0123,
         input_tokens: 1200,

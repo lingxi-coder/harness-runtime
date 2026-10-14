@@ -97,10 +97,14 @@ async fn assert_root_context_activation_race(resume_same_id: bool) {
         .await
         .unwrap();
     assert_eq!(
-        initial.eager_instructions.as_ref().unwrap()[0].content,
+        String::from_utf16(&initial.eager_instructions.as_ref().unwrap()[0].content_units())
+            .unwrap(),
         "before reset"
     );
-    assert!(initial.user_context["instructions"].contains("before reset"));
+    assert!(initial
+        .user_context_utf8("instructions")
+        .unwrap()
+        .contains("before reset"));
     assert_eq!(memory.loads.load(Ordering::SeqCst), 1);
 
     *root.prompt_runtime.prompt_snapshot.lock().await = Some(PromptSnapshot {
@@ -149,7 +153,8 @@ async fn assert_root_context_activation_race(resume_same_id: bool) {
     .expect("root ingress does not wait for reports activation")
     .unwrap();
     assert_eq!(
-        during_reset.eager_instructions.as_ref().unwrap()[0].content,
+        String::from_utf16(&during_reset.eager_instructions.as_ref().unwrap()[0].content_units())
+            .unwrap(),
         "before reset"
     );
     assert_eq!(during_reset.user_context, initial.user_context);
@@ -175,15 +180,20 @@ async fn assert_root_context_activation_race(resume_same_id: bool) {
         .await
         .unwrap();
     assert_eq!(
-        after_activation.eager_instructions.as_ref().unwrap()[0].content,
+        String::from_utf16(
+            &after_activation.eager_instructions.as_ref().unwrap()[0].content_units()
+        )
+        .unwrap(),
         "published session instructions"
     );
-    assert!(
-        after_activation.user_context["instructions"].contains("published session instructions")
-    );
-    assert!(
-        !after_activation.user_context["instructions"].contains("unpublished reset instructions")
-    );
+    assert!(after_activation
+        .user_context_utf8("instructions")
+        .unwrap()
+        .contains("published session instructions"));
+    assert!(!after_activation
+        .user_context_utf8("instructions")
+        .unwrap()
+        .contains("unpublished reset instructions"));
     assert_eq!(memory.loads.load(Ordering::SeqCst), 2);
     assert_eq!(root.prompt_runtime.instruction_cache.builds_started(), 2);
 }

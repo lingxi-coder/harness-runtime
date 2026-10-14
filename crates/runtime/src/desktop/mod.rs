@@ -40,7 +40,6 @@ mod connect;
 mod cron_command;
 pub mod cron_management;
 mod cron_native;
-mod oauth_refresh_lock;
 pub mod file_changed_watch;
 pub mod fork_resume;
 #[cfg(test)]
@@ -55,7 +54,13 @@ mod fusion_pool_admission_test;
 pub mod fusion_recorder;
 pub mod ide;
 mod managed_plist;
+mod oauth_refresh_lock;
 mod pane_teammate;
+mod policy_helpers;
+pub use policy_helpers::{
+    NativePolicySemanticWorkerFailure, NativePolicyWarningLogger, PolicyHelperRefusalProbe,
+    PolicyHelperStartupError, PolicySemanticWorkerProbe,
+};
 mod sandbox_runner;
 pub mod session_agents;
 pub mod session_state;
@@ -579,10 +584,15 @@ impl tasks::handlers::TeammateDefinitionResolver for CoordinatorTeammateDefiniti
 impl tasks::handlers::TeammateSystemPromptRenderer for OrchestratorTeammatePromptRenderer {
     async fn render_default_system_prompt(
         &self,
-    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    ) -> Result<
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::settings::SettingsError,
+    > {
         match self.orchestrator.upgrade() {
             Some(orchestrator) => orchestrator.assemble_default_system_prompt_preview().await,
-            None => lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
+            None => Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "",
+            )),
         }
     }
 }
@@ -794,9 +804,20 @@ fn teammate_backend_selector(
         Arc<dyn lingxi_core::host::SwarmBackend>,
     >::new());
     Arc::new(move || {
-        let mode = match flag_mode
-            .or_else(|| load_merged_settings(&cwd).and_then(|s| s.settings.teammate_mode))
-        {
+        let configured_mode = match flag_mode {
+            Some(mode) => Some(mode),
+            None => match load_merged_settings(&cwd) {
+                Ok(settings) => settings.settings.teammate_mode,
+                Err(error) => {
+                    return pane_teammate::PaneBackendSelection {
+                        backend: None,
+                        explicit: false,
+                        error: Some(error.to_string()),
+                    };
+                }
+            },
+        };
+        let mode = match configured_mode {
             Some(lingxi_core::settings::schema::TeammateMode::InProcess) => TeammateMode::InProcess,
             Some(lingxi_core::settings::schema::TeammateMode::Tmux) => TeammateMode::Tmux,
             Some(lingxi_core::settings::schema::TeammateMode::ITerm2) => TeammateMode::ITerm2,
@@ -849,8 +870,19 @@ fn teammate_backend_selector(
     _is_tty: bool,
 ) -> Arc<dyn Fn() -> pane_teammate::PaneBackendSelection + Send + Sync> {
     Arc::new(move || {
-        let mode =
-            flag_mode.or_else(|| load_merged_settings(&cwd).and_then(|s| s.settings.teammate_mode));
+        let mode = match flag_mode {
+            Some(mode) => Some(mode),
+            None => match load_merged_settings(&cwd) {
+                Ok(settings) => settings.settings.teammate_mode,
+                Err(error) => {
+                    return pane_teammate::PaneBackendSelection {
+                        backend: None,
+                        explicit: false,
+                        error: Some(error.to_string()),
+                    };
+                }
+            },
+        };
         let explicit = matches!(
             mode,
             Some(
@@ -1692,11 +1724,13 @@ impl std::fmt::Debug for DesktopAudio {
     }
 }
 
+#[cfg(test)]
 fn resolve_workflow_size_guideline(
     cfg: &DesktopConfig,
     cwd: &std::path::Path,
     managed_layers: &[lingxi_core::settings::SettingsJson],
-) -> (tool_workflow::WorkflowSizeGuideline, bool, bool) {
+) -> Result<(tool_workflow::WorkflowSizeGuideline, bool, bool), lingxi_core::settings::SettingsError>
+{
     let defaults = lingxi_core::settings::SettingsJson {
         workflow_size_guideline: Some("medium".to_string()),
         ..Default::default()
@@ -1718,28 +1752,28 @@ fn resolve_workflow_size_guideline(
             managed_layers,
         },
         Some(&user_settings_path),
-    )
-    .ok();
+    )?;
     let wire = effective
-        .as_ref()
-        .and_then(|settings| settings.settings.workflow_size_guideline.as_deref())
+        .settings
+        .workflow_size_guideline
+        .as_deref()
         .unwrap_or("medium");
     let guideline = tool_workflow::WorkflowSizeGuideline::from_wire(wire);
     let source = effective
-        .as_ref()
-        .and_then(|settings| settings.effective_for("workflowSizeGuideline"))
+        .effective_for("workflowSizeGuideline")
         .and_then(|provenance| provenance.contributors.last())
         .copied();
     let managed = source == Some(lingxi_core::settings::tracer::Source::Managed);
     let is_default = source == Some(lingxi_core::settings::tracer::Source::Defaults);
-    (guideline, managed, is_default)
+    Ok((guideline, managed, is_default))
 }
 
+#[cfg(test)]
 fn resolve_workflow_session_enabled(
     cfg: &DesktopConfig,
     cwd: &std::path::Path,
     managed_layers: &[lingxi_core::settings::SettingsJson],
-) -> (bool, bool) {
+) -> Result<(bool, bool), lingxi_core::settings::SettingsError> {
     let defaults = lingxi_core::settings::SettingsJson {
         enable_workflows: Some(true),
         ..Default::default()
@@ -1761,15 +1795,42 @@ fn resolve_workflow_session_enabled(
             managed_layers,
         },
         Some(&user_settings_path),
-    )
-    .ok();
-    let enabled = effective
-        .as_ref()
-        .and_then(|settings| settings.settings.enable_workflows)
-        .unwrap_or(true);
+    )?;
+    let enabled = effective.settings.enable_workflows.unwrap_or(true);
     let managed = effective
-        .as_ref()
-        .and_then(|settings| settings.effective_for("enableWorkflows"))
+        .effective_for("enableWorkflows")
+        .and_then(|provenance| provenance.contributors.last())
+        .copied()
+        == Some(lingxi_core::settings::tracer::Source::Managed);
+    Ok((enabled, managed))
+}
+
+pub(super) fn resolve_workflow_size_guideline_from_effective(
+    effective: &lingxi_core::settings::EffectiveSettings,
+) -> (tool_workflow::WorkflowSizeGuideline, bool, bool) {
+    let wire = effective
+        .settings
+        .workflow_size_guideline
+        .as_deref()
+        .unwrap_or("medium");
+    let guideline = tool_workflow::WorkflowSizeGuideline::from_wire(wire);
+    let source = effective
+        .effective_for("workflowSizeGuideline")
+        .and_then(|provenance| provenance.contributors.last())
+        .copied();
+    (
+        guideline,
+        source == Some(lingxi_core::settings::tracer::Source::Managed),
+        source == Some(lingxi_core::settings::tracer::Source::Defaults),
+    )
+}
+
+pub(super) fn resolve_workflow_session_enabled_from_effective(
+    effective: &lingxi_core::settings::EffectiveSettings,
+) -> (bool, bool) {
+    let enabled = effective.settings.enable_workflows.unwrap_or(true);
+    let managed = effective
+        .effective_for("enableWorkflows")
         .and_then(|provenance| provenance.contributors.last())
         .copied()
         == Some(lingxi_core::settings::tracer::Source::Managed);
@@ -1805,7 +1866,7 @@ async fn desktop_command_registry(
     // `/reload-skills` (batch 8) mutates it live so a reload refreshes the set
     // the rest of the session sees.
     shared_registry: Arc<RwLock<CommandRegistry>>,
-) -> CommandRegistry {
+) -> Result<CommandRegistry, lingxi_core::settings::SettingsError> {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
     // Bundled programmatic skills (`/loop`), port of `registerBundledSkills`.
@@ -1863,6 +1924,7 @@ async fn desktop_command_registry(
     // `/recap`, `/reload-skills`, `/skill-doctor`, `/stop`). Wired here (after
     // the skill-discovery roots are known, before the `disables_skills` early
     // return) so the builtins register regardless of the customization gate.
+    let disable_agent_view = load_merged_disable_agent_view(cwd)?;
     command_api::builtins::register_core_batch_8(
         &mut reg,
         handle.clone(),
@@ -1873,7 +1935,7 @@ async fn desktop_command_registry(
         home.clone(),
         additional_skill_dirs.clone(),
         gates.safe_mode,
-        load_merged_disable_agent_view(cwd),
+        disable_agent_view,
     );
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom-command + skill
     // dir discovery (`K5d.skills:!1` / `V5d.skills:!0`; the commands-dir
@@ -1881,7 +1943,7 @@ async fn desktop_command_registry(
     // the on-disk customization layers are skipped, including the managed dir
     // (the binary's `aGe` returns `[]` before reaching its managed root).
     if gates.disables_skills() {
-        return reg;
+        return Ok(reg);
     }
     let (registered, registered_skills) = if strict_plugin_only_skills {
         (
@@ -1927,7 +1989,7 @@ async fn desktop_command_registry(
         skill_commands = registered_skills,
         "registered custom slash commands"
     );
-    reg
+    Ok(reg)
 }
 
 /// Everything a host needs to drive a conversation, built deterministically by
@@ -2395,6 +2457,13 @@ pub struct DesktopRuntime {
     /// Shared ordered shutdown owner used by CLI remounts and bridge process
     /// teardown. It is always present, including explicit ephemeral mode.
     pub session_lifecycle: Arc<DesktopSessionLifecycle>,
+    /// Read-only source-bearing Native policy-helper refusal state. Product
+    /// hosts snapshot this before consuming a requested exit so an enforced
+    /// refusal remains an error result rather than a successful session exit.
+    pub policy_helper_refusal: PolicyHelperRefusalProbe,
+    /// Read-only source-scoped report for a required Bun semantic operation
+    /// that could not be validated during a later admin-policy transition.
+    pub policy_helper_semantic_worker_failure: PolicySemanticWorkerProbe,
     /// The runtime analytics bus shared with the orchestrator and host-side
     /// producers. `mcp serve` uses this to emit process-scope startup
     /// telemetry after boot succeeds and before the request loop starts.
@@ -2903,6 +2972,9 @@ fn new_live_sandbox_runner_with_permission_gate(
 /// without changing every call site.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// Settings layers could not be composed without discarding a source error.
+    #[error("settings load failed: {0}")]
+    Settings(#[from] lingxi_core::settings::SettingsError),
     /// API base URL resolution / api-client construction failed.
     #[error("api base resolution failed: {0}")]
     ApiBase(String),
@@ -2921,6 +2993,17 @@ pub enum BuildError {
     /// only this error's Display implementation renders it for a host surface.
     #[error("structured output JSON Schema compilation failed: {0}")]
     StructuredOutputSchema(#[source] lingxi_core::host::json_schema_validator::SchemaCompileError),
+    /// A source-preserving Native managed-policy helper diagnostic marked
+    /// startup-fatal. Its exact UTF-16 diagnostic remains available through
+    /// the contained error's getter.
+    #[error("{0}")]
+    PolicyHelperStartup(#[source] PolicyHelperStartupError),
+    /// The exact Bun engine required to validate Native policy semantics was
+    /// unavailable or could not complete its source-keyed request.
+    #[error("Native policy semantic worker failed: {0}")]
+    NativePolicySemanticWorker(
+        #[source] lingxi_core::settings::native_policy_regex::NativePolicyRegexWorkerError,
+    ),
     /// Durable session claim/hydration/composition failed before activation.
     #[error("durable session state failed: {0}")]
     DurableSession(String),
@@ -3417,7 +3500,9 @@ fn merged_settings_revision(project_dir: &Path, env: &BTreeMap<String, String>) 
     hasher.finish()
 }
 
-fn load_merged_settings(project_dir: &Path) -> Option<lingxi_core::settings::EffectiveSettings> {
+fn load_merged_settings(
+    project_dir: &Path,
+) -> Result<lingxi_core::settings::EffectiveSettings, lingxi_core::settings::SettingsError> {
     let env: BTreeMap<String, String> = std::env::vars().collect();
     let revision = merged_settings_revision(project_dir, &env);
     let cache = SETTINGS_CACHE.get_or_init(|| Mutex::new(None));
@@ -3427,14 +3512,19 @@ fn load_merged_settings(project_dir: &Path) -> Option<lingxi_core::settings::Eff
         .as_ref()
         .filter(|entry| entry.project_dir == project_dir && entry.revision == revision)
     {
-        return Some(entry.value.clone());
+        return Ok(entry.value.clone());
     }
-    let inputs = lingxi_core::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: lingxi_core::settings::schema::SettingsJson::default(),
-    };
-    let value = lingxi_core::settings::Settings::load(inputs).ok()?;
+    let stack = lingxi_core::settings::Settings::load_raw_layer_stack_from_user_path(
+        lingxi_core::settings::LoadInputs {
+            env: &env,
+            project_dir,
+            defaults: lingxi_core::settings::schema::SettingsJson::default(),
+        },
+        lingxi_core::settings::FileLayerScope::ALL,
+        lingxi_core::settings::RawSupplementalLayers::default(),
+        lingxi_core::settings::loader::user_settings_path().as_deref(),
+    )?;
+    let value = stack.into_effective_settings()?;
     *cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(MergedSettingsCacheEntry {
@@ -3442,44 +3532,39 @@ fn load_merged_settings(project_dir: &Path) -> Option<lingxi_core::settings::Eff
         revision,
         value: value.clone(),
     });
-    Some(value)
+    Ok(value)
 }
 
 /// Resolve the startup region with the same file, CLI, managed and env layers
 /// used by the execution stack. Catalog previews must use this too.
 pub fn resolve_provider_region(
     cfg: &DesktopConfig,
-    managed: &BTreeMap<String, serde_json::Value>,
-) -> llm_runtime::Region {
-    let tiers = vec![serde_json::to_string(managed).expect("managed settings serialize")];
-    match load_effective_settings_for_config(cfg, &tiers)
-        .and_then(|settings| settings.settings.provider_region)
-        .unwrap_or_default()
-    {
-        lingxi_core::settings::ProviderRegion::International => llm_runtime::Region::International,
-        lingxi_core::settings::ProviderRegion::ChinaMainland => llm_runtime::Region::ChinaMainland,
-    }
-}
-
-fn load_effective_settings_for_config(
-    cfg: &DesktopConfig,
-    managed_raw_tiers: &[String],
-) -> Option<lingxi_core::settings::EffectiveSettings> {
+    managed: &Utf16JsonProjection,
+) -> Result<llm_runtime::Region, lingxi_core::settings::SettingsError> {
+    let managed_layers = if managed.get_property("providerRegion").is_some() {
+        let key = "providerRegion".encode_utf16().collect::<Vec<_>>();
+        let field = managed.subprojection_property_units(&key)?;
+        let layer = Utf16JsonProjection::object_units(vec![(key, field)])?;
+        let raw = layer.to_json_string()?;
+        serde_json::from_str::<lingxi_core::settings::SettingsJson>(&raw)
+            .ok()
+            .filter(|settings| settings.validate().is_ok())
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let env: BTreeMap<String, String> = std::env::vars().collect();
-    let managed_layers: Vec<lingxi_core::settings::SettingsJson> = managed_raw_tiers
-        .iter()
-        .filter_map(|raw| serde_json::from_str(raw).ok())
-        .collect();
     let (include_user, include_project) = if cfg.restricted {
         (false, false)
     } else {
         cfg.setting_source_scope
     };
-    lingxi_core::settings::Settings::load_with_layers_from_user_path(
+    let effective = lingxi_core::settings::Settings::load_with_layers_from_user_path(
         lingxi_core::settings::LoadInputs {
             env: &env,
             project_dir: &cfg.cwd,
-            defaults: lingxi_core::settings::schema::SettingsJson::default(),
+            defaults: lingxi_core::settings::SettingsJson::default(),
         },
         lingxi_core::settings::FileLayerScope {
             include_user,
@@ -3491,8 +3576,100 @@ fn load_effective_settings_for_config(
             managed_layers: &managed_layers,
         },
         Some(&cfg.lingxi_home.join("settings.json")),
+    )?;
+    Ok(
+        match effective.settings.provider_region.unwrap_or_default() {
+            lingxi_core::settings::ProviderRegion::International => {
+                llm_runtime::Region::International
+            }
+            lingxi_core::settings::ProviderRegion::ChinaMainland => {
+                llm_runtime::Region::ChinaMainland
+            }
+        },
     )
-    .ok()
+}
+
+fn load_effective_settings_for_config(
+    cfg: &DesktopConfig,
+    managed_snapshot: Option<&settings_watch::ManagedSettingsSnapshot>,
+) -> Result<lingxi_core::settings::EffectiveSettings, lingxi_core::settings::SettingsError> {
+    load_effective_settings_for_config_with_defaults(
+        cfg,
+        managed_snapshot,
+        lingxi_core::settings::schema::SettingsJson::default(),
+    )
+}
+
+fn load_effective_settings_for_config_with_defaults(
+    cfg: &DesktopConfig,
+    managed_snapshot: Option<&settings_watch::ManagedSettingsSnapshot>,
+    defaults: lingxi_core::settings::SettingsJson,
+) -> Result<lingxi_core::settings::EffectiveSettings, lingxi_core::settings::SettingsError> {
+    let (include_user, include_project) = if cfg.restricted {
+        (false, false)
+    } else {
+        cfg.setting_source_scope
+    };
+    let env = std::env::vars().collect::<BTreeMap<_, _>>();
+    load_effective_settings_with_inputs(
+        cfg,
+        managed_snapshot,
+        lingxi_core::settings::FileLayerScope {
+            include_user,
+            include_project,
+            include_local: include_project,
+        },
+        &env,
+        defaults,
+    )
+}
+
+fn load_effective_settings_with_inputs(
+    cfg: &DesktopConfig,
+    managed_snapshot: Option<&settings_watch::ManagedSettingsSnapshot>,
+    file_scope: lingxi_core::settings::FileLayerScope,
+    env: &BTreeMap<String, String>,
+    defaults: lingxi_core::settings::SettingsJson,
+) -> Result<lingxi_core::settings::EffectiveSettings, lingxi_core::settings::SettingsError> {
+    let cli_source = match cfg.flag_settings_source.clone() {
+        Some(source) => Some(source),
+        None => cfg
+            .flag_settings
+            .as_ref()
+            .map(|settings| {
+                serde_json::to_string(settings).map_err(|error| {
+                    lingxi_core::settings::SettingsError::SchemaViolation(error.to_string())
+                })
+            })
+            .transpose()?,
+    };
+    let stack = lingxi_core::settings::Settings::load_raw_layer_stack_from_user_path(
+        lingxi_core::settings::LoadInputs {
+            env,
+            project_dir: &cfg.cwd,
+            defaults,
+        },
+        file_scope,
+        lingxi_core::settings::RawSupplementalLayers {
+            cli_layer: cli_source.as_deref(),
+            managed_policy: managed_snapshot.map(|snapshot| &snapshot.selection),
+        },
+        Some(&cfg.lingxi_home.join("settings.json")),
+    )?;
+    let mut effective = stack.into_effective_settings()?;
+    if let Some(snapshot) = managed_snapshot.filter(|snapshot| snapshot.read_failed()) {
+        if let lingxi_core::settings::SettingsError::SourceFailure {
+            message,
+            diagnostics,
+            ..
+        } = snapshot.source_failure()
+        {
+            effective.source_incomplete = true;
+            effective.source_message = Some(message);
+            effective.source_diagnostics = Some(diagnostics);
+        }
+    }
+    Ok(effective)
 }
 
 /// Sample the current merged main/subagent prompt-cache settings for an API
@@ -3500,13 +3677,15 @@ fn load_effective_settings_for_config(
 /// as the other desktop settings consumers.
 pub(super) fn prompt_cache_ttl_settings_for_config(
     cfg: &DesktopConfig,
-) -> lingxi_core::settings::schema::PromptCacheTtlSettings {
-    let Ok(managed) = settings_watch::managed_policy_layers_sync(cfg) else {
-        return Default::default();
-    };
-    load_effective_settings_for_config(cfg, &managed)
+) -> Result<
+    lingxi_core::settings::schema::PromptCacheTtlSettings,
+    lingxi_core::settings::SettingsError,
+> {
+    let snapshot = settings_watch::managed_settings_snapshot_sync(cfg).ok_or(
+        lingxi_core::settings::SettingsError::SourceUnavailable("managed policy snapshot"),
+    )?;
+    load_effective_settings_for_config(cfg, Some(&snapshot))
         .map(|settings| settings.settings.prompt_cache_ttl_settings())
-        .unwrap_or_default()
 }
 
 /// `Bk("bashEditDiffEnabled")[0]` — the value as the USER / flag / policy tiers
@@ -3525,36 +3704,22 @@ pub(super) fn prompt_cache_ttl_settings_for_config(
 /// [`tool_shell::bash_edit_diff::enabled`].
 fn load_trusted_tier_bash_edit_diff(
     cfg: &DesktopConfig,
-    managed_raw_tiers: &[String],
-) -> Option<bool> {
+    managed_snapshot: Option<&settings_watch::ManagedSettingsSnapshot>,
+) -> Result<Option<bool>, lingxi_core::settings::SettingsError> {
     let env: BTreeMap<String, String> = BTreeMap::new();
-    let managed_layers: Vec<lingxi_core::settings::SettingsJson> = managed_raw_tiers
-        .iter()
-        .filter_map(|raw| serde_json::from_str(raw).ok())
-        .collect();
     let include_user = !cfg.restricted && cfg.setting_source_scope.0;
-    lingxi_core::settings::Settings::load_with_layers_from_user_path(
-        lingxi_core::settings::LoadInputs {
-            // Deliberately EMPTY: `CLAUDE_CODE_BASH_EDIT_DIFF` is the gate's
-            // first arm and is read there. Letting the env layer contribute
-            // here would make an env value look like a policy tier.
-            env: &env,
-            project_dir: &cfg.cwd,
-            defaults: lingxi_core::settings::schema::SettingsJson::default(),
-        },
+    load_effective_settings_with_inputs(
+        cfg,
+        managed_snapshot,
         lingxi_core::settings::FileLayerScope {
             include_user,
             include_project: false,
             include_local: false,
         },
-        lingxi_core::settings::SupplementalLayers {
-            cli_layer: cfg.flag_settings.as_ref(),
-            managed_layers: &managed_layers,
-        },
-        Some(&cfg.lingxi_home.join("settings.json")),
+        &env,
+        lingxi_core::settings::schema::SettingsJson::default(),
     )
-    .ok()
-    .and_then(|effective| effective.settings.bash_edit_diff_enabled)
+    .map(|effective| effective.settings.bash_edit_diff_enabled)
 }
 
 /// Resolve CLI-5's gate and, when it is on, the per-session shadow root.
@@ -3567,10 +3732,13 @@ fn load_trusted_tier_bash_edit_diff(
 /// the same checkout never share one shadow index.
 fn resolve_bash_edit_diff(
     cfg: &DesktopConfig,
-    effective_settings: Option<&lingxi_core::settings::EffectiveSettings>,
-    managed_raw_tiers: &[String],
+    effective_settings: &lingxi_core::settings::EffectiveSettings,
+    managed_snapshot: Option<&settings_watch::ManagedSettingsSnapshot>,
     session_id: &str,
-) -> Option<Arc<tool_api::builtin_context::BashEditDiffSetup>> {
+) -> Result<
+    Option<Arc<tool_api::builtin_context::BashEditDiffSetup>>,
+    lingxi_core::settings::SettingsError,
+> {
     let env_override = std::env::var("CLAUDE_CODE_BASH_EDIT_DIFF")
         .ok()
         .map(|raw| !matches!(raw.trim(), "" | "0" | "false"));
@@ -3584,7 +3752,7 @@ fn resolve_bash_edit_diff(
     resolve_bash_edit_diff_with(
         cfg,
         effective_settings,
-        managed_raw_tiers,
+        managed_snapshot,
         session_id,
         env_override,
         rollout,
@@ -3599,99 +3767,119 @@ fn resolve_bash_edit_diff(
 /// the env at the edge, pass it as a parameter.
 fn resolve_bash_edit_diff_with(
     cfg: &DesktopConfig,
-    effective_settings: Option<&lingxi_core::settings::EffectiveSettings>,
-    managed_raw_tiers: &[String],
+    effective_settings: &lingxi_core::settings::EffectiveSettings,
+    managed_snapshot: Option<&settings_watch::ManagedSettingsSnapshot>,
     session_id: &str,
     env_override: Option<bool>,
     rollout: bool,
-) -> Option<Arc<tool_api::builtin_context::BashEditDiffSetup>> {
-    let trusted_tier = load_trusted_tier_bash_edit_diff(cfg, managed_raw_tiers);
-    let merged = effective_settings.and_then(|e| e.settings.bash_edit_diff_enabled);
+) -> Result<
+    Option<Arc<tool_api::builtin_context::BashEditDiffSetup>>,
+    lingxi_core::settings::SettingsError,
+> {
+    let trusted_tier = load_trusted_tier_bash_edit_diff(cfg, managed_snapshot)?;
+    let merged = effective_settings.settings.bash_edit_diff_enabled;
     let permissive = matches!(
         cfg.permission_mode,
         permission::PermissionMode::Auto | permission::PermissionMode::BypassPermissions
     );
     if !tool_shell::bash_edit_diff::enabled(env_override, trusted_tier, merged, permissive, rollout)
     {
-        return None;
+        return Ok(None);
     }
-    Some(Arc::new(tool_api::builtin_context::BashEditDiffSetup {
-        shadow_root: cfg.lingxi_home.join("bash-edit-diff").join(session_id),
-    }))
+    Ok(Some(Arc::new(
+        tool_api::builtin_context::BashEditDiffSetup {
+            shadow_root: cfg.lingxi_home.join("bash-edit-diff").join(session_id),
+        },
+    )))
 }
 
 static SETTINGS_CACHE: OnceLock<Mutex<Option<MergedSettingsCacheEntry>>> = OnceLock::new();
 
 fn load_merged_output_style(
     project_dir: &std::path::Path,
-) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
-    load_merged_settings(project_dir).and_then(|eff| eff.settings.output_style)
+) -> Result<
+    Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    lingxi_core::settings::SettingsError,
+> {
+    load_merged_settings(project_dir).map(|eff| eff.settings.output_style)
 }
 
 /// Load the merged `settings.showThinkingSummaries` request-beta preference.
 /// Absent/invalid settings resolve to Claude Code's default (`false`).
-fn load_merged_show_thinking_summaries(project_dir: &std::path::Path) -> bool {
+fn load_merged_show_thinking_summaries(
+    project_dir: &std::path::Path,
+) -> Result<bool, lingxi_core::settings::SettingsError> {
     load_merged_settings(project_dir)
-        .and_then(|eff| eff.settings.show_thinking_summaries)
-        .unwrap_or(false)
+        .map(|eff| eff.settings.show_thinking_summaries.unwrap_or(false))
 }
 
 /// Load LingXi's `settings.visionDelegationEnabled` preference. The feature is
 /// enabled when absent so existing installations gain the safe image sidecar
 /// without a migration.
-fn load_merged_vision_delegation_enabled(project_dir: &std::path::Path) -> bool {
+fn load_merged_vision_delegation_enabled(
+    project_dir: &std::path::Path,
+) -> Result<bool, lingxi_core::settings::SettingsError> {
     load_merged_settings(project_dir)
-        .and_then(|effective| effective.settings.vision_delegation_enabled)
-        .unwrap_or(true)
+        .map(|effective| effective.settings.vision_delegation_enabled.unwrap_or(true))
 }
 
 /// Load the merged `settings.agentPushNotifEnabled` preference. The independent
 /// `tengu_kairos_push_notifications` feature flag is applied by consumers.
-fn load_merged_agent_push_notif_enabled(project_dir: &std::path::Path) -> bool {
+fn load_merged_agent_push_notif_enabled(
+    project_dir: &std::path::Path,
+) -> Result<bool, lingxi_core::settings::SettingsError> {
     load_merged_settings(project_dir)
-        .and_then(|effective| effective.settings.agent_push_notif_enabled)
-        .unwrap_or(false)
+        .map(|effective| effective.settings.agent_push_notif_enabled.unwrap_or(false))
 }
 
 /// Load the merged `settings.taskOutputMaxChars`. `None` when unset — the
 /// oracle's `Ge().taskOutputMaxChars === undefined` branch, which is what makes
 /// `TASK_MAX_OUTPUT_LENGTH` apply.
-fn load_merged_task_output_max_chars(project_dir: &std::path::Path) -> Option<u32> {
-    load_merged_settings(project_dir).and_then(|eff| eff.settings.task_output_max_chars)
+fn load_merged_task_output_max_chars(
+    project_dir: &std::path::Path,
+) -> Result<Option<u32>, lingxi_core::settings::SettingsError> {
+    load_merged_settings(project_dir).map(|eff| eff.settings.task_output_max_chars)
 }
 
 /// Load the merged `settings.bashOutputMaxChars`. `None` when unset — the
 /// branch under which `BASH_MAX_OUTPUT_LENGTH` applies.
-fn load_merged_bash_output_max_chars(project_dir: &std::path::Path) -> Option<u32> {
-    load_merged_settings(project_dir).and_then(|eff| eff.settings.bash_output_max_chars)
+fn load_merged_bash_output_max_chars(
+    project_dir: &std::path::Path,
+) -> Result<Option<u32>, lingxi_core::settings::SettingsError> {
+    load_merged_settings(project_dir).map(|eff| eff.settings.bash_output_max_chars)
 }
 
 /// Load `settings.attribution` + `settings.includeCoAuthoredBy` — the git
 /// attribution trailer overrides, resolved the same way as the caps above.
 fn load_merged_attribution(
     project_dir: &std::path::Path,
-) -> (
-    Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
-    Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
-    Option<bool>,
-) {
-    let Some(eff) = load_merged_settings(project_dir) else {
-        return (None, None, None);
-    };
-    let attribution = eff.settings.attribution.clone();
+) -> Result<
     (
+        Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        Option<bool>,
+    ),
+    lingxi_core::settings::SettingsError,
+> {
+    let eff = load_merged_settings(project_dir)?;
+    let attribution = eff.settings.attribution.clone();
+    Ok((
         attribution.as_ref().and_then(|a| a.commit.clone()),
         attribution.and_then(|a| a.pr),
         eff.settings.include_co_authored_by,
-    )
+    ))
 }
 
 /// Load `settings.workflowKeywordTriggerEnabled`. The default remains off,
 /// matching Claude Code's optional setting.
-fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -> bool {
-    load_merged_settings(project_dir)
-        .and_then(|eff| eff.settings.workflow_keyword_trigger_enabled)
-        .unwrap_or(false)
+fn load_merged_workflow_keyword_trigger_enabled(
+    project_dir: &std::path::Path,
+) -> Result<bool, lingxi_core::settings::SettingsError> {
+    load_merged_settings(project_dir).map(|eff| {
+        eff.settings
+            .workflow_keyword_trigger_enabled
+            .unwrap_or(false)
+    })
 }
 
 /// Load the merged `settings.skipWebFetchPreflight` (project + user + env layers)
@@ -3700,10 +3888,11 @@ fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -
 /// the domain-blocklist preflight (CC 2.1.207 `!Mi().skipWebFetchPreflight` gate,
 /// parity P2-14). Returns `false` on any load failure or when the key is unset —
 /// the frozen default (preflight runs).
-fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
+fn load_merged_skip_web_fetch_preflight(
+    project_dir: &std::path::Path,
+) -> Result<bool, lingxi_core::settings::SettingsError> {
     load_merged_settings(project_dir)
-        .and_then(|eff| eff.settings.skip_web_fetch_preflight)
-        .unwrap_or(false)
+        .map(|eff| eff.settings.skip_web_fetch_preflight.unwrap_or(false))
 }
 
 /// Load the merged `settings.disableAgentView` (project + user + env layers) for
@@ -3715,10 +3904,10 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
 /// [`lingxi_core::host::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
 /// load failure or when the key is unset — the frozen default (agent view
 /// enabled; the env half still applies independently).
-fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
-    load_merged_settings(project_dir)
-        .and_then(|eff| eff.settings.disable_agent_view)
-        .unwrap_or(false)
+fn load_merged_disable_agent_view(
+    project_dir: &std::path::Path,
+) -> Result<bool, lingxi_core::settings::SettingsError> {
+    load_merged_settings(project_dir).map(|eff| eff.settings.disable_agent_view.unwrap_or(false))
 }
 
 /// Resolve the merged hooks-restricted flag for the `/goal` gate (review #12):
@@ -3726,82 +3915,65 @@ fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
 /// (the same `Settings::load` seam). Mirrors claude's `kEt` hooks half —
 /// `if (tX() || lMe()) return hooks_gate`. `false` on any load failure or when
 /// both keys are unset (the permissive default).
-fn load_merged_hooks_restricted(project_dir: &std::path::Path) -> bool {
-    load_merged_settings(project_dir)
-        .map(|eff| {
-            eff.settings.disable_all_hooks.unwrap_or(false)
-                || eff.settings.allow_managed_hooks_only.unwrap_or(false)
-        })
-        .unwrap_or(false)
+fn load_merged_hooks_restricted(
+    project_dir: &std::path::Path,
+) -> Result<bool, lingxi_core::settings::SettingsError> {
+    load_merged_settings(project_dir).map(|eff| {
+        eff.settings.disable_all_hooks.unwrap_or(false)
+            || eff.settings.allow_managed_hooks_only.unwrap_or(false)
+    })
 }
 
 /// Resolve the effective `disableAllHooks` value for the executor's runner-head
 /// kill switch. Unlike the `/goal` restriction helper above, this returns only
 /// the setting that suppresses every hook, including hooks registered after
 /// boot.
-fn load_merged_disable_all_hooks(project_dir: &std::path::Path) -> bool {
-    load_merged_settings(project_dir)
-        .and_then(|eff| eff.settings.disable_all_hooks)
-        .unwrap_or(false)
+fn load_merged_disable_all_hooks(
+    project_dir: &std::path::Path,
+) -> Result<bool, lingxi_core::settings::SettingsError> {
+    load_merged_settings(project_dir).map(|eff| eff.settings.disable_all_hooks.unwrap_or(false))
 }
 
-fn load_merged_allow_managed_hooks_only(project_dir: &std::path::Path) -> bool {
+fn load_merged_allow_managed_hooks_only(
+    project_dir: &std::path::Path,
+) -> Result<bool, lingxi_core::settings::SettingsError> {
     load_merged_settings(project_dir)
-        .and_then(|eff| eff.settings.allow_managed_hooks_only)
-        .unwrap_or(false)
+        .map(|eff| eff.settings.allow_managed_hooks_only.unwrap_or(false))
 }
 
 /// Return the selected managed policy as a source-preserving JSON projection.
-/// `None` means source selection/read failed; a successfully loaded absence is
-/// represented by an empty object projection. Consumers keep exact UTF-16
-/// keys and values instead of rebuilding a map through `serde_json::Value`.
+/// A complete selection without an effective source is `Ok(None)`; incomplete
+/// reads return a typed source error that retains any healthy effective tiers.
 #[must_use]
 pub async fn managed_settings_overlay(
     cfg: &DesktopConfig,
-) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+) -> Result<
+    Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    lingxi_core::settings::SettingsError,
+> {
     let snapshot = settings_watch::managed_settings_snapshot_for_config(cfg).await;
-    if snapshot.read_failed() {
-        return None;
-    }
-    Some(snapshot.effective_projection().cloned().unwrap_or_else(|| {
-        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
-            .expect("empty object is valid JSON")
-    }))
+    snapshot.managed_overlay()
 }
 
 /// Resolve `askUserQuestionTimeout` from its allowed sources only: user,
 /// `--settings`, and managed policy. Project/local files are intentionally
 /// excluded because an untrusted checkout must not control interaction timing.
-async fn load_ask_user_question_timeout(cfg: &DesktopConfig) -> Option<String> {
+async fn load_ask_user_question_timeout(
+    cfg: &DesktopConfig,
+) -> Result<lingxi_core::settings::EffectiveSettings, lingxi_core::settings::SettingsError> {
     let managed_snapshot = settings_watch::managed_settings_snapshot_for_config(cfg).await;
-    if managed_snapshot.read_failed() {
-        return None;
-    }
-    let managed_layers: Vec<lingxi_core::settings::SettingsJson> = managed_snapshot
-        .effective_json()
-        .into_iter()
-        .filter_map(|raw| serde_json::from_str(&raw).ok())
-        .collect();
     let empty_env = std::collections::BTreeMap::new();
-    lingxi_core::settings::Settings::load_with_layers_from_user_path(
-        lingxi_core::settings::LoadInputs {
-            env: &empty_env,
-            project_dir: &cfg.cwd,
-            defaults: lingxi_core::settings::SettingsJson::default(),
-        },
+    load_effective_settings_with_inputs(
+        cfg,
+        Some(&managed_snapshot),
         lingxi_core::settings::FileLayerScope {
             include_user: cfg.setting_source_scope.0,
             include_project: false,
             include_local: false,
         },
-        lingxi_core::settings::SupplementalLayers {
-            cli_layer: cfg.flag_settings.as_ref(),
-            managed_layers: &managed_layers,
-        },
-        Some(&cfg.lingxi_home.join("settings.json")),
+        &empty_env,
+        lingxi_core::settings::schema::SettingsJson::default(),
     )
-    .ok()
-    .and_then(|effective| effective.settings.ask_user_question_timeout)
 }
 
 /// Load the merged HTTP-hook security policy (H-BIN-12) — `allowedHttpHookUrls`
@@ -3814,14 +3986,13 @@ async fn load_ask_user_question_timeout(cfg: &DesktopConfig) -> Option<String> {
 /// `PFy()=Wn()` read (lingxi sources once at boot).
 fn load_merged_http_hook_policy(
     project_dir: &std::path::Path,
-) -> (Option<Vec<String>>, Option<Vec<String>>) {
-    match load_merged_settings(project_dir) {
-        Some(eff) => (
+) -> Result<(Option<Vec<String>>, Option<Vec<String>>), lingxi_core::settings::SettingsError> {
+    load_merged_settings(project_dir).map(|eff| {
+        (
             eff.settings.allowed_http_hook_urls,
             eff.settings.http_hook_allowed_env_vars,
-        ),
-        None => (None, None),
-    }
+        )
+    })
 }
 
 /// (P2-02 cc2.1.207) `g9e(source)` — is the agent source in the trusted set
@@ -4821,22 +4992,20 @@ impl PluginRuntime {
             .iter()
             .filter(|id| live.contains(*id))
         {
-            match self.manager.plugin_state(id).await {
-                Some(
-                    plugin::PluginState::Loaded {
-                        manifest,
-                        install_dir,
-                        ..
-                    }
-                    | plugin::PluginState::DisablingFailed {
-                        manifest,
-                        install_dir,
-                        ..
-                    },
-                ) => {
-                    result.push((manifest, install_dir));
+            if let Some(
+                plugin::PluginState::Loaded {
+                    manifest,
+                    install_dir,
+                    ..
                 }
-                _ => {}
+                | plugin::PluginState::DisablingFailed {
+                    manifest,
+                    install_dir,
+                    ..
+                },
+            ) = self.manager.plugin_state(id).await
+            {
+                result.push((manifest, install_dir));
             }
         }
         // Stable sorting preserves discovery order for each category; it does
@@ -5429,13 +5598,15 @@ fn native_main_refresh_source_includes_output_style_suffixes_only() {
 fn registry_skill_listing_provider(
     registry: Arc<RwLock<CommandRegistry>>,
     read_file_state: tool_api::read_file_state::ReadFileStateMap,
-    include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
+    include_code_review_suggestion: Arc<
+        dyn Fn() -> Result<bool, lingxi_core::settings::SettingsError> + Send + Sync,
+    >,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     registry_skill_listing_provider_with_sources(
         registry,
         read_file_state,
         include_code_review_suggestion,
-        Arc::new(|| NativeSkillListingSettings::default()),
+        Arc::new(|| Ok(NativeSkillListingSettings::default())),
         Arc::new(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
         None,
     )
@@ -5444,17 +5615,19 @@ fn registry_skill_listing_provider(
 fn registry_skill_listing_provider_for_desktop(
     registry: Arc<RwLock<CommandRegistry>>,
     read_file_state: tool_api::read_file_state::ReadFileStateMap,
-    include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
+    include_code_review_suggestion: Arc<
+        dyn Fn() -> Result<bool, lingxi_core::settings::SettingsError> + Send + Sync,
+    >,
     cfg: DesktopConfig,
     session_cwd: Arc<SessionCwd>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     let settings_cfg = cfg.clone();
     let settings_cwd = session_cwd.clone();
-    let settings_loader: Arc<dyn Fn() -> NativeSkillListingSettings + Send + Sync> =
-        Arc::new(move || {
-            load_native_skill_listing_settings(&settings_cfg, &settings_cwd.cwd())
-                .unwrap_or_default()
-        });
+    let settings_loader: Arc<
+        dyn Fn() -> Result<NativeSkillListingSettings, lingxi_core::settings::SettingsError>
+            + Send
+            + Sync,
+    > = Arc::new(move || load_native_skill_listing_settings(&settings_cfg, &settings_cwd.cwd()));
     let cwd_source = session_cwd.clone();
     let cwd_provider: Arc<dyn Fn() -> PathBuf + Send + Sync> =
         { Arc::new(move || cwd_source.cwd()) };
@@ -5491,14 +5664,13 @@ struct NativeSkillListingSettings {
 fn load_native_skill_listing_settings(
     cfg: &DesktopConfig,
     cwd: &Path,
-) -> Option<NativeSkillListingSettings> {
+) -> Result<NativeSkillListingSettings, lingxi_core::settings::SettingsError> {
     use lingxi_core::settings::tracer::Source;
 
     let env = std::env::vars().collect::<BTreeMap<_, _>>();
-    let managed_snapshot = settings_watch::managed_settings_snapshot_sync(cfg)?;
-    if managed_snapshot.read_failed() {
-        return None;
-    }
+    let managed_snapshot = settings_watch::managed_settings_snapshot_sync(cfg).ok_or(
+        lingxi_core::settings::SettingsError::SourceUnavailable("managed policy snapshot"),
+    )?;
     let cli_source = cfg.flag_settings_source.clone().or_else(|| {
         cfg.flag_settings
             .as_ref()
@@ -5525,27 +5697,26 @@ fn load_native_skill_listing_settings(
             managed_policy: Some(&managed_snapshot.selection),
         },
         Some(&cfg.lingxi_home.join("settings.json")),
-    )
-    .ok()?;
+    )?;
 
     let admitted = stack.admitted_typed_layers();
     let mut policy = lingxi_core::settings::SettingsJson::default();
     let mut flag = lingxi_core::settings::SettingsJson::default();
     let mut effective = lingxi_core::settings::SettingsJson::default();
     for layer in admitted {
-        effective = lingxi_core::settings::merger::merge(effective, layer.settings.clone());
+        effective = lingxi_core::settings::merger::merge(effective, layer.settings.clone())?;
         match layer.source {
             Source::Cli => {
-                flag = lingxi_core::settings::merger::merge(flag, layer.settings);
+                flag = lingxi_core::settings::merger::merge(flag, layer.settings)?;
             }
             Source::Managed => {
-                policy = lingxi_core::settings::merger::merge(policy, layer.settings);
+                policy = lingxi_core::settings::merger::merge(policy, layer.settings)?;
             }
             Source::Defaults | Source::User | Source::Project | Source::Local | Source::Env => {}
         }
     }
 
-    Some(NativeSkillListingSettings {
+    Ok(NativeSkillListingSettings {
         // Native cte starts from ft().skillOverrides, the fully merged
         // settings snapshot, then layers policySettings and flagSettings as
         // their own alias/rank inputs below.
@@ -5564,8 +5735,14 @@ fn load_native_skill_listing_settings(
 fn registry_skill_listing_provider_with_sources(
     registry: Arc<RwLock<CommandRegistry>>,
     read_file_state: tool_api::read_file_state::ReadFileStateMap,
-    include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
-    settings_loader: Arc<dyn Fn() -> NativeSkillListingSettings + Send + Sync>,
+    include_code_review_suggestion: Arc<
+        dyn Fn() -> Result<bool, lingxi_core::settings::SettingsError> + Send + Sync,
+    >,
+    settings_loader: Arc<
+        dyn Fn() -> Result<NativeSkillListingSettings, lingxi_core::settings::SettingsError>
+            + Send
+            + Sync,
+    >,
     cwd_provider: Arc<dyn Fn() -> PathBuf + Send + Sync>,
     skill_usage_home: Option<PathBuf>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
@@ -5585,7 +5762,7 @@ fn registry_skill_listing_provider_with_sources(
             use command_api::CommandSource;
             use lingxi_core::settings::SkillOverride;
             let reg = registry.read().await;
-            let settings = settings_loader();
+            let settings = settings_loader()?;
             let usage = skill_usage_home.as_deref().and_then(|home| {
                 command_api::skill_usage::SkillUsageSnapshot::read(home)
                         .map_err(|error| {
@@ -5718,22 +5895,23 @@ fn registry_skill_listing_provider_with_sources(
                     Some(entry)
                 })
                 .collect();
-            orchestrator::prompt::skill_listing::SkillListingSnapshot {
+            Ok(orchestrator::prompt::skill_listing::SkillListingSnapshot {
                 entries,
                 budget_settings: settings.budget,
-            }
+            })
         }
     });
     let provider = provider.with_bash_precommit_skills(move |entries| {
         let registry = precommit_registry.clone();
-        let include_code_review_suggestion = include_code_review_suggestion();
+        let include_code_review_suggestion = include_code_review_suggestion.clone();
         async move {
+            let include_code_review_suggestion = include_code_review_suggestion()?;
             let registry = registry.read().await;
-            crate::skill_prompt::bash_precommit_skills(
+            Ok(crate::skill_prompt::bash_precommit_skills(
                 &registry,
                 &entries,
                 include_code_review_suggestion,
-            )
+            ))
         }
     });
     Arc::new(provider)
@@ -5741,16 +5919,15 @@ fn registry_skill_listing_provider_with_sources(
 fn code_review_suggestion_provider(
     cfg: DesktopConfig,
     session_cwd: Arc<SessionCwd>,
-) -> Arc<dyn Fn() -> bool + Send + Sync> {
+) -> Arc<dyn Fn() -> Result<bool, lingxi_core::settings::SettingsError> + Send + Sync> {
     Arc::new(move || {
         let mut current_cfg = cfg.clone();
         current_cfg.cwd = session_cwd.cwd();
-        let Ok(managed) = settings_watch::managed_policy_layers_sync(&current_cfg) else {
-            return false;
-        };
-        load_effective_settings_for_config(&current_cfg, &managed).is_some_and(|effective| {
-            effective.settings.include_code_review_suggestion == Some(true)
-        })
+        let snapshot = settings_watch::managed_settings_snapshot_sync(&current_cfg).ok_or(
+            lingxi_core::settings::SettingsError::SourceUnavailable("managed policy snapshot"),
+        )?;
+        let effective = load_effective_settings_for_config(&current_cfg, Some(&snapshot))?;
+        Ok(effective.settings.include_code_review_suggestion == Some(true))
     })
 }
 
@@ -6199,6 +6376,7 @@ use permission_config::cron_scheduler_enabled;
 use permission_config::current_uid;
 #[cfg(not(unix))]
 use permission_config::current_uid;
+use permission_config::effective_model_source_for_config;
 use permission_config::expand_trusted_dir;
 use permission_config::lingxi_temp_dir;
 use permission_config::load_boot_permission_tiers_with_policy_snapshot;

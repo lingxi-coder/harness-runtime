@@ -197,6 +197,125 @@ fn sha256(raw: &[u8]) -> String {
     format!("{:x}", Sha256::digest(raw))
 }
 
+fn write_native_command_replay_diagnostics(
+    case: &FixtureCase,
+    harness_jsonl: &[u8],
+    native_request_fixture: &[u8],
+    captured_messages: &[lingxi_core::types::ConversationMessage],
+    captured_message_projection: &[u8],
+    normalized_message_projection: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let diagnostic_dir = match std::env::var_os("LINGXI_COMMAND_REPLAY_DIAGNOSTIC_DIR") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        Some(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "LINGXI_COMMAND_REPLAY_DIAGNOSTIC_DIR must not be empty",
+            ));
+        }
+        None => return Ok(()),
+    };
+    std::fs::create_dir_all(&diagnostic_dir)?;
+
+    let captured_name = format!("{}.harness-captured-messages.projection.json", case.id);
+    let normalized_name = format!("{}.harness-normalized-messages.projection.json", case.id);
+    let jsonl_name = format!("{}.harness.jsonl", case.id);
+    let native_name = format!("{}.native-request-fixture.raw.json", case.id);
+    let artifacts = [
+        (jsonl_name.as_str(), harness_jsonl),
+        (native_name.as_str(), native_request_fixture),
+        (captured_name.as_str(), captured_message_projection),
+        (normalized_name.as_str(), normalized_message_projection),
+    ];
+    for (name, bytes) in artifacts {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(diagnostic_dir.join(name))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+
+    let jsonl_rows = parsed_transcript_rows(harness_jsonl)
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let content_len = row.array_len("/message/content").unwrap_or(0);
+            let message_text_blocks = (0..content_len)
+                .filter_map(|block| {
+                    row.string_at(&format!("/message/content/{block}/text"))
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "line": index + 1,
+                "row_type": row.string_at("/type"),
+                "uuid": row.string_at("/uuid"),
+                "parent_uuid": row.string_at("/parentUuid"),
+                "attachment_type": row.string_at("/attachment/type"),
+                "attachment_text": row.string_at("/attachment/text"),
+                "message_text_blocks": message_text_blocks,
+            })
+        })
+        .collect::<Vec<_>>();
+    let request_messages = captured_messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let (message_kind, is_meta) = match message {
+                lingxi_core::types::ConversationMessage::User { is_meta, .. } => {
+                    ("user", Some(*is_meta))
+                }
+                lingxi_core::types::ConversationMessage::Assistant { .. } => ("assistant", None),
+                lingxi_core::types::ConversationMessage::System { .. } => ("system", None),
+            };
+            serde_json::json!({
+                "request_index": index,
+                "message_id": message.id().as_uuid().to_string(),
+                "message_kind": message_kind,
+                "is_meta": is_meta,
+                "display_text": message.text_content(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let artifact_metadata = artifacts
+        .iter()
+        .map(|(name, bytes)| {
+            serde_json::json!({
+                "file": name,
+                "bytes": bytes.len(),
+                "sha256": sha256(bytes),
+            })
+        })
+        .collect::<Vec<_>>();
+    let summary = serde_json::json!({
+        "case_id": case.id,
+        "session_id": case.session_id,
+        "capture_provenance": {
+            "harness_jsonl": "exact bytes read from the active transcript_path",
+            "native_request_fixture": "exact bytes read from the checked-in Native fixture; reference only",
+            "harness_captured_messages": "serde reserialization of MockApiClient::captured_msgs ConversationMessage values; derived projection, not raw provider transport bytes",
+            "harness_normalized_messages": "serde reserialization after normalize_messages_for_api; derived projection, not raw provider transport bytes",
+            "harness_raw_provider_request_body_available": false,
+            "harness_raw_provider_request_body_reason": "MockApiClient captures typed OrchestratorApiRequest/ConversationMessage values and has no raw HTTP body buffer",
+        },
+        "artifacts": artifact_metadata,
+        "jsonl_rows": jsonl_rows,
+        "captured_request_messages": request_messages,
+    });
+    let summary_bytes = serde_json::to_vec_pretty(&summary)
+        .expect("diagnostic summary contains only serializable metadata");
+    let summary_name = format!("{}.summary.json", case.id);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(diagnostic_dir.join(summary_name))?;
+    file.write_all(&summary_bytes)?;
+    file.sync_all()
+}
+
 fn row_has_text_units(row: &Utf16JsonProjection, expected: &[u16]) -> bool {
     if row.string_units("/message/content").as_deref() == Some(expected) {
         return true;
@@ -385,9 +504,7 @@ async fn regular_headless_prompt_stages_skill_listing_from_live_command_registry
     let stream = Arc::new(StreamJsonStream::new_placeholder(
         crate::headless::io::Output::new(tokio::io::sink()),
     ));
-    eprintln!("[regular-headless-skill] before fixture_runtime");
     let mut runtime = Box::pin(super::tests::fixture_runtime(stream.clone(), root.path())).await;
-    eprintln!("[regular-headless-skill] after fixture_runtime");
     let catalog = runtime.headless_command_catalog().await;
     assert!(catalog
         .prompt_command_names
@@ -452,17 +569,9 @@ async fn regular_headless_prompt_stages_skill_listing_from_live_command_registry
         no_stream: true,
         ..Default::default()
     };
-    eprintln!("[regular-headless-skill] before spawn");
-    let code = tokio::spawn(async move {
-        eprintln!("[regular-headless-skill] run_oneshot entered");
-        let code = run_oneshot(&argv, &runtime, &sink).await;
-        eprintln!("[regular-headless-skill] run_oneshot completed");
-        code
-    })
+    let code = tokio::spawn(async move { run_oneshot(&argv, &runtime, &sink).await })
         .await
         .expect("regular prompt runner task completes");
-    eprintln!("[regular-headless-skill] after spawn");
-    eprintln!("[regular-headless-skill] before assert");
     assert_eq!(code, exit_codes::SUCCESS);
     assert!(streaming.captured_calls().await.is_empty());
     let captured = batched.captured_msgs().await;
@@ -867,6 +976,17 @@ async fn native_295_commands_fixture_replay_body() {
         );
         assert_message_parent_chain(&native_jsonl, "Native 2.1.295");
         let harness_jsonl = std::fs::read(&transcript_path).expect("Harness JSONL transcript");
+        if case.unknown_command_fallback {
+            write_native_command_replay_diagnostics(
+                case,
+                &harness_jsonl,
+                &native_request,
+                &captured[0],
+                &outbound_bytes,
+                &normalized_outbound_bytes,
+            )
+            .expect("opt-in Native command replay diagnostics must be written without overwrites");
+        }
         assert_message_parent_chain(&harness_jsonl, "Harness");
         let harness_attachment_types = transcript_attachment_types(&harness_jsonl);
         assert_attachment_subsequence(
@@ -1052,7 +1172,7 @@ async fn native_295_commands_fixture_replay_body() {
                     && outbound_session_context < outbound_instructions
                     && outbound_session_context < outbound_date
                     && outbound_date < outbound_prompt_index,
-                "Native 2.1.295 request rows must order per-turn reminders, typed fallback, shared context, and prompt"
+                "Native 2.1.295 request rows must order per-turn reminders, typed fallback, shared context, and prompt: session_context={outbound_session_context}, total_tokens={outbound_total_tokens}, fallback={outbound_fallback_index}, instructions={outbound_instructions}, date={outbound_date}, prompt={outbound_prompt_index}"
             );
             let reminder_occurrences = captured[0]
                 .iter()

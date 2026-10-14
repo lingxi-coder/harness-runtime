@@ -320,7 +320,13 @@ mod tests {
         let loader =
             MobileDiskSkillLoader::for_mode(Arc::new(RwLock::new(registry)), SessionMode::Chat);
         let loaded = loader
-            .resolve_and_load("mobile-personal-context", "general-purpose", None, None)
+            .resolve_and_load(
+                "mobile-personal-context",
+                "general-purpose",
+                None,
+                None,
+                lingxi_core::host::CancellationToken::new(),
+            )
             .await
             .unwrap()
             .unwrap();

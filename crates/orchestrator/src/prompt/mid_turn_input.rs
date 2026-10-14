@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ImageSource, MessageId};
 
 /// The existing driver's admission boundary, before queue input is consumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,10 +187,12 @@ pub trait MidTurnInputSource: Send + Sync {
         Ok(self.take_mid_turn_input().await.map(|text| {
             vec![MidTurnInput {
                 text,
+                images: Vec::new(),
                 origin_kind: None,
                 projected_content: None,
                 source_message_uuid: None,
                 queue_delivery: None,
+                pending_prompt_identity: None,
             }]
         }))
     }
@@ -199,12 +201,29 @@ pub trait MidTurnInputSource: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MidTurnInput {
     pub text: Utf16JsonProjection,
+    /// Ordered image sources that accompanied this Mobile prompt.
+    pub images: Vec<ImageSource>,
     pub origin_kind: Option<&'static str>,
     /// Original content, including exact JavaScript strings and media blocks.
     pub projected_content: Option<Utf16JsonProjection>,
     /// Delivery identity from the source. Generated transcript IDs are not substitutes.
     pub source_message_uuid: Option<Utf16JsonProjection>,
     pub queue_delivery: Option<MidTurnInputDelivery>,
+    /// Present on the first member of a durable Mobile coalesced batch. The
+    /// orchestrator uses it for append-once JSONL/history publication.
+    pub pending_prompt_identity: Option<PendingMidTurnPromptIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMidTurnPromptIdentity {
+    pub session_id: String,
+    /// First member, which owns the durable envelope/ack marker.
+    pub owner_turn_id: u64,
+    pub message_id: MessageId,
+    pub prompt_id: String,
+    /// Ordered Native source members; the aggregate history row uses the last
+    /// member identity while this list preserves every accepted source.
+    pub member_turn_ids: Vec<u64>,
 }
 
 /// Facts recorded when a host accepts an input delivery, before tool folding.

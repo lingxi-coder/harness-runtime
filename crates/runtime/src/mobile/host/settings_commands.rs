@@ -6,22 +6,22 @@ use ::configuration_admin::settings_bridge::{
 };
 use client::adapter::ClientEventSink;
 use client::protocol::commands::{PermissionBehaviorDto, WritableScopeDto};
+use client::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 pub(super) struct MobileModSettingsReader {
     paths: ::configuration_admin::settings_bridge::SettingsPaths,
-    active: Arc<RwLock<BTreeMap<String, Value>>>,
-    managed: BTreeMap<String, Value>,
+    active: Arc<RwLock<Utf16JsonProjection>>,
+    managed: Utf16JsonProjection,
 }
 
 impl MobileModSettingsReader {
     pub(super) fn new(
         paths: ::configuration_admin::settings_bridge::SettingsPaths,
-        active: Arc<RwLock<BTreeMap<String, Value>>>,
-        managed: BTreeMap<String, Value>,
+        active: Arc<RwLock<Utf16JsonProjection>>,
+        managed: Utf16JsonProjection,
     ) -> Self {
         Self {
             paths,
@@ -47,7 +47,15 @@ impl hooks::mods::ModSettingsReader for MobileModSettingsReader {
             .read()
             .map(|active| active.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
-        let snapshot = build_snapshot(&self.paths, active, self.managed.clone());
+        let snapshot =
+            build_snapshot(&self.paths, active, self.managed.clone()).map_err(|error| {
+                hooks::mods::ModError::Protocol(
+                    error
+                        .diagnostic_projection()
+                        .to_json_string()
+                        .expect("settings diagnostic serializes"),
+                )
+            })?;
         Ok(snapshot.effective_source)
     }
 }
@@ -59,18 +67,34 @@ impl MobileEngineHandle {
                 kind: ErrorKindDto::Internal,
                 message: "settings listing unavailable: this connection was built without a \
                           settings context"
-                    .to_string(),
+                    .into(),
             })
             .await;
             return;
         };
 
-        let snapshot = build_snapshot(
-            &context.paths,
-            context.active_snapshot(),
-            context.managed.clone(),
-        );
-        let lowered = lower_snapshot(&snapshot);
+        let snapshot = match context.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: settings_listing_error_message(&error),
+                })
+                .await;
+                return;
+            }
+        };
+        let lowered = match lower_snapshot(&snapshot) {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: settings_listing_error_message(&error),
+                })
+                .await;
+                return;
+            }
+        };
         sink.emit(ClientEvent::SettingsSnapshot {
             effective_json: lowered.effective_json,
             provenance_json: lowered.provenance_json,
@@ -103,7 +127,7 @@ impl MobileEngineHandle {
                 kind: ErrorKindDto::Internal,
                 message: "settings update unavailable: this connection was built without a \
                           settings context"
-                    .to_string(),
+                    .into(),
             })
             .await;
             return;
@@ -114,7 +138,7 @@ impl MobileEngineHandle {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message,
+                    message: message.into(),
                 })
                 .await;
                 return;
@@ -139,7 +163,7 @@ impl MobileEngineHandle {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message,
+                    message: message.into(),
                 })
                 .await;
             }
@@ -162,7 +186,7 @@ impl MobileEngineHandle {
                 kind: ErrorKindDto::Internal,
                 message: "permission update unavailable: this connection was built without a \
                           settings context"
-                    .to_string(),
+                    .into(),
             })
             .await;
             return None;
@@ -208,7 +232,7 @@ impl MobileEngineHandle {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("failed to persist permission rules: {error}"),
+                        message: format!("failed to persist permission rules: {error}").into(),
                     })
                     .await;
                     // `add` and `remove` are two SEPARATE transactions. If the
@@ -238,7 +262,7 @@ impl MobileEngineHandle {
                 kind: ErrorKindDto::Rejected,
                 message: "no permission rule changed: `add`/`remove` were empty, or every \
                           entry already matched the file"
-                    .to_string(),
+                    .into(),
             })
             .await;
         }
@@ -269,7 +293,7 @@ impl MobileEngineHandle {
                     kind: ErrorKindDto::Rejected,
                     message: "`bypassPermissions` is session-scoped and is deliberately never \
                               persisted as the default mode"
-                        .to_string(),
+                        .into(),
                 })
                 .await;
             }
@@ -279,14 +303,15 @@ impl MobileEngineHandle {
                     message: format!(
                         "default permission mode was not persisted: `{mode}` is unrecognized, \
                          or already the current default"
-                    ),
+                    )
+                    .into(),
                 })
                 .await;
             }
             Err(error) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message: format!("failed to persist default permission mode: {error}"),
+                    message: format!("failed to persist default permission mode: {error}").into(),
                 })
                 .await;
             }
@@ -321,7 +346,7 @@ impl MobileEngineHandle {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("failed to persist workspace directories: {error}"),
+                        message: format!("failed to persist workspace directories: {error}").into(),
                     })
                     .await;
                     // Same honesty property as `apply_permission_rule_update`:
@@ -344,7 +369,7 @@ impl MobileEngineHandle {
                 kind: ErrorKindDto::Rejected,
                 message: "no workspace directory changed: `add`/`remove` were empty, or every \
                           entry already matched the file"
-                    .to_string(),
+                    .into(),
             })
             .await;
         }
@@ -392,12 +417,25 @@ impl MobileEngineHandle {
                 self.connection_sink
                     .emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message,
+                        message: message.into(),
                     })
                     .await
             }
         }
     }
+}
+
+fn settings_listing_error_message(error: &lingxi_core::settings::SettingsError) -> ClientTextDto {
+    let mut code_units = "settings listing failed: "
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    code_units.extend(
+        error
+            .message_projection()
+            .string_units("")
+            .expect("settings error message is a root string"),
+    );
+    ClientTextDto::from_code_units(code_units)
 }
 
 fn parse_settings_patch(
@@ -455,6 +493,28 @@ pub(super) fn prepare_mobile_mcp_storage(home: &std::path::Path) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_listing_error_keeps_exact_utf16_message_units() {
+        let suffix = vec![u16::from('e'), 0xD800];
+        let projection =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&suffix), suffix.clone())
+                .unwrap();
+        let error = lingxi_core::settings::SettingsError::source_failure(
+            "fixture",
+            projection,
+            Utf16JsonProjection::object(Vec::new()).unwrap(),
+            None,
+        );
+
+        let message = settings_listing_error_message(&error);
+        let mut expected = "settings listing failed: "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        expected.extend(suffix);
+        assert_eq!(message.code_units, expected);
+    }
+
     #[test]
     fn mcp_migration_preserves_settings_and_does_not_resurrect_deleted_servers() {
         let root = tempfile::tempdir().unwrap();

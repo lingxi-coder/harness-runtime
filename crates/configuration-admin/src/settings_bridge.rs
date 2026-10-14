@@ -164,18 +164,18 @@ const FILE_LAYERS: [WritableScope; 3] = [
 /// as locked.
 pub fn build_snapshot(
     paths: &SettingsPaths,
-    active: BTreeMap<String, Value>,
-    managed: BTreeMap<String, Value>,
-) -> SettingsSnapshot {
+    active: Utf16JsonProjection,
+    managed: Utf16JsonProjection,
+) -> Result<SettingsSnapshot, lingxi_core::settings::SettingsError> {
     build_snapshot_with_env(paths, active, managed, &std::env::vars().collect())
 }
 
 fn build_snapshot_with_env(
     paths: &SettingsPaths,
-    active: BTreeMap<String, Value>,
-    managed: BTreeMap<String, Value>,
+    active: Utf16JsonProjection,
+    managed: Utf16JsonProjection,
     env: &BTreeMap<String, String>,
-) -> SettingsSnapshot {
+) -> Result<SettingsSnapshot, lingxi_core::settings::SettingsError> {
     let mut effective: BTreeMap<String, Value> = BTreeMap::new();
     let mut effective_source = empty_settings_source();
     let mut provenance: BTreeMap<String, SettingsLayer> = BTreeMap::new();
@@ -194,7 +194,8 @@ fn build_snapshot_with_env(
         // The public snapshot and merger stay Source-native. `effective` is
         // separately built through the typed `SettingsJson` boundary for
         // existing controls; an unrepresentable field is omitted only from
-        // that typed view and remains complete in `effective_source`.
+        // that dense compatibility view and remains complete in
+        // `effective_source`.
         for entry in source_map.object_entries().unwrap_or_default() {
             if entry.value.is_null() {
                 // `"key": null` is UNSET to the engine — every `SettingsJson`
@@ -217,11 +218,10 @@ fn build_snapshot_with_env(
             // the layers that follow always have the last word.
             merged_keys.remove(&key);
         }
-        let source_unions = merge_raw_source_layer(&mut effective_source, &source_map)
-            .expect("a parsed settings object must remain mergeable as source JSON");
+        let source_unions = merge_raw_source_layer(&mut effective_source, &source_map)?;
         merged_keys.extend(source_unions);
-        let typed_map = settings_values_from_source(&source_map);
-        let _ = fold_layer(&mut effective, &typed_map);
+        let typed_map = settings_values_from_source(&source_map)?;
+        fold_layer(&mut effective, &typed_map)?;
         files.push(SettingsFile {
             layer,
             path,
@@ -242,27 +242,27 @@ fn build_snapshot_with_env(
     // policy-pinned key the engine deep-merges (`permissions`, `hooks`)
     // report a value the engine never resolves — the very defect this
     // function's file-layer loop was fixed for, kept alive one layer higher.
-    let locked: Vec<String> = managed.keys().cloned().collect();
-    for (key, value) in &managed {
+    let managed_entries = managed.object_entries().unwrap_or_default();
+    let locked: Vec<String> = managed_entries
+        .iter()
+        .filter_map(|entry| String::from_utf16(entry.code_units).ok())
+        .collect();
+    for entry in managed_entries {
         // Same null rule and same reset as the file-layer loop above.
-        if value.is_null() {
+        if entry.value.is_null() {
             continue;
         }
+        let Ok(key) = String::from_utf16(entry.code_units) else {
+            continue;
+        };
         provenance.insert(key.clone(), SettingsLayer::Managed);
-        merged_keys.remove(key);
+        merged_keys.remove(&key);
     }
-    let managed_source = Utf16JsonProjection::from_serde_value(&Value::Object(
-        managed.clone().into_iter().collect(),
-    ))
-    .expect("managed settings Value object is valid source JSON");
-    merged_keys.extend(
-        merge_raw_source_layer(&mut effective_source, &managed_source)
-            .expect("managed settings object must remain mergeable as source JSON"),
-    );
-    let typed_managed = settings_values_from_source(&managed_source);
-    let _ = merge_raw_layer(&mut effective, typed_managed.into_iter().collect());
+    merged_keys.extend(merge_raw_source_layer(&mut effective_source, &managed)?);
+    let typed_managed = settings_values_from_source(&managed)?;
+    merge_raw_layer(&mut effective, typed_managed.into_iter().collect())?;
 
-    if active.contains_key("providerRegion") {
+    if active.get_property("providerRegion").is_some() {
         effective
             .entry("providerRegion".into())
             .or_insert_with(|| Value::String("international".into()));
@@ -291,16 +291,17 @@ fn build_snapshot_with_env(
         provenance.insert("providerRegion".into(), SettingsLayer::Env);
     }
 
-    SettingsSnapshot {
+    Ok(SettingsSnapshot {
         files,
         effective,
         effective_source,
         active,
+        managed_diagnostics: None,
         provenance,
         merged_keys: merged_keys.into_iter().collect(),
         locked,
         layers,
-    }
+    })
 }
 
 /// Fold one file layer's raw map into `effective` through the engine's merge,
@@ -314,7 +315,7 @@ fn build_snapshot_with_env(
 fn fold_layer(
     effective: &mut BTreeMap<String, Value>,
     map: &serde_json::Map<String, Value>,
-) -> Vec<String> {
+) -> Result<Vec<String>, lingxi_core::settings::SettingsError> {
     let owned: BTreeMap<String, Value> = map
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -326,10 +327,12 @@ fn fold_layer(
 /// the legacy control view. The raw settings object itself is never routed
 /// through `serde_json::Value`; any field that cannot enter the typed schema
 /// remains available in the exact source snapshot and merger.
-fn settings_values_from_source(source: &Utf16JsonProjection) -> serde_json::Map<String, Value> {
+fn settings_values_from_source(
+    source: &Utf16JsonProjection,
+) -> Result<serde_json::Map<String, Value>, lingxi_core::settings::SettingsError> {
     let mut values = serde_json::Map::new();
     let Some(entries) = source.object_entries() else {
-        return values;
+        return Ok(values);
     };
     for entry in entries {
         if entry.value.is_null() {
@@ -338,28 +341,27 @@ fn settings_values_from_source(source: &Utf16JsonProjection) -> serde_json::Map<
         let Ok(key) = String::from_utf16(entry.code_units) else {
             continue;
         };
-        let Ok(value) = source.subprojection_property_units(entry.code_units) else {
+        if matches!(key.as_str(), "policyHelper" | "policyHelpers") {
+            // Policy-helper input is owned by the source-aware helper resolver.
+            // It remains in effective_source and is never copied into a typed
+            // map whose deserializer cannot represent sparse arrays.
             continue;
-        };
-        let Ok(single_field) =
-            Utf16JsonProjection::object_units(vec![(entry.code_units.to_vec(), value)])
-        else {
-            continue;
-        };
-        let Ok(raw) = single_field.to_json_string() else {
-            continue;
-        };
+        }
+        let value = source.subprojection_property_units(entry.code_units)?;
+        let single_field =
+            Utf16JsonProjection::object_units(vec![(entry.code_units.to_vec(), value)])?;
+        let raw = single_field.to_json_string()?;
         let Ok(typed) = serde_json::from_str::<SettingsJson>(&raw) else {
             continue;
         };
-        let Ok(typed) = serde_json::to_value(typed) else {
-            continue;
-        };
+        let typed = serde_json::to_value(typed).map_err(|error| {
+            lingxi_core::settings::SettingsError::SchemaViolation(error.to_string())
+        })?;
         if let Some(value) = typed.get(&key).filter(|value| !value.is_null()) {
             values.insert(key, value.clone());
         }
     }
-    values
+    Ok(values)
 }
 
 /// The `SettingsContext.active` a connection captures ONCE at boot: the three
@@ -379,9 +381,9 @@ fn settings_values_from_source(source: &Utf16JsonProjection) -> serde_json::Map<
 /// re-applies — the same map in both places, so the two can never drift apart.
 pub fn active_settings_baseline(
     paths: &SettingsPaths,
-    managed: &BTreeMap<String, Value>,
-) -> BTreeMap<String, Value> {
-    build_snapshot(paths, BTreeMap::new(), managed.clone()).effective
+    managed: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
+    Ok(build_snapshot(paths, empty_settings_source(), managed.clone())?.effective_source)
 }
 
 /// Resolve the file path for a **writable** destination layer. Only
@@ -708,11 +710,13 @@ pub struct SettingsContext {
     /// [`SettingsSnapshot::active`] for why managed is included: the engine
     /// loads it at startup too, so leaving it out would make a policy-pinned
     /// key look eternally "pending a restart" that no restart could apply.
-    pub active: Arc<RwLock<BTreeMap<String, Value>>>,
-    /// The administrator's managed (policy) overlay, key → value. Its values
-    /// win over every file layer, and its keys ARE the locked set reported on
-    /// the wire.
-    pub managed: BTreeMap<String, Value>,
+    pub active: Arc<RwLock<Utf16JsonProjection>>,
+    /// The administrator's managed (policy) source projection. It remains in
+    /// the raw carrier so sparse arrays and lone UTF-16 units survive listings.
+    pub managed: Utf16JsonProjection,
+    /// Source diagnostics from an incomplete managed read whose healthy
+    /// documents still produced the `managed` projection.
+    pub managed_diagnostics: Option<Utf16JsonProjection>,
 }
 
 impl SettingsContext {
@@ -720,33 +724,47 @@ impl SettingsContext {
     /// primitive to protocol code. A poisoned lock degrades to the last inner
     /// value rather than turning a settings listing into a process failure.
     #[must_use]
-    pub fn active_snapshot(&self) -> BTreeMap<String, Value> {
+    pub fn active_snapshot(&self) -> Utf16JsonProjection {
         self.active
             .read()
             .map(|active| active.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
+    /// Build a fresh source-preserving listing and attach the managed read
+    /// diagnostics retained by the composition root.
+    pub fn snapshot(&self) -> Result<SettingsSnapshot, lingxi_core::settings::SettingsError> {
+        let mut snapshot =
+            build_snapshot(&self.paths, self.active_snapshot(), self.managed.clone())?;
+        snapshot.managed_diagnostics = self.managed_diagnostics.clone();
+        Ok(snapshot)
+    }
+
     /// Mark a set of top-level settings keys as applied by a successful atomic
     /// hot reload. Values come from a freshly merged disk snapshot; keys that
     /// disappeared are removed so a lower layer can become the active value.
-    pub fn mark_keys_applied(&self, keys: &[&str]) {
+    pub fn mark_keys_applied(
+        &self,
+        keys: &[&str],
+    ) -> Result<(), lingxi_core::settings::SettingsError> {
         let current = self.active_snapshot();
-        let effective = build_snapshot(&self.paths, current, self.managed.clone()).effective;
+        let mut effective_snapshot = build_snapshot(&self.paths, current, self.managed.clone())?;
+        effective_snapshot.managed_diagnostics = self.managed_diagnostics.clone();
+        let effective = effective_snapshot.effective_source;
         let mut active = self
             .active
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for key in keys {
-            match effective.get(*key) {
-                Some(value) => {
-                    active.insert((*key).to_string(), value.clone());
-                }
-                None => {
-                    active.remove(*key);
-                }
+            let encoded_key = key.encode_utf16().collect::<Vec<_>>();
+            if effective.get_property(key).is_some() {
+                let value = effective.subprojection_property_units(&encoded_key)?;
+                active.set_field(key, value)?;
+            } else {
+                active.remove_field(key)?;
             }
         }
+        Ok(())
     }
 }
 
@@ -791,7 +809,9 @@ pub struct LoweredSettings {
 /// the routing seam is never acceptable, so a failure degrades to an empty
 /// JSON document rather than unwrapping.
 #[must_use]
-pub fn lower_snapshot(snapshot: &SettingsSnapshot) -> LoweredSettings {
+pub fn lower_snapshot(
+    snapshot: &SettingsSnapshot,
+) -> Result<LoweredSettings, lingxi_core::settings::SettingsError> {
     let provenance: BTreeMap<&str, &str> = snapshot
         .provenance
         .iter()
@@ -822,42 +842,42 @@ pub fn lower_snapshot(snapshot: &SettingsSnapshot) -> LoweredSettings {
         })
         .collect();
 
-    LoweredSettings {
-        effective_json: source_json_or_empty_object("effective", &snapshot.effective_source),
-        provenance_json: to_json_or_empty_object("provenance", &provenance),
-        files_json: serde_json::to_string(&files).unwrap_or_else(|error| {
-            tracing::warn!(
-                %error,
-                "bridge-server: settings file layers failed to serialize; \
-                 the client is told no settings files exist"
-            );
-            "[]".to_string()
-        }),
-        active_json: to_json_or_empty_object("active", &snapshot.active),
+    Ok(LoweredSettings {
+        effective_json: source_json("effective", &snapshot.effective_source)?,
+        provenance_json: to_json("provenance", &provenance)?,
+        files_json: serde_json::to_string(&files).map_err(|error| {
+            lingxi_core::settings::SettingsError::SchemaViolation(error.to_string())
+        })?,
+        active_json: source_json("active", &snapshot.active)?,
         locked: snapshot.locked.clone(),
         merged_keys: snapshot.merged_keys.clone(),
-        layers_json: source_layers_json(&snapshot.layers),
-    }
+        layers_json: source_layers_json(&snapshot.layers)?,
+    })
 }
 
-fn source_layers_json(layers: &BTreeMap<&'static str, Utf16JsonProjection>) -> String {
+fn source_layers_json(
+    layers: &BTreeMap<&'static str, Utf16JsonProjection>,
+) -> Result<String, lingxi_core::settings::SettingsError> {
     let fields = layers
         .iter()
         .map(|(name, source)| ((*name).to_owned(), source.clone()))
         .collect();
-    Utf16JsonProjection::object(fields)
-        .and_then(|source| source.to_pretty_json_string())
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "settings source layers failed to serialize; the client is told no settings files exist");
-            "{}".to_string()
-        })
+    Ok(Utf16JsonProjection::object(fields)?.to_pretty_json_string()?)
 }
 
-fn source_json_or_empty_object(what: &str, source: &Utf16JsonProjection) -> String {
-    source.to_json_string().unwrap_or_else(|error| {
-        tracing::warn!(%error, what, "settings source payload failed to serialize; the client is told this payload is empty");
-        "{}".to_string()
-    })
+fn source_json(
+    _what: &str,
+    source: &Utf16JsonProjection,
+) -> Result<String, lingxi_core::settings::SettingsError> {
+    Ok(source.to_json_string()?)
+}
+
+fn to_json<T: serde::Serialize>(
+    _what: &str,
+    value: &T,
+) -> Result<String, lingxi_core::settings::SettingsError> {
+    serde_json::to_string(value)
+        .map_err(|error| lingxi_core::settings::SettingsError::SchemaViolation(error.to_string()))
 }
 
 fn source_string_value(value: &str) -> Utf16JsonProjection {
@@ -865,8 +885,19 @@ fn source_string_value(value: &str) -> Utf16JsonProjection {
         .expect("Rust string is valid source JSON")
 }
 
-fn empty_settings_source() -> Utf16JsonProjection {
+pub fn empty_settings_source() -> Utf16JsonProjection {
     Utf16JsonProjection::object(Vec::new()).expect("empty settings object is valid")
+}
+
+/// Convert only at an existing Rust-string display boundary; the typed error
+/// retains its full source diagnostics for callers that can carry projections.
+pub fn settings_error_message(error: &lingxi_core::settings::SettingsError) -> String {
+    let message = error.message_projection();
+    String::from_utf16_lossy(
+        &message
+            .string_units("")
+            .expect("settings error message is a root string"),
+    )
 }
 
 /// Serialize a map, degrading to `{}` rather than panicking at the routing
@@ -897,13 +928,20 @@ mod region_tests {
             lingxi_home: root.path().join("home"),
             project_dir: root.path().join("project"),
         };
-        let active =
-            BTreeMap::from([("providerRegion".into(), serde_json::json!("international"))]);
-        let snapshot =
-            build_snapshot_with_env(&paths, active.clone(), BTreeMap::new(), &BTreeMap::new());
+        let active = Utf16JsonProjection::parse(r#"{"providerRegion":"international"}"#).unwrap();
+        let snapshot = build_snapshot_with_env(
+            &paths,
+            active.clone(),
+            empty_settings_source(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(
-            snapshot.effective.get("providerRegion"),
-            active.get("providerRegion")
+            snapshot
+                .effective
+                .get("providerRegion")
+                .and_then(Value::as_str),
+            active.string_at("/providerRegion")
         );
     }
 
@@ -930,7 +968,13 @@ mod region_tests {
                 format!("{}PROVIDER_REGION", env_parser::PREFIX_PRIORITY[0]),
                 value.into(),
             )]);
-            let snapshot = build_snapshot_with_env(&paths, BTreeMap::new(), BTreeMap::new(), &env);
+            let snapshot = build_snapshot_with_env(
+                &paths,
+                empty_settings_source(),
+                empty_settings_source(),
+                &env,
+            )
+            .unwrap();
             assert_eq!(
                 snapshot.effective.get("providerRegion"),
                 Some(&serde_json::json!(expected)),
@@ -948,6 +992,18 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    fn source_from_values(values: BTreeMap<String, Value>) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&Value::Object(values.into_iter().collect()))
+            .expect("test settings map is valid source JSON")
+    }
+
+    fn source_string(source: &Utf16JsonProjection, key: &str) -> Option<String> {
+        source
+            .get_property(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    }
 
     /// Four layers could each define the same key; provenance must point at
     /// the layer the priority order actually produced, not a hardcoded
@@ -983,7 +1039,7 @@ mod tests {
         // set without interfering with the precedence assertion below.
         let mut managed = BTreeMap::new();
         managed.insert("telemetryEnabled".to_string(), Value::from(false));
-        let snap = build_snapshot(&paths, active, managed);
+        let snap = build_snapshot(&paths, active, source_from_values(managed)).unwrap();
 
         assert_eq!(
             snap.effective.get("outputStyle").and_then(|v| v.as_str()),
@@ -1048,7 +1104,8 @@ mod tests {
             lingxi_home: home,
             project_dir: project,
         };
-        let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+        let snap =
+            build_snapshot(&paths, empty_settings_source(), empty_settings_source()).unwrap();
 
         // Sanity check on the premise: `effective` is the engine's merge, and
         // `providers` is one of the keys the engine DEEP-MERGES, so
@@ -1153,7 +1210,7 @@ mod tests {
 
         // The wire lowering must carry the same per-layer isolation through
         // `layers_json`'s JSON serialization.
-        let lowered = lower_snapshot(&snap);
+        let lowered = lower_snapshot(&snap).unwrap();
         let layers_wire: Value = serde_json::from_str(&lowered.layers_json).unwrap();
         assert!(
             layers_wire["user"]["providers"]["userProvider"].is_object(),
@@ -1185,7 +1242,8 @@ mod tests {
         )
         .expect("settings source");
 
-        let snapshot = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+        let snapshot =
+            build_snapshot(&paths, empty_settings_source(), empty_settings_source()).unwrap();
         assert!(snapshot.files[0].writable);
         assert!(snapshot.files[0].parse_error.is_none());
         assert_eq!(
@@ -1203,10 +1261,70 @@ mod tests {
             snapshot.effective_source.string_units("/opaque/value"),
             Some(vec![0xDFFF])
         );
-        let lowered = lower_snapshot(&snapshot);
+        let lowered = lower_snapshot(&snapshot).unwrap();
         assert!(lowered.layers_json.contains(r#""value": "\ud800""#));
         assert!(lowered.effective_json.contains(r#""value":"\ud800""#));
         assert!(lowered.effective_json.contains(r#""value":"\udfff""#));
+    }
+
+    #[test]
+    fn sparse_policy_helpers_survive_active_baseline_and_applied_key_updates() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: root.path().join("home"),
+            project_dir: root.path().join("project"),
+        };
+        let mut managed =
+            Utf16JsonProjection::parse(r#"{"policyHelpers":{"defaultSettings":{"custom":[1,2]}}}"#)
+                .expect("lower source layer");
+        let upper = Utf16JsonProjection::parse(
+            r#"{"policyHelpers":{"defaultSettings":{"custom":{"4":9}}}}"#,
+        )
+        .expect("upper source layer");
+        merge_raw_source_layer(&mut managed, &upper).expect("Native source merge");
+
+        assert_eq!(
+            managed.array_len("/policyHelpers/defaultSettings/custom"),
+            Some(5)
+        );
+        assert_eq!(
+            managed.number_at("/policyHelpers/defaultSettings/custom/4"),
+            Some(9.0)
+        );
+        assert!(managed.has_sparse_arrays());
+        assert!(
+            !settings_values_from_source(&managed)
+                .unwrap()
+                .contains_key("policyHelpers"),
+            "arbitrary helper payloads stay out of the typed control view"
+        );
+
+        let active = active_settings_baseline(&paths, &managed).unwrap();
+        let context = SettingsContext {
+            paths,
+            active: Arc::new(RwLock::new(active)),
+            managed,
+            managed_diagnostics: None,
+        };
+        let snapshot = context.snapshot().unwrap();
+        assert!(snapshot.effective_source.has_sparse_arrays());
+        assert_eq!(
+            snapshot
+                .effective_source
+                .array_len("/policyHelpers/defaultSettings/custom"),
+            Some(5)
+        );
+        let lowered = lower_snapshot(&snapshot).unwrap();
+        assert!(lowered.effective_json.contains("policyHelpers"));
+        assert!(lowered.active_json.contains("policyHelpers"));
+
+        context.mark_keys_applied(&["policyHelpers"]).unwrap();
+        let applied = context.active_snapshot();
+        assert!(applied.has_sparse_arrays());
+        assert_eq!(
+            applied.array_len("/policyHelpers/defaultSettings/custom"),
+            Some(5)
+        );
     }
 
     #[test]
@@ -1273,7 +1391,8 @@ mod tests {
             lingxi_home: home,
             project_dir: project,
         };
-        let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+        let snap =
+            build_snapshot(&paths, empty_settings_source(), empty_settings_source()).unwrap();
 
         let hooks = snap
             .effective
@@ -1327,7 +1446,7 @@ mod tests {
         );
 
         // The wire carries it, or none of the above reaches the UI.
-        let lowered = lower_snapshot(&snap);
+        let lowered = lower_snapshot(&snap).unwrap();
         assert!(
             lowered.merged_keys.contains(&"hooks".to_string()),
             "the lowered payload must carry the merged keys, got {:?}",
@@ -1377,7 +1496,8 @@ mod tests {
             lingxi_home: home,
             project_dir: project,
         };
-        let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+        let snap =
+            build_snapshot(&paths, empty_settings_source(), empty_settings_source()).unwrap();
 
         assert_eq!(
             snap.effective.get("hooks"),
@@ -1423,7 +1543,8 @@ mod tests {
             lingxi_home: home,
             project_dir: project,
         };
-        let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+        let snap =
+            build_snapshot(&paths, empty_settings_source(), empty_settings_source()).unwrap();
 
         assert_eq!(
             snap.effective.get("outputStyle").and_then(|v| v.as_str()),
@@ -1491,7 +1612,8 @@ mod tests {
             "permissions".to_string(),
             serde_json::json!({"deny": ["Bash(rm -rf /)"]}),
         );
-        let snap = build_snapshot(&paths, BTreeMap::new(), managed);
+        let snap =
+            build_snapshot(&paths, empty_settings_source(), source_from_values(managed)).unwrap();
 
         let permissions = snap.effective.get("permissions").unwrap();
         assert_eq!(
@@ -1550,7 +1672,8 @@ mod tests {
         };
         let mut managed = BTreeMap::new();
         managed.insert("outputStyle".to_string(), Value::from("from-managed"));
-        let snap = build_snapshot(&paths, BTreeMap::new(), managed);
+        let snap =
+            build_snapshot(&paths, empty_settings_source(), source_from_values(managed)).unwrap();
 
         assert_eq!(
             snap.effective.get("outputStyle").and_then(|v| v.as_str()),
@@ -1589,7 +1712,7 @@ mod tests {
     /// (`active_settings_baseline` for `SettingsContext.active`, then
     /// `build_snapshot` again at listing time with that same `active` and
     /// `managed`) and exactly what a REGRESSION back to the old
-    /// `build_snapshot(&paths, BTreeMap::new(), BTreeMap::new()).effective`
+    /// `build_snapshot(&paths, empty_settings_source(), empty_settings_source()).effective`
     /// (empty managed) would break: with that old call, `active` would carry
     /// no `outputStyle` key at all, so the `assert_eq!` below on `active`
     /// would fail immediately, and the `snap.effective`/`snap.active`
@@ -1616,18 +1739,19 @@ mod tests {
         managed.insert("outputStyle".to_string(), Value::from("from-managed"));
 
         // Exactly what `boot.rs` does once, at connection setup.
-        let active = active_settings_baseline(&paths, &managed);
+        let managed = source_from_values(managed);
+        let active = active_settings_baseline(&paths, &managed).unwrap();
         assert_eq!(
-            active.get("outputStyle").and_then(|v| v.as_str()),
+            source_string(&active, "outputStyle").as_deref(),
             Some("from-managed"),
             "active must already carry the managed value, or it can never agree with effective",
         );
 
         // Exactly what `emit_settings_snapshot` does on every later listing.
-        let snap = build_snapshot(&paths, active, managed);
+        let snap = build_snapshot(&paths, active, managed).unwrap();
         assert_eq!(
-            snap.effective.get("outputStyle"),
-            snap.active.get("outputStyle"),
+            snap.effective.get("outputStyle").and_then(Value::as_str),
+            source_string(&snap.active, "outputStyle").as_deref(),
             "a managed key must be identical between effective and active — nothing is pending \
              on a key the user cannot change",
         );
@@ -1703,9 +1827,10 @@ mod tests {
             lingxi_home: home,
             project_dir: project,
         };
-        let mut active = BTreeMap::new();
-        active.insert("model".to_string(), Value::from("loaded-at-startup"));
-        let lowered = lower_snapshot(&build_snapshot(&paths, active, BTreeMap::new()));
+        let active = Utf16JsonProjection::parse(r#"{"model":"loaded-at-startup"}"#).unwrap();
+        let lowered =
+            lower_snapshot(&build_snapshot(&paths, active, empty_settings_source()).unwrap())
+                .unwrap();
 
         let effective: Value = serde_json::from_str(&lowered.effective_json).unwrap();
         let active: Value = serde_json::from_str(&lowered.active_json).unwrap();
@@ -1761,7 +1886,8 @@ mod tests {
             lingxi_home: home,
             project_dir: project,
         };
-        let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+        let snap =
+            build_snapshot(&paths, empty_settings_source(), empty_settings_source()).unwrap();
 
         let project_file = snap
             .files

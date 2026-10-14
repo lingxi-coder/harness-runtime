@@ -42,7 +42,12 @@ pub(crate) fn context_attachment_projection(
     attachment: &lingxi_core::types::utf16_json::Utf16JsonProjection,
 ) -> ConversationMessage {
     match render_instruction_attachment(attachment) {
-        Some(body) => ConversationMessage::user_meta(id, body),
+        Some(body) => {
+            let units = body
+                .string_units("")
+                .expect("rendered attachment is a string");
+            ConversationMessage::user_meta_js_utf16(id, String::from_utf16_lossy(&units), units)
+        }
         None => ConversationMessage::System {
             api_system: None,
             id,
@@ -91,7 +96,9 @@ impl ConversationOrchestrator {
     pub(crate) async fn context_announcement_messages(&self) -> Vec<ConversationMessage> {
         // This loads the host's eager descriptor snapshot and all existing
         // userContext producers once; the scalar projection is for inline only.
-        let _ = self.additional_context_message().await;
+        self.additional_context_message()
+            .await
+            .expect("settings source must resolve before rendering context announcements");
         self.context_announcements_from_frozen_snapshot().await
     }
 
@@ -171,25 +178,36 @@ impl ConversationOrchestrator {
         } else if let Some(prior_context) = prior_context {
             prior_context
                 .get_property("gitStatus")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
+                .and_then(|value| value.code_units())
+                .map(|units| {
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                        String::from_utf16_lossy(units),
+                        units.to_vec(),
+                    )
+                    .expect("git status display matches source units")
+                })
         } else {
             let probe_cwd = self.prompt_probe_cwd(&self.session_cwd.cwd());
             self.cached_git_status(&probe_cwd).await.1.map(|block| {
-                block
+                let text = block
                     .strip_prefix("gitStatus: ")
                     .unwrap_or(&block)
-                    .to_owned()
+                    .to_owned();
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from(text)
             })
         };
-        context.user_context.remove("gitStatus");
+        context
+            .remove_user_context_text("gitStatus")
+            .expect("userContext remains an object");
         if let Some(git) = git {
-            context.user_context.insert("gitStatus".into(), git);
+            context
+                .set_user_context_text("gitStatus", git)
+                .expect("userContext remains an object");
         }
         let date = crate::prompt::env_meta::current_date_string();
         context
-            .user_context
-            .insert("currentDate".into(), format!("Today's date is {date}."));
+            .set_user_context_text("currentDate", format!("Today's date is {date}."))
+            .expect("userContext remains an object");
         // Capture the exact request context for a subsequent explicit fork.
         if let Some(stored) = self
             .prompt_runtime

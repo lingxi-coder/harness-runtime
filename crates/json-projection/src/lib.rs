@@ -1,11 +1,9 @@
-//! Flat JSON values with exact JavaScript UTF-16 strings and property names.
-//!
-//! Source values refer to child indices in one flat arena. A replacement-safe
-//! `serde_json::Value` mirror supports current Rust consumers, while exact
-//! strings, property names, object order, and JavaScript number formatting
-//! remain in the flat arena. Flat-carrier clone, parse, and serialization do
-//! not recurse with JSON depth; the serde DTO is `{ root, nodes }` and
-//! `to_json_string` is the source-authoritative JSON text operation.
+//! Flat JSON values with exact JavaScript UTF-16 strings, property names, and
+//! sparse-array holes. Source values refer to child indices in one flat arena.
+//! Clone, parse, and streaming JSON serialization do not recurse with JSON
+//! depth. Dense `serde_json::Value` conversion is an explicit fallible
+//! boundary; callers must choose it rather than relying on a hidden display
+//! mirror.
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
@@ -22,22 +20,6 @@ use thiserror::Error;
 pub struct Utf16JsonProjection {
     root: usize,
     nodes: Vec<JsonNode>,
-    /// Replacement-safe serde display tree for current Rust consumers.
-    ///
-    /// The flat arena remains the source of truth for exact UTF-16 strings,
-    /// object order, and JavaScript number stringification. This mirror uses
-    /// U+FFFD for lone surrogates in values and unique placeholders for lone
-    /// surrogate keys; callers transforming it must use
-    /// [`Self::rebase_display_value`] to retain unchanged exact source text.
-    #[serde(skip)]
-    pub value: Value,
-}
-
-impl Drop for Utf16JsonProjection {
-    fn drop(&mut self) {
-        let display = std::mem::replace(&mut self.value, Value::Null);
-        drop_value_iteratively(display);
-    }
 }
 
 impl Clone for Utf16JsonProjection {
@@ -45,8 +27,6 @@ impl Clone for Utf16JsonProjection {
         Self {
             root: self.root,
             nodes: self.nodes.clone(),
-            value: display_value(&self.nodes, self.root)
-                .expect("a validated projection has a display value"),
         }
     }
 }
@@ -124,7 +104,20 @@ enum JsonNode {
         code_units: Vec<u16>,
     },
     Array(Vec<usize>),
+    SparseArray {
+        length: u32,
+        entries: Vec<SparseArrayEntry>,
+        /// Enumerable own string properties attached by Native's Nf merge.
+        /// JSON.stringify ignores them, but later merges can observe them.
+        properties: Vec<JsonProperty>,
+    },
     Object(Vec<JsonProperty>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SparseArrayEntry {
+    index: u32,
+    value: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +127,14 @@ struct JsonProperty {
     display: String,
     code_units: Vec<u16>,
     value: usize,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectionReplaceTarget {
+    ObjectProperty(usize),
+    DenseArrayIndex(usize),
+    SparseArrayIndex(u32),
+    SparseArrayProperty(usize),
 }
 
 #[derive(Debug, Error)]
@@ -167,6 +168,34 @@ pub enum Utf16JsonProjectionError {
     #[error("JSON projection pointer is invalid")]
     /// A JSON Pointer is malformed or does not resolve to the requested value.
     InvalidPointer,
+    /// A sparse-array hole is JavaScript `undefined`, not a standalone JSON value.
+    #[error("a JavaScript undefined array hole is not a standalone JSON value")]
+    UndefinedNotJson,
+    /// A dense serde value or owned JSON string could not be materialized.
+    #[error("unable to materialize dense JSON: {0}")]
+    Materialization(String),
+    /// A caller-provided streaming sink failed while writing JSON.
+    #[error("JSON output failed: {0}")]
+    Write(#[from] std::io::Error),
+    /// Native `Nf` assigned an invalid JavaScript value to an array's `length`.
+    /// Keeping the source value lets callers report/inspect the exact input
+    /// without replacing the thrown `RangeError` with a fallback layer.
+    #[error("RangeError: Invalid array length")]
+    InvalidArraySetLength {
+        /// Exact value supplied for the `length` property.
+        raw_value: Box<Utf16JsonProjection>,
+        /// JavaScript `ToNumber` result when it produced a number; `None`
+        /// represents NaN.
+        coerced_number: Option<f64>,
+    },
+    /// JavaScript ToPrimitive failed before `ArraySetLength` could validate a
+    /// numeric length. Native's OrdinaryToPrimitive reports this when a JSON
+    /// object owns a non-callable `toString` member and has no primitive result.
+    #[error("TypeError: No default value")]
+    InvalidArrayLengthPrimitive {
+        /// Exact value whose coercion failed.
+        raw_value: Box<Utf16JsonProjection>,
+    },
     #[error("JSON projection operation requires an object")]
     /// An operation requiring an object root received another JSON value kind.
     ExpectedObject,
@@ -187,15 +216,11 @@ impl<'de> Deserialize<'de> for Utf16JsonProjection {
         }
 
         let flat = FlatProjection::deserialize(deserializer)?;
-        let mut projection = Self {
+        let projection = Self {
             root: flat.root,
             nodes: flat.nodes,
-            value: Value::Null,
         };
         projection.validate().map_err(serde::de::Error::custom)?;
-        projection
-            .refresh_display_value()
-            .map_err(serde::de::Error::custom)?;
         Ok(projection)
     }
 }
@@ -321,6 +346,15 @@ impl Utf16JsonProjection {
     /// replacement from a new rich source should replace the whole carrier.
     pub fn rebase_display_value(&mut self, value: Value) -> Result<(), Utf16JsonProjectionError> {
         self.validate()?;
+        if self
+            .nodes
+            .iter()
+            .any(|node| matches!(node, JsonNode::SparseArray { .. }))
+        {
+            return Err(Utf16JsonProjectionError::Materialization(
+                "display-tree rebasing cannot distinguish array holes from explicit nulls".into(),
+            ));
+        }
         enum Task<'a> {
             Visit(&'a Value, String),
             Array(usize),
@@ -420,6 +454,15 @@ impl Utf16JsonProjection {
                     pending.push((id, true));
                     pending.extend(items.iter().rev().map(|child| (*child, false)));
                 }
+                JsonNode::SparseArray {
+                    entries,
+                    properties,
+                    ..
+                } if !complete => {
+                    pending.push((id, true));
+                    pending.extend(properties.iter().rev().map(|entry| (entry.value, false)));
+                    pending.extend(entries.iter().rev().map(|entry| (entry.value, false)));
+                }
                 JsonNode::Object(entries) if !complete => {
                     pending.push((id, true));
                     let order = javascript_ordered_object_indices(entries);
@@ -434,6 +477,23 @@ impl Utf16JsonProjection {
                     mapped[id] = builder.push(JsonNode::Array(
                         items.iter().map(|child| mapped[*child]).collect(),
                     ));
+                }
+                JsonNode::SparseArray {
+                    length,
+                    entries,
+                    properties,
+                } => {
+                    mapped[id] = builder.push_sparse_array_with_properties(
+                        *length,
+                        entries
+                            .iter()
+                            .map(|entry| (entry.index, mapped[entry.value]))
+                            .collect(),
+                        properties
+                            .iter()
+                            .map(|entry| (entry.code_units.clone(), mapped[entry.value]))
+                            .collect(),
+                    )?;
                 }
                 JsonNode::Object(entries) => {
                     // Original exact keys and display identities are already
@@ -473,6 +533,46 @@ impl Utf16JsonProjection {
         builder.finish(root)
     }
 
+    /// Construct a sparse array from present own-index values. Missing indices
+    /// are JavaScript `undefined` holes and remain distinct from explicit JSON
+    /// nulls. The logical length is a JavaScript array length (`0..=2^32-1`).
+    pub fn sparse_array(
+        length: u32,
+        entries: Vec<(u32, Self)>,
+    ) -> Result<Self, Utf16JsonProjectionError> {
+        Self::sparse_array_with_properties(length, entries, Vec::new())
+    }
+
+    /// Construct a sparse array while retaining enumerable own named
+    /// properties that Native's merge can observe before JSON stringification.
+    /// Array-index keys and `length` belong in the indexed/length fields and
+    /// are rejected from `properties`.
+    pub fn sparse_array_with_properties(
+        length: u32,
+        entries: Vec<(u32, Self)>,
+        properties: Vec<(Vec<u16>, Self)>,
+    ) -> Result<Self, Utf16JsonProjectionError> {
+        let mut builder = Utf16JsonBuilder::new();
+        let mut imported = Vec::with_capacity(entries.len());
+        let mut previous_index = None;
+        for (index, value) in &entries {
+            if *index >= length || previous_index.is_some_and(|previous| previous >= *index) {
+                return Err(Utf16JsonProjectionError::InvalidProjection(
+                    "sparse array indices must be unique, ordered, and in range",
+                ));
+            }
+            previous_index = Some(*index);
+            imported.push((*index, builder.import_projection(value)?));
+        }
+        let mut imported_properties = Vec::with_capacity(properties.len());
+        for (key_units, value) in properties {
+            imported_properties.push((key_units, builder.import_projection(&value)?));
+        }
+        let root =
+            builder.push_sparse_array_with_properties(length, imported, imported_properties)?;
+        builder.finish(root)
+    }
+
     /// Construct an object with ordinary Unicode keys from flat JSON values.
     pub fn object(fields: Vec<(String, Self)>) -> Result<Self, Utf16JsonProjectionError> {
         let mut builder = Utf16JsonBuilder::new();
@@ -503,9 +603,39 @@ impl Utf16JsonProjection {
     pub fn to_json_string(&self) -> Result<String, Utf16JsonProjectionError> {
         self.validate()?;
         let mut output = Vec::new();
-        write_json(&mut output, &self.nodes, self.root)?;
+        self.write_json_to(&mut output)?;
         String::from_utf8(output)
             .map_err(|_| Utf16JsonProjectionError::InvalidProjection("non-UTF-8 JSON output"))
+    }
+
+    /// Whether this projection contains a JavaScript sparse array node.
+    /// Dense JSON compatibility views cannot represent array holes or named
+    /// array properties; keep such values in the source carrier until an
+    /// explicit materialization boundary handles them.
+    #[must_use]
+    pub fn has_sparse_arrays(&self) -> bool {
+        self.nodes
+            .iter()
+            .any(|node| matches!(node, JsonNode::SparseArray { .. }))
+    }
+
+    /// Stream canonical JSON to a caller-owned sink. Sparse holes become JSON
+    /// nulls at this serialization boundary, while remaining distinguishable
+    /// from explicit null in the projection arena.
+    pub fn write_json_to(&self, output: &mut impl Write) -> Result<(), Utf16JsonProjectionError> {
+        self.validate()?;
+        write_json(output, &self.nodes, self.root)
+    }
+
+    /// Dense serde materialization with a caller-selected per-array item
+    /// budget. This budget applies only to the explicit serde boundary; sparse
+    /// projections and Native merging have no arbitrary logical-length cap.
+    pub fn try_to_serde_value_with_array_budget(
+        &self,
+        max_array_items: usize,
+    ) -> Result<Value, Utf16JsonProjectionError> {
+        self.validate()?;
+        display_value(&self.nodes, self.root, Some(max_array_items))
     }
 
     /// JavaScript-compatible `JSON.stringify(value, null, 2)` over the flat
@@ -550,6 +680,51 @@ impl Utf16JsonProjection {
                     }
                 }
                 JsonNode::Array(children) => pending.extend(children.iter().copied()),
+                JsonNode::SparseArray {
+                    length,
+                    entries,
+                    properties,
+                } => {
+                    let mut previous_index = None;
+                    for entry in entries {
+                        if entry.index >= *length
+                            || previous_index.is_some_and(|previous| previous >= entry.index)
+                        {
+                            return Err(Utf16JsonProjectionError::InvalidProjection(
+                                "sparse array indices must be unique, ordered, and in range",
+                            ));
+                        }
+                        previous_index = Some(entry.index);
+                        pending.push(entry.value);
+                    }
+                    let mut seen_units = HashSet::<Vec<u16>>::new();
+                    let mut seen_display = HashSet::<&str>::new();
+                    for property in properties {
+                        if javascript_array_index(&property.code_units).is_some()
+                            || property
+                                .code_units
+                                .iter()
+                                .copied()
+                                .eq("length".encode_utf16())
+                            || !seen_units.insert(property.code_units.clone())
+                            || !seen_display.insert(&property.display)
+                        {
+                            return Err(Utf16JsonProjectionError::InvalidProjection(
+                                "sparse array named properties must be unique non-index keys other than length",
+                            ));
+                        }
+                        if let Ok(key) = String::from_utf16(&property.code_units) {
+                            if key != property.display {
+                                return Err(Utf16JsonProjectionError::InvalidKeyPointer);
+                            }
+                        } else if property.display.is_empty()
+                            || property.display == String::from_utf16_lossy(&property.code_units)
+                        {
+                            return Err(Utf16JsonProjectionError::InvalidKeyPointer);
+                        }
+                        pending.push(property.value);
+                    }
+                }
                 JsonNode::Object(entries) => {
                     let mut seen_units = HashSet::<Vec<u16>>::new();
                     let mut seen_display = HashSet::<&str>::new();
@@ -587,7 +762,7 @@ impl Utf16JsonProjection {
     /// Read a value at an RFC 6901 pointer as a borrowed flat view.
     #[must_use]
     pub fn at_pointer(&self, pointer: &str) -> Option<JsonValueView<'_>> {
-        let id = value_at_pointer(&self.nodes, self.root, pointer)?;
+        let id = view_at_pointer(&self.nodes, self.root, pointer)?;
         Some(JsonValueView {
             nodes: &self.nodes,
             id,
@@ -647,7 +822,6 @@ impl Utf16JsonProjection {
         *display = String::from_utf16_lossy(code_units);
         target.clear();
         target.extend_from_slice(code_units);
-        self.refresh_display_value()?;
         self.validate()
     }
 
@@ -678,18 +852,36 @@ impl Utf16JsonProjection {
         self.at_pointer(pointer)?.array_len()
     }
 
+    /// Return present array entries in ascending index order together with the
+    /// logical length. This allocates only in proportion to present entries;
+    /// gaps are represented by absent indices and can be detected through
+    /// `JsonValueView::is_undefined` when accessed by index.
+    #[must_use]
+    pub fn array_entries(&self) -> Option<(u32, Vec<(u32, JsonValueView<'_>)>)> {
+        self.at_pointer("")?.array_entries()
+    }
+
+    /// Return an array's enumerable own named properties. JSON serialization
+    /// omits these properties, but source-preserving Native merges retain them.
+    #[must_use]
+    pub fn array_named_properties(&self) -> Option<Vec<JsonObjectEntryView<'_>>> {
+        self.at_pointer("")?.array_named_properties()
+    }
+
     /// Extract a subtree and re-root it as its own flat arena.
     pub fn subprojection(&self, pointer: &str) -> Result<Self, Utf16JsonProjectionError> {
-        let id = value_at_pointer(&self.nodes, self.root, pointer)
-            .ok_or(Utf16JsonProjectionError::InvalidPointer)?;
+        let id = view_at_pointer(&self.nodes, self.root, pointer)
+            .ok_or(Utf16JsonProjectionError::InvalidPointer)?
+            .ok_or(Utf16JsonProjectionError::UndefinedNotJson)?;
         compact_nodes(&self.nodes, id)
     }
 
     /// Extract a subtree by an RFC 6901 pointer stored as exact UTF-16 units.
     /// This supports object keys containing unpaired surrogates.
     pub fn subprojection_units(&self, pointer: &[u16]) -> Result<Self, Utf16JsonProjectionError> {
-        let id = value_at_pointer_units(&self.nodes, self.root, pointer)
-            .ok_or(Utf16JsonProjectionError::InvalidPointer)?;
+        let id = view_at_pointer_units(&self.nodes, self.root, pointer)
+            .ok_or(Utf16JsonProjectionError::InvalidPointer)?
+            .ok_or(Utf16JsonProjectionError::UndefinedNotJson)?;
         compact_nodes(&self.nodes, id)
     }
 
@@ -704,6 +896,24 @@ impl Utf16JsonProjection {
             return Err(Utf16JsonProjectionError::ExpectedObject);
         };
         let id = entries
+            .iter()
+            .find(|entry| entry.code_units == key_units)
+            .map(|entry| entry.value)
+            .ok_or(Utf16JsonProjectionError::InvalidPointer)?;
+        self.subprojection_for_id(id)
+    }
+
+    /// Extract one enumerable named property from a sparse-array node. This
+    /// is an internal merge-state accessor; JSON text output still omits the
+    /// property's key and value.
+    pub fn subprojection_array_property_units(
+        &self,
+        key_units: &[u16],
+    ) -> Result<Self, Utf16JsonProjectionError> {
+        let Some(JsonNode::SparseArray { properties, .. }) = self.nodes.get(self.root) else {
+            return Err(Utf16JsonProjectionError::InvalidPointer);
+        };
+        let id = properties
             .iter()
             .find(|entry| entry.code_units == key_units)
             .map(|entry| entry.value)
@@ -903,6 +1113,28 @@ impl Utf16JsonProjection {
                         .get(index)
                         .ok_or(Utf16JsonProjectionError::InvalidPointer)?
                 }
+                JsonNode::SparseArray {
+                    length,
+                    entries,
+                    properties,
+                } => {
+                    if let Some(index) = parse_pointer_index(token)
+                        .and_then(|index| u32::try_from(index).ok())
+                        .filter(|index| *index < *length)
+                    {
+                        entries
+                            .binary_search_by_key(&index, |entry| entry.index)
+                            .ok()
+                            .map(|position| entries[position].value)
+                            .ok_or(Utf16JsonProjectionError::InvalidPointer)?
+                    } else {
+                        properties
+                            .iter()
+                            .find(|entry| entry.code_units == *token)
+                            .map(|entry| entry.value)
+                            .ok_or(Utf16JsonProjectionError::InvalidPointer)?
+                    }
+                }
                 JsonNode::Null
                 | JsonNode::Bool(_)
                 | JsonNode::Number(_)
@@ -916,10 +1148,22 @@ impl Utf16JsonProjection {
             JsonNode::Object(entries) => entries
                 .iter()
                 .position(|entry| entry.code_units == leaf)
-                .map(|index| (false, index)),
+                .map(ProjectionReplaceTarget::ObjectProperty),
             JsonNode::Array(items) => parse_pointer_index(&leaf)
                 .filter(|index| *index < items.len())
-                .map(|index| (true, index)),
+                .map(ProjectionReplaceTarget::DenseArrayIndex),
+            JsonNode::SparseArray {
+                length, properties, ..
+            } => parse_pointer_index(&leaf)
+                .and_then(|index| u32::try_from(index).ok())
+                .filter(|index| *index < *length)
+                .map(ProjectionReplaceTarget::SparseArrayIndex)
+                .or_else(|| {
+                    properties
+                        .iter()
+                        .position(|entry| entry.code_units == leaf)
+                        .map(ProjectionReplaceTarget::SparseArrayProperty)
+                }),
             JsonNode::Null | JsonNode::Bool(_) | JsonNode::Number(_) | JsonNode::String { .. } => {
                 None
             }
@@ -935,12 +1179,40 @@ impl Utf16JsonProjection {
                 .map(|node| shift_node(node, offset)),
         );
         match &mut self.nodes[parent] {
-            JsonNode::Object(entries) if !target.0 => {
-                entries[target.1].value = replacement_root;
+            JsonNode::Object(entries) => {
+                let ProjectionReplaceTarget::ObjectProperty(index) = target else {
+                    return Err(Utf16JsonProjectionError::InvalidPointer);
+                };
+                entries[index].value = replacement_root;
             }
-            JsonNode::Array(items) if target.0 => {
-                items[target.1] = replacement_root;
+            JsonNode::Array(items) => {
+                let ProjectionReplaceTarget::DenseArrayIndex(index) = target else {
+                    return Err(Utf16JsonProjectionError::InvalidPointer);
+                };
+                items[index] = replacement_root;
             }
+            JsonNode::SparseArray {
+                entries,
+                properties,
+                ..
+            } => match target {
+                ProjectionReplaceTarget::SparseArrayIndex(index) => {
+                    match entries.binary_search_by_key(&index, |entry| entry.index) {
+                        Ok(position) => entries[position].value = replacement_root,
+                        Err(position) => entries.insert(
+                            position,
+                            SparseArrayEntry {
+                                index,
+                                value: replacement_root,
+                            },
+                        ),
+                    }
+                }
+                ProjectionReplaceTarget::SparseArrayProperty(index) => {
+                    properties[index].value = replacement_root;
+                }
+                _ => return Err(Utf16JsonProjectionError::InvalidPointer),
+            },
             _ => return Err(Utf16JsonProjectionError::InvalidPointer),
         }
         *self = compact_nodes(&self.nodes, self.root)?;
@@ -963,9 +1235,11 @@ impl Utf16JsonProjection {
         Ok(true)
     }
 
-    /// Compare two flat JSON trees with JavaScript JSON value equality for
-    /// numbers, exact UTF-16 equality for strings/keys, and order-independent
-    /// object-member matching.
+    /// Compare two flat projections with SameValueZero-like primitive number
+    /// equality, exact UTF-16 equality for strings/keys, order-independent
+    /// object-member matching, and exact sparse-hole positions. A hole is not
+    /// equal to explicit JSON null even though both stringify as `null` inside
+    /// an array.
     #[must_use]
     pub fn semantically_eq(&self, other: &Self) -> bool {
         let mut pending = vec![(self.root, other.root)];
@@ -989,6 +1263,38 @@ impl Utf16JsonProjection {
                 ) if left == right => {}
                 (JsonNode::Array(left), JsonNode::Array(right)) if left.len() == right.len() => {
                     pending.extend(left.iter().copied().zip(right.iter().copied()));
+                }
+                (
+                    JsonNode::SparseArray {
+                        length: left_length,
+                        entries: left,
+                        properties: left_properties,
+                    },
+                    JsonNode::SparseArray {
+                        length: right_length,
+                        entries: right,
+                        properties: right_properties,
+                    },
+                ) if left_length == right_length
+                    && left.len() == right.len()
+                    && left.iter().zip(right).all(|(l, r)| l.index == r.index)
+                    && left_properties.len() == right_properties.len()
+                    && left_properties
+                        .iter()
+                        .zip(right_properties)
+                        .all(|(left, right)| left.code_units == right.code_units) =>
+                {
+                    pending.extend(
+                        left.iter()
+                            .zip(right)
+                            .map(|(left, right)| (left.value, right.value)),
+                    );
+                    pending.extend(
+                        left_properties
+                            .iter()
+                            .zip(right_properties)
+                            .map(|(left, right)| (left.value, right.value)),
+                    );
                 }
                 (JsonNode::Object(left), JsonNode::Object(right)) if left.len() == right.len() => {
                     for entry in left {
@@ -1021,8 +1327,10 @@ impl Utf16JsonProjection {
         }
         let mut next = 1_u64;
         for node in &mut self.nodes {
-            let JsonNode::Object(entries) = node else {
-                continue;
+            let entries = match node {
+                JsonNode::Object(entries) => entries,
+                JsonNode::SparseArray { properties, .. } => properties,
+                _ => continue,
             };
             for index in 0..entries.len() {
                 if String::from_utf16(&entries[index].code_units).is_ok() {
@@ -1048,15 +1356,7 @@ impl Utf16JsonProjection {
                 entries[index].display = replacement;
             }
         }
-        self.refresh_display_value()?;
         self.validate()
-    }
-
-    fn refresh_display_value(&mut self) -> Result<(), Utf16JsonProjectionError> {
-        let display = display_value(&self.nodes, self.root)?;
-        let previous = std::mem::replace(&mut self.value, display);
-        drop_value_iteratively(previous);
-        Ok(())
     }
 }
 
@@ -1103,7 +1403,8 @@ impl From<&Utf16JsonProjection> for Utf16JsonProjection {
 #[derive(Clone, Copy)]
 pub struct JsonValueView<'a> {
     nodes: &'a [JsonNode],
-    id: usize,
+    /// `None` is an in-range sparse-array hole (`undefined`), not JSON null.
+    id: Option<usize>,
 }
 
 impl<'a> JsonValueView<'a> {
@@ -1111,7 +1412,13 @@ impl<'a> JsonValueView<'a> {
     /// This preserves JavaScript object identity for reference-walk guards.
     #[must_use]
     pub fn same_node_as(self, other: Self) -> bool {
-        std::ptr::eq(self.nodes, other.nodes) && self.id == other.id
+        self.id.is_some() && std::ptr::eq(self.nodes, other.nodes) && self.id == other.id
+    }
+
+    /// Whether this view is a sparse-array hole (`undefined`).
+    #[must_use]
+    pub fn is_undefined(self) -> bool {
+        self.id.is_none()
     }
 
     /// Return this string's Rust-safe display form, or `None` for non-string values.
@@ -1119,7 +1426,7 @@ impl<'a> JsonValueView<'a> {
     /// Unpaired UTF-16 units are represented lossily; use [`Self::code_units`] for exact units.
     #[must_use]
     pub fn as_str(self) -> Option<&'a str> {
-        match &self.nodes[self.id] {
+        match self.id.and_then(|id| self.nodes.get(id))? {
             JsonNode::String { display, .. } => Some(display),
             _ => None,
         }
@@ -1128,7 +1435,7 @@ impl<'a> JsonValueView<'a> {
     /// Return this string's exact UTF-16 code units, or `None` for non-string values.
     #[must_use]
     pub fn code_units(self) -> Option<&'a [u16]> {
-        match &self.nodes[self.id] {
+        match self.id.and_then(|id| self.nodes.get(id))? {
             JsonNode::String { code_units, .. } => Some(code_units),
             _ => None,
         }
@@ -1137,7 +1444,7 @@ impl<'a> JsonValueView<'a> {
     /// Return this number as an `f64`, or `None` for non-number values.
     #[must_use]
     pub fn as_number(self) -> Option<f64> {
-        match &self.nodes[self.id] {
+        match self.id.and_then(|id| self.nodes.get(id))? {
             JsonNode::Number(bits) => Some(f64::from_bits(*bits)),
             _ => None,
         }
@@ -1146,7 +1453,7 @@ impl<'a> JsonValueView<'a> {
     /// Return this boolean value, or `None` for non-boolean values.
     #[must_use]
     pub fn as_bool(self) -> Option<bool> {
-        match &self.nodes[self.id] {
+        match self.id.and_then(|id| self.nodes.get(id))? {
             JsonNode::Bool(value) => Some(*value),
             _ => None,
         }
@@ -1155,14 +1462,17 @@ impl<'a> JsonValueView<'a> {
     /// Whether this node is the JSON `null` value.
     #[must_use]
     pub fn is_null(self) -> bool {
-        matches!(&self.nodes[self.id], JsonNode::Null)
+        self.id
+            .and_then(|id| self.nodes.get(id))
+            .is_some_and(|node| matches!(node, JsonNode::Null))
     }
 
     /// Return the array's number of items, or `None` if this node is not an array.
     #[must_use]
     pub fn array_len(self) -> Option<usize> {
-        match &self.nodes[self.id] {
+        match self.id.and_then(|id| self.nodes.get(id))? {
             JsonNode::Array(items) => Some(items.len()),
+            JsonNode::SparseArray { length, .. } => Some(*length as usize),
             _ => None,
         }
     }
@@ -1170,14 +1480,27 @@ impl<'a> JsonValueView<'a> {
     /// Return an in-range array item as a borrowed view.
     #[must_use]
     pub fn get_index(self, index: usize) -> Option<Self> {
-        let JsonNode::Array(items) = &self.nodes[self.id] else {
-            return None;
-        };
-        let id = *items.get(index)?;
-        Some(Self {
-            nodes: self.nodes,
-            id,
-        })
+        let node = self.id.and_then(|id| self.nodes.get(id))?;
+        match node {
+            JsonNode::Array(items) => Some(Self {
+                nodes: self.nodes,
+                id: Some(*items.get(index)?),
+            }),
+            JsonNode::SparseArray {
+                length, entries, ..
+            } if index < *length as usize => {
+                let index = u32::try_from(index).ok()?;
+                let id = entries
+                    .binary_search_by_key(&index, |entry| entry.index)
+                    .ok()
+                    .map(|position| entries[position].value);
+                Some(Self {
+                    nodes: self.nodes,
+                    id,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Look up an object member by a Rust string key, comparing its UTF-16 encoding exactly.
@@ -1194,25 +1517,29 @@ impl<'a> JsonValueView<'a> {
         let id = self.property_units(units)?;
         Some(Self {
             nodes: self.nodes,
-            id,
+            id: Some(id),
         })
     }
 
     fn property_units(self, units: &[u16]) -> Option<usize> {
-        let JsonNode::Object(entries) = &self.nodes[self.id] else {
-            return None;
-        };
-        entries
-            .iter()
-            .find(|entry| entry.code_units == units)
-            .map(|entry| entry.value)
+        match self.id.and_then(|id| self.nodes.get(id))? {
+            JsonNode::Object(entries) => entries
+                .iter()
+                .find(|entry| entry.code_units == units)
+                .map(|entry| entry.value),
+            JsonNode::SparseArray { properties, .. } => properties
+                .iter()
+                .find(|entry| entry.code_units == units)
+                .map(|entry| entry.value),
+            _ => None,
+        }
     }
 
     /// Return the object's members as borrowed views, or `None` for non-object values.
     ///
     /// Each view exposes a safe display key and the separate exact UTF-16 key units.
     pub fn object_entries(self) -> Option<Vec<JsonObjectEntryView<'a>>> {
-        let JsonNode::Object(entries) = &self.nodes[self.id] else {
+        let JsonNode::Object(entries) = self.id.and_then(|id| self.nodes.get(id))? else {
             return None;
         };
         Some(
@@ -1223,7 +1550,76 @@ impl<'a> JsonValueView<'a> {
                     code_units: &entry.code_units,
                     value: Self {
                         nodes: self.nodes,
-                        id: entry.value,
+                        id: Some(entry.value),
+                    },
+                    value_id: entry.value,
+                })
+                .collect(),
+        )
+    }
+
+    /// Return the logical array length and its present own-index entries. A
+    /// dense input reports every index; a sparse input reports only present
+    /// values, preserving gaps as `undefined` holes.
+    pub fn array_entries(self) -> Option<(u32, Vec<(u32, Self)>)> {
+        let node = self.id.and_then(|id| self.nodes.get(id))?;
+        match node {
+            JsonNode::Array(items) => Some((
+                u32::try_from(items.len()).ok()?,
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, id)| {
+                        Some((
+                            u32::try_from(index).ok()?,
+                            Self {
+                                nodes: self.nodes,
+                                id: Some(*id),
+                            },
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            JsonNode::SparseArray {
+                length, entries, ..
+            } => Some((
+                *length,
+                entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.index,
+                            Self {
+                                nodes: self.nodes,
+                                id: Some(entry.value),
+                            },
+                        )
+                    })
+                    .collect(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Return the array's enumerable own named properties in insertion order.
+    /// Numeric index properties are represented by `array_entries`, and the
+    /// non-enumerable `length` property is represented by `array_len`.
+    pub fn array_named_properties(self) -> Option<Vec<JsonObjectEntryView<'a>>> {
+        let node = self.id.and_then(|id| self.nodes.get(id))?;
+        let properties = match node {
+            JsonNode::SparseArray { properties, .. } => properties,
+            JsonNode::Array(_) => return Some(Vec::new()),
+            _ => return None,
+        };
+        Some(
+            properties
+                .iter()
+                .map(|entry| JsonObjectEntryView {
+                    display_key: &entry.display,
+                    code_units: &entry.code_units,
+                    value: Self {
+                        nodes: self.nodes,
+                        id: Some(entry.value),
                     },
                     value_id: entry.value,
                 })
@@ -1297,6 +1693,87 @@ impl Utf16JsonBuilder {
     pub fn push_array(&mut self, items: Vec<usize>) -> Result<usize, Utf16JsonProjectionError> {
         self.validate_children(&items)?;
         Ok(self.push(JsonNode::Array(items)))
+    }
+
+    /// Append a sparse array with only present own-index values. Entries must
+    /// be sorted, unique, and below the logical array length.
+    pub fn push_sparse_array(
+        &mut self,
+        length: u32,
+        entries: Vec<(u32, usize)>,
+    ) -> Result<usize, Utf16JsonProjectionError> {
+        self.push_sparse_array_with_properties(length, entries, Vec::new())
+    }
+
+    /// Append a sparse array with index entries and enumerable own named
+    /// properties. Named properties are retained in the arena but are omitted
+    /// by JSON stringification, as on a JavaScript array.
+    pub fn push_sparse_array_with_properties(
+        &mut self,
+        length: u32,
+        entries: Vec<(u32, usize)>,
+        properties: Vec<(Vec<u16>, usize)>,
+    ) -> Result<usize, Utf16JsonProjectionError> {
+        let mut previous = None;
+        let mut child_ids = Vec::with_capacity(entries.len() + properties.len());
+        let mut stored = Vec::with_capacity(entries.len());
+        for (index, value) in entries {
+            if index >= length || previous.is_some_and(|prior| prior >= index) {
+                return Err(Utf16JsonProjectionError::InvalidProjection(
+                    "sparse array indices must be unique, ordered, and in range",
+                ));
+            }
+            previous = Some(index);
+            child_ids.push(value);
+            stored.push(SparseArrayEntry { index, value });
+        }
+        let mut stored_properties = Vec::<JsonProperty>::with_capacity(properties.len());
+        for (code_units, value) in properties {
+            if javascript_array_index(&code_units).is_some()
+                || code_units == "length".encode_utf16().collect::<Vec<_>>()
+                || stored_properties
+                    .iter()
+                    .any(|entry| entry.code_units == code_units)
+            {
+                return Err(Utf16JsonProjectionError::InvalidProjection(
+                    "sparse array named properties must be unique non-index keys other than length",
+                ));
+            }
+            let display = match String::from_utf16(&code_units) {
+                Ok(key) => {
+                    if let Some(index) = stored_properties.iter().position(|entry| {
+                        entry.display == key
+                            && entry.code_units != code_units
+                            && String::from_utf16(&entry.code_units).is_err()
+                    }) {
+                        let placeholder = self.allocate_placeholder(&stored_properties);
+                        stored_properties[index].display = placeholder;
+                    }
+                    key
+                }
+                Err(_) => self.allocate_placeholder(&stored_properties),
+            };
+            if stored_properties
+                .iter()
+                .any(|entry| entry.display == display)
+            {
+                return Err(Utf16JsonProjectionError::InvalidProjection(
+                    "sparse array has colliding named-property displays",
+                ));
+            }
+            child_ids.push(value);
+            stored_properties.push(JsonProperty {
+                display,
+                code_units,
+                value,
+            });
+        }
+        self.validate_children(&child_ids)?;
+        Ok(self.push(JsonNode::SparseArray {
+            length,
+            entries: stored,
+            properties: stored_properties,
+        }))
     }
 
     /// Append an object from Rust string keys and earlier builder node IDs.
@@ -1902,6 +2379,28 @@ fn shift_node(node: &JsonNode, offset: usize) -> JsonNode {
             code_units: code_units.clone(),
         },
         JsonNode::Array(items) => JsonNode::Array(items.iter().map(|id| id + offset).collect()),
+        JsonNode::SparseArray {
+            length,
+            entries,
+            properties,
+        } => JsonNode::SparseArray {
+            length: *length,
+            entries: entries
+                .iter()
+                .map(|entry| SparseArrayEntry {
+                    index: entry.index,
+                    value: entry.value + offset,
+                })
+                .collect(),
+            properties: properties
+                .iter()
+                .map(|entry| JsonProperty {
+                    display: entry.display.clone(),
+                    code_units: entry.code_units.clone(),
+                    value: entry.value + offset,
+                })
+                .collect(),
+        },
         JsonNode::Object(entries) => JsonNode::Object(
             entries
                 .iter()
@@ -1947,6 +2446,14 @@ fn compact_nodes(
             JsonNode::Array(items) => {
                 pending.extend(items.iter().rev().map(|child| (*child, false)));
             }
+            JsonNode::SparseArray {
+                entries,
+                properties,
+                ..
+            } => {
+                pending.extend(properties.iter().rev().map(|entry| (entry.value, false)));
+                pending.extend(entries.iter().rev().map(|entry| (entry.value, false)));
+            }
             JsonNode::Object(entries) => {
                 pending.extend(entries.iter().rev().map(|entry| (entry.value, false)));
             }
@@ -1971,6 +2478,28 @@ fn compact_nodes(
                 code_units: code_units.clone(),
             },
             JsonNode::Array(items) => JsonNode::Array(items.iter().map(|id| remap[*id]).collect()),
+            JsonNode::SparseArray {
+                length,
+                entries,
+                properties,
+            } => JsonNode::SparseArray {
+                length: *length,
+                entries: entries
+                    .iter()
+                    .map(|entry| SparseArrayEntry {
+                        index: entry.index,
+                        value: remap[entry.value],
+                    })
+                    .collect(),
+                properties: properties
+                    .iter()
+                    .map(|entry| JsonProperty {
+                        display: entry.display.clone(),
+                        code_units: entry.code_units.clone(),
+                        value: remap[entry.value],
+                    })
+                    .collect(),
+            },
             JsonNode::Object(entries) => JsonNode::Object(
                 entries
                     .iter()
@@ -1984,20 +2513,23 @@ fn compact_nodes(
         };
         compacted.push(node);
     }
-    let value = display_value(&compacted, remap[root])?;
     let projection = Utf16JsonProjection {
         root: remap[root],
         nodes: compacted,
-        value,
     };
     projection.validate()?;
     Ok(projection)
 }
 
-fn display_value(nodes: &[JsonNode], root: usize) -> Result<Value, Utf16JsonProjectionError> {
+fn display_value(
+    nodes: &[JsonNode],
+    root: usize,
+    max_array_items: Option<usize>,
+) -> Result<Value, Utf16JsonProjectionError> {
     enum Task {
         Visit(usize),
         Array(usize),
+        Null,
         Object(Vec<String>),
     }
 
@@ -2028,8 +2560,47 @@ fn display_value(nodes: &[JsonNode], root: usize) -> Result<Value, Utf16JsonProj
                         completed.push(Value::String(display.clone()));
                     }
                     JsonNode::Array(items) => {
+                        check_materialized_array_len(items.len(), max_array_items)?;
+                        completed.try_reserve(items.len()).map_err(|error| {
+                            Utf16JsonProjectionError::Materialization(error.to_string())
+                        })?;
+                        pending.try_reserve(items.len()).map_err(|error| {
+                            Utf16JsonProjectionError::Materialization(error.to_string())
+                        })?;
                         pending.push(Task::Array(items.len()));
                         pending.extend(items.iter().rev().copied().map(Task::Visit));
+                    }
+                    JsonNode::SparseArray {
+                        length,
+                        entries,
+                        properties,
+                    } => {
+                        if !properties.is_empty() {
+                            return Err(Utf16JsonProjectionError::Materialization(
+                                "serde_json::Value cannot retain sparse-array named properties"
+                                    .into(),
+                            ));
+                        }
+                        let length = *length as usize;
+                        check_materialized_array_len(length, max_array_items)?;
+                        completed.try_reserve(length).map_err(|error| {
+                            Utf16JsonProjectionError::Materialization(error.to_string())
+                        })?;
+                        pending.try_reserve(length).map_err(|error| {
+                            Utf16JsonProjectionError::Materialization(error.to_string())
+                        })?;
+                        pending.push(Task::Array(length));
+                        for index in (0..length).rev() {
+                            let value = u32::try_from(index)
+                                .ok()
+                                .and_then(|index| {
+                                    entries
+                                        .binary_search_by_key(&index, |entry| entry.index)
+                                        .ok()
+                                })
+                                .map(|position| entries[position].value);
+                            pending.push(value.map_or(Task::Null, Task::Visit));
+                        }
                     }
                     JsonNode::Object(entries) => {
                         pending.push(Task::Object(
@@ -2048,6 +2619,7 @@ fn display_value(nodes: &[JsonNode], root: usize) -> Result<Value, Utf16JsonProj
                 let items = completed.split_off(completed.len() - length);
                 completed.push(Value::Array(items));
             }
+            Task::Null => completed.push(Value::Null),
             Task::Object(keys) => {
                 if completed.len() < keys.len() {
                     return Err(Utf16JsonProjectionError::InvalidProjection(
@@ -2071,29 +2643,65 @@ fn display_value(nodes: &[JsonNode], root: usize) -> Result<Value, Utf16JsonProj
     Ok(completed.pop().expect("one completed root value"))
 }
 
+fn check_materialized_array_len(
+    length: usize,
+    max_array_items: Option<usize>,
+) -> Result<(), Utf16JsonProjectionError> {
+    if max_array_items.is_some_and(|limit| length > limit) {
+        return Err(Utf16JsonProjectionError::Materialization(format!(
+            "array length {length} exceeds caller budget {}",
+            max_array_items.expect("checked some")
+        )));
+    }
+    Ok(())
+}
+
 fn join_pointer(parent: &str, token: &str) -> String {
     format!("{parent}/{}", token.replace('~', "~0").replace('/', "~1"))
 }
 
-fn value_at_pointer(nodes: &[JsonNode], root: usize, pointer: &str) -> Option<usize> {
+fn view_at_pointer(nodes: &[JsonNode], root: usize, pointer: &str) -> Option<Option<usize>> {
     if pointer.is_empty() {
-        return Some(root);
+        return Some(Some(root));
     }
     let rest = pointer.strip_prefix('/')?;
-    let mut id = root;
+    let mut id = Some(root);
     for raw in rest.split('/') {
         let token = decode_pointer_token(raw)?;
-        id = match &nodes[id] {
+        let parent = id?;
+        id = match &nodes[parent] {
             JsonNode::Object(entries) => entries
                 .iter()
                 .find(|entry| entry.display == token)
-                .map(|entry| entry.value)?,
+                .map(|entry| Some(entry.value))?,
             JsonNode::Array(items) => {
                 let index = token.parse::<usize>().ok()?;
                 if index.to_string() != token {
                     return None;
                 }
-                *items.get(index)?
+                Some(*items.get(index)?)
+            }
+            JsonNode::SparseArray {
+                length,
+                entries,
+                properties,
+            } => {
+                let token_units = token.encode_utf16().collect::<Vec<_>>();
+                if let Some(index) = parse_pointer_index(&token_units)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .filter(|index| *index < *length)
+                {
+                    entries
+                        .binary_search_by_key(&index, |entry| entry.index)
+                        .ok()
+                        .map(|position| Some(entries[position].value))
+                        .unwrap_or(None)
+                } else {
+                    properties
+                        .iter()
+                        .find(|entry| entry.display == token)
+                        .map(|entry| Some(entry.value))?
+                }
             }
             JsonNode::Null | JsonNode::Bool(_) | JsonNode::Number(_) | JsonNode::String { .. } => {
                 return None;
@@ -2103,22 +2711,52 @@ fn value_at_pointer(nodes: &[JsonNode], root: usize, pointer: &str) -> Option<us
     Some(id)
 }
 
-fn value_at_pointer_units(nodes: &[JsonNode], root: usize, pointer: &[u16]) -> Option<usize> {
+fn value_at_pointer(nodes: &[JsonNode], root: usize, pointer: &str) -> Option<usize> {
+    view_at_pointer(nodes, root, pointer).flatten()
+}
+
+fn view_at_pointer_units(
+    nodes: &[JsonNode],
+    root: usize,
+    pointer: &[u16],
+) -> Option<Option<usize>> {
     if pointer.is_empty() {
-        return Some(root);
+        return Some(Some(root));
     }
     if pointer.first() != Some(&u16::from(b'/')) {
         return None;
     }
-    let mut id = root;
+    let mut id = Some(root);
     for raw in pointer[1..].split(|unit| *unit == u16::from(b'/')) {
         let token = decode_pointer_token_units(raw)?;
-        id = match &nodes[id] {
+        let parent = id?;
+        id = match &nodes[parent] {
             JsonNode::Object(entries) => entries
                 .iter()
                 .find(|entry| entry.code_units == token)
-                .map(|entry| entry.value)?,
-            JsonNode::Array(items) => *items.get(parse_pointer_index(&token)?)?,
+                .map(|entry| Some(entry.value))?,
+            JsonNode::Array(items) => Some(*items.get(parse_pointer_index(&token)?)?),
+            JsonNode::SparseArray {
+                length,
+                entries,
+                properties,
+            } => {
+                if let Some(index) = u32::try_from(parse_pointer_index(&token)?)
+                    .ok()
+                    .filter(|index| *index < *length)
+                {
+                    entries
+                        .binary_search_by_key(&index, |entry| entry.index)
+                        .ok()
+                        .map(|position| Some(entries[position].value))
+                        .unwrap_or(None)
+                } else {
+                    properties
+                        .iter()
+                        .find(|entry| entry.code_units == token)
+                        .map(|entry| Some(entry.value))?
+                }
+            }
             JsonNode::Null | JsonNode::Bool(_) | JsonNode::Number(_) | JsonNode::String { .. } => {
                 return None;
             }
@@ -2206,7 +2844,7 @@ fn javascript_ordered_object_indices(entries: &[JsonProperty]) -> Vec<usize> {
 }
 
 fn write_json(
-    output: &mut Vec<u8>,
+    output: &mut impl Write,
     nodes: &[JsonNode],
     root: usize,
 ) -> Result<(), Utf16JsonProjectionError> {
@@ -2214,41 +2852,80 @@ fn write_json(
         Value(usize),
         ObjectKey(&'a [u16]),
         Byte(u8),
+        ArrayNext { id: usize, index: u32 },
     }
 
     let mut pending = vec![Task::Value(root)];
     while let Some(task) = pending.pop() {
         match task {
-            Task::Byte(byte) => output.push(byte),
-            Task::ObjectKey(units) => write_units(output, units),
-            Task::Value(id) => match &nodes[id] {
-                JsonNode::Null => output.extend_from_slice(b"null"),
-                JsonNode::Bool(true) => output.extend_from_slice(b"true"),
-                JsonNode::Bool(false) => output.extend_from_slice(b"false"),
-                JsonNode::Number(bits) => {
-                    let number = f64::from_bits(*bits);
-                    if !number.is_finite() {
-                        output.extend_from_slice(b"null");
-                    } else if number == 0.0 {
-                        output.push(b'0');
+            Task::Byte(byte) => output.write_all(&[byte])?,
+            Task::ObjectKey(units) => write_units(output, units)?,
+            Task::ArrayNext { id, index } => match &nodes[id] {
+                JsonNode::Array(items) => {
+                    if index as usize >= items.len() {
+                        output.write_all(b"]")?;
                     } else {
-                        let mut buffer = ryu_js::Buffer::new();
-                        output.extend_from_slice(buffer.format_finite(number).as_bytes());
+                        if index > 0 {
+                            output.write_all(b",")?;
+                        }
+                        pending.push(Task::ArrayNext {
+                            id,
+                            index: index + 1,
+                        });
+                        pending.push(Task::Value(items[index as usize]));
                     }
                 }
-                JsonNode::String { code_units, .. } => write_units(output, code_units),
-                JsonNode::Array(items) => {
-                    output.push(b'[');
-                    pending.push(Task::Byte(b']'));
-                    for (index, child) in items.iter().enumerate().rev() {
-                        pending.push(Task::Value(*child));
+                JsonNode::SparseArray {
+                    length, entries, ..
+                } => {
+                    if index >= *length {
+                        output.write_all(b"]")?;
+                    } else {
                         if index > 0 {
-                            pending.push(Task::Byte(b','));
+                            output.write_all(b",")?;
+                        }
+                        pending.push(Task::ArrayNext {
+                            id,
+                            index: index + 1,
+                        });
+                        if let Ok(position) =
+                            entries.binary_search_by_key(&index, |entry| entry.index)
+                        {
+                            pending.push(Task::Value(entries[position].value));
+                        } else {
+                            // JSON.stringify writes an array `undefined` as null.
+                            output.write_all(b"null")?;
                         }
                     }
                 }
+                _ => {
+                    return Err(Utf16JsonProjectionError::InvalidProjection(
+                        "array writer continuation references a non-array",
+                    ))
+                }
+            },
+            Task::Value(id) => match &nodes[id] {
+                JsonNode::Null => output.write_all(b"null")?,
+                JsonNode::Bool(true) => output.write_all(b"true")?,
+                JsonNode::Bool(false) => output.write_all(b"false")?,
+                JsonNode::Number(bits) => {
+                    let number = f64::from_bits(*bits);
+                    if !number.is_finite() {
+                        output.write_all(b"null")?;
+                    } else if number == 0.0 {
+                        output.write_all(b"0")?;
+                    } else {
+                        let mut buffer = ryu_js::Buffer::new();
+                        output.write_all(buffer.format_finite(number).as_bytes())?;
+                    }
+                }
+                JsonNode::String { code_units, .. } => write_units(output, code_units)?,
+                JsonNode::Array(_) | JsonNode::SparseArray { .. } => {
+                    output.write_all(b"[")?;
+                    pending.push(Task::ArrayNext { id, index: 0 });
+                }
                 JsonNode::Object(entries) => {
-                    output.push(b'{');
+                    output.write_all(b"{")?;
                     pending.push(Task::Byte(b'}'));
                     for (index, entry_index) in javascript_ordered_object_indices(entries)
                         .into_iter()
@@ -2271,7 +2948,7 @@ fn write_json(
 }
 
 fn write_pretty_json(
-    output: &mut Vec<u8>,
+    output: &mut impl Write,
     nodes: &[JsonNode],
     root: usize,
 ) -> Result<(), Utf16JsonProjectionError> {
@@ -2280,50 +2957,108 @@ fn write_pretty_json(
         ObjectKey(&'a [u16]),
         Bytes(&'static [u8]),
         Indent(usize),
+        ArrayNext { id: usize, index: u32, depth: usize },
     }
 
     let mut pending = vec![Task::Value(root, 0)];
     while let Some(task) = pending.pop() {
         match task {
-            Task::Bytes(bytes) => output.extend_from_slice(bytes),
-            Task::Indent(depth) => output.extend(std::iter::repeat_n(b' ', depth * 2)),
-            Task::ObjectKey(units) => write_units(output, units),
+            Task::Bytes(bytes) => output.write_all(bytes)?,
+            Task::Indent(depth) => {
+                for _ in 0..depth * 2 {
+                    output.write_all(b" ")?;
+                }
+            }
+            Task::ObjectKey(units) => write_units(output, units)?,
+            Task::ArrayNext { id, index, depth } => {
+                let (length, item) = match &nodes[id] {
+                    JsonNode::Array(items) => (
+                        u32::try_from(items.len()).map_err(|_| {
+                            Utf16JsonProjectionError::Materialization(
+                                "dense array exceeds JavaScript array length".into(),
+                            )
+                        })?,
+                        items.get(index as usize).copied(),
+                    ),
+                    JsonNode::SparseArray {
+                        length, entries, ..
+                    } => (
+                        *length,
+                        entries
+                            .binary_search_by_key(&index, |entry| entry.index)
+                            .ok()
+                            .map(|position| entries[position].value),
+                    ),
+                    _ => {
+                        return Err(Utf16JsonProjectionError::InvalidProjection(
+                            "pretty array continuation references a non-array",
+                        ))
+                    }
+                };
+                if index >= length {
+                    output.write_all(b"\n")?;
+                    for _ in 0..depth * 2 {
+                        output.write_all(b" ")?;
+                    }
+                    output.write_all(b"]")?;
+                } else {
+                    if index > 0 {
+                        output.write_all(b",")?;
+                    }
+                    output.write_all(b"\n")?;
+                    for _ in 0..(depth + 1) * 2 {
+                        output.write_all(b" ")?;
+                    }
+                    pending.push(Task::ArrayNext {
+                        id,
+                        index: index + 1,
+                        depth,
+                    });
+                    if let Some(item) = item {
+                        pending.push(Task::Value(item, depth + 1));
+                    } else {
+                        output.write_all(b"null")?;
+                    }
+                }
+            }
             Task::Value(id, depth) => match &nodes[id] {
-                JsonNode::Null => output.extend_from_slice(b"null"),
-                JsonNode::Bool(true) => output.extend_from_slice(b"true"),
-                JsonNode::Bool(false) => output.extend_from_slice(b"false"),
+                JsonNode::Null => output.write_all(b"null")?,
+                JsonNode::Bool(true) => output.write_all(b"true")?,
+                JsonNode::Bool(false) => output.write_all(b"false")?,
                 JsonNode::Number(bits) => {
                     let number = f64::from_bits(*bits);
                     if !number.is_finite() {
-                        output.extend_from_slice(b"null");
+                        output.write_all(b"null")?;
                     } else if number == 0.0 {
-                        output.push(b'0');
+                        output.write_all(b"0")?;
                     } else {
                         let mut buffer = ryu_js::Buffer::new();
-                        output.extend_from_slice(buffer.format_finite(number).as_bytes());
+                        output.write_all(buffer.format_finite(number).as_bytes())?;
                     }
                 }
-                JsonNode::String { code_units, .. } => write_units(output, code_units),
-                JsonNode::Array(items) if items.is_empty() => output.extend_from_slice(b"[]"),
+                JsonNode::String { code_units, .. } => write_units(output, code_units)?,
+                JsonNode::Array(items) if items.is_empty() => output.write_all(b"[]")?,
                 JsonNode::Array(items) => {
-                    output.push(b'[');
-                    let mut sequence = Vec::with_capacity(items.len() * 4 + 2);
-                    for (index, child) in items.iter().enumerate() {
-                        if index > 0 {
-                            sequence.push(Task::Bytes(b","));
-                        }
-                        sequence.push(Task::Bytes(b"\n"));
-                        sequence.push(Task::Indent(depth + 1));
-                        sequence.push(Task::Value(*child, depth + 1));
-                    }
-                    sequence.push(Task::Bytes(b"\n"));
-                    sequence.push(Task::Indent(depth));
-                    sequence.push(Task::Bytes(b"]"));
-                    pending.extend(sequence.into_iter().rev());
+                    output.write_all(b"[")?;
+                    let _ = items;
+                    pending.push(Task::ArrayNext {
+                        id,
+                        index: 0,
+                        depth,
+                    });
                 }
-                JsonNode::Object(entries) if entries.is_empty() => output.extend_from_slice(b"{}"),
+                JsonNode::SparseArray { length: 0, .. } => output.write_all(b"[]")?,
+                JsonNode::SparseArray { .. } => {
+                    output.write_all(b"[")?;
+                    pending.push(Task::ArrayNext {
+                        id,
+                        index: 0,
+                        depth,
+                    });
+                }
+                JsonNode::Object(entries) if entries.is_empty() => output.write_all(b"{}")?,
                 JsonNode::Object(entries) => {
-                    output.push(b'{');
+                    output.write_all(b"{")?;
                     let order = javascript_ordered_object_indices(entries);
                     let mut sequence = Vec::with_capacity(order.len() * 6 + 2);
                     for (index, entry_index) in order.into_iter().enumerate() {
@@ -2348,33 +3083,33 @@ fn write_pretty_json(
     Ok(())
 }
 
-fn write_units(output: &mut Vec<u8>, units: &[u16]) {
-    output.push(b'"');
+fn write_units(output: &mut impl Write, units: &[u16]) -> Result<(), Utf16JsonProjectionError> {
+    output.write_all(b"\"")?;
     for decoded in char::decode_utf16(units.iter().copied()) {
         match decoded {
             Ok(ch) => match ch {
-                '"' => output.extend_from_slice(br#"\""#),
-                '\\' => output.extend_from_slice(br"\\"),
-                '\u{08}' => output.extend_from_slice(br"\b"),
-                '\u{0c}' => output.extend_from_slice(br"\f"),
-                '\n' => output.extend_from_slice(br"\n"),
-                '\r' => output.extend_from_slice(br"\r"),
-                '\t' => output.extend_from_slice(br"\t"),
+                '"' => output.write_all(br#"\""#)?,
+                '\\' => output.write_all(br"\\")?,
+                '\u{08}' => output.write_all(br"\b")?,
+                '\u{0c}' => output.write_all(br"\f")?,
+                '\n' => output.write_all(br"\n")?,
+                '\r' => output.write_all(br"\r")?,
+                '\t' => output.write_all(br"\t")?,
                 ch if ch <= '\u{1f}' => {
-                    write!(output, "\\u{:04x}", u32::from(ch)).expect("Vec writes cannot fail");
+                    write!(output, "\\u{:04x}", u32::from(ch))?;
                 }
                 _ => {
                     let mut buffer = [0; 4];
-                    output.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
+                    output.write_all(ch.encode_utf8(&mut buffer).as_bytes())?;
                 }
             },
             Err(error) => {
-                write!(output, "\\u{:04x}", error.unpaired_surrogate())
-                    .expect("Vec writes cannot fail");
+                write!(output, "\\u{:04x}", error.unpaired_surrogate())?;
             }
         }
     }
-    output.push(b'"');
+    output.write_all(b"\"")?;
+    Ok(())
 }
 
 /// A collision-free, reversible `serde_json::Value` namespace for validators
@@ -2389,9 +3124,42 @@ pub struct Utf16JsonConsumer {
 }
 
 impl Utf16JsonConsumer {
-    /// Build one namespace shared by all inputs so cross-field identity checks
-    /// continue to distinguish different unpaired units from the same unit.
-    pub fn new(inputs: &[&Utf16JsonProjection]) -> Result<Self, Utf16JsonProjectionError> {
+    /// Build a reversible serde namespace for values that crossed a JSON text
+    /// parse boundary. Those inputs contain only dense JSON arrays; the exact
+    /// maximum array length is derived from the parsed arenas, not an invented
+    /// global cap. Sparse merge values must use an explicit budget instead.
+    pub fn new_for_json_decoded_sources(
+        inputs: &[&Utf16JsonProjection],
+    ) -> Result<Self, Utf16JsonProjectionError> {
+        let mut max_array_items = 0_usize;
+        for input in inputs {
+            input.validate()?;
+            for node in &input.nodes {
+                match node {
+                    JsonNode::Array(items) => max_array_items = max_array_items.max(items.len()),
+                    JsonNode::SparseArray { .. } => {
+                        return Err(Utf16JsonProjectionError::Materialization(
+                            "JSON-decoded schema input unexpectedly contains a sparse array".into(),
+                        ));
+                    }
+                    JsonNode::Null
+                    | JsonNode::Bool(_)
+                    | JsonNode::Number(_)
+                    | JsonNode::String { .. }
+                    | JsonNode::Object(_) => {}
+                }
+            }
+        }
+        Self::new_with_array_budget(inputs, max_array_items)
+    }
+
+    /// Build a reversible serde namespace with an explicit per-array dense
+    /// materialization budget. Sparse source values remain flat until this
+    /// conversion is explicitly requested.
+    pub fn new_with_array_budget(
+        inputs: &[&Utf16JsonProjection],
+        max_array_items: usize,
+    ) -> Result<Self, Utf16JsonProjectionError> {
         let mut occupied = HashSet::new();
         let mut unpaired = BTreeSet::new();
         for input in inputs {
@@ -2403,6 +3171,19 @@ impl Utf16JsonConsumer {
                         collect_consumer_units(code_units, &mut occupied, &mut unpaired);
                     }
                     JsonNode::Array(items) => pending.extend(items.iter().copied()),
+                    JsonNode::SparseArray {
+                        entries,
+                        properties,
+                        ..
+                    } => {
+                        if !properties.is_empty() {
+                            return Err(Utf16JsonProjectionError::Materialization(
+                                "serde_json::Value cannot retain sparse-array named properties"
+                                    .into(),
+                            ));
+                        }
+                        pending.extend(entries.iter().map(|entry| entry.value));
+                    }
                     JsonNode::Object(entries) => {
                         for entry in entries {
                             collect_consumer_units(&entry.code_units, &mut occupied, &mut unpaired);
@@ -2427,7 +3208,7 @@ impl Utf16JsonConsumer {
 
         let values = inputs
             .iter()
-            .map(|input| consumer_value(input, &units))
+            .map(|input| consumer_value(input, &units, max_array_items))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { values, units })
     }
@@ -2551,10 +3332,12 @@ fn restore_consumer_string(value: &str, units: &HashMap<u16, u16>) -> Vec<u16> {
 fn consumer_value(
     input: &Utf16JsonProjection,
     units: &HashMap<u16, u16>,
+    max_array_items: usize,
 ) -> Result<Value, Utf16JsonProjectionError> {
     enum Task {
         Visit(usize),
         Array(usize),
+        Hole,
         Object(Vec<String>),
     }
     let mut tasks = vec![Task::Visit(input.root)];
@@ -2563,8 +3346,46 @@ fn consumer_value(
         match task {
             Task::Visit(id) => match &input.nodes[id] {
                 JsonNode::Array(items) => {
+                    check_materialized_array_len(items.len(), Some(max_array_items))?;
+                    complete.try_reserve(items.len()).map_err(|error| {
+                        Utf16JsonProjectionError::Materialization(error.to_string())
+                    })?;
+                    tasks.try_reserve(items.len()).map_err(|error| {
+                        Utf16JsonProjectionError::Materialization(error.to_string())
+                    })?;
                     tasks.push(Task::Array(items.len()));
                     tasks.extend(items.iter().rev().copied().map(Task::Visit));
+                }
+                JsonNode::SparseArray {
+                    length,
+                    entries,
+                    properties,
+                } => {
+                    if !properties.is_empty() {
+                        return Err(Utf16JsonProjectionError::Materialization(
+                            "serde_json::Value cannot retain sparse-array named properties".into(),
+                        ));
+                    }
+                    let length = *length as usize;
+                    check_materialized_array_len(length, Some(max_array_items))?;
+                    complete.try_reserve(length).map_err(|error| {
+                        Utf16JsonProjectionError::Materialization(error.to_string())
+                    })?;
+                    tasks.try_reserve(length).map_err(|error| {
+                        Utf16JsonProjectionError::Materialization(error.to_string())
+                    })?;
+                    tasks.push(Task::Array(length));
+                    for index in (0..length).rev() {
+                        let present = u32::try_from(index)
+                            .ok()
+                            .and_then(|index| {
+                                entries
+                                    .binary_search_by_key(&index, |entry| entry.index)
+                                    .ok()
+                            })
+                            .map(|position| entries[position].value);
+                        tasks.push(present.map_or(Task::Hole, Task::Visit));
+                    }
                 }
                 JsonNode::Object(entries) => {
                     let order = javascript_ordered_object_indices(entries);
@@ -2594,6 +3415,7 @@ fn consumer_value(
                     );
                 }
             },
+            Task::Hole => complete.push(Value::Null),
             Task::Array(length) => {
                 let start = complete.len().checked_sub(length).ok_or(
                     Utf16JsonProjectionError::InvalidProjection("consumer array stack underflow"),
@@ -2616,6 +3438,101 @@ fn consumer_value(
         .ok_or(Utf16JsonProjectionError::InvalidProjection(
             "consumer did not produce a root value",
         ))
+}
+
+#[cfg(test)]
+mod sparse_array_tests {
+    use super::{Utf16JsonProjection, Utf16JsonProjectionError};
+    use std::io::{self, Write};
+
+    struct PrefixCounter {
+        limit: usize,
+        written: usize,
+    }
+
+    impl Write for PrefixCounter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.written == self.limit {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "prefix complete"));
+            }
+            let count = bytes.len().min(self.limit - self.written);
+            self.written += count;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn sparse_holes_remain_distinct_from_null_through_view_clone_and_replace() {
+        let mut sparse = Utf16JsonProjection::sparse_array(
+            3,
+            vec![
+                (0, Utf16JsonProjection::parse("1").unwrap()),
+                (2, Utf16JsonProjection::parse("3").unwrap()),
+            ],
+        )
+        .unwrap();
+        let hole = sparse.at_pointer("/1").expect("in-range hole view");
+        assert!(hole.is_undefined());
+        assert!(!hole.is_null());
+        assert!(matches!(
+            sparse.subprojection("/1"),
+            Err(Utf16JsonProjectionError::UndefinedNotJson)
+        ));
+        assert_eq!(sparse.to_json_string().unwrap(), "[1,null,3]");
+
+        let explicit_null = Utf16JsonProjection::parse("[1,null,3]").unwrap();
+        assert!(!explicit_null.at_pointer("/1").unwrap().is_undefined());
+        assert!(explicit_null.at_pointer("/1").unwrap().is_null());
+        assert!(!sparse.semantically_eq(&explicit_null));
+
+        let cloned = sparse.clone();
+        assert_eq!(cloned.to_json_string().unwrap(), "[1,null,3]");
+        sparse
+            .replace_pointer_projection("/1", Utf16JsonProjection::parse("null").unwrap())
+            .unwrap();
+        assert!(!sparse.at_pointer("/1").unwrap().is_undefined());
+        assert!(sparse.at_pointer("/1").unwrap().is_null());
+        assert_eq!(sparse.to_json_string().unwrap(), "[1,null,3]");
+    }
+
+    #[test]
+    fn dense_materialization_is_explicit_and_budgeted() {
+        let sparse = Utf16JsonProjection::sparse_array(
+            4,
+            vec![(0, Utf16JsonProjection::parse("\"x\"").unwrap())],
+        )
+        .unwrap();
+        let display = sparse.try_to_serde_value_with_array_budget(4).unwrap();
+        assert_eq!(display, serde_json::json!(["x", null, null, null]));
+        assert!(matches!(
+            sparse.try_to_serde_value_with_array_budget(3),
+            Err(Utf16JsonProjectionError::Materialization(_))
+        ));
+        assert_eq!(sparse.to_json_string().unwrap(), "[\"x\",null,null,null]");
+    }
+
+    #[test]
+    fn streaming_a_max_length_sparse_array_does_not_preallocate_or_materialize_holes() {
+        let sparse = Utf16JsonProjection::sparse_array(
+            u32::MAX,
+            vec![(0, Utf16JsonProjection::parse("0").unwrap())],
+        )
+        .unwrap();
+        let mut sink = PrefixCounter {
+            limit: 32,
+            written: 0,
+        };
+        assert!(matches!(
+            sparse.write_json_to(&mut sink),
+            Err(Utf16JsonProjectionError::Write(_))
+        ));
+        assert_eq!(sink.written, 32);
+        assert_eq!(sparse.array_len(""), Some(u32::MAX as usize));
+    }
 }
 
 #[cfg(test)]
@@ -2735,6 +3652,58 @@ mod tests {
             entry.value.code_units(),
             Some([115, 104, 111, 119, 110, 0xd800].as_slice())
         );
+    }
+
+    #[test]
+    fn sparse_array_named_properties_survive_views_clone_and_replacement() {
+        let payload = Utf16JsonProjection::parse(r#"{"text":"before"}"#).unwrap();
+        let mut projection = Utf16JsonProjection::sparse_array_with_properties(
+            0,
+            Vec::new(),
+            vec![("custom".encode_utf16().collect(), payload)],
+        )
+        .unwrap();
+
+        projection.validate().unwrap();
+        assert_eq!(projection.to_json_string().unwrap(), "[]");
+        assert_eq!(
+            projection
+                .array_named_properties()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.display_key)
+                .collect::<Vec<_>>(),
+            ["custom"]
+        );
+        assert_eq!(projection.string_at("/custom/text"), Some("before"));
+        assert_eq!(
+            projection
+                .subprojection_array_property_units(&"custom".encode_utf16().collect::<Vec<_>>())
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"{"text":"before"}"#
+        );
+        assert!(matches!(
+            projection.try_to_serde_value_with_array_budget(0),
+            Err(Utf16JsonProjectionError::Materialization(_))
+        ));
+        assert!(matches!(
+            Utf16JsonConsumer::new_with_array_budget(&[&projection], 0),
+            Err(Utf16JsonProjectionError::Materialization(_))
+        ));
+
+        let cloned = projection.clone();
+        assert!(projection.semantically_eq(&cloned));
+        projection
+            .replace_pointer_projection(
+                "/custom/text",
+                Utf16JsonProjection::parse(r#""after""#).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(projection.string_at("/custom/text"), Some("after"));
+        assert_eq!(projection.to_json_string().unwrap(), "[]");
+        assert!(!projection.semantically_eq(&cloned));
     }
 
     #[test]
@@ -2977,7 +3946,7 @@ mod consumer_tests {
         )
         .unwrap();
         let input = Utf16JsonProjection::parse(r#"{"\ud801":"\ud802","\ue000":"\ud800"}"#).unwrap();
-        let consumer = Utf16JsonConsumer::new(&[&schema, &input]).unwrap();
+        let consumer = Utf16JsonConsumer::new_with_array_budget(&[&schema, &input], 256).unwrap();
         let required_key = consumer.values()[0]["required"][0]
             .as_str()
             .expect("consumer strings are valid Rust strings");
@@ -3084,11 +4053,15 @@ mod utf16_document_tests {
     fn current_display_apis_do_not_replace_the_exact_flat_source() {
         let mut frame =
             Utf16JsonProjection::parse(r#"{"count":1,"nested":{"text":"source-\ud800"}}"#).unwrap();
-        assert_eq!(frame.value["nested"]["text"], "source-�");
+        let display = frame.try_to_serde_value_with_array_budget(256).unwrap();
+        assert_eq!(display["nested"]["text"], "source-�");
         frame
             .set_pointer("/count", Utf16JsonProjection::plain(serde_json::json!(2)))
             .unwrap();
-        assert_eq!(frame.value["count"].as_f64(), Some(2.0));
+        assert_eq!(
+            frame.try_to_serde_value_with_array_budget(256).unwrap()["count"].as_f64(),
+            Some(2.0)
+        );
         assert_eq!(
             frame.string_units("/nested/text"),
             Some("source-".encode_utf16().chain([0xd800]).collect())
@@ -3103,7 +4076,9 @@ mod utf16_document_tests {
     fn display_rebase_keeps_unchanged_surrogate_keys_and_values() {
         let mut projection =
             Utf16JsonProjection::parse(r#"{"\ud800":"value-\ud801","keep":"same"}"#).unwrap();
-        let mut changed = projection.value.clone();
+        let mut changed = projection
+            .try_to_serde_value_with_array_budget(256)
+            .unwrap();
         changed["keep"] = serde_json::json!("updated");
         projection.rebase_display_value(changed).unwrap();
 
@@ -3210,11 +4185,18 @@ mod flat_string_mapper_tests {
             r#"{"kept":"\ud800","changed":"\ud801","gone":{"\ud802":1}}"#,
         )
         .unwrap();
-        let mut value = projection.value.clone();
+        let mut value = projection
+            .try_to_serde_value_with_array_budget(256)
+            .unwrap();
         value["changed"] = serde_json::Value::String("plain".to_owned());
         value.as_object_mut().unwrap().remove("gone");
         projection.rebase_display_value(value.clone()).unwrap();
-        assert_eq!(projection.value, value);
+        assert_eq!(
+            projection
+                .try_to_serde_value_with_array_budget(256)
+                .unwrap(),
+            value
+        );
         assert_eq!(projection.string_units("/kept"), Some(vec![0xd800]));
         projection.validate().unwrap();
         assert_eq!(

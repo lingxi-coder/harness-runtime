@@ -4171,9 +4171,10 @@ mod tests {
         assert_eq!(agents.agent_settings["s"], json!("escaped"));
         assert_eq!(agents.agent_settings["b"], json!("bom"));
         assert_eq!(agents.agent_settings["c"], json!("crlf"));
-        assert!(
-            !agents.agent_settings.contains_key("i"),
-            "only the file's leading BOM is stripped"
+        assert_eq!(
+            agents.agent_settings.get("i"),
+            Some(&json!("inner-bom")),
+            "Native X5e trims a BOM at each JSONL row boundary"
         );
         let worktrees = route_rows_of_types(&content, &["worktree-state"]);
         assert_eq!(worktrees.worktree_states, full.worktree_states);

@@ -207,6 +207,9 @@ impl NativeQueryResultPublisher<'_> {
     }
 
     async fn release_held_results(&mut self, stopping: bool) {
+        if self.runtime.policy_helper_refusal.current().is_some() {
+            return;
+        }
         let cost = self.runtime.orchestrator.snapshot_cost().await;
         let model = self
             .runtime
@@ -225,6 +228,9 @@ impl NativeQueryResultPublisher<'_> {
                 .await
                 .map(|stats| serde_json::to_value(stats).expect("agent statistics")),
         );
+        if self.runtime.policy_helper_refusal.current().is_some() {
+            return;
+        }
         self.stream.release_sdk_results(stopping);
         self.prompt_suggestions.emit_pending(self.stream);
         let _ = self.stream.flush().await;
@@ -254,6 +260,9 @@ impl NativeQueryResultPublisher<'_> {
         result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
         queued: usize,
     ) {
+        if self.runtime.policy_helper_refusal.current().is_some() {
+            return;
+        }
         if result.is_ok() {
             self.runtime.execution_interrupted.store(
                 matches!(result, Ok(orchestrator::TurnOutcome::Cancelled)),
@@ -303,6 +312,9 @@ impl NativeQueryResultPublisher<'_> {
                 .map(|stats| serde_json::to_value(stats).expect("agent statistics")),
         );
         set_result_position(self.runtime, self.stream, queued, self.next_index).await;
+        if self.runtime.policy_helper_refusal.current().is_some() {
+            return;
+        }
         self.last_result_failed = result.is_err()
             || self
                 .runtime
@@ -367,8 +379,13 @@ impl NativeQueryResultPublisher<'_> {
 
 /// Drive a one-shot conversation: either a `/slash-command` or a normal
 /// prompt that runs through the orchestrator turn loop.
-pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
-    run_print_owned(runtime, run_oneshot_inner(argv, runtime, sink)).await
+pub fn run_oneshot<'a>(
+    argv: &'a Argv,
+    runtime: &'a Runtime,
+    sink: &'a dyn OutputSink,
+) -> futures::future::BoxFuture<'a, i32> {
+    let operation = Box::pin(run_oneshot_inner(argv, runtime, sink));
+    Box::pin(run_print_owned(runtime, operation))
 }
 
 async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
@@ -383,7 +400,9 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
     }
     if let Err(error) = runtime.flush_prepared_fork_history().await {
         runtime.record_execution_error(&error);
-        sink.error("runtime", &error).await;
+        if runtime.policy_helper_refusal.current().is_none() {
+            sink.error("runtime", &error).await;
+        }
         return exit_codes::RUNTIME_ERROR;
     }
 
@@ -415,7 +434,9 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
                 }
                 Err(error) => {
                     runtime.record_execution_error(&error);
-                    sink.error("task_message", &error).await;
+                    if runtime.policy_helper_refusal.current().is_none() {
+                        sink.error("task_message", &error).await;
+                    }
                     exit_codes::RUNTIME_ERROR
                 }
             };
@@ -527,7 +548,9 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
         Ok(_outcome) => exit_codes::SUCCESS,
         Err(e) => {
             runtime.record_execution_error(&e);
-            sink.error("runtime", &e.to_string()).await;
+            if runtime.policy_helper_refusal.current().is_none() {
+                sink.error("runtime", &e.to_string()).await;
+            }
             exit_codes::RUNTIME_ERROR
         }
     }
@@ -558,6 +581,9 @@ async fn run_stream_compact_command(
             cancel,
         )
         .await;
+    if runtime.policy_helper_refusal.current().is_some() {
+        return;
+    }
     // A successful boundary emits the init frame immediately before itself.
     // A failed attempt has no boundary but still completes a local SDK command.
     if result.is_err() {
@@ -587,6 +613,9 @@ async fn run_stream_compact_command(
         )
         .await;
     let cost = runtime.orchestrator.snapshot_cost().await;
+    if runtime.policy_helper_refusal.current().is_some() {
+        return;
+    }
     stream
         .emit_compact_command_result(
             &cost,
@@ -607,6 +636,9 @@ pub async fn run_stream_json_print(
     run_print_owned(runtime, async {
         let code =
             run_stream_json_print_inner(argv, runtime, stream.clone(), permission_mode).await;
+        if runtime.policy_helper_refusal.current().is_some() {
+            return exit_codes::RUNTIME_ERROR;
+        }
         // Publish the native JSON result before entering the shared
         // shutdown barrier. Stream-json has already delivered each frame.
         let cost = runtime.orchestrator.snapshot_cost().await;
@@ -619,6 +651,9 @@ pub async fn run_stream_json_print(
                 serde_json::to_value(stats).expect("agent statistics are JSON scalars")
             }),
         );
+        if runtime.policy_helper_refusal.current().is_some() {
+            return exit_codes::RUNTIME_ERROR;
+        }
         if stream.publish_json().await.is_err() {
             exit_codes::RUNTIME_ERROR
         } else {
@@ -751,7 +786,7 @@ async fn run_stream_json_print_inner(
         resolve_fast_mode_state(&model_str, fast_mode_disabled_reason, sdk_fast_mode_opt_in);
 
     // Build the init parameters now that the runtime is available.
-    let init_params = build_init_params(
+    let mut init_params = build_init_params(
         &session_id_str,
         tool_names,
         mcp_servers,
@@ -768,6 +803,11 @@ async fn run_stream_json_print_inner(
         fast_mode_disabled_reason,
         init_host_metadata(runtime),
     );
+    init_params.model_source = runtime
+        .orchestrator
+        .get_status_snapshot()
+        .await
+        .model_source;
 
     // Thread the real params + session_id into the stream.
     stream.set_init_params(init_params).await;
@@ -899,8 +939,12 @@ async fn run_stream_json_print_inner(
     publisher
         .release_held_results(wind_down.is_err() || runtime.shutdown.is_cancelled())
         .await;
-    prompt_suggestions.settle().await;
-    prompt_suggestions.emit_pending(&stream);
+    if runtime.policy_helper_refusal.current().is_none() {
+        prompt_suggestions.settle().await;
+        if runtime.policy_helper_refusal.current().is_none() {
+            prompt_suggestions.emit_pending(&stream);
+        }
+    }
     match wind_down {
         Ok(()) if !publisher.last_result_failed => exit_codes::SUCCESS,
         Ok(()) => exit_codes::RUNTIME_ERROR,
@@ -1039,7 +1083,7 @@ async fn run_stream_json_input_loop_inner(
     let fast_mode_state =
         resolve_fast_mode_state(&model_str, fast_mode_disabled_reason, sdk_fast_mode_opt_in);
 
-    let init_params = build_init_params(
+    let mut init_params = build_init_params(
         &session_id_str,
         tool_names,
         mcp_servers,
@@ -1056,6 +1100,11 @@ async fn run_stream_json_input_loop_inner(
         fast_mode_disabled_reason,
         init_host_metadata(runtime),
     );
+    init_params.model_source = runtime
+        .orchestrator
+        .get_status_snapshot()
+        .await
+        .model_source;
 
     stream.set_init_params(init_params).await;
 
@@ -1723,8 +1772,12 @@ async fn run_stream_json_input_loop_inner(
         )
         .await;
     // Native HS.settle runs before auxiliary/control-owner teardown.
-    prompt_suggestions.settle().await;
-    prompt_suggestions.emit_pending(&stream);
+    if runtime.policy_helper_refusal.current().is_none() {
+        prompt_suggestions.settle().await;
+        if runtime.policy_helper_refusal.current().is_none() {
+            prompt_suggestions.emit_pending(&stream);
+        }
+    }
 
     input_rx.close().await;
     reader.stop();
@@ -1752,9 +1805,16 @@ async fn run_stream_json_input_loop_inner(
         }
     }
 
-    if !had_any_turn && publisher.next_index == 0 && last_turn_err.is_none() {
+    if runtime.policy_helper_refusal.current().is_none()
+        && !had_any_turn
+        && publisher.next_index == 0
+        && last_turn_err.is_none()
+    {
         // No user turns received — emit an empty-result envelope.
         let cost = runtime.orchestrator.snapshot_cost().await;
+        if runtime.policy_helper_refusal.current().is_some() {
+            return exit_codes::RUNTIME_ERROR;
+        }
         stream
             .emit_result_success(
                 &Utf16JsonProjection::from(""),
@@ -1878,22 +1938,26 @@ async fn run_structured_output(
             }
             Err(error) => {
                 runtime.record_execution_error(&error);
-                sink.error("structured_output", &error.to_string()).await;
+                if runtime.policy_helper_refusal.current().is_none() {
+                    sink.error("structured_output", &error.to_string()).await;
+                }
                 exit_codes::RUNTIME_ERROR
             }
         },
         Ok(None) => exit_codes::SUCCESS,
         Err(error) => {
             runtime.record_execution_error(&error);
-            sink.error(
-                if stream_json_error_subtype(&error) == "error_max_structured_output_retries" {
-                    "structured_output"
-                } else {
-                    "runtime"
-                },
-                &error.to_string(),
-            )
-            .await;
+            if runtime.policy_helper_refusal.current().is_none() {
+                sink.error(
+                    if stream_json_error_subtype(&error) == "error_max_structured_output_retries" {
+                        "structured_output"
+                    } else {
+                        "runtime"
+                    },
+                    &error.to_string(),
+                )
+                .await;
+            }
             exit_codes::RUNTIME_ERROR
         }
     }
@@ -1988,9 +2052,22 @@ async fn run_slash_command_with_budget(
         is_fullscreen: false,
         columns: 80,
     };
-    match command_api::with_mod_command_context(context, runtime.dispatcher.dispatch(input.clone()))
-        .await
+    let cancellation = runtime.turn_cancel();
+    match command_api::with_mod_command_context(
+        context,
+        runtime.dispatcher.dispatch(input.clone(), cancellation),
+    )
+    .await
     {
+        SlashDispatchResult::Failed { diagnostic } => {
+            let message = diagnostic
+                .string_at("/message")
+                .or_else(|| diagnostic.string_at(""))
+                .unwrap_or("command settings failed");
+            runtime.record_execution_error(message);
+            sink.error("command", message).await;
+            exit_codes::RUNTIME_ERROR
+        }
         SlashDispatchResult::Handled { display } => {
             let display_text = display.string_at("").unwrap_or_default();
             sink.command_output("", display_text).await;
@@ -2059,7 +2136,9 @@ async fn run_slash_command_with_budget(
                 Ok(_outcome) => exit_codes::SUCCESS,
                 Err(e) => {
                     runtime.record_execution_error(&e);
-                    sink.error("runtime", &e.to_string()).await;
+                    if runtime.policy_helper_refusal.current().is_none() {
+                        sink.error("runtime", &e.to_string()).await;
+                    }
                     exit_codes::RUNTIME_ERROR
                 }
             }
@@ -2106,7 +2185,9 @@ async fn run_slash_command_with_budget(
                 Ok(_outcome) => exit_codes::SUCCESS,
                 Err(e) => {
                     runtime.record_execution_error(&e);
-                    sink.error("runtime", &e.to_string()).await;
+                    if runtime.policy_helper_refusal.current().is_none() {
+                        sink.error("runtime", &e.to_string()).await;
+                    }
                     exit_codes::RUNTIME_ERROR
                 }
             }
@@ -2142,8 +2223,10 @@ async fn run_slash_command_with_budget(
             // Defensive: only reached when caller violated the slash-prefix
             // contract.
             runtime.record_execution_error("not a slash command (internal error)");
-            sink.error("runtime", "not a slash command (internal error)")
-                .await;
+            if runtime.policy_helper_refusal.current().is_none() {
+                sink.error("runtime", "not a slash command (internal error)")
+                    .await;
+            }
             exit_codes::RUNTIME_ERROR
         }
     }
@@ -2232,7 +2315,9 @@ async fn run_fallback_prompt_turn(
         Ok(_) => exit_codes::SUCCESS,
         Err(error) => {
             runtime.record_execution_error(&error);
-            sink.error("runtime", &error.to_string()).await;
+            if runtime.policy_helper_refusal.current().is_none() {
+                sink.error("runtime", &error.to_string()).await;
+            }
             exit_codes::RUNTIME_ERROR
         }
     }

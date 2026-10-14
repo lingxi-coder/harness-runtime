@@ -40,6 +40,12 @@ pub enum TranscriptAppendOutcome {
     AlreadyPresent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DuplicatePayloadPolicy {
+    Exact,
+    PendingPrompt,
+}
+
 /// Durable transcript errors.  A conflict is never repaired by appending a
 /// second interpretation of the same delivery id.
 #[derive(Debug, Error)]
@@ -427,10 +433,66 @@ impl DurableTranscriptWriter {
         transcript_identity: &RootIdentity,
         transcript_relative: &Path,
         delivery_id: &str,
-        mut payload: Utf16JsonProjection,
+        payload: Utf16JsonProjection,
         stamp_delivery_id: bool,
         identity_registration: Option<(&IdentityLogStore, &Path)>,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        if payload.object_entries().is_none() {
+            return Err(TranscriptWriterError::PayloadNotObject);
+        }
+        if !stamp_delivery_id && payload.contains_property("deliveryId") {
+            return Err(TranscriptWriterError::NativeDeliveryIdField);
+        }
+        let message_uuid = payload
+            .string_at("/uuid")
+            .filter(|uuid| !uuid.is_empty())
+            .ok_or(TranscriptWriterError::MissingMessageUuid)?
+            .to_string();
+        let (outcome, last_uuid) = self.append_json_once_at_locked_with_policy(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            delivery_id,
+            payload,
+            stamp_delivery_id,
+            identity_registration,
+            DuplicatePayloadPolicy::Exact,
+        )?;
+        Ok((outcome, last_uuid.as_deref() == Some(message_uuid.as_str())))
+    }
+
+    fn append_pending_prompt_json_once_at_locked(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        message_uuid: &str,
+        payload: Utf16JsonProjection,
+        identity_registration: Option<(&IdentityLogStore, &Path)>,
+    ) -> Result<(TranscriptAppendOutcome, Option<String>), TranscriptWriterError> {
+        self.append_json_once_at_locked_with_policy(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            message_uuid,
+            payload,
+            false,
+            identity_registration,
+            DuplicatePayloadPolicy::PendingPrompt,
+        )
+    }
+
+    fn append_json_once_at_locked_with_policy(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        delivery_id: &str,
+        mut payload: Utf16JsonProjection,
+        stamp_delivery_id: bool,
+        identity_registration: Option<(&IdentityLogStore, &Path)>,
+        comparison_policy: DuplicatePayloadPolicy,
+    ) -> Result<(TranscriptAppendOutcome, Option<String>), TranscriptWriterError> {
         if payload.object_entries().is_none() {
             return Err(TranscriptWriterError::PayloadNotObject);
         }
@@ -454,8 +516,13 @@ impl DurableTranscriptWriter {
                 Some(transcript_identity),
             ) {
                 Ok(file) => {
-                    let (missing_delimiter, matching, last_uuid) =
-                        self.scan_existing(file, delivery_id, &message_uuid, &payload)?;
+                    let (missing_delimiter, matching, last_uuid) = self.scan_existing(
+                        file,
+                        delivery_id,
+                        &message_uuid,
+                        &payload,
+                        comparison_policy,
+                    )?;
                     (true, missing_delimiter, matching, last_uuid)
                 }
                 Err(FsError::NotFound(_)) => (false, false, None, None),
@@ -476,8 +543,7 @@ impl DurableTranscriptWriter {
                     transcript_relative,
                 )?;
             }
-            return outcome
-                .map(|outcome| (outcome, last_uuid.as_deref() == Some(message_uuid.as_str())));
+            return outcome.map(|outcome| (outcome, last_uuid));
         }
         // Parentage is part of the immutable transcript payload. Resolve it
         // only after the UUID duplicate check, while the same transaction is
@@ -548,7 +614,7 @@ impl DurableTranscriptWriter {
             )
             .map_err(TranscriptWriterError::WrittenButNotDurable)?;
         }
-        Ok((TranscriptAppendOutcome::Appended, true))
+        Ok((TranscriptAppendOutcome::Appended, Some(message_uuid)))
     }
 
     fn sync_existing_match(
@@ -602,6 +668,7 @@ impl DurableTranscriptWriter {
         delivery_id: &str,
         message_uuid: &str,
         payload: &Utf16JsonProjection,
+        comparison_policy: DuplicatePayloadPolicy,
     ) -> Result<
         (
             bool,
@@ -670,6 +737,7 @@ impl DurableTranscriptWriter {
                         delivery_id,
                         message_uuid,
                         &expected,
+                        comparison_policy,
                         &mut matching,
                     )?
                 };
@@ -704,6 +772,7 @@ impl DurableTranscriptWriter {
                     delivery_id,
                     message_uuid,
                     &expected,
+                    comparison_policy,
                     &mut matching,
                 )?
             };
@@ -721,6 +790,7 @@ impl DurableTranscriptWriter {
         delivery_id: &str,
         message_uuid: &str,
         expected: &TranscriptExpectation,
+        comparison_policy: DuplicatePayloadPolicy,
         matching: &mut Option<Result<TranscriptAppendOutcome, TranscriptWriterError>>,
     ) -> Result<Option<String>, TranscriptWriterError> {
         if line.is_empty() {
@@ -760,10 +830,32 @@ impl DurableTranscriptWriter {
                     .remove_field("parentUuid")
                     .map_err(crate::jsonl::exact_json::projection_error)?;
             }
+            if comparison_policy == DuplicatePayloadPolicy::PendingPrompt {
+                comparable_actual
+                    .remove_field("timestamp")
+                    .map_err(crate::jsonl::exact_json::projection_error)?;
+                comparable_expected
+                    .remove_field("timestamp")
+                    .map_err(crate::jsonl::exact_json::projection_error)?;
+            }
+            let duplicate_payload_matches = match comparison_policy {
+                DuplicatePayloadPolicy::Exact => comparable_actual == comparable_expected,
+                DuplicatePayloadPolicy::PendingPrompt => {
+                    // JSONL already contains the result of Native JSON
+                    // serialization. Compare pending retries at that same
+                    // boundary: values such as -0 and 1e309 are observable as
+                    // 0 and null respectively after JSON.stringify, while
+                    // source property order and UTF-16 code units remain
+                    // significant. Do not use projection semantic equality,
+                    // which would normalize object order differently.
+                    crate::jsonl::exact_json::stringify_projection(&comparable_actual)?
+                        == crate::jsonl::exact_json::stringify_projection(&comparable_expected)?
+                }
+            };
             // Native rows identify their prepared UUID alone. Fusion rows
             // carry the current delivery identity as well. A retry must use
             // the same format and immutable payload as its original append.
-            let outcome = if identities_agree && comparable_actual == comparable_expected {
+            let outcome = if identities_agree && duplicate_payload_matches {
                 Ok(TranscriptAppendOutcome::AlreadyPresent)
             } else {
                 Err(TranscriptWriterError::DeliveryConflict {
@@ -1120,6 +1212,34 @@ impl DurableTranscriptTransaction<'_> {
             delivery_id,
             payload,
             false,
+            Some((identity_store, transcript_path)),
+        )
+    }
+
+    /// Append a pending user-prompt row once by its stable UUID. Duplicate
+    /// comparison preserves every source field except the regenerated
+    /// timestamp and transaction-derived parent UUID.
+    pub(crate) fn append_pending_prompt_json_once_at_with_tip_identity(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        message_uuid: &str,
+        payload: Utf16JsonProjection,
+        identity_store: &IdentityLogStore,
+        transcript_path: &Path,
+    ) -> Result<(TranscriptAppendOutcome, Option<String>), TranscriptWriterError> {
+        if payload.string_at("/uuid") != Some(message_uuid) {
+            return Err(TranscriptWriterError::DeliveryConflict {
+                delivery_id: message_uuid.to_string(),
+            });
+        }
+        self.writer.append_pending_prompt_json_once_at_locked(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            message_uuid,
+            payload,
             Some((identity_store, transcript_path)),
         )
     }

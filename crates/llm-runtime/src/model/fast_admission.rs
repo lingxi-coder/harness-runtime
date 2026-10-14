@@ -425,7 +425,7 @@ impl Policy {
         }
     }
 }
-pub type PolicySource = Arc<dyn Fn() -> Policy + Send + Sync>;
+pub type PolicySource = Arc<dyn Fn() -> Result<Policy, crate::error::LlmError> + Send + Sync>;
 
 #[cfg(test)]
 mod tests {

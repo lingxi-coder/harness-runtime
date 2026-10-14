@@ -174,6 +174,7 @@ fn orch_with_tools(names: &[&'static str]) -> ConversationOrchestrator {
 async fn wire_tool_names(orch: &ConversationOrchestrator) -> Vec<String> {
     orch.build_wire_tools()
         .await
+        .expect("the named-tool fixture builds its wire tool list")
         .0
         .into_iter()
         .map(|tool| tool.name)
@@ -380,7 +381,10 @@ async fn an_ordinary_auth_failure_is_not_reported_as_an_expired_login() {
 #[tokio::test]
 async fn main_thread_agent_prompt_replaces_default() {
     let orch = orch_with_config(OrchestratorConfig::default());
-    let default = orch.assemble_system_prompt_preview().await;
+    let default = orch
+        .assemble_system_prompt_preview()
+        .await
+        .expect("valid fixture settings assemble a system prompt");
     orch.set_main_thread_agent(
         "code-reviewer".to_string(),
         Some("You are a meticulous code reviewer.".into()),
@@ -389,7 +393,10 @@ async fn main_thread_agent_prompt_replaces_default() {
         None,
     )
     .await;
-    let after = orch.assemble_system_prompt_preview().await;
+    let after = orch
+        .assemble_system_prompt_preview()
+        .await
+        .expect("valid fixture settings assemble a system prompt");
     assert_eq!(after, "You are a meticulous code reviewer.");
     assert_ne!(
         after, default,
@@ -414,7 +421,9 @@ async fn system_prompt_override_beats_main_thread_agent() {
     )
     .await;
     assert_eq!(
-        orch.assemble_system_prompt_preview().await,
+        orch.assemble_system_prompt_preview()
+            .await
+            .expect("valid fixture settings assemble a system prompt"),
         "EXPLICIT --system-prompt wins"
     );
 }
@@ -424,7 +433,10 @@ async fn system_prompt_override_beats_main_thread_agent() {
 #[tokio::test]
 async fn main_thread_agent_without_prompt_uses_default() {
     let orch = orch_with_config(OrchestratorConfig::default());
-    let default = orch.assemble_system_prompt_preview().await;
+    let default = orch
+        .assemble_system_prompt_preview()
+        .await
+        .expect("valid fixture settings assemble a system prompt");
     orch.set_main_thread_agent(
         "promptless".to_string(),
         None,
@@ -433,7 +445,12 @@ async fn main_thread_agent_without_prompt_uses_default() {
         None,
     )
     .await;
-    assert_eq!(orch.assemble_system_prompt_preview().await, default);
+    assert_eq!(
+        orch.assemble_system_prompt_preview()
+            .await
+            .expect("valid fixture settings assemble a system prompt"),
+        default
+    );
 }
 
 /// The adopted agent's `agentType` rides main-thread lifecycle hook payloads
@@ -1017,6 +1034,7 @@ async fn provider_invalid_request_uses_status_gated_native_error_copy() {
                 thinking_resumption_refused: false,
                 thinking_resumption_beta_requested: None,
                 thinking_resumption_beta_refused: false,
+                response: None,
             }),
         }
     };

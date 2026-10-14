@@ -14,6 +14,7 @@ use client::protocol::audio::AudioCapabilitySnapshotDto;
 use client::protocol::computer_access::ComputerAccessRequestDto;
 use client::protocol::events::ClientEvent;
 use client::protocol::permission::PermissionRequest;
+use client::protocol::text::ClientTextDto;
 use client::protocol::version::CLIENT_PROTOCOL_VERSION;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::de::IgnoredAny;
@@ -159,8 +160,8 @@ pub struct BridgeResponse {
 pub struct BridgeWireError {
     /// Numeric error code (JSON-RPC convention).
     pub code: i32,
-    /// Log-safe error message.
-    pub message: String,
+    /// Error text carried as a JSON string while preserving exact UTF-16 units.
+    pub message: ClientTextDto,
 }
 
 /// Server → client auth challenge. // M9: JWT/nonce flow.

@@ -890,6 +890,7 @@ pub(crate) fn orchestrator_error_text_source(
     model: &str,
 ) -> Utf16JsonProjection {
     match error {
+        OrchestratorError::Settings(error) => error.message_projection(),
         OrchestratorError::MaxStructuredOutputRetries {
             max_retries,
             last_error: Some(detail),
@@ -1074,6 +1075,7 @@ mod source_error_tests {
                 thinking_resumption_refused: false,
                 thinking_resumption_beta_requested: None,
                 thinking_resumption_beta_refused: false,
+                response: None,
             }),
         })
     }
@@ -1102,6 +1104,27 @@ mod source_error_tests {
         assert_eq!(
             orchestrator_error_text_source(&error(units.clone(), false), "model").string_units(""),
             Some(units)
+        );
+    }
+
+    #[test]
+    fn settings_error_text_keeps_its_source_utf16_units() {
+        let message = Utf16JsonProjection::parse(r#""managed policy \ud800 failed""#).unwrap();
+        let diagnostics = Utf16JsonProjection::parse(
+            r#"{"kind":"read","message":"managed policy \ud800 failed"}"#,
+        )
+        .unwrap();
+        let error =
+            OrchestratorError::Settings(lingxi_core::settings::SettingsError::source_failure(
+                "incomplete_managed_selection",
+                message.clone(),
+                diagnostics,
+                None,
+            ));
+
+        assert_eq!(
+            orchestrator_error_text_source(&error, "model").string_units(""),
+            message.string_units("")
         );
     }
 }

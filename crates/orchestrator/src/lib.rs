@@ -52,6 +52,7 @@ pub mod mod_prompt_origin;
 pub mod mod_surface_roster;
 pub mod mod_turn_step;
 pub mod model;
+pub(crate) mod model_validation;
 pub mod native_computer;
 pub mod native_user_message_source;
 pub mod prompt;
@@ -113,8 +114,9 @@ pub use config::{
     QUERY_SOURCE_SDK,
 };
 pub use conversation::{
-    realtime_history, skill_prompt_inputs, QueuedPromptInput, RealtimeAgentContext,
-    RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits, ScheduledLoopFire,
+    realtime_history, skill_prompt_inputs, PendingPromptIdentity, QueuedPromptInput,
+    RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits,
+    ScheduledLoopFire,
 };
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
@@ -131,6 +133,7 @@ pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };
 pub use provider_adapter::ProviderApiAdapter;
+pub use request_context::PromptIngressKind;
 pub use request_context::RequestContextTranscriptAttachment;
 pub use resume::{
     client_state_tool_results_from_messages, deferred_tool_replays_from_messages,

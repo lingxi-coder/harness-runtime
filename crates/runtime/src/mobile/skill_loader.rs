@@ -479,8 +479,13 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         agent_type: &str,
         cwd: Option<&std::path::Path>,
         model: Option<&str>,
+        cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<Option<SkillLoad>, String> {
-        let registry = self.registry.read().await;
+        let registry = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err("Agent skill preload cancelled".into()),
+            registry = self.registry.read() => registry,
+        };
         let Some(resolved) = Self::resolve_agent_skill_name(&registry, skill_name, agent_type)
         else {
             return Ok(None);
@@ -541,6 +546,9 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         }
         if let Some(session_id) = descriptor.session_id {
             body = replace_prompt_text(&body, &product_prompt_token("SESSION_ID"), &session_id);
+        }
+        if cancellation.is_cancelled() {
+            return Err("Agent skill preload cancelled".into());
         }
         let body_units = body
             .string_units("")
@@ -767,6 +775,7 @@ mod tests {
             "acme-plugin:designer",
             None,
             None,
+            lingxi_core::host::CancellationToken::new(),
         )
         .await
         .expect("checked skill preload")
@@ -804,6 +813,7 @@ mod tests {
             "acme-plugin:designer",
             None,
             None,
+            lingxi_core::host::CancellationToken::new(),
         )
         .await
         .expect("checked skill preload")
@@ -993,7 +1003,8 @@ mod tests {
                 "loop",
                 "agent",
                 Some(Path::new("/child")),
-                Some("claude-fable-5")
+                Some("claude-fable-5"),
+                lingxi_core::host::CancellationToken::new()
             )
             .await
             .unwrap_err(),

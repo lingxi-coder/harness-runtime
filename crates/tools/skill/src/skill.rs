@@ -1600,6 +1600,9 @@ present this turn, the skill is loaded — follow it directly rather than callin
                 &shell_ctx,
                 &slash_command_name,
                 desc.shell,
+                ctx.cancel
+                    .clone()
+                    .unwrap_or_else(lingxi_core::host::CancellationToken::new),
             )
             .await
             {

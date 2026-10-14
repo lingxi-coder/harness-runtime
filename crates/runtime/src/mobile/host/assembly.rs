@@ -689,7 +689,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         )
         .with_fast_policy_source({
             let home = cfg.lingxi_home.clone();
-            Arc::new(move || crate::fast_settings::policy(&home, None, &[]))
+            Arc::new(move || crate::fast_settings::policy(&home, None, &[]).map_err(Into::into))
         })
         .with_interactive_session(interactive_launch)
         .with_effort_table_options(crate::effort_settings::table_options(&cfg.lingxi_home))
@@ -698,15 +698,22 @@ pub(super) async fn build_mobile_inner_with_ask(
             Arc::new(move || {
                 super::provider_services::mobile_effective_settings(&effort_cfg)
                     .map(|settings| settings.effort_layers)
-                    .unwrap_or_default()
             })
         })
+        .map_err(|error| {
+            MobileBuildError::Orchestrator(format!(
+                "settings source failed: {}",
+                error
+                    .diagnostic_projection()
+                    .to_json_string()
+                    .expect("settings diagnostic is valid JSON")
+            ))
+        })?
         .with_prompt_cache_ttl_settings_source({
             let cache_cfg = cfg.clone();
             Arc::new(move || {
                 super::provider_services::mobile_effective_settings(&cache_cfg)
                     .map(|settings| settings.settings.prompt_cache_ttl_settings())
-                    .unwrap_or_default()
             })
         }),
     );
@@ -2122,7 +2129,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     tools.set_bash_precommit_skills_provider(move || {
         let provider = child_skill_listing_provider.clone();
         async move {
-            let snapshot = provider.skill_listing_snapshot().await;
+            let snapshot = provider.skill_listing_snapshot().await?;
             provider.bash_precommit_skills(&snapshot.entries).await
         }
     });
@@ -2322,18 +2329,28 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Mobile currently has no managed-settings tier; this is the same empty
     // overlay previously exposed by its SettingsContext, shared with the Mod
     // reader rather than implying a separate policy source.
-    let mod_settings_managed = std::collections::BTreeMap::new();
+    let mod_settings_managed = ::configuration_admin::settings_bridge::empty_settings_source();
     let mut mod_settings_active = ::configuration_admin::settings_bridge::active_settings_baseline(
         &mod_settings_reader_paths,
         &mod_settings_managed,
-    );
-    mod_settings_active.insert(
-        "providerRegion".into(),
-        serde_json::to_value(provider_region).expect("region serializes"),
-    );
+    )
+    .map_err(|error| {
+        MobileBuildError::Orchestrator(
+            ::configuration_admin::settings_bridge::settings_error_message(&error),
+        )
+    })?;
+    let region_value = serde_json::to_value(provider_region).expect("region serializes");
+    mod_settings_active
+        .set_field(
+            "providerRegion",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&region_value)
+                .expect("provider region is valid source JSON"),
+        )
+        .map_err(|error| MobileBuildError::Orchestrator(error.to_string()))?;
     let mod_settings_active = Arc::new(std::sync::RwLock::new(mod_settings_active));
 
     let mod_prompt_output = output.clone();
+    let expansion_hook_executor = hooks.clone();
     let mut orch_inner = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -2604,6 +2621,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                     session: session.clone(),
                     api: api_service.clone(),
                     model_resolution: model_resolution_context_provider.clone(),
+                    main_model_source: orch.configured_model_source_handle(),
                 });
             let native_prompt_context: Arc<
                 dyn crate::insights::InsightsNativeSideQueryContextProvider,
@@ -2707,6 +2725,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     }
     let prompt_paths_orch = orch.clone();
     let bundled_prompt_model_orch = orch.clone();
+    let expansion_ctx_orch = orch.clone();
     let skill_prompt_transformer = crate::skill_prompt::mod_skill_prompt_transformer(
         hook_registry.clone(),
         mod_session.clone(),
@@ -2714,6 +2733,13 @@ pub(super) async fn build_mobile_inner_with_ask(
     );
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_skill_prompt_transformer(skill_prompt_transformer)
+        .with_expansion_hooks(
+            expansion_hook_executor,
+            std::sync::Arc::new(move || {
+                let orch = expansion_ctx_orch.clone();
+                Box::pin(async move { orch.expansion_hook_context().await })
+            }),
+        )
         .with_prompt_paths(Arc::new(move || {
             (
                 prompt_paths_orch.project_root(),
@@ -2997,6 +3023,18 @@ pub fn build_mobile_engine_inner(
 
     let skill_count = crate::mobile::mobile_skill_registry().len();
     let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
+    let initial_session_uuid = inner
+        .active_session_uuid
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    runtime
+        .block_on(rebuild_mobile_prompt_dispatch_cache(
+            &message_queue,
+            &durable_turns,
+            &initial_session_uuid,
+        ))
+        .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
     inner.main_report_waker.bind_queue(message_queue.clone());
     runtime.block_on(async {
         if let Err(error) = inner.orchestrator.recover_main_reports().await {
@@ -3045,11 +3083,14 @@ pub fn build_mobile_engine_inner(
         .set_mid_turn_input(Arc::new(MobileMsgQueueInput {
             queue: message_queue.clone(),
             loop_state: loop_state.clone(),
+            durable_turns: durable_turns.clone(),
+            active_session_uuid: inner.active_session_uuid.clone(),
         }));
     let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
     inner.orchestrator.set_cancel_reason(cancel_reason.clone());
     runtime.block_on({
         let message_queue = message_queue.clone();
+        let durable_turns = durable_turns.clone();
         let cancel_reason = cancel_reason.clone();
         async move {
             message_queue
@@ -3071,6 +3112,8 @@ pub fn build_mobile_engine_inner(
     }
 
     let settings_write_lock = mobile_settings_write_lock(&lingxi_home.join("settings.json"));
+    let queued_slash_handle =
+        Arc::new(std::sync::OnceLock::<std::sync::Weak<MobileEngineHandle>>::new());
     // Use the native turn slot and permission owner, exactly like SendPrompt.
     // Capture runtime components, never the handle itself: retaining/upgrading
     // the FFI Arc on a runtime worker can make that worker drop its own Runtime.
@@ -3079,6 +3122,10 @@ pub fn build_mobile_engine_inner(
         let orch = inner.orchestrator.clone();
         let permission_gate = inner.permission_gate.clone();
         let session_uuid = inner.active_session_uuid.clone();
+        let session_writer = inner.session_writer.clone();
+        let durable_turns = durable_turns.clone();
+        let lingxi_home = lingxi_home.clone();
+        let session_cwd = session_cwd.clone();
         let message_output = inner.message_output.clone();
         let sink = event_sink.clone();
         let active_cancel = active_cancel.clone();
@@ -3086,6 +3133,7 @@ pub fn build_mobile_engine_inner(
         let cancel_reason = cancel_reason.clone();
         let loop_scheduler = loop_scheduler.clone();
         let loop_transition = loop_transition.clone();
+        let queued_slash_handle = queued_slash_handle.clone();
         runtime
             .spawn(async move {
                 loop {
@@ -3160,10 +3208,153 @@ pub fn build_mobile_engine_inner(
                         }
                     }
                     let session_id = session_uuid.lock().map(|id| id.clone()).unwrap_or_default();
+                    let mobile_slash_id = scheduled.as_ref().and_then(|command| {
+                        super::parse_mobile_slash_command(&command.uuid, &session_id)
+                    });
+                    if let Some(turn_id) = mobile_slash_id {
+                        let Some(handle) = queued_slash_handle
+                            .get()
+                            .and_then(std::sync::Weak::upgrade)
+                        else {
+                            if let Some(command) = scheduled.clone() {
+                                message_queue.enqueue(command).await;
+                            }
+                            drop(active);
+                            drop(_transition);
+                            continue;
+                        };
+                        drop(active);
+                        drop(_transition);
+                        if let Err(error) = handle
+                            .run_queued_mobile_slash(&session_id, turn_id)
+                            .await
+                        {
+                            sink.emit(ClientEvent::Error {
+                                kind: client::protocol::events::ErrorKindDto::Internal,
+                                message: format!("could not dispatch queued mobile slash: {error}")
+                                    .into(),
+                            })
+                            .await;
+                        }
+                        continue;
+                    }
+                    let mobile_prompt_id = scheduled.as_ref().and_then(|command| {
+                        super::parse_mobile_prompt_command(&command.uuid, &session_id)
+                    });
+                    let mobile_bash_id = mobile_prompt_id.filter(|turn_id| {
+                        durable_turns
+                            .load(&session_id, *turn_id)
+                            .is_ok_and(|checkpoint| checkpoint.is_pending_mobile_bash())
+                    });
+                    if let Some(turn_id) = mobile_bash_id {
+                        let Some(handle) = queued_slash_handle
+                            .get()
+                            .and_then(std::sync::Weak::upgrade)
+                        else {
+                            if let Some(command) = scheduled.clone() {
+                                message_queue.enqueue(command).await;
+                            }
+                            drop(active);
+                            drop(_transition);
+                            continue;
+                        };
+                        drop(active);
+                        drop(_transition);
+                        if let Err(error) = handle
+                            .run_queued_mobile_bash(&session_id, turn_id)
+                            .await
+                        {
+                            sink.emit(ClientEvent::Error {
+                                kind: client::protocol::events::ErrorKindDto::Internal,
+                                message: format!("could not execute queued mobile Bash: {error}")
+                                    .into(),
+                            })
+                            .await;
+                        }
+                        continue;
+                    }
+                    let mut mobile_delivery = if let Some(turn_id) = mobile_prompt_id {
+                        let loaded = durable_turns
+                            .load(&session_id, turn_id)
+                            .and_then(|checkpoint| {
+                                let inputs = checkpoint.queued_prompt_inputs(&durable_turns)?;
+                                let is_dispatch_pending = durable_turns
+                                    .scan_pending(&session_id)?
+                                    .iter()
+                                    .any(|candidate| candidate.turn_id == turn_id);
+                                Ok((checkpoint, inputs, is_dispatch_pending))
+                            });
+                        match loaded {
+                            Ok((checkpoint, inputs, true))
+                                if checkpoint.state.is_none()
+                                    && matches!(
+                                        checkpoint.queue_delivery,
+                                        crate::mobile::turn_durability::QueueDeliveryState::Pending
+                                            | crate::mobile::turn_durability::QueueDeliveryState::CoalescedPending
+                                            | crate::mobile::turn_durability::QueueDeliveryState::CoalescedClaimed
+                                    ) => Some((checkpoint, inputs)),
+                            Ok((checkpoint, _, _)) => {
+                                let stale_ids = checkpoint
+                                    .coalesced_batch
+                                    .as_ref()
+                                    .map(|batch| batch.member_turn_ids.clone())
+                                    .unwrap_or_else(|| vec![checkpoint.turn_id]);
+                                super::remove_mobile_prompt_dispatches(
+                                    &message_queue,
+                                    &session_id,
+                                    &stale_ids,
+                                )
+                                .await;
+                                continue;
+                            }
+                            Err(crate::mobile::turn_durability::DurableTurnStoreError::Terminal { .. })
+                            | Err(crate::mobile::turn_durability::DurableTurnStoreError::NotFound { .. }) => {
+                                if let Some(command) = scheduled.as_ref() {
+                                    message_queue
+                                        .remove(
+                                            &[command.uuid.clone()],
+                                            "remove stale durable mobile prompt dispatch",
+                                        )
+                                        .await;
+                                }
+                                continue;
+                            }
+                            Err(error) => {
+                                if let Some(command) = scheduled.clone() {
+                                    message_queue.enqueue(command).await;
+                                }
+                                sink.emit(ClientEvent::Error {
+                                    kind: client::protocol::events::ErrorKindDto::Internal,
+                                    message: format!("could not load queued mobile prompt: {error}")
+                                        .into(),
+                                })
+                                .await;
+                                continue;
+                            }
+                        }
+                    } else if scheduled
+                        .as_ref()
+                        .is_some_and(|command| {
+                            command.uuid.starts_with("mobile-prompt:")
+                                || command.uuid.starts_with("mobile-slash:")
+                        })
+                    {
+                        // A stale-session or malformed durable cache command is
+                        // never reinterpreted as an ordinary text prompt.
+                        continue;
+                    } else {
+                        None
+                    };
+                    let claimed_turn_id = mobile_delivery
+                        .as_ref()
+                        .map(|(checkpoint, _)| checkpoint.turn_id);
                     let permission_owner_id =
-                        permission_gate.begin_main_turn(Some(session_id.clone()), None);
-                    let turn =
-                        Arc::new(ActiveTurn::new_owned(None, session_id, permission_owner_id));
+                        permission_gate.begin_main_turn(Some(session_id.clone()), claimed_turn_id);
+                    let turn = Arc::new(ActiveTurn::new_owned(
+                        claimed_turn_id,
+                        session_id,
+                        permission_owner_id,
+                    ));
                     *active = Some(turn.clone());
                     drop(active);
                     cancel_reason.reset();
@@ -3171,6 +3362,113 @@ pub fn build_mobile_engine_inner(
                         .register_active_turn(turn.cancel.clone())
                         .await;
                     message_output.reset_message_buffer().await;
+                    if mobile_delivery.is_some() {
+                        if let Err(error) = super::ensure_mobile_session_identity(
+                            &session_writer,
+                            &lingxi_home,
+                            &session_cwd,
+                            &turn.session_id,
+                        )
+                        .await
+                        {
+                            let mut active = active_cancel.lock().await;
+                            if active
+                                .as_ref()
+                                .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
+                            {
+                                *active = None;
+                            }
+                            drop(active);
+                            if let Some(owner_id) = turn.permission_owner_id {
+                                permission_gate.end_main_turn(owner_id);
+                            }
+                            message_queue.clear_active_turn().await;
+                            turn.mark_completed();
+                            if let Some(command) = scheduled.clone() {
+                                message_queue.enqueue(command).await;
+                            }
+                            sink.emit(ClientEvent::Error {
+                                kind: client::protocol::events::ErrorKindDto::Internal,
+                                message: format!(
+                                    "could not bootstrap queued mobile prompt transcript identity: {error:?}"
+                                )
+                                .into(),
+                            })
+                            .await;
+                            continue;
+                        }
+                        let claim_id = mobile_delivery
+                            .as_ref()
+                            .map(|(checkpoint, _)| checkpoint.turn_id)
+                            .expect("mobile delivery has a checkpoint");
+                        match durable_turns.claim_pending(&turn.session_id, claim_id) {
+                            Ok(checkpoint) => {
+                                if let Some((loaded, _)) = mobile_delivery.as_mut() {
+                                    *loaded = checkpoint.clone();
+                                }
+                                sink.emit(ClientEvent::TurnRecoveryState {
+                                    snapshot: checkpoint.snapshot(),
+                                })
+                                .await;
+                                client::adapter::TurnEventEmitter::new(sink.clone())
+                                    .emit_turn_started(Some(checkpoint.turn_id))
+                                    .await;
+                            }
+                            Err(crate::mobile::turn_durability::DurableTurnStoreError::Terminal { .. })
+                            | Err(crate::mobile::turn_durability::DurableTurnStoreError::NotFound { .. }) => {
+                                let member_ids = mobile_delivery
+                                    .as_ref()
+                                    .and_then(|(checkpoint, _)| checkpoint.coalesced_batch.as_ref())
+                                    .map(|batch| batch.member_turn_ids.clone())
+                                    .unwrap_or_else(|| vec![claim_id]);
+                                super::remove_mobile_prompt_dispatches(
+                                    &message_queue,
+                                    &turn.session_id,
+                                    &member_ids,
+                                )
+                                .await;
+                                let mut active = active_cancel.lock().await;
+                                if active
+                                    .as_ref()
+                                    .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
+                                {
+                                    *active = None;
+                                }
+                                drop(active);
+                                if let Some(owner_id) = turn.permission_owner_id {
+                                    permission_gate.end_main_turn(owner_id);
+                                }
+                                message_queue.clear_active_turn().await;
+                                turn.mark_completed();
+                                continue;
+                            }
+                            Err(error) => {
+                                let mut active = active_cancel.lock().await;
+                                if active
+                                    .as_ref()
+                                    .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
+                                {
+                                    *active = None;
+                                }
+                                drop(active);
+                                if let Some(owner_id) = turn.permission_owner_id {
+                                    permission_gate.end_main_turn(owner_id);
+                                }
+                                message_queue.clear_active_turn().await;
+                                turn.mark_completed();
+                                if let Some(command) = scheduled.clone() {
+                                    message_queue.enqueue(command).await;
+                                }
+                                sink.emit(ClientEvent::Error {
+                                    kind: client::protocol::events::ErrorKindDto::Internal,
+                                    message: format!("could not claim queued mobile prompt: {error}")
+                                        .into(),
+                                })
+                                .await;
+                                continue;
+                            }
+                        }
+                    }
                     orch.turn_span().reset();
                     let scheduled_task_id = scheduled
                         .as_ref()
@@ -3260,7 +3558,10 @@ pub fn build_mobile_engine_inner(
                     // not materialize the full queued-turn future inline while
                     // creating the Tokio task.
                     let task = tokio::spawn(Box::pin(async move {
-                        let result = match prompt {
+                        let result = if let Some((_, inputs)) = mobile_delivery {
+                            orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone()).await
+                        } else {
+                            match prompt {
                             Err(error) => {
                                 Err(orchestrator::OrchestratorError::Internal(error.to_string()))
                             }
@@ -3269,12 +3570,16 @@ pub fn build_mobile_engine_inner(
                                     vec![orchestrator::QueuedPromptInput {
                                         goal_retry_id,
                                         text: prompt,
+                                        images: Vec::new(),
                                         is_meta: true,
                                         turn_companion: false,
                                         trailing_history_rows: Vec::new(),
                                         message_id: None,
+                                        pending_prompt_identity: None,
                                         message_origin: None,
                                         prompt_source: None,
+                                        prompt_ingress_kind: None,
+                                        skip_model_query: false,
                                         queue_priority: Some("later".into()),
                                         scheduled_task_id,
                                         scheduled_fire_id,
@@ -3304,6 +3609,7 @@ pub fn build_mobile_engine_inner(
                                         registry.as_ref(), task_turn.cancel.clone(),
                                     ).await
                                 }
+                            }
                             }
                         };
                         if let Err(error) = result {
@@ -3372,6 +3678,7 @@ pub fn build_mobile_engine_inner(
         firer_cfg,
         firer_platform,
     });
+    let _ = queued_slash_handle.set(Arc::downgrade(&handle));
     {
         // This runs on every scope switch / reconnect within one process, not
         // just at process start, so drop the handles whose engine is already

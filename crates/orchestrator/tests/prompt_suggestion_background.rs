@@ -11,26 +11,33 @@ fn native_background_classifier_and_redactor_execute_in_quickjs() {
     let blocked = javascript::evaluate_result("prepare", json!({
         "text":"Which option do you prefer?", "previous":"working", "latestAsk":"Build it", "tools":"", "minutes":0
     })).expect("native regex must compile in production QuickJS");
-    assert_eq!(blocked.value["result"]["tempo"], "blocked");
     assert_eq!(
-        blocked.value["result"]["needs"],
+        blocked
+            .string_at("/result/tempo")
+            .expect("classifier tempo"),
+        "blocked"
+    );
+    assert_eq!(
+        blocked
+            .string_at("/result/needs")
+            .expect("classifier needs"),
         "Which option do you prefer?"
     );
     assert_eq!(
         javascript::evaluate("safeReply", json!({"text":"Use the first option"}))
-            .map(|value| value.value.clone()),
-        Some(json!(true))
+            .and_then(|value| value.at_pointer("").and_then(|root| root.as_bool())),
+        Some(true)
     );
     assert_eq!(
         javascript::evaluate(
             "safeReply",
             json!({"text":"Use sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaAAAA"})
-        ).map(|value| value.value.clone()),
-        Some(json!(false))
+        ).and_then(|value| value.at_pointer("").and_then(|root| root.as_bool())),
+        Some(false)
     );
     let parsed = javascript::evaluate("parse", json!({"text":"```json\n{\"state\":\"blocked\",\"tempo\":\"blocked\",\"needs\":\"approve\",\"extra\":true}\n```", "previous":"working"})).unwrap();
-    assert_eq!(parsed.value["needs"], "approve");
-    assert!(parsed.value.get("extra").is_none());
+    assert_eq!(parsed.string_at("/needs").expect("parsed needs"), "approve");
+    assert!(!parsed.contains_property("extra"));
     let parsed_projection = javascript::evaluate_parse_projection(
         lingxi_core::types::utf16_json::Utf16JsonProjection::from(
             r#"{"state":"blocked","tempo":"blocked","needs":"Choose one option"}"#,
@@ -785,8 +792,14 @@ fn native_background_input_preserves_tool_tie_order_whole_history_and_text_windo
     ]);
     let assembled =
         javascript::evaluate("assemble", json!({"messages":messages,"lastCount":1})).unwrap();
-    assert_eq!(assembled.value["text"], "Latest one\nLatest two");
-    assert_eq!(assembled.value["tools"], "Zulu×2, Alpha, Agent");
+    assert_eq!(
+        assembled.string_at("/text").expect("assembled text"),
+        "Latest one\nLatest two"
+    );
+    assert_eq!(
+        assembled.string_at("/tools").expect("assembled tools"),
+        "Zulu×2, Alpha, Agent"
+    );
     assert_eq!(assembled.number_at("/count"), Some(3.0));
     assert_eq!(
         assembled.to_json_string().unwrap(),

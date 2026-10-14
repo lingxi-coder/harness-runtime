@@ -63,13 +63,13 @@ mod tests {
         dyn_sink
             .emit(ClientEvent::Error {
                 kind: ErrorKindDto::Transport,
-                message: "first".to_string(),
+                message: "first".into(),
             })
             .await;
         dyn_sink
             .emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message: "second".to_string(),
+                message: "second".into(),
             })
             .await;
 
@@ -81,14 +81,14 @@ mod tests {
             captured[0],
             ClientEvent::Error {
                 kind: ErrorKindDto::Transport,
-                message: "first".to_string(),
+                message: "first".into()
             }
         );
         assert_eq!(
             captured[1],
             ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message: "second".to_string(),
+                message: "second".into()
             }
         );
     }

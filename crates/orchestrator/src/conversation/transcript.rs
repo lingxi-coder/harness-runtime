@@ -3140,6 +3140,60 @@ impl ConversationOrchestrator {
         .await;
     }
 
+    /// Append a checkpointed user row by its stable pending-prompt identity.
+    /// Unlike ordinary history writes, any persistence error aborts the turn
+    /// before session history or a model request can advance.
+    pub(super) async fn persist_pending_prompt_queued_message_once(
+        &self,
+        msg: &ConversationMessage,
+        input: &QueuedPromptInput,
+        prompt_id: &str,
+    ) -> Result<ConversationMessage, OrchestratorError> {
+        let sanitized = redact_ephemeral_tool_result_images(msg);
+        self.persist_message_to_jsonl_inner_with_pending_prompt_identity(
+            &sanitized,
+            None,
+            None,
+            false,
+            Some(input),
+            None,
+            false,
+            Some(prompt_id),
+        )
+        .await?
+        .ok_or_else(|| {
+            OrchestratorError::Internal(
+                "pending prompt append completed without a source message".into(),
+            )
+        })
+    }
+
+    /// Publish a pending user row to live history only after its durable
+    /// append succeeded. Cold retry is idempotent by message UUID and rejects
+    /// a different source projection for that UUID.
+    pub(super) async fn append_pending_prompt_message_to_history_once(
+        &self,
+        msg: &ConversationMessage,
+    ) -> Result<(), OrchestratorError> {
+        let mut session = self.session.lock().await;
+        if let Some(existing) = session
+            .history
+            .iter()
+            .find(|existing| existing.id() == msg.id())
+        {
+            return if existing == msg {
+                Ok(())
+            } else {
+                Err(OrchestratorError::Internal(format!(
+                    "pending prompt history UUID {} has different source content",
+                    msg.id()
+                )))
+            };
+        }
+        session.history.push(msg.clone());
+        Ok(())
+    }
+
     /// Persist a synthetic api-error assistant line, stamping the top-level
     /// `isApiErrorMessage`/`error`/`apiErrorStatus` envelope (and any inner
     /// `stop_reason` override) from `env`. 1:1 with claude-code's
@@ -3203,6 +3257,73 @@ impl ConversationOrchestrator {
             "hook_attachment",
         )
         .await;
+    }
+
+    /// Persist one raw UserPromptExpansion row with its checkpointed UUID.
+    /// The transaction compares its exact source attachment and returns the
+    /// actual transcript tail so a retry cannot move the live cursor backward.
+    pub(super) async fn persist_pending_prompt_attachment_once(
+        &self,
+        id: lingxi_core::types::MessageId,
+        payload: Source,
+    ) -> Result<bool, OrchestratorError> {
+        if active_mod_result_stage_is_virtual().await {
+            return Err(OrchestratorError::Internal(
+                "pending prompt attachment cannot be persisted in a virtual Mod stage".into(),
+            ));
+        }
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            return Err(OrchestratorError::Internal(
+                "pending prompt attachment requires a durable transcript writer".into(),
+            ));
+        };
+        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
+        let row = session::JsonlMessage {
+            message_type: "attachment".into(),
+            uuid: id.as_uuid().to_string(),
+            parent_uuid: None,
+            session_id: session_id.clone(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: self.current_cwd().to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            message: Source::parse("null").expect("null is valid JSON"),
+            attachment_projection: Some(payload),
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
+            is_sidechain: false,
+            user_type: Some("external".into()),
+            git_branch: self.resolve_git_branch().await,
+            entrypoint: Some(entrypoint_value()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra: source_object([]),
+        };
+        let (outcome, last_uuid) = writer
+            .append_pending_prompt_message_once(&row)
+            .await
+            .map_err(|error| {
+                OrchestratorError::Internal(format!(
+                    "pending prompt attachment append failed: {error}"
+                ))
+            })?;
+        let last_uuid = last_uuid.ok_or_else(|| {
+            OrchestratorError::Internal(
+                "pending prompt attachment append completed without a transcript tip".into(),
+            )
+        })?;
+        *self.transcript.last_jsonl_uuid.lock().await = Some(last_uuid);
+        let appended = outcome == session::jsonl::TranscriptAppendOutcome::Appended;
+        if appended {
+            telemetry::emit_session_appended(&session_id, &row.uuid);
+        }
+        Ok(appended)
     }
 
     /// Persist a future-owned request-context sidecar with Native's rendered
@@ -3783,6 +3904,37 @@ impl ConversationOrchestrator {
         preappended: Option<PreappendedRowMetadata<'_>>,
         session_append_preaccepted: bool,
     ) {
+        let _ = self
+            .persist_message_to_jsonl_inner_with_pending_prompt_identity(
+                msg,
+                parent_override,
+                api_error,
+                compact_summary,
+                queued_input,
+                preappended,
+                session_append_preaccepted,
+                None,
+            )
+            .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_message_to_jsonl_inner_with_pending_prompt_identity(
+        &self,
+        msg: &ConversationMessage,
+        parent_override: Option<String>,
+        api_error: Option<ApiErrorEnvelope>,
+        compact_summary: bool,
+        queued_input: Option<&QueuedPromptInput>,
+        preappended: Option<PreappendedRowMetadata<'_>>,
+        session_append_preaccepted: bool,
+        pending_prompt_id: Option<&str>,
+    ) -> Result<Option<ConversationMessage>, OrchestratorError> {
+        if pending_prompt_id.is_some() && !matches!(msg, ConversationMessage::User { .. }) {
+            return Err(OrchestratorError::Internal(
+                "pending prompt append requires a user message".into(),
+            ));
+        }
         let rewritten = if preappended.is_some() || session_append_preaccepted {
             msg.clone()
         } else {
@@ -3826,13 +3978,23 @@ impl ConversationOrchestrator {
             let _ = self.take_tool_denial_kind(msg).await;
             let _ = self.take_tool_use_mcp_meta(msg).await;
             let _ = self.take_source_tool_assistant_uuid(msg).await;
-            return;
+            return if pending_prompt_id.is_some() {
+                Err(OrchestratorError::Internal(
+                    "pending prompt append requires a durable transcript writer".into(),
+                ))
+            } else {
+                Ok(None)
+            };
         };
         let (session_id_str, plan_mode, parent_uuid) = {
             let session = self.session.lock().await;
-            let parent = match parent_override {
-                Some(p) => Some(p),
-                None => self.transcript.last_jsonl_uuid.lock().await.clone(),
+            let parent = if pending_prompt_id.is_some() {
+                None
+            } else {
+                match parent_override {
+                    Some(p) => Some(p),
+                    None => self.transcript.last_jsonl_uuid.lock().await.clone(),
+                }
             };
             (
                 session.session_id.as_uuid().to_string(),
@@ -3850,7 +4012,12 @@ impl ConversationOrchestrator {
         //   turn. `to_jsonl_message` drops it on non-user lines.
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
-        let prompt_id = self.prompt_id_for_message(msg).await;
+        let mut prompt_id = self.prompt_id_for_message(msg).await;
+        if let Some(stable_prompt_id) = pending_prompt_id {
+            *self.prompt_runtime.current_prompt_id.lock().await =
+                Some(stable_prompt_id.to_string());
+            prompt_id = Some(stable_prompt_id.to_string());
+        }
         let mut jmsg = self.to_jsonl_message_with_inner_id(
             msg,
             &session_id_str,
@@ -3997,6 +4164,9 @@ impl ConversationOrchestrator {
                 )
                 .expect("extra metadata is an object");
         }
+        if let Some(stable_prompt_id) = pending_prompt_id {
+            jmsg.prompt_id = Some(stable_prompt_id.to_string());
+        }
         // Compaction summary user line: stamp the top-level envelope flags in
         // claude's on-disk order (`isVisibleInTranscriptOnly` before
         // `isCompactSummary`, between `message` and `uuid` — the schema's user
@@ -4074,10 +4244,35 @@ impl ConversationOrchestrator {
                 .expect("extra metadata is an object");
         }
         let uuid_for_chain = jmsg.uuid.clone();
-        match writer.append(&jmsg).await {
-            Ok(()) => {
-                *self.transcript.last_jsonl_uuid.lock().await = Some(uuid_for_chain.clone());
-                telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
+        let append_result = if pending_prompt_id.is_some() {
+            writer
+                .append_pending_prompt_message_once(&jmsg)
+                .await
+                .map(|(outcome, last_uuid)| {
+                    (
+                        last_uuid,
+                        outcome == session::jsonl::TranscriptAppendOutcome::Appended,
+                    )
+                })
+                .map_err(|error| error.to_string())
+        } else {
+            writer
+                .append(&jmsg)
+                .await
+                .map(|()| (Some(uuid_for_chain.clone()), true))
+                .map_err(|error| error.to_string())
+        };
+        match append_result {
+            Ok((last_uuid, newly_appended)) => {
+                if pending_prompt_id.is_some() && last_uuid.is_none() {
+                    return Err(OrchestratorError::Internal(
+                        "pending prompt append completed without a transcript tip".into(),
+                    ));
+                }
+                *self.transcript.last_jsonl_uuid.lock().await = last_uuid;
+                if newly_appended {
+                    telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
+                }
                 if let Some(id) = crate::resume::native_zce_message_id(&jmsg) {
                     self.session
                         .lock()
@@ -4100,11 +4295,17 @@ impl ConversationOrchestrator {
                         .await;
                 }
             }
-            Err(e) => {
-                self.record_transcript_append_failure(&session_id_str, "message", &e)
+            Err(error) => {
+                if pending_prompt_id.is_some() {
+                    return Err(OrchestratorError::Internal(format!(
+                        "pending prompt transcript append failed: {error}"
+                    )));
+                }
+                self.record_transcript_append_failure(&session_id_str, "message", &error)
                     .await;
             }
         }
+        Ok(Some(rewritten))
     }
 
     /// Persist a meta user message to one exact session transcript and mark it

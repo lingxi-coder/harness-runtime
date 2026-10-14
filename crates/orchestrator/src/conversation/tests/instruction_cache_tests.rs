@@ -87,12 +87,9 @@ fn orchestrator(
 }
 
 async fn body(orch: &ConversationOrchestrator) -> String {
-    orch.instruction_context_snapshot()
-        .await
-        .eager_instructions
-        .unwrap()[0]
-        .content
-        .clone()
+    let context = orch.instruction_context_snapshot().await;
+    String::from_utf16(&context.eager_instructions.unwrap()[0].content_units())
+        .expect("filesystem fixture content is valid UTF-16")
 }
 
 #[tokio::test]
@@ -104,13 +101,13 @@ async fn main_prompt_consumers_share_one_eager_snapshot_across_model_steps() {
         source.clone(),
         dir.path(),
     );
-    orch.effective_system_prompt().await;
+    orch.effective_system_prompt().await.unwrap();
     orch.additional_context_message().await.unwrap();
     assert_eq!(body(&orch).await, "original instructions");
     assert_eq!(source.loads.load(Ordering::SeqCst), 1);
     source.replace_body("unannounced file edit");
     for _ in 0..3 {
-        orch.effective_system_prompt().await;
+        orch.effective_system_prompt().await.unwrap();
         orch.additional_context_message().await.unwrap();
         assert_eq!(body(&orch).await, "original instructions");
     }
@@ -163,10 +160,13 @@ async fn pt_rebuilds_live_identity_with_the_same_eager_file_promise() {
     orch.additional_context_message().await.unwrap();
     let context = orch.instruction_context_snapshot().await;
     assert_eq!(
-        context.eager_instructions.unwrap()[0].content,
+        String::from_utf16(&context.eager_instructions.as_ref().unwrap()[0].content_units())
+            .unwrap(),
         "original instructions"
     );
-    assert!(context.user_context["userEmail"]
+    assert!(context
+        .user_context_utf8("userEmail")
+        .unwrap()
         .starts_with("The user's email address is next@example.test."));
     assert_eq!(source.loads.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -273,18 +273,25 @@ async fn injected_identity_none_omits_configured_fallback_and_raw_whitespace_is_
     let orch = orchestrator(config, source, dir.path())
         .with_instruction_user_email_provider(identity.clone());
     orch.additional_context_message().await.unwrap();
-    assert!(!orch
-        .instruction_context_snapshot()
-        .await
-        .user_context
-        .contains_key("userEmail"));
+    let context = orch.instruction_context_snapshot().await;
+    assert!(
+        context
+            .user_context_value(&"userEmail".encode_utf16().collect::<Vec<_>>())
+            .is_none(),
+        "an injected identity provider returning None must not use configured user_email"
+    );
     *identity.0.write().unwrap() = Some("  raw@example.test \t".into());
     orch.invalidate_instruction_context(InstructionRefreshReason::AccountChange);
     orch.additional_context_message().await.unwrap();
     let context = orch.instruction_context_snapshot().await;
-    assert!(context.user_context["userEmail"]
+    assert!(context
+        .user_context_utf8("userEmail")
+        .unwrap()
         .starts_with("The user's email address is   raw@example.test \t."));
-    assert!(context.user_context["userEmail"].contains("Never send it to an unrelated service"));
+    assert!(context
+        .user_context_utf8("userEmail")
+        .unwrap()
+        .contains("Never send it to an unrelated service"));
 }
 
 struct GatedIdentity {
@@ -346,11 +353,18 @@ async fn retired_builder_cannot_replace_a_new_sessions_frozen_context() {
     old_query.await.unwrap().unwrap();
     let context = orch.instruction_context_snapshot().await;
     assert_eq!(
-        context.eager_instructions.unwrap()[0].content,
+        String::from_utf16(&context.eager_instructions.as_ref().unwrap()[0].content_units())
+            .unwrap(),
         "current instructions"
     );
-    assert!(context.user_context["userEmail"].contains("current@example.test"));
-    assert!(!context.user_context["userEmail"].contains("retired@example.test"));
+    assert!(context
+        .user_context_utf8("userEmail")
+        .unwrap()
+        .contains("current@example.test"));
+    assert!(!context
+        .user_context_utf8("userEmail")
+        .unwrap()
+        .contains("retired@example.test"));
     assert_eq!(
         *orch.prompt_runtime.instruction_context_key.lock().unwrap(),
         Some(InstructionContextKey {
@@ -433,7 +447,11 @@ async fn scalar_projection_retains_its_ingress_handle_across_a_host_refresh() {
     assert!(original.contains("ingress instructions"));
     assert!(!original.contains("instructions for a later ingress"));
     assert_eq!(source.loads.load(Ordering::SeqCst), 1);
-    let later = orch.additional_context_message().await.unwrap();
+    let later = orch
+        .additional_context_message()
+        .await
+        .unwrap()
+        .expect("later context");
     assert!(serde_json::to_string(&later)
         .unwrap()
         .contains("instructions for a later ingress"));
@@ -474,12 +492,21 @@ async fn children_project_the_current_roots_same_full_context_and_files() {
         .load(&caller_cwd, InstructionScope::ManagedOnly)
         .await
         .unwrap();
-    assert!(full.user_context["instructions"].contains("root project instructions"));
-    assert!(managed.user_context["instructions"].contains("managed instructions"));
-    assert!(!managed.user_context["instructions"].contains("root project instructions"));
+    assert!(full
+        .user_context_utf8("instructions")
+        .unwrap()
+        .contains("root project instructions"));
+    assert!(managed
+        .user_context_utf8("instructions")
+        .unwrap()
+        .contains("managed instructions"));
+    assert!(!managed
+        .user_context_utf8("instructions")
+        .unwrap()
+        .contains("root project instructions"));
     assert_eq!(
-        managed.user_context["currentDate"],
-        full.user_context["currentDate"]
+        managed.user_context_utf8("currentDate"),
+        full.user_context_utf8("currentDate")
     );
     assert_eq!(
         full.instructions_root,
@@ -493,7 +520,10 @@ async fn children_project_the_current_roots_same_full_context_and_files() {
         .load(&caller_cwd, InstructionScope::Full)
         .await
         .unwrap();
-    assert!(next.user_context["instructions"].contains("current root instructions"));
+    assert!(next
+        .user_context_utf8("instructions")
+        .unwrap()
+        .contains("current root instructions"));
     assert_eq!(source.loads.load(Ordering::SeqCst), 2);
     assert!(provider.bind(&root).is_err());
 }
@@ -520,9 +550,13 @@ async fn pending_child_reader_does_not_keep_the_root_alive() {
     assert!(weak.upgrade().is_none());
     assert!(!provider.is_bound());
     identity.release.notify_one();
-    assert!(
-        child.await.unwrap().unwrap().user_context["userEmail"].contains("retired@example.test")
-    );
+    assert!(child
+        .await
+        .unwrap()
+        .unwrap()
+        .user_context_utf8("userEmail")
+        .unwrap()
+        .contains("retired@example.test"));
 }
 
 struct FailedManagedMemory(AtomicUsize);
@@ -577,9 +611,19 @@ async fn rejected_managed_context_stays_sticky_and_prevents_model_dispatch() {
     );
     for _ in 0..2 {
         let error = root.run_turn("hello").await.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("native context acquisition failed"));
+        match error {
+            crate::OrchestratorError::Settings(
+                lingxi_core::settings::SettingsError::SourceFailure { kind, message, .. },
+            ) => {
+                assert_eq!(kind, "instruction_context");
+                assert_eq!(
+                    message.string_at(""),
+                    Some("native context acquisition failed"),
+                    "the typed failure must retain the exact managed source message"
+                );
+            }
+            other => panic!("expected the typed instruction-context source failure, got {other:?}"),
+        }
     }
     assert!(api.captured_msgs().await.is_empty());
     assert_eq!(memory.0.load(Ordering::SeqCst), 1);
@@ -702,10 +746,16 @@ async fn root_reservation_retains_identity_through_clear_and_preserves_old_waite
         .load(dir.path(), InstructionScope::Full)
         .await
         .unwrap();
-    assert!(current.user_context["instructions"].contains("current session"));
+    assert!(current
+        .user_context_utf8("instructions")
+        .unwrap()
+        .contains("current session"));
     source.release_file.notify_one();
     let retired = old_reader.await.unwrap().unwrap();
-    assert!(retired.user_context["instructions"].contains("original waiter"));
+    assert!(retired
+        .user_context_utf8("instructions")
+        .unwrap()
+        .contains("original waiter"));
     assert!(root
         .prompt_runtime
         .instruction_cache

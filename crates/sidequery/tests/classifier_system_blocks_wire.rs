@@ -119,6 +119,7 @@ async fn classifier_keeps_each_system_cache_control_without_implicit_prompt_rewr
         let response = client
             .query_fork(
                 SideQueryRequest {
+                    model_source: None,
                     enable_prompt_caching: false,
                     model_attempt: None,
                     native_prompt_context: None,

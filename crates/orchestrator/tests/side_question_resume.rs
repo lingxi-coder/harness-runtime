@@ -199,6 +199,7 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
         "Frozen prefix".into(),
     )];
     slot.save(sidequery::CacheSafeParams {
+        model_source: None,
         system_prompt: Arc::new("frozen system".into()),
         system_prompt_input: Some(SystemPromptInput::custom_prompt("frozen system".into())),
         user_context: Default::default(),

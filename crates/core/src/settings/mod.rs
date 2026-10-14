@@ -3,6 +3,7 @@
 //! Entry point: [`Settings::load`]. Per-field merge rules live in
 //! [`merger`]; provenance for `/doctor` (M6) lives in [`tracer`].
 
+use crate::types::utf16_json::Utf16JsonProjectionError;
 use std::path::PathBuf;
 
 pub mod company_announcements;
@@ -10,11 +11,23 @@ pub mod enterprise;
 pub mod env_parser;
 pub mod loader;
 pub mod merger;
+mod native_extra_known_marketplaces;
+mod native_managed_mcp_servers;
+mod native_permission_rule_validation;
 pub mod native_policy;
+mod native_policy_error_vt;
+mod native_policy_hook_settings;
+pub mod native_policy_js_semantics;
+mod native_policy_marketplaces;
 mod native_policy_parser;
+pub mod native_policy_regex;
+mod native_policy_static_defaults;
+mod native_policy_strict_settings;
 pub mod raw_layer_stack;
 pub mod schema;
 pub mod tracer;
+
+pub use native_policy_parser::{NativePolicyDiagnosticKind, NativePolicyParseDiagnostic};
 
 /// Test-only support — process-wide mutex shared by every settings test that
 /// mutates `HOME` to redirect [`loader::user_settings_path`] at a tempdir.
@@ -52,6 +65,25 @@ pub enum SettingsError {
         /// The raw value as received from the process env.
         value: String,
     },
+    /// A source that the request requires is unavailable.
+    #[error("settings source unavailable: {0}")]
+    SourceUnavailable(&'static str),
+    /// A managed selection is incomplete, but any healthy source projection
+    /// remains available to the caller for Native-shaped partial composition.
+    #[error("settings source selection is incomplete")]
+    SourceFailure {
+        /// Source state discriminator supplied by the policy reader.
+        kind: String,
+        /// Exact user-facing source message as a root-string projection.
+        message: crate::types::utf16_json::Utf16JsonProjection,
+        /// Exact source diagnostics, retained as an object or ordered array.
+        diagnostics: crate::types::utf16_json::Utf16JsonProjection,
+        /// Healthy effective source assembled despite other read failures.
+        effective: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    },
+    /// An exact source projection could not be merged or materialized.
+    #[error(transparent)]
+    Projection(#[from] Utf16JsonProjectionError),
     /// Semantic validation ([`SettingsJson::validate`]) rejected the file
     /// (e.g. empty string in an array field). Unknown fields are NOT a
     /// violation — they are tolerated-and-ignored (zod `.passthrough()`
@@ -69,12 +101,126 @@ pub enum SettingsError {
     },
 }
 
+impl SettingsError {
+    /// Construct a source failure without passing through a lossy Display path.
+    #[must_use]
+    pub fn source_failure(
+        kind: impl Into<String>,
+        message: crate::types::utf16_json::Utf16JsonProjection,
+        diagnostics: crate::types::utf16_json::Utf16JsonProjection,
+        effective: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    ) -> Self {
+        Self::SourceFailure {
+            kind: kind.into(),
+            message,
+            diagnostics,
+            effective,
+        }
+    }
+
+    /// Return the exact root-string message for user-facing display.
+    #[must_use]
+    pub fn message_projection(&self) -> crate::types::utf16_json::Utf16JsonProjection {
+        match self {
+            Self::SourceFailure { message, .. } => message.clone(),
+            _ => crate::types::utf16_json::Utf16JsonProjection::from(self.to_string()),
+        }
+    }
+
+    /// Project a settings failure for command dispatch without discarding the
+    /// exact input that caused a Native array-length coercion error.
+    #[must_use]
+    pub fn diagnostic_projection(&self) -> crate::types::utf16_json::Utf16JsonProjection {
+        use crate::types::utf16_json::{Utf16JsonProjection as Source, Utf16JsonProjectionError};
+        let object = |kind: &str, message: String| {
+            Source::object(vec![
+                ("kind".into(), Source::from(kind)),
+                ("message".into(), Source::from(message)),
+            ])
+            .expect("settings diagnostic is a valid JSON object")
+        };
+        let projection_error = |raw_value: &Source| {
+            Source::object(vec![
+                ("kind".into(), Source::from("settings_projection")),
+                ("message".into(), Source::from(self.to_string())),
+                ("sourceValue".into(), raw_value.clone()),
+            ])
+            .expect("settings projection diagnostic is a valid JSON object")
+        };
+        match self {
+            Self::Projection(Utf16JsonProjectionError::InvalidArraySetLength {
+                raw_value, ..
+            })
+            | Self::Projection(Utf16JsonProjectionError::InvalidArrayLengthPrimitive {
+                raw_value,
+            }) => projection_error(raw_value),
+            Self::Missing(path) => {
+                let mut value = object("missing", self.to_string());
+                value
+                    .set_field("path", Source::from(path.display().to_string()))
+                    .expect("settings diagnostic path field");
+                value
+            }
+            Self::ParseError { path, source } => {
+                let mut value = object("parse", source.to_string());
+                value
+                    .set_field("path", Source::from(path.display().to_string()))
+                    .expect("settings diagnostic path field");
+                value
+            }
+            Self::InvalidEnv { var, value } => {
+                let mut diagnostic = object("invalid_env", self.to_string());
+                diagnostic
+                    .set_field("var", Source::from(var.as_str()))
+                    .expect("settings diagnostic variable field");
+                diagnostic
+                    .set_field("sourceValue", Source::from(value.as_str()))
+                    .expect("settings diagnostic source field");
+                diagnostic
+            }
+            Self::SourceUnavailable(_) => object("source_unavailable", self.to_string()),
+            Self::SourceFailure {
+                kind,
+                message,
+                diagnostics,
+                effective,
+            } => {
+                let mut fields = vec![
+                    ("kind".into(), Source::from(kind.as_str())),
+                    ("message".into(), message.clone()),
+                    ("diagnostics".into(), diagnostics.clone()),
+                ];
+                if let Some(effective) = effective {
+                    fields.push(("effective".into(), effective.clone()));
+                }
+                Source::object(fields).expect("source failure diagnostic is an object")
+            }
+            Self::Projection(_) => object("projection", self.to_string()),
+            Self::SchemaViolation(_) => object("schema", self.to_string()),
+            Self::Io { path, source } => {
+                let mut value = object("io", source.to_string());
+                value
+                    .set_field("path", Source::from(path.display().to_string()))
+                    .expect("settings diagnostic path field");
+                value
+            }
+        }
+    }
+}
+
 pub use native_policy::{
-    resolve_native_policy, NativeManagedSourcesBehavior, NativeParentSettingsBehavior,
-    NativePolicyAdmission, NativePolicyControls, NativePolicyDocument, NativePolicyEffective,
-    NativePolicyHostFacts, NativePolicyHostKind, NativePolicyInputs, NativePolicyLoadState,
-    NativePolicyManagedFileFacts, NativePolicyParentFacts, NativePolicyPlistFacts,
-    NativePolicySelection, NativePolicySource, NativePolicySourceMetadata, NativePolicyUnresolved,
+    apply_native_policy_helper_settings, parse_native_policy_helper_output, resolve_native_policy,
+    NativeManagedSourcesBehavior, NativeParentSettingsBehavior, NativePolicyAdmission,
+    NativePolicyControls, NativePolicyDocument, NativePolicyEffective,
+    NativePolicyHelperApplyResult, NativePolicyHelperApplyStatus, NativePolicyHelperEntry,
+    NativePolicyHelperOnFailure, NativePolicyHelperOutput, NativePolicyHelperOutputBehavior,
+    NativePolicyHelperOutputError, NativePolicyHelperPlan, NativePolicyHelperPlanValidation,
+    NativePolicyHelperSelectedKind, NativePolicyHelperSettingsInput, NativePolicyHostFacts,
+    NativePolicyHostKind, NativePolicyInputs, NativePolicyLoadState, NativePolicyManagedFileFacts,
+    NativePolicyParentFacts, NativePolicyPlatform, NativePolicyPlistFacts, NativePolicySelection,
+    NativePolicySource, NativePolicySourceMetadata, NativePolicyStartupFatal,
+    NativePolicyStaticFallbackCandidate, NativePolicyStaticFallbackValidation,
+    NativePolicyUnresolved,
 };
 pub use raw_layer_stack::{
     RawSupplementalLayers, SettingsAdmittedLayer, SettingsRawLayer, SettingsRawLayerStack,
@@ -167,6 +313,23 @@ pub struct EffectiveSettings {
     pub trace: tracer::ProvenanceTrace,
     /// Admitted effort sources before ordinary field merging.
     pub effort_layers: Vec<crate::host::effort::EffortSettingsLayer>,
+    /// Exact admitted effective JSON when this value came from the source
+    /// stack. Typed-only settings loads leave this absent; absence here does
+    /// not imply the settings source omitted a field.
+    pub source_projection: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Admitted source layers in merge order, when available.
+    pub source_layers: Vec<raw_layer_stack::SettingsRawLayer>,
+    /// Native-admitted fields that the Rust typed view cannot carry.
+    pub typed_view_unrepresented_fields: Vec<String>,
+    /// The managed typed view is a convenience projection, not a second
+    /// whole-document admission decision.
+    pub managed_typed_view_is_partial: bool,
+    /// Some local policy inputs were incomplete while healthy layers remained
+    /// available for composition.
+    pub source_incomplete: bool,
+    /// Primary Native source message and full source diagnostics, if present.
+    pub source_message: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    pub source_diagnostics: Option<crate::types::utf16_json::Utf16JsonProjection>,
 }
 
 impl EffectiveSettings {
@@ -178,6 +341,41 @@ impl EffectiveSettings {
     #[must_use]
     pub fn effective_for(&self, field: &str) -> Option<&tracer::FieldProvenance> {
         self.trace.by_field.get(field)
+    }
+
+    /// Return an exact top-level field from the authoritative effective JSON.
+    /// This remains available when a JavaScript UTF-16 string cannot fit in a
+    /// Rust `String` field.
+    #[must_use]
+    pub fn source_field(
+        &self,
+        field: &str,
+    ) -> Option<crate::types::utf16_json::Utf16JsonProjection> {
+        let pointer = format!("/{}", field.replace('~', "~0").replace('/', "~1"));
+        self.source_projection
+            .as_ref()?
+            .subprojection(&pointer)
+            .ok()
+    }
+
+    /// Return exact admitted source layers containing a top-level field, in
+    /// priority order, including their physical path and raw projection.
+    #[must_use]
+    pub fn source_field_layers(&self, field: &str) -> Vec<&raw_layer_stack::SettingsRawLayer> {
+        let pointer = format!("/{}", field.replace('~', "~0").replace('/', "~1"));
+        self.source_layers
+            .iter()
+            .filter(|layer| layer.projection.subprojection(&pointer).is_ok())
+            .collect()
+    }
+
+    /// Contributor identities for a top-level source field.
+    #[must_use]
+    pub fn source_field_contributors(&self, field: &str) -> Vec<tracer::Source> {
+        self.source_field_layers(field)
+            .into_iter()
+            .map(|layer| layer.source)
+            .collect()
     }
 }
 
@@ -277,7 +475,7 @@ impl Settings {
                     ));
                     effort_layers.last_mut().expect("just recorded source").path =
                         Some(user_path.to_path_buf());
-                    acc = merger::merge(acc, usr);
+                    acc = merger::merge(acc, usr)?;
                 }
             }
         }
@@ -293,7 +491,7 @@ impl Settings {
                 ));
                 effort_layers.last_mut().expect("just recorded source").path =
                     Some(project_path.to_path_buf());
-                acc = merger::merge(acc, proj);
+                acc = merger::merge(acc, proj)?;
             }
         }
 
@@ -308,7 +506,7 @@ impl Settings {
                 ));
                 effort_layers.last_mut().expect("just recorded source").path =
                     Some(local_path.to_path_buf());
-                acc = merger::merge(acc, local);
+                acc = merger::merge(acc, local)?;
             }
         }
 
@@ -320,7 +518,7 @@ impl Settings {
                     tracer::Source::Cli,
                     cli,
                 ));
-                acc = merger::merge(acc, cli.clone());
+                acc = merger::merge(acc, cli.clone())?;
             }
         }
 
@@ -332,7 +530,7 @@ impl Settings {
                     tracer::Source::Managed,
                     managed,
                 ));
-                acc = merger::merge(acc, managed.clone());
+                acc = merger::merge(acc, managed.clone())?;
             }
         }
 
@@ -343,12 +541,19 @@ impl Settings {
             tracer::Source::Env,
             &env_layer,
         ));
-        acc = merger::merge(acc, env_layer);
+        acc = merger::merge(acc, env_layer)?;
 
         Ok(EffectiveSettings {
             settings: acc,
             trace,
             effort_layers,
+            source_projection: None,
+            source_layers: Vec::new(),
+            typed_view_unrepresented_fields: Vec::new(),
+            managed_typed_view_is_partial: false,
+            source_incomplete: false,
+            source_message: None,
+            source_diagnostics: None,
         })
     }
 
@@ -446,7 +651,7 @@ impl Settings {
                         ));
                         effort_layers.last_mut().expect("just recorded source").path =
                             Some(up.to_path_buf());
-                        acc = merger::merge(acc, usr);
+                        acc = merger::merge(acc, usr)?;
                         layers_present += 1;
                     }
                     Ok(None) => {}
@@ -473,7 +678,7 @@ impl Settings {
                     ));
                     effort_layers.last_mut().expect("just recorded source").path =
                         Some(project_path.to_path_buf());
-                    acc = merger::merge(acc, proj);
+                    acc = merger::merge(acc, proj)?;
                     layers_present += 1;
                 }
                 Ok(None) => {}
@@ -495,7 +700,7 @@ impl Settings {
                     ));
                     effort_layers.last_mut().expect("just recorded source").path =
                         Some(local_path.to_path_buf());
-                    acc = merger::merge(acc, local);
+                    acc = merger::merge(acc, local)?;
                     layers_present += 1;
                 }
                 Ok(None) => {}
@@ -513,7 +718,7 @@ impl Settings {
                     tracer::Source::Cli,
                     cli,
                 ));
-                acc = merger::merge(acc, cli.clone());
+                acc = merger::merge(acc, cli.clone())?;
                 layers_present += 1;
             }
         }
@@ -526,7 +731,7 @@ impl Settings {
                     tracer::Source::Managed,
                     managed,
                 ));
-                acc = merger::merge(acc, managed.clone());
+                acc = merger::merge(acc, managed.clone())?;
                 layers_present += 1;
             }
         }
@@ -543,7 +748,7 @@ impl Settings {
             tracer::Source::Env,
             &env_layer,
         ));
-        acc = merger::merge(acc, env_layer);
+        acc = merger::merge(acc, env_layer)?;
 
         // Emit per-invalid-env event before the loaded event.
         if let Some(observer) = observer {
@@ -563,6 +768,13 @@ impl Settings {
             settings: acc,
             trace,
             effort_layers,
+            source_projection: None,
+            source_layers: Vec::new(),
+            typed_view_unrepresented_fields: Vec::new(),
+            managed_typed_view_is_partial: false,
+            source_incomplete: false,
+            source_message: None,
+            source_diagnostics: None,
         })
     }
 }
@@ -604,6 +816,9 @@ async fn emit_parse_error(
         SettingsError::Io { .. } => "io",
         SettingsError::Missing(_) => "missing",
         SettingsError::InvalidEnv { .. } => "invalid_env",
+        SettingsError::SourceUnavailable(_) => "source_unavailable",
+        SettingsError::SourceFailure { .. } => "source_failure",
+        SettingsError::Projection(_) => "projection",
     };
     observer.parse_error(path, class).await;
 }

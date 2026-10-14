@@ -122,8 +122,21 @@ fn native_mcp_dropped_tools_attachment(
 
 #[derive(Default)]
 pub(crate) struct NestedMemoryHistory {
-    pub(crate) announced: HashMap<PathBuf, String>,
+    /// Raw path/content identities recovered from durable instructions rows.
+    pub(crate) announced: HashMap<Vec<u16>, Vec<u16>>,
     pub(crate) nested: HashMap<PathBuf, String>,
+}
+
+fn native_filesystem_path_units(path: &Path) -> Vec<u16> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().collect()
+    }
+    #[cfg(not(windows))]
+    {
+        path.as_os_str().to_string_lossy().encode_utf16().collect()
+    }
 }
 
 impl ConversationOrchestrator {
@@ -251,7 +264,7 @@ impl ConversationOrchestrator {
         context_attachments: &[Source],
     ) -> NestedMemoryHistory {
         use lingxi_core::host::instruction_announcements::js_trim;
-        use lingxi_core::host::instructions::InstructionFile;
+        use lingxi_core::host::instruction_announcements::recover_instruction_files;
         let raw = {
             let session = self.session.lock().await;
             let history = session.model_context_history();
@@ -282,39 +295,11 @@ impl ConversationOrchestrator {
                 prior.nested.insert(path.into(), js_trim(body).into());
             }
         }
-        let files = |attachment: &lingxi_core::types::utf16_json::Utf16JsonProjection| {
-            (attachment.string_at("/type") == Some("instructions")
-                && lingxi_core::host::instruction_announcements::is_valid_context_attachment(
-                    attachment,
-                ))
-            .then(|| {
-                let files = attachment.subprojection("/files").ok()?;
-                serde_json::from_str::<Vec<InstructionFile>>(&files.to_json_string().ok()?).ok()
-            })
-            .flatten()
-        };
-        if let Some(start) = raw.iter().rposition(|attachment| {
-            attachment
-                .at_pointer("/changed")
-                .and_then(|value| value.as_bool())
-                != Some(true)
-                && files(attachment).is_some()
-        }) {
-            for attachment in &raw[start..] {
-                if let Some(files) = files(attachment) {
-                    for file in files {
-                        prior.announced.insert(file.path.into(), file.content);
-                    }
-                    if let Ok(removed) = attachment.subprojection("/removed") {
-                        if let Ok(paths) = serde_json::from_str::<Vec<String>>(
-                            &removed.to_json_string().expect("source paths"),
-                        ) {
-                            for path in paths {
-                                prior.announced.remove(Path::new(&path));
-                            }
-                        }
-                    }
-                }
+        if let Some(files) = recover_instruction_files(&raw) {
+            for file in files {
+                prior
+                    .announced
+                    .insert(file.path_units(), file.content_units());
             }
         }
         if !prior.announced.is_empty() {
@@ -325,7 +310,7 @@ impl ConversationOrchestrator {
                         .eager_instructions
                         .iter()
                         .flatten()
-                        .map(|file| PathBuf::from(&file.path))
+                        .map(|file| file.path_units())
                         .collect::<HashSet<_>>();
                     prior.announced.retain(|path, _| current.contains(path));
                 }
@@ -364,12 +349,14 @@ impl ConversationOrchestrator {
                 continue;
             }
             let body = js_trim(&file.body);
-            if prior.nested.get(&file.path).is_some_and(|old| old == body)
-                || prior
-                    .announced
-                    .get(&file.path)
-                    .is_some_and(|old| old == body)
-            {
+            let body_units = body.encode_utf16().collect::<Vec<_>>();
+            let path_units = native_filesystem_path_units(&file.path);
+            let nested_was_announced = prior.nested.get(&file.path).is_some_and(|old| old == body);
+            let instruction_was_announced = prior
+                .announced
+                .get(&path_units)
+                .is_some_and(|old| old == &body_units);
+            if nested_was_announced || instruction_was_announced {
                 continue;
             }
             let display_path = crate::prompt::nested_memory::relative_display_path(&file.path, cwd);

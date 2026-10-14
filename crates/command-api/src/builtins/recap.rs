@@ -260,6 +260,22 @@ mod tests {
         ) -> Result<(), lingxi_core::host::HandleError> {
             Ok(())
         }
+        async fn validate_model_selection(
+            &self,
+            _request: &lingxi_core::host::ModelSelectionRequest,
+        ) -> Result<(), lingxi_core::host::HandleError> {
+            Err(lingxi_core::host::HandleError::Unimplemented(
+                "validate_model_selection".into(),
+            ))
+        }
+        async fn select_model(
+            &self,
+            _request: lingxi_core::host::ModelSelectionRequest,
+        ) -> Result<(), lingxi_core::host::HandleError> {
+            Err(lingxi_core::host::HandleError::Unimplemented(
+                "select_model".into(),
+            ))
+        }
         async fn request_exit(&self) {}
         async fn current_should_exit(&self) -> bool {
             false

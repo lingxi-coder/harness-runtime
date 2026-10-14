@@ -90,6 +90,30 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
+    /// Native YKe capability for a resolved Foundry deployment. `Some(false)`
+    /// is an observed unsupported `tool_search_server` or `tool_search`;
+    /// `Some(true)` includes the Native default for an unobserved deployment.
+    /// `None` means this client cannot authoritatively resolve a Foundry route.
+    fn foundry_tool_search_supported(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _model_source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    ) -> Option<bool> {
+        None
+    }
+
+    /// Current exact Native model option, when supplied by the host environment.
+    fn model_validation_custom_model_option(&self) -> Option<Vec<u16>> {
+        None
+    }
+
+    /// Account epoch for model-validation probe fencing. Implementations that
+    /// do not own an account observer may leave this unavailable.
+    fn model_validation_account_generation(&self) -> Option<u64> {
+        None
+    }
+
     /// Native hQ capability for the selected current route, including its
     /// settings and account exclusions. Unavailable host facts admit no support.
     fn supports_native_mid_conversation_system(
@@ -164,6 +188,22 @@ pub trait OrchestratorApiClient: Send + Sync {
     ) -> Result<(), LlmError> {
         Ok(())
     }
+
+    /// Probe an exact model source on a known route without inheriting turn policy.
+    ///
+    /// Non-routing API clients fail explicitly instead of treating an unperformed
+    /// probe as successful validation.
+    async fn probe_model(
+        &self,
+        _route_model: &str,
+        _profile: Option<&str>,
+        _source_model: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<(), LlmError> {
+        Err(LlmError::InvalidRequest {
+            message: "model validation is unsupported by this API client".to_owned(),
+        })
+    }
+
     /// Execute an owned main request or isolated structured hook evaluation.
     async fn messages_create(
         &self,
@@ -498,6 +538,7 @@ pub trait StreamingApiClient: Send + Sync {
             lingxi_core::types::MessageId,
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
+        model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = effort;
         let _ = tool_result_reminder_suffixes;
@@ -505,6 +546,7 @@ pub trait StreamingApiClient: Send + Sync {
         let _ = native_anthropic_request_context;
         let _ = typed_attachment_ids;
         let _ = task_deliveries;
+        let _ = model_source;
         self.stream(
             model,
             profile,
@@ -813,7 +855,8 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
                 LlmError::MalformedToolInput { .. }
                 | LlmError::RequestDispatchRejected { .. }
                 | LlmError::CostUnavailable { .. }
-                | LlmError::UnsupportedCapability { .. } => (Some("unknown"), None),
+                | LlmError::UnsupportedCapability { .. }
+                | LlmError::SettingsSource { .. } => (Some("unknown"), None),
             }
         }
         // Generic-Error fallthrough (`Flp`: `if(e instanceof $o)→"unknown"`;
@@ -822,6 +865,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         // upstream and never reach `surface_model_error` — dead arms kept for
         // totality.
         OrchestratorError::Internal(_)
+        | OrchestratorError::Settings(_)
         | OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::StreamingProtocol(_)
         | OrchestratorError::StreamEndedWithoutStop
@@ -905,6 +949,7 @@ fn tool_search_supported_for_request(
     api: &dyn OrchestratorApiClient,
     model: &str,
     profile: Option<&str>,
+    model_source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> bool {
     let unsupported_models = telemetry::flag_string_list(
         "tengu_tool_search_unsupported_models",
@@ -917,11 +962,16 @@ fn tool_search_supported_for_request(
             "claude-3-7-sonnet",
         ],
     );
-    tool_search_supported_for_model_and_protocol(
-        model,
-        &unsupported_models,
-        api.protocol_for_model(model, profile),
-    )
+    let protocol = api.protocol_for_model(model, profile);
+    if !tool_search_supported_for_model_and_protocol(model, &unsupported_models, protocol) {
+        return false;
+    }
+    if protocol == Some(llm_runtime::ProtocolFamily::FoundryClaude) {
+        return api
+            .foundry_tool_search_supported(model, profile, model_source)
+            .unwrap_or(true);
+    }
+    true
 }
 
 fn tool_search_supported_for_model_and_protocol(
@@ -1867,8 +1917,8 @@ pub(crate) use compaction_impl::{
 #[path = "conversation/drivers/mod.rs"]
 mod drivers_impl;
 pub use drivers_impl::{
-    realtime_history, skill_prompt_inputs, QueuedPromptInput, RealtimeAgentContext,
-    RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits,
+    realtime_history, skill_prompt_inputs, PendingPromptIdentity, QueuedPromptInput,
+    RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits,
 };
 #[path = "conversation/context_announcements.rs"]
 pub(crate) mod context_announcements_impl;

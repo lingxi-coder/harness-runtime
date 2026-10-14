@@ -183,8 +183,27 @@ pub trait InsightsModelSelector: Send + Sync {
 pub struct InsightsSelectedModel {
     /// Model identifier used for route resolution.
     pub model: String,
+    /// Effective Native model source carried only when its owner and original
+    /// route anchor still match this selected request route.
+    pub model_source: Option<InsightsSource>,
     /// Optional profile that disambiguates the provider route.
     pub profile: Option<String>,
+}
+
+fn same_insights_request_route(left: &MediaRoute, right: &MediaRoute) -> bool {
+    left.main.provider_id == right.main.provider_id
+        && left.main.profile_name == right.main.profile_name
+        && left.main.request_model == right.main.request_model
+}
+
+fn insights_route_uses_native_model_catalog(route: &MediaRoute) -> bool {
+    matches!(
+        &route.main.provider_id,
+        ProviderId::AnthropicFirstParty
+            | ProviderId::BedrockClaude
+            | ProviderId::VertexClaude
+            | ProviderId::FoundryClaude
+    )
 }
 
 /// Supplies the five explicit `MZo` q4 gate results that Native folds into
@@ -391,14 +410,22 @@ pub struct RuntimeInsightsModelSelector {
     pub api: Arc<ApiService>,
     /// Same-runtime model resolver used for the source-selected Opus family.
     pub model_resolution: Arc<dyn agent::model_resolution::ModelResolutionContextProvider>,
+    /// Live configured source binding lock owned by the current orchestrator.
+    /// Explicit session picks and per-query Native model selections do not own it.
+    pub main_model_source: Arc<std::sync::RwLock<Option<lingxi_core::host::ModelSourceBinding>>>,
 }
 
 #[async_trait]
 impl InsightsModelSelector for RuntimeInsightsModelSelector {
     async fn selected_model(&self) -> Result<InsightsSelectedModel, InsightsSource> {
-        let (current_model, current_profile) = {
+        let (current_model, current_profile, source_owner, user_model_setting) = {
             let session = self.session.lock().await;
-            (session.model.clone(), session.model_profile.clone())
+            (
+                session.model.clone(),
+                session.model_profile.clone(),
+                session.user_model_setting_source,
+                session.user_model_setting.clone(),
+            )
         };
         let route = self
             .api
@@ -419,8 +446,18 @@ impl InsightsModelSelector for RuntimeInsightsModelSelector {
         };
 
         if !use_opus_family {
+            let model_source = self
+                .model_source_for_request(
+                    &current_model,
+                    current_profile.as_deref(),
+                    &route,
+                    source_owner,
+                    user_model_setting.as_ref(),
+                )
+                .await;
             return Ok(InsightsSelectedModel {
                 model: current_model,
+                model_source,
                 profile: current_profile,
             });
         }
@@ -438,12 +475,63 @@ impl InsightsModelSelector for RuntimeInsightsModelSelector {
         .map_err(|error| error_source(format!("insights Opus model resolution failed: {error}")))?;
         Ok(InsightsSelectedModel {
             model: selected.model,
+            // Native `ke()` selected a per-query Opus route. The configured
+            // parent source belongs to the session route and must not override it.
+            model_source: None,
             profile: selected.model_profile,
         })
     }
 }
 
 impl RuntimeInsightsModelSelector {
+    async fn model_source_for_request(
+        &self,
+        session_model: &str,
+        session_profile: Option<&str>,
+        request_route: &MediaRoute,
+        source_owner: lingxi_core::session::SessionModelSettingSource,
+        user_model_setting: Option<&lingxi_core::host::ModelSourceBinding>,
+    ) -> Option<InsightsSource> {
+        if !insights_route_uses_native_model_catalog(request_route) {
+            return None;
+        }
+        {
+            let session = self.session.lock().await;
+            if session.model != session_model
+                || session.model_profile.as_deref() != session_profile
+                || session.user_model_setting_source != source_owner
+                || (source_owner == lingxi_core::session::SessionModelSettingSource::UserSelection
+                    && session.user_model_setting.as_ref() != user_model_setting)
+            {
+                return None;
+            }
+        }
+        let binding = match source_owner {
+            lingxi_core::session::SessionModelSettingSource::Configured => self
+                .main_model_source
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()?,
+            lingxi_core::session::SessionModelSettingSource::UserSelection => {
+                user_model_setting?.clone()
+            }
+        };
+        let anchor_route = self
+            .api
+            .resolve_media_route(
+                &binding.route_anchor.model,
+                binding.route_anchor.profile.as_deref(),
+            )
+            .ok()?;
+        if !same_insights_request_route(&anchor_route, request_route) {
+            return None;
+        }
+        binding.effective_source_for_route(
+            &binding.route_anchor.model,
+            binding.route_anchor.profile.as_deref(),
+        )
+    }
+
     async fn first_party_opus_branch(
         &self,
         model: &str,
@@ -639,6 +727,7 @@ impl InsightsSideQueryExecutor {
                 enable_prompt_caching: false,
                 model_attempt: None,
                 model: selected.model,
+                model_source: selected.model_source,
                 profile: selected.profile,
                 system_prompt: None,
                 typed_attachment_ids: Default::default(),

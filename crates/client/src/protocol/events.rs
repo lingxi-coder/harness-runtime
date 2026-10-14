@@ -119,7 +119,7 @@ define_client_event! {
     },
     Error {
         kind: ErrorKindDto,
-        message: String,
+        message: ClientTextDto,
     },
 
     SystemNotice {
@@ -262,12 +262,16 @@ define_client_event! {
     ModelList {
         models: Vec<String>,
         current: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_model_source: Option<ClientTextDto>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         details: Vec<ModelDetailsDto>,
     },
 
     ModelChanged {
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_source: Option<ClientTextDto>,
     },
 
     PermissionModeChanged {
@@ -990,13 +994,21 @@ impl From<ClientEventWire> for ClientEvent {
             ClientEventWire::ModelList {
                 models,
                 current,
+                current_model_source,
                 details,
             } => Self::ModelList {
                 models,
                 current,
+                current_model_source,
                 details,
             },
-            ClientEventWire::ModelChanged { model } => Self::ModelChanged { model },
+            ClientEventWire::ModelChanged {
+                model,
+                model_source,
+            } => Self::ModelChanged {
+                model,
+                model_source,
+            },
             ClientEventWire::PermissionModeChanged { mode } => Self::PermissionModeChanged { mode },
             ClientEventWire::ProviderCredentialStatus {
                 operation_id,

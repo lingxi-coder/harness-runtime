@@ -216,6 +216,16 @@ pub struct OrchestratorConfig {
     )]
     pub system_prompt_override: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
 
+    /// Host-owned text appended after the default system prompt or its explicit
+    /// override. It remains a separate source projection so the default prompt
+    /// is never replaced by an append-only CLI option.
+    #[serde(
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option"
+    )]
+    pub append_system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+
     /// Normal queries announce typed context attachments. Native bare/inline
     /// callers retain the additional-context prefix by selecting `Inline`.
     #[serde(default)]
@@ -602,6 +612,7 @@ impl Default for OrchestratorConfig {
             classifier_model_default_env: false,
             fallback_model: None,
             system_prompt_override: None,
+            append_system_prompt: None,
             context_rendering: lingxi_core::host::instructions::InstructionRendering::Announced,
             bare: false,
             exclude_dynamic_system_prompt_sections: false,
@@ -727,6 +738,7 @@ mod tests {
             classifier_model_default_env: false,
             fallback_model: Some("claude-sonnet-4-6".into()),
             system_prompt_override: Some("custom".into()),
+            append_system_prompt: Some("append".into()),
             context_rendering: lingxi_core::host::instructions::InstructionRendering::Announced,
             bare: false,
             exclude_dynamic_system_prompt_sections: false,
@@ -788,6 +800,12 @@ mod tests {
                 .as_ref()
                 .and_then(|prompt| prompt.string_at("")),
             Some("custom")
+        );
+        assert_eq!(
+            back.append_system_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at("")),
+            Some("append")
         );
         assert!(back.interactive_permissions);
         assert!(back.interactive_session);

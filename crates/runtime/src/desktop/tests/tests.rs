@@ -436,7 +436,7 @@ fn workflow_size_uses_custom_home_flag_and_managed_precedence() {
     };
 
     let (without_managed, is_managed, is_default) =
-        resolve_workflow_size_guideline(&cfg, &cwd, &[]);
+        resolve_workflow_size_guideline(&cfg, &cwd, &[]).expect("settings merge should succeed");
     assert_eq!(
         without_managed,
         tool_workflow::WorkflowSizeGuideline::Large,
@@ -446,7 +446,8 @@ fn workflow_size_uses_custom_home_flag_and_managed_precedence() {
     assert!(!is_default);
 
     let (with_managed, is_managed, is_default) =
-        resolve_workflow_size_guideline(&cfg, &cwd, &[managed]);
+        resolve_workflow_size_guideline(&cfg, &cwd, &[managed])
+            .expect("settings merge should succeed");
     assert_eq!(with_managed, tool_workflow::WorkflowSizeGuideline::Small);
     assert!(is_managed);
     assert!(!is_default);
@@ -465,7 +466,8 @@ fn workflow_size_tracks_the_builtin_default_separately_from_explicit_medium() {
         ..DesktopConfig::default()
     };
 
-    let (guideline, managed, is_default) = resolve_workflow_size_guideline(&cfg, &cwd, &[]);
+    let (guideline, managed, is_default) =
+        resolve_workflow_size_guideline(&cfg, &cwd, &[]).expect("settings merge should succeed");
     assert_eq!(guideline, tool_workflow::WorkflowSizeGuideline::Medium);
     assert!(!managed);
     assert!(is_default);
@@ -500,12 +502,13 @@ fn workflow_session_enabled_uses_custom_home_flag_and_managed_precedence() {
     };
 
     assert_eq!(
-        resolve_workflow_session_enabled(&cfg, &cwd, &[]),
+        resolve_workflow_session_enabled(&cfg, &cwd, &[]).expect("settings merge should succeed"),
         (false, false),
         "flag > local > user"
     );
     assert_eq!(
-        resolve_workflow_session_enabled(&cfg, &cwd, &[managed]),
+        resolve_workflow_session_enabled(&cfg, &cwd, &[managed])
+            .expect("settings merge should succeed"),
         (true, true),
         "managed > flag > local > user"
     );
@@ -525,7 +528,7 @@ fn workflow_session_enabled_defaults_true() {
     };
 
     assert_eq!(
-        resolve_workflow_session_enabled(&cfg, &cwd, &[]),
+        resolve_workflow_session_enabled(&cfg, &cwd, &[]).expect("settings merge should succeed"),
         (true, false)
     );
 }
@@ -654,7 +657,8 @@ async fn desktop_registry_exposes_connect() {
         Default::default(),
         Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
     )
-    .await;
+    .await
+    .expect("desktop settings must load for command registry");
     assert!(
         reg.get_handler(&"connect".into()).is_some(),
         "/connect not wired into desktop registry"
@@ -763,7 +767,8 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
             Default::default(),
             Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
         )
-        .await;
+        .await
+        .expect("desktop settings must load for command registry");
         assert_eq!(
             reg.resolve(&"m3custom".into()).is_some(),
             want_custom,
@@ -888,7 +893,8 @@ async fn an_add_dir_root_contributes_its_skills() {
             Default::default(),
             Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
         )
-        .await;
+        .await
+        .expect("desktop settings must load for command registry");
         assert_eq!(
             reg.resolve(&"addskill".into()).is_some(),
             want,
@@ -4907,6 +4913,7 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         .orchestrator
         .assemble_default_system_prompt_preview()
         .await
+        .unwrap()
         .string_at("")
         .is_some_and(|text| text.contains("MOD SURFACE desktop")));
     assert!(rt
@@ -4921,7 +4928,10 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
             is_fullscreen: false,
             columns: 80,
         },
-        rt.dispatcher.dispatch("/hello Ada".into()),
+        rt.dispatcher.dispatch(
+            "/hello Ada".into(),
+            lingxi_core::host::CancellationToken::new(),
+        ),
     )
     .await;
     assert_eq!(
@@ -4937,7 +4947,7 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         }
     );
     assert_eq!(
-        rt.dispatcher.dispatch("/unanswered".into()).await,
+        rt.dispatcher.dispatch("/unanswered".into(), lingxi_core::host::CancellationToken::new()).await,
         SlashDispatchResult::Handled {
             display: "moddemo registered /unanswered but no command.run hook answered it: add on(\"command.run\", { command: \"unanswered\" }, ($, e) => ({ text: ... })) to the plugin.".into()
         }
@@ -4949,7 +4959,10 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
                 is_fullscreen: true,
                 columns: 123,
             },
-            rt.dispatcher.dispatch("/origin".into()),
+            rt.dispatcher.dispatch(
+                "/origin".into(),
+                lingxi_core::host::CancellationToken::new()
+            ),
         )
         .await,
         SlashDispatchResult::Handled {
@@ -4957,7 +4970,12 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         }
     );
     assert_eq!(
-        rt.dispatcher.dispatch("/origin".into()).await,
+        rt.dispatcher
+            .dispatch(
+                "/origin".into(),
+                lingxi_core::host::CancellationToken::new()
+            )
+            .await,
         SlashDispatchResult::Handled {
             display: "moddemo: unclassified:-:false:80".into()
         }
@@ -4987,7 +5005,10 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
             is_fullscreen: false,
             columns: 80,
         },
-        rt.dispatcher.dispatch("/echo Ada".into()),
+        rt.dispatcher.dispatch(
+            "/echo Ada".into(),
+            lingxi_core::host::CancellationToken::new(),
+        ),
     )
     .await;
     assert_eq!(
@@ -5004,14 +5025,24 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
     );
     assert_eq!(echo_hits.load(Ordering::SeqCst), 1);
     assert_eq!(
-        rt.dispatcher.dispatch("/cut Ada".into()).await,
+        rt.dispatcher
+            .dispatch(
+                "/cut Ada".into(),
+                lingxi_core::host::CancellationToken::new()
+            )
+            .await,
         SlashDispatchResult::Handled {
             display: "moddemo: blocked".into()
         }
     );
     assert_eq!(cut_hits.load(Ordering::SeqCst), 0);
     assert_eq!(
-        rt.dispatcher.dispatch("/plain Ada".into()).await,
+        rt.dispatcher
+            .dispatch(
+                "/plain Ada".into(),
+                lingxi_core::host::CancellationToken::new()
+            )
+            .await,
         SlashDispatchResult::Handled {
             display: "core Ada".into()
         }
@@ -5021,7 +5052,10 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         rt.dispatcher
             .clone_shared()
             .with_injected_messages_as_turns()
-            .dispatch("/prompted".into())
+            .dispatch(
+                "/prompted".into(),
+                lingxi_core::host::CancellationToken::new()
+            )
             .await,
         SlashDispatchResult::RunAsTurn {
             prompt: "model prompt".into()
@@ -5031,7 +5065,12 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
     let host = rt.hook_registry.read().await.mod_host().expect("Mod host");
     host.unload("moddemo").await.unwrap();
     assert_eq!(
-        rt.dispatcher.dispatch("/echo Ada".into()).await,
+        rt.dispatcher
+            .dispatch(
+                "/echo Ada".into(),
+                lingxi_core::host::CancellationToken::new()
+            )
+            .await,
         SlashDispatchResult::Handled {
             display: "core Ada".into()
         }
@@ -5044,7 +5083,12 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         .resolve(&"hello".into())
         .is_none());
     assert!(matches!(
-        rt.dispatcher.dispatch("/hello Ada".into()).await,
+        rt.dispatcher
+            .dispatch(
+                "/hello Ada".into(),
+                lingxi_core::host::CancellationToken::new()
+            )
+            .await,
         SlashDispatchResult::Unknown { .. }
     ));
 }
@@ -5405,7 +5449,10 @@ async fn build_reroutes_disconnected_default_to_connected_provider() {
     let session = rt.orchestrator.session();
     let state = session.lock().await;
     assert_eq!(
-        state.user_model_setting.as_deref(),
+        state
+            .user_model_setting
+            .as_ref()
+            .and_then(|binding| binding.source.string_at("")),
         Some("opusplan"),
         "connected-provider wire fallback must not replace the raw main model setting"
     );
@@ -7782,6 +7829,7 @@ async fn session_persistence_flag_gates_jsonl_writer() {
             let dispatched = lingxi_core::host::SlashCommandDispatcher::dispatch(
                 &rt.dispatcher,
                 "/fusion compare these approaches".into(),
+                lingxi_core::host::CancellationToken::new(),
             )
             .await;
             let lingxi_core::host::SlashDispatchResult::Handled { display } = dispatched else {
@@ -7960,6 +8008,7 @@ async fn build_with_injected_memory_reaches_system_prompt() {
         .orchestrator
         .additional_context_preview()
         .await
+        .unwrap()
         .expect("an additional-context meta must be present (currentDate is unconditional)");
     assert!(
             ctx.contains(
@@ -8007,7 +8056,11 @@ async fn build_default_loads_no_memory() {
 
     let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
-    let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+    let sys = rt
+        .orchestrator
+        .assemble_system_prompt_preview()
+        .await
+        .unwrap();
     assert!(
         !sys.contains("Codebase and user instructions are shown below."),
         "default (empty) memory provider must elide the memory section: {sys}"
@@ -8038,7 +8091,11 @@ async fn coordinator_session_assembles_coordinator_system_prompt() {
         .await
         .expect("coordinator build must succeed");
 
-    let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+    let sys = rt
+        .orchestrator
+        .assemble_system_prompt_preview()
+        .await
+        .unwrap();
     // Coordinator role header + interpolated tool names.
     assert!(
             sys.contains(
@@ -8071,7 +8128,11 @@ async fn default_session_does_not_assemble_coordinator_prompt() {
         Arc::new(RecordingPermissionSink::default());
 
     let rt = build(cfg, output, perm_sink).await.expect("build failed");
-    let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+    let sys = rt
+        .orchestrator
+        .assemble_system_prompt_preview()
+        .await
+        .unwrap();
     assert!(
         !sys.contains("You are a **coordinator**."),
         "a default session must NOT use the coordinator system prompt: {sys}"
@@ -9173,8 +9234,7 @@ async fn managed_model_policy_source_uses_selected_managed_snapshot_and_enforces
     cfg.lingxi_home = root.path().join("home");
     std::fs::create_dir_all(&cfg.cwd).unwrap();
     std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
-    let managed_layers = bad.effective_json().into_iter().collect::<Vec<_>>();
-    let effective = super::load_effective_settings_for_config(&cfg, &managed_layers)
+    let effective = super::load_effective_settings_for_config(&cfg, Some(&bad))
         .expect("Native-normalized managed projection remains loadable");
     let catalog_restriction = allowlist::catalog_restriction_from_settings(
         true,
@@ -9268,6 +9328,13 @@ fn model_setting_provenance_is_provider_neutral() {
             settings,
             trace,
             effort_layers: Vec::new(),
+            source_projection: None,
+            source_layers: Vec::new(),
+            typed_view_unrepresented_fields: Vec::new(),
+            managed_typed_view_is_partial: false,
+            source_incomplete: false,
+            source_message: None,
+            source_diagnostics: None,
         }
     }
 
@@ -9284,6 +9351,37 @@ fn model_setting_provenance_is_provider_neutral() {
         super::managed_model_setting_for_config(&cfg, Some(&managed)).as_deref(),
         Some("copilot/claude-sonnet-4-5")
     );
+    assert!(
+        super::effective_model_source_for_config(&cfg, Some(&managed)).is_none(),
+        "typed-only settings have no authoritative raw model projection to forward"
+    );
+
+    let mut ill_formed_managed = effective_model(
+        "placeholder",
+        lingxi_core::settings::tracer::Source::Managed,
+    );
+    ill_formed_managed.source_projection = Some(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"{"model":"\ud800"}"#)
+            .unwrap(),
+    );
+    let retained = super::effective_model_source_for_config(&cfg, Some(&ill_formed_managed))
+        .expect("the admitted Native string stays present even without a Rust String view");
+    assert_eq!(retained.string_units(""), Some(vec![0xd800]));
+    assert!(super::managed_model_setting_for_config(&cfg, Some(&ill_formed_managed)).is_none());
+
+    let mut valid_unknown_managed = effective_model(
+        "uncatalogued-claude-id",
+        lingxi_core::settings::tracer::Source::Managed,
+    );
+    valid_unknown_managed.source_projection = Some(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"model":"uncatalogued-claude-id"}"#,
+        )
+        .unwrap(),
+    );
+    let retained = super::effective_model_source_for_config(&cfg, Some(&valid_unknown_managed))
+        .expect("a valid unknown Native model remains source-authoritative");
+    assert_eq!(retained.string_at(""), Some("uncatalogued-claude-id"));
 
     let blank_managed = effective_model(" ", lingxi_core::settings::tracer::Source::Managed);
     assert_eq!(

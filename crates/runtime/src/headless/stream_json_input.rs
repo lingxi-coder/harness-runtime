@@ -1208,18 +1208,18 @@ pub struct ControlPlaneWriter {
 }
 
 impl ControlPlaneWriter {
-    /// Enqueue an error response preserving the request ID's source projection.
+    /// Enqueue an error response preserving the request ID and message source projections.
     pub fn reply_error_projected(
         &self,
         request_id: Utf16JsonProjection,
-        message: &str,
+        message: Utf16JsonProjection,
     ) -> Result<(), InputError> {
         let mut response = projection_from_value(&json!({"subtype":"error"}));
         response
             .set_field("request_id", request_id)
             .map_err(|_| InputError::MalformedJson)?;
         response
-            .set_field("error", Utf16JsonProjection::from(message))
+            .set_field("error", message)
             .map_err(|_| InputError::MalformedJson)?;
         let mut frame = projection_from_value(&json!({"type":"control_response"}));
         frame
@@ -1305,6 +1305,7 @@ mod tests {
                 panic!("unexpected heartbeat message")
             }
             crate::headless::stream_json::OutboundMsg::Shutdown(_)
+            | crate::headless::stream_json::OutboundMsg::ShutdownBeforeRuntime(_)
             | crate::headless::stream_json::OutboundMsg::PublishJson(_)
             | crate::headless::stream_json::OutboundMsg::RefreshHeldResultTotals(_)
             | crate::headless::stream_json::OutboundMsg::Flush(_) => {
@@ -1941,12 +1942,12 @@ mod tests {
         writer
             .reply_error_projected(
                 Utf16JsonProjection::parse(r#""\ud800""#).unwrap(),
-                "unsupported",
+                Utf16JsonProjection::parse(r#""\udfff""#).unwrap(),
             )
             .unwrap();
         assert_eq!(
             outbound_line(rx.try_recv().unwrap()),
-            "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"\\ud800\",\"error\":\"unsupported\"}}\n"
+            "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"\\ud800\",\"error\":\"\\udfff\"}}\n"
         );
         writer
             .reply_success_projected(

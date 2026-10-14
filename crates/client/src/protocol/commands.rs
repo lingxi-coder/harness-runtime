@@ -384,8 +384,8 @@ define_client_command! {
     // Switch the active model. Confirmed by a
     // [`ModelChanged`](crate::protocol::events::ClientEvent::ModelChanged) event.
     SetModel {
-        // The model name to activate.
-        model: String,
+        // Exact model-selection source. Route/profile resolution remains host-owned.
+        model: ClientTextDto,
     },
 
     // Request the available-model catalog. Replied with a
@@ -436,9 +436,9 @@ define_client_command! {
         // Optional working directory for the new session. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
-        // Optional starting model. Skipped when `None`.
+        // Optional exact starting model-selection source. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
+        model: Option<ClientTextDto>,
     },
 
     // Resume a prior session on this connection. **The ONE allowed

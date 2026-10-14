@@ -103,14 +103,15 @@ impl RuntimeModelResolutionProvider {
         // a Native family spelling with the same text. For example, a profile
         // can literally register a model named "opus".
         match self.runtime.resolve_media_route(model, None) {
-            Ok(route) => return self.resolved_route(model, None, route.main),
+            Ok(route) => self.resolved_route(model, None, route.main),
             Err(error) if is_family_alias(model) => {
                 if error.to_string().contains("ambiguous across profiles") {
-                    return Err(self.route_error(model, None, error));
+                    Err(self.route_error(model, None, error))
+                } else {
+                    self.select_family_alias_profile(model, None)
                 }
-                return self.select_family_alias_profile(model, None);
             }
-            Err(error) => return Err(self.route_error(model, None, error)),
+            Err(error) => Err(self.route_error(model, None, error)),
         }
     }
 

@@ -28,6 +28,9 @@ pub const REPEATED_529_ERROR_MESSAGE: &str = "Repeated 529 Overloaded errors";
 /// change the format string without a corresponding spec amendment.
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
+    /// A source-preserving settings projection failed while building the request context.
+    #[error(transparent)]
+    Settings(#[from] lingxi_core::settings::SettingsError),
     /// The current query exhausted its structured-output correction budget.
     #[error("Failed to provide valid structured output after {max_retries} attempts{detail}", detail = structured_retry_detail(last_error.as_ref()))]
     MaxStructuredOutputRetries {

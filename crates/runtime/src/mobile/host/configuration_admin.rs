@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 async fn protocol_error(sink: &dyn ClientEventSink, message: impl Into<String>) {
     sink.emit(ClientEvent::Error {
         kind: ErrorKindDto::Protocol,
-        message: message.into(),
+        message: client::protocol::text::ClientTextDto::from(message.into()),
     })
     .await;
 }

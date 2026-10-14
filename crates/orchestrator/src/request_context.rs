@@ -22,6 +22,17 @@ pub(crate) struct PromptIngressAttachment {
     pub(crate) rendered: Utf16JsonProjection,
 }
 
+/// Trusted source class for one user-row/model-step ingress. Direct Bash is
+/// carried by the host from the durable queue; it is never inferred from
+/// rendered transcript text and is consumed for exactly one model step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptIngressKind {
+    RegularUser,
+    LocalSkill,
+    Other,
+    DirectBash,
+}
+
 /// A typed transcript sidecar associated with a request-context turn.
 ///
 /// The rendered view is stored in JSONL beside the attachment payload. The
@@ -64,6 +75,9 @@ struct PromptContext {
     /// retries must not consume a stateful producer twice just because its
     /// first result contained no attachment.
     ingress_batch: std::sync::Mutex<PromptIngressBatch>,
+    /// A host-stamped DirectBash source applies only to the next model-step
+    /// preparation, then falls back to the ordinary history classifier.
+    next_model_step_ingress_kind: std::sync::Mutex<Option<PromptIngressKind>>,
 }
 
 #[derive(Default)]
@@ -159,6 +173,7 @@ impl ConversationOrchestrator {
                     transcript_attachment: std::sync::Mutex::new(transcript_attachment),
                     staged_ingress_attachments: std::sync::Mutex::new(None),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
+                    next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
                 self.run_turn_streaming_with_cancel_image_sources_and_message_id(
                     prompt,
@@ -188,6 +203,7 @@ impl ConversationOrchestrator {
                     transcript_attachment: std::sync::Mutex::new(transcript_attachment),
                     staged_ingress_attachments: std::sync::Mutex::new(None),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
+                    next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
                 self.run_turn_with_cancel_image_sources_and_message_id(
                     prompt,
@@ -251,6 +267,7 @@ pub(crate) async fn scope_if_missing<F: Future>(future: F) -> F::Output {
                     transcript_attachment: std::sync::Mutex::new(None),
                     staged_ingress_attachments: std::sync::Mutex::new(None),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
+                    next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
                 future,
             )
@@ -265,10 +282,20 @@ pub(crate) async fn scope_if_missing<F: Future>(future: F) -> F::Output {
 pub(crate) async fn persist_prompt_ingress_after_user(
     orchestrator: &ConversationOrchestrator,
     prompt_id: MessageId,
-    is_regular_user_prompt: bool,
-) {
-    if !is_native_nar_ingress(is_regular_user_prompt) {
-        return;
+    kind: PromptIngressKind,
+) -> Result<(), lingxi_core::settings::SettingsError> {
+    if kind == PromptIngressKind::DirectBash {
+        let _ = REQUEST_CONTEXT.try_with(|context| {
+            *context
+                .next_model_step_ingress_kind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kind);
+        });
+        return Ok(());
+    }
+    let fallback_pending = unknown_command_fallback_pending();
+    if !should_stage_prompt_ingress(kind, fallback_pending) {
+        return Ok(());
     }
     let _ = REQUEST_CONTEXT.try_with(|context| {
         *context
@@ -295,12 +322,14 @@ pub(crate) async fn persist_prompt_ingress_after_user(
         if let Some(model) = orchestrator.model_prompt_ingress_attachment().await {
             staged.push(model);
         }
-        staged.extend(orchestrator.prompt_ingress_listing_attachments().await);
-        if let Some(reminder) = orchestrator
-            .total_tokens_prompt_ingress_attachment(true)
-            .await
-        {
-            staged.push(reminder);
+        staged.extend(orchestrator.prompt_ingress_listing_attachments().await?);
+        if let Some(is_regular_user) = total_tokens_ingress_reanchor(kind, fallback_pending) {
+            if let Some(reminder) = orchestrator
+                .total_tokens_prompt_ingress_attachment(is_regular_user)
+                .await
+            {
+                staged.push(reminder);
+            }
         }
         if let Some(reminder) = orchestrator.budget_usd_prompt_ingress_attachment().await {
             staged.push(reminder);
@@ -317,27 +346,142 @@ pub(crate) async fn persist_prompt_ingress_after_user(
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(staged);
         });
     }
+    Ok(())
 }
 
-/// Native `NAr` also runs for a real user request that is being sent through
-/// the typed unknown-command fallback. That fallback is carried as a user-role
-/// transcript attachment, so retain it as an explicit collector entry even if
-/// the ordinary prompt classifier does not consider the current tail a regular
-/// user prompt. Other metadata rows do not open the ingress collector.
-pub(crate) fn is_native_nar_ingress(is_regular_user_prompt: bool) -> bool {
-    is_regular_user_prompt
-        || REQUEST_CONTEXT
-            .try_with(|context| {
-                context
-                    .transcript_attachment
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .is_some_and(|attachment| {
-                        attachment.payload.string_at("/type") == Some("unknown_command_fallback")
-                    })
-            })
-            .unwrap_or(false)
+/// Classify a submitted ordinary row from the task-local source. A typed
+/// LocalSkill caller supplies the trusted companion class explicitly; an
+/// unknown-command fallback remains `Other` so it opens its initial collector
+/// without borrowing the regular-user token/re-anchor bit.
+pub(crate) fn prompt_ingress_kind_for_user_submission(is_local_skill: bool) -> PromptIngressKind {
+    if is_local_skill {
+        PromptIngressKind::LocalSkill
+    } else if has_unknown_command_fallback() {
+        PromptIngressKind::Other
+    } else {
+        PromptIngressKind::RegularUser
+    }
+}
+
+/// Whether the current request owns the Native unknown-command fallback row.
+pub(crate) fn pending_model_step_ingress_kind() -> Option<PromptIngressKind> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            *context
+                .next_model_step_ingress_kind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        })
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn take_model_step_ingress_kind() -> Option<PromptIngressKind> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            context
+                .next_model_step_ingress_kind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        })
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn has_unknown_command_fallback() -> bool {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            context
+                .transcript_attachment
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|attachment| {
+                    attachment.payload.string_at("/type") == Some("unknown_command_fallback")
+                })
+        })
+        .unwrap_or(false)
+}
+
+/// The fallback collector is a one-shot request-ingress lane. Once its staged
+/// batch has been finalized, later `Other` model steps are real tool
+/// continuations and use the existing false/reanchor-false token path.
+pub(crate) fn unknown_command_fallback_pending() -> bool {
+    has_unknown_command_fallback() && !prompt_ingress_batch_finalized()
+}
+
+fn should_stage_prompt_ingress(kind: PromptIngressKind, fallback_pending: bool) -> bool {
+    match kind {
+        PromptIngressKind::RegularUser | PromptIngressKind::LocalSkill => true,
+        PromptIngressKind::Other => fallback_pending,
+        PromptIngressKind::DirectBash => false,
+    }
+}
+
+/// Native's unknown-command collector has no regular-user ingress (`e === null`),
+/// so it still stages total tokens without reanchoring the task budget. Once
+/// the fallback batch is finalized, real continuations use the engine collector.
+fn total_tokens_ingress_reanchor(
+    kind: PromptIngressKind,
+    fallback_pending: bool,
+) -> Option<bool> {
+    match kind {
+        PromptIngressKind::RegularUser => Some(true),
+        PromptIngressKind::Other if fallback_pending => Some(false),
+        PromptIngressKind::Other | PromptIngressKind::LocalSkill | PromptIngressKind::DirectBash => {
+            None
+        }
+    }
+}
+
+fn native_nar_ingress_eligible(
+    kind: PromptIngressKind,
+    fallback_present: bool,
+    staged_batch_present: bool,
+    batch_finalized: bool,
+) -> bool {
+    match kind {
+        PromptIngressKind::RegularUser => true,
+        PromptIngressKind::LocalSkill => staged_batch_present,
+        PromptIngressKind::Other => fallback_present && !batch_finalized,
+        PromptIngressKind::DirectBash => false,
+    }
+}
+
+/// Native NAr eligibility is per model step, not sticky to a whole turn.
+/// Skills need their staged initial batch; the typed fallback is eligible only
+/// until that one-shot batch is finalized; regular users retain the existing
+/// collector behavior.
+pub(crate) fn is_native_nar_ingress(kind: PromptIngressKind) -> bool {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            let fallback_present = context
+                .transcript_attachment
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|attachment| {
+                    attachment.payload.string_at("/type") == Some("unknown_command_fallback")
+                });
+            let staged_batch_present = context
+                .staged_ingress_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
+            let batch_finalized = context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finalized;
+            native_nar_ingress_eligible(
+                kind,
+                fallback_present,
+                staged_batch_present,
+                batch_finalized,
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Select and persist the complete first user-prompt attachment batch once.
@@ -919,6 +1063,30 @@ where
         .unwrap_or(rows)
 }
 
+/// Fallible counterpart for producers whose source projection can fail. The
+/// result is cached only after successful production, so a failed attempt does
+/// not become a sealed empty batch on retry.
+pub(crate) async fn prompt_ingress_producer_rows_or_else_fallible<F, Fut>(
+    orchestrator: &ConversationOrchestrator,
+    producer: &str,
+    produce: F,
+) -> Result<Vec<PromptIngressAttachment>, lingxi_core::settings::SettingsError>
+where
+    F: FnOnce() -> Fut,
+    Fut:
+        Future<Output = Result<Vec<PromptIngressAttachment>, lingxi_core::settings::SettingsError>>,
+{
+    if let Some(rows) = prompt_ingress_producer_rows(producer) {
+        return Ok(rows);
+    }
+    let rows = produce().await?;
+    Ok(
+        cache_prompt_ingress_producer_rows(orchestrator, producer, rows.clone())
+            .await
+            .unwrap_or(rows),
+    )
+}
+
 /// Find one typed row in the request-owned ingress batch. A retry after the
 /// first preparation reuses this identity and its already-consumed producer
 /// state instead of computing the attachment again.
@@ -1179,3 +1347,68 @@ pub(crate) fn attach(messages: &mut Vec<ConversationMessage>) {
 #[cfg(test)]
 #[path = "request_context_staging_test.rs"]
 mod staging_tests;
+
+#[cfg(test)]
+mod prompt_ingress_kind_tests {
+    use super::*;
+
+    #[test]
+    fn stage_and_token_flags_are_separate_for_regular_skill_and_other() {
+        use PromptIngressKind::{DirectBash, LocalSkill, Other, RegularUser};
+
+        assert!(should_stage_prompt_ingress(RegularUser, false));
+        assert!(should_stage_prompt_ingress(LocalSkill, false));
+        assert!(should_stage_prompt_ingress(Other, true));
+        assert!(!should_stage_prompt_ingress(Other, false));
+        assert!(!should_stage_prompt_ingress(DirectBash, true));
+
+        assert_eq!(total_tokens_ingress_reanchor(RegularUser, false), Some(true));
+        assert_eq!(total_tokens_ingress_reanchor(LocalSkill, true), None);
+        assert_eq!(total_tokens_ingress_reanchor(Other, true), Some(false));
+        assert_eq!(total_tokens_ingress_reanchor(Other, false), None);
+        assert_eq!(total_tokens_ingress_reanchor(DirectBash, true), None);
+    }
+
+    #[test]
+    fn model_step_collector_is_one_shot_for_fallback_and_staged_for_skill() {
+        use PromptIngressKind::{DirectBash, LocalSkill, Other, RegularUser};
+
+        assert!(native_nar_ingress_eligible(RegularUser, false, false, true));
+        assert!(native_nar_ingress_eligible(LocalSkill, false, true, true));
+        assert!(!native_nar_ingress_eligible(
+            LocalSkill, false, false, false
+        ));
+        assert!(native_nar_ingress_eligible(Other, true, true, false));
+        assert!(!native_nar_ingress_eligible(Other, true, true, true));
+        assert!(!native_nar_ingress_eligible(Other, false, true, false));
+        assert!(!native_nar_ingress_eligible(DirectBash, true, true, false));
+    }
+
+    #[tokio::test]
+    async fn direct_bash_model_step_source_is_consumed_once() {
+        let context = PromptContext {
+            prompt_id: std::sync::Mutex::new(MessageId::new()),
+            rows: Vec::new(),
+            turn_projection: std::sync::Mutex::new(None),
+            transcript_attachment: std::sync::Mutex::new(None),
+            staged_ingress_attachments: std::sync::Mutex::new(None),
+            ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
+            next_model_step_ingress_kind: std::sync::Mutex::new(Some(
+                PromptIngressKind::DirectBash,
+            )),
+        };
+        REQUEST_CONTEXT
+            .scope(context, async {
+                assert_eq!(
+                    pending_model_step_ingress_kind(),
+                    Some(PromptIngressKind::DirectBash)
+                );
+                assert_eq!(
+                    take_model_step_ingress_kind(),
+                    Some(PromptIngressKind::DirectBash)
+                );
+                assert_eq!(take_model_step_ingress_kind(), None);
+            })
+            .await;
+    }
+}

@@ -4,7 +4,80 @@ use super::*;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock};
 use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 
+fn same_request_route(left: &llm_runtime::MediaRoute, right: &llm_runtime::MediaRoute) -> bool {
+    left.main.provider_id == right.main.provider_id
+        && left.main.profile_name == right.main.profile_name
+        && left.main.request_model == right.main.request_model
+}
+
+fn main_source_owner_is_current(has_scoped_request_route: bool) -> bool {
+    !has_scoped_request_route
+}
+
+fn main_source_requires_model_carrier(
+    source_owner_is_current: bool,
+    request_route_is_claude: bool,
+    request_matches_session_route: bool,
+    resolved_source_route_is_claude: Option<bool>,
+    resolved_source_matches_request_profile: Option<bool>,
+    resolved_source_matches_request: Option<bool>,
+) -> bool {
+    source_owner_is_current
+        && request_route_is_claude
+        && request_matches_session_route
+        && resolved_source_route_is_claude != Some(false)
+        && resolved_source_matches_request_profile != Some(false)
+        && resolved_source_matches_request != Some(true)
+}
+
 impl ConversationOrchestrator {
+    /// Pair a configured or explicitly selected source with a known route.
+    /// Native aliases are resolved against the supplied route context. An
+    /// unresolved source stays exact and retains the existing known anchor.
+    pub fn bind_model_source(
+        source: &Utf16JsonProjection,
+        fallback_anchor: lingxi_core::host::ModelRouteAnchor,
+        provider: Option<&dyn agent::model_resolution::ModelResolutionContextProvider>,
+    ) -> lingxi_core::host::ModelSourceBinding {
+        let source = crate::model_validation::TrimmedModelSource::from_projection(source)
+            .map(|trimmed| trimmed.source().clone())
+            .unwrap_or_else(|_| source.clone());
+        let resolved = source
+            .string_units("")
+            .and_then(|units| String::from_utf16(&units).ok())
+            .and_then(|source_text| {
+                let provider = provider?;
+                let context = provider
+                    .context_for_route(&fallback_anchor.model, fallback_anchor.profile.as_deref())
+                    .ok()?;
+                agent::model_resolution::resolve_user_model_selection(
+                    &source_text,
+                    None,
+                    &context,
+                    provider,
+                )
+                .ok()
+            });
+        let (route_anchor, effective_source) = match resolved {
+            Some(selection) => {
+                let effective_model = selection.model;
+                (
+                    lingxi_core::host::ModelRouteAnchor {
+                        model: effective_model.clone(),
+                        profile: selection.model_profile,
+                    },
+                    Utf16JsonProjection::from(effective_model),
+                )
+            }
+            None => (fallback_anchor, source.clone()),
+        };
+        lingxi_core::host::ModelSourceBinding {
+            source,
+            effective_source,
+            route_anchor,
+        }
+    }
+
     /// Native model-selection admission applies on explicit Claude provider
     /// routes. Other configured providers keep their own catalog admission.
     pub(crate) fn route_uses_native_model_catalog(route: &llm_runtime::MediaRoute) -> bool {
@@ -15,6 +88,137 @@ impl ConversationOrchestrator {
                 | llm_runtime::ProviderId::VertexClaude
                 | llm_runtime::ProviderId::FoundryClaude
         )
+    }
+
+    /// Share the live configured model-source owner with a host-side consumer.
+    /// The returned `Arc` is the same lock used by main requests and settings
+    /// refreshes, so clones observe later source updates without retaining the
+    /// orchestrator itself.
+    pub fn configured_model_source_handle(
+        &self,
+    ) -> Arc<std::sync::RwLock<Option<lingxi_core::host::ModelSourceBinding>>> {
+        self.model_runtime.configured_model_source.clone()
+    }
+
+    /// Carry the exact current Native model-selection source when the selected
+    /// provider route cannot reproduce it through the ordinary model resolver.
+    /// Configured source and explicit session selection remain separate owners;
+    /// a user pick never inherits the configured parent's value.
+    pub(crate) async fn main_model_source_for_request(
+        &self,
+        request_model: &str,
+        request_profile: Option<&str>,
+    ) -> Option<Utf16JsonProjection> {
+        let (source_owner, user_selection_source, session_model, session_profile) = {
+            let session = self.session.lock().await;
+            (
+                session.user_model_setting_source,
+                session.user_model_setting.clone(),
+                session.model.clone(),
+                session.model_profile.clone(),
+            )
+        };
+        if !main_source_owner_is_current(crate::query_model::current().is_some()) {
+            // A scoped request route owns this call even when it happens to be
+            // byte-identical to the session's selected route.
+            return None;
+        }
+        let binding = match source_owner {
+            lingxi_core::session::SessionModelSettingSource::Configured => self
+                .model_runtime
+                .configured_model_source
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()?,
+            lingxi_core::session::SessionModelSettingSource::UserSelection => {
+                user_selection_source?
+            }
+        };
+
+        let request_route = self
+            .api
+            .resolve_media_route(request_model, request_profile)
+            .ok()?;
+        let session_route = self
+            .api
+            .resolve_media_route(&session_model, session_profile.as_deref())
+            .ok()?;
+        // The source belongs to the route where Native selected it. A refusal
+        // fallback, scoped route, or fresh cross-provider selection must not
+        // inherit it merely because the source owner enum stayed unchanged.
+        let anchor_route = self
+            .api
+            .resolve_media_route(
+                &binding.route_anchor.model,
+                binding.route_anchor.profile.as_deref(),
+            )
+            .ok()?;
+        if !same_request_route(&anchor_route, &session_route)
+            || !same_request_route(&anchor_route, &request_route)
+        {
+            return None;
+        }
+
+        let source = binding.effective_source;
+        let units = source.string_units("")?;
+        let native_effective_model = String::from_utf16(&units).ok().and_then(|source_model| {
+            match self
+                .model_resolution_context_provider
+                .as_ref()
+                .and_then(|provider| {
+                    provider
+                        .context_for_route(&session_model, session_profile.as_deref())
+                        .ok()
+                }) {
+                Some(context) => {
+                    agent::model_resolution::resolve_user_specified_model(&source_model, &context)
+                        .ok()
+                }
+                None => Some(source_model),
+            }
+        });
+        let resolved_source_route = native_effective_model.as_deref().and_then(|source_model| {
+            self.api
+                .resolve_media_route(&source_model, None)
+                .ok()
+                .or_else(|| {
+                    source_model.split_once('/').and_then(|(profile, model)| {
+                        self.api.resolve_media_route(model, Some(profile)).ok()
+                    })
+                })
+                .or_else(|| {
+                    self.api
+                        .resolve_media_route(source_model, request_profile)
+                        .ok()
+                })
+        });
+        let resolved_source_matches_request_profile = resolved_source_route.as_ref().map(|route| {
+            route.main.provider_id == request_route.main.provider_id
+                && route.main.profile_name == request_route.main.profile_name
+        });
+        let resolved_source_matches_request = resolved_source_route
+            .as_ref()
+            .map(|route| same_request_route(route, &request_route));
+        let resolved_source_route_is_claude = resolved_source_route
+            .as_ref()
+            .map(Self::route_uses_native_model_catalog);
+        if main_source_requires_model_carrier(
+            true,
+            Self::route_uses_native_model_catalog(&request_route),
+            same_request_route(&request_route, &session_route),
+            resolved_source_route_is_claude,
+            resolved_source_matches_request_profile,
+            resolved_source_matches_request,
+        ) {
+            Some(native_effective_model.map_or(source, Utf16JsonProjection::from))
+        } else {
+            // A valid alias or catalog id already represented by the selected
+            // Native route needs no additional `model_source` carrier. Keep the
+            // existing multi-provider request encoding and let this route carry
+            // the source. Scoped per-request routes are handled above; a
+            // scheduled lifecycle alone does not displace the current owner.
+            None
+        }
     }
 
     /// Compare models after the current route resolver has turned aliases and
@@ -50,6 +254,28 @@ impl ConversationOrchestrator {
 
         llm_runtime::model::allowlist::normalize(&left.main.request_model)
             == llm_runtime::model::allowlist::normalize(&right.main.request_model)
+    }
+
+    /// Keep a configured source only when the route selected after policy
+    /// fallback is still the configured Native route. Callers must pass the
+    /// final effective model/profile, not a rejected pre-fallback request.
+    pub(crate) fn configured_source_for_effective_route(
+        api: &dyn OrchestratorApiClient,
+        effective_model: &str,
+        effective_profile: Option<&str>,
+        configured_model: &str,
+        configured_profile: Option<&str>,
+        configured_source: Option<Utf16JsonProjection>,
+    ) -> Option<Utf16JsonProjection> {
+        Self::same_native_model_identity(
+            api,
+            effective_model,
+            effective_profile,
+            configured_model,
+            configured_profile,
+        )
+        .then_some(configured_source)
+        .flatten()
     }
 
     /// Native `d_` does not treat the dynamic `best` or plan-strategy alias as
@@ -97,6 +323,30 @@ impl ConversationOrchestrator {
             &self.config.model_catalog_restriction,
             Some(&self.config.server_fallback_regular_model_overrides),
         ))
+    }
+
+    /// Check a source model without converting its UTF-16 units to the display
+    /// replacement string. This keeps live and startup catalog restrictions on
+    /// the actual model sent to the provider.
+    pub(crate) async fn model_catalog_allows_source(
+        &self,
+        model: &Utf16JsonProjection,
+    ) -> Result<bool, hooks::mods::ModError> {
+        if let Some(reader) = self.mod_settings_reader.as_ref() {
+            if let Some(allowed) = reader.model_allowed_projection(model).await? {
+                return Ok(allowed);
+            }
+        }
+        let units = model.string_units("").ok_or_else(|| {
+            hooks::mods::ModError::Protocol("model source must be a JSON string projection".into())
+        })?;
+        Ok(
+            llm_runtime::model::allowlist::model_allowed_under_catalog_utf16(
+                &units,
+                &self.config.model_catalog_restriction,
+                Some(&self.config.server_fallback_regular_model_overrides),
+            ),
+        )
     }
 
     /// Return `None` when routing does not identify a Native Claude route, so
@@ -722,13 +972,27 @@ impl ConversationOrchestrator {
     ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
         let safety_observer = self.model_safety_observer().await;
         let plugin_error = |message: String| hooks::mods::ModError::Native(message);
-        let model = mod_projection_display(&input, "/model")
-            .filter(|model| !model.is_empty())
+        let model_source = input
+            .subprojection("/model")
+            .ok()
+            .filter(|_| input.string_units("/model").is_some())
             .ok_or_else(|| {
                 plugin_error(format!(
                     "{plugin}: $.model.complete: model must be a non-empty string"
                 ))
             })?;
+        let model_units = input.string_units("/model").ok_or_else(|| {
+            plugin_error(format!(
+                "{plugin}: $.model.complete: model must be a non-empty string"
+            ))
+        })?;
+        if model_units.is_empty() {
+            return Err(plugin_error(format!(
+                "{plugin}: $.model.complete: model must be a non-empty string"
+            )));
+        }
+        let model = String::from_utf16_lossy(&model_units);
+        let well_formed_model = String::from_utf16(&model_units).ok();
         let prompt_units = input.string_units("/prompt").ok_or_else(|| {
             plugin_error(format!(
                 "{plugin}: $.model.complete: prompt must be a string"
@@ -794,35 +1058,93 @@ impl ConversationOrchestrator {
         };
         // Resolve aliases through the same provider registry as the main
         // session before applying a policy allowlist or an output ceiling.
-        let route = self
+        let native_resolved_model = well_formed_model.as_deref().and_then(|source_model| {
+            self.model_resolution_context_provider
+                .as_ref()
+                .and_then(|provider| {
+                    provider
+                        .context_for_route(&current_model, current_profile.as_deref())
+                        .ok()
+                })
+                .and_then(|context| {
+                    agent::model_resolution::resolve_user_specified_model(source_model, &context)
+                        .ok()
+                })
+        });
+        let route = native_resolved_model
+            .as_deref()
+            .or(well_formed_model.as_deref())
+            .and_then(|route_model| {
+                self.api
+                    .resolve_media_route(route_model, current_profile.as_deref())
+                    .or_else(|_| self.api.resolve_media_route(route_model, None))
+                    .ok()
+            });
+        let current_route = self
             .api
-            .resolve_media_route(&model, current_profile.as_deref())
-            .or_else(|_| self.api.resolve_media_route(&model, None))
+            .resolve_media_route(&current_model, current_profile.as_deref())
             .ok();
-        let native_catalog_route = route
-            .as_ref()
-            .is_some_and(Self::route_uses_native_model_catalog);
-        let (resolved_model, profile) = match route {
-            Some(route) => (route.main.request_model, Some(route.main.profile_name)),
+        let (resolved_model, profile, native_catalog_route, request_model_source): (
+            String,
+            Option<String>,
+            bool,
+            Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        ) = match route {
+            Some(route) => {
+                let native = Self::route_uses_native_model_catalog(&route);
+                (
+                    route.main.request_model,
+                    Some(route.main.profile_name),
+                    native,
+                    None,
+                )
+            }
+            None if !model.contains('/')
+                && current_route
+                    .as_ref()
+                    .is_some_and(Self::route_uses_native_model_catalog) =>
+            {
+                let route = current_route.expect("guard checked current route");
+                (
+                    route.main.request_model,
+                    Some(route.main.profile_name),
+                    true,
+                    Some(model_source.clone()),
+                )
+            }
             None => (
                 model.to_owned(),
-                (model == current_model)
-                    .then_some(current_profile)
+                (well_formed_model.as_deref() == Some(current_model.as_str()))
+                    .then_some(current_profile.clone())
                     .flatten(),
+                false,
+                None,
             ),
         };
-        if native_catalog_route && !self.model_catalog_allows(&resolved_model).await? {
+        let allowed = if native_catalog_route {
+            match request_model_source.as_ref() {
+                Some(source) => self.model_catalog_allows_source(source).await?,
+                None => self.model_catalog_allows(&resolved_model).await?,
+            }
+        } else {
+            true
+        };
+        if native_catalog_route && !allowed {
             return Err(plugin_error(format!(
                 "{plugin}: $.model.complete: model \"{model}\" is not in this organization's allowlist"
             )));
         }
-        let upper_limit =
-            llm_runtime::model::context_window::known_output_token_limit_for_model(&resolved_model)
-                .unwrap_or(64_000)
-                .min(64_000);
+        let effective_model_display = request_model_source
+            .as_ref()
+            .map_or(resolved_model.as_str(), |_| model.as_str());
+        let upper_limit = llm_runtime::model::context_window::known_output_token_limit_for_model(
+            effective_model_display,
+        )
+        .unwrap_or(64_000)
+        .min(64_000);
         if max_tokens > upper_limit {
             return Err(plugin_error(format!(
-                "{plugin}: $.model.complete: maxTokens {max_tokens} is past what {resolved_model} can produce in one reply ({upper_limit})"
+                "{plugin}: $.model.complete: maxTokens {max_tokens} is past what {effective_model_display} can produce in one reply ({upper_limit})"
             )));
         }
         let Some(runner) = self
@@ -834,11 +1156,12 @@ impl ConversationOrchestrator {
                 "model.complete needs a model client".into(),
             ));
         };
-        let claude_thinking = llm_runtime::model::context_window::is_claude_family(&resolved_model)
-            && llm_runtime::model::thinking::model_supports_thinking(&resolved_model);
+        let claude_thinking =
+            llm_runtime::model::context_window::is_claude_family(effective_model_display)
+                && llm_runtime::model::thinking::model_supports_thinking(effective_model_display);
         let thinking = if claude_thinking {
             None
-        } else if llm_runtime::model::context_window::is_claude_family(&resolved_model) {
+        } else if llm_runtime::model::context_window::is_claude_family(effective_model_display) {
             Some(llm_runtime::model::thinking::ThinkingConfig::Disabled)
         } else {
             // LingXi's authorized non-Claude providers own their reasoning
@@ -867,6 +1190,7 @@ impl ConversationOrchestrator {
         let request = sidequery::SideQueryRequest {
             model_attempt: None,
             native_prompt_context: None,
+            model_source: request_model_source,
             typed_attachment_ids: std::collections::HashSet::new(),
             task_deliveries: std::collections::HashMap::new(),
             model: resolved_model,
@@ -1663,13 +1987,13 @@ impl ConversationOrchestrator {
         // but current tools, model options, and post-compaction messages.
         let system = match saved.as_ref() {
             Some(params) => params.system_prompt_input.clone(),
-            None => Some(self.provider_system_prompt().await),
+            None => Some(self.provider_system_prompt().await?),
         };
         let model = self.session.lock().await.model.clone();
-        let tools = self.build_wire_tools().await.0;
+        let tools = self.build_wire_tools().await?.0;
         let mut params = self
             .build_cache_safe_params(system.as_ref(), &model, &tools)
-            .await;
+            .await?;
         if let Some(saved) = saved {
             params.user_context = saved.user_context;
             params.system_context = saved.system_context;
@@ -1769,12 +2093,13 @@ impl ConversationOrchestrator {
         system: Option<&SystemPromptInput>,
         model: &str,
         tools: &[lingxi_core::host::SourceToolWireDefinition],
-    ) {
+    ) -> Result<(), lingxi_core::settings::SettingsError> {
         let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
-            return;
+            return Ok(());
         };
-        slot.save(self.build_cache_safe_params(system, model, tools).await)
+        slot.save(self.build_cache_safe_params(system, model, tools).await?)
             .await;
+        Ok(())
     }
 
     /// Save the exact physical history snapshot associated with a successful
@@ -1787,11 +2112,11 @@ impl ConversationOrchestrator {
         tools: &[lingxi_core::host::SourceToolWireDefinition],
         request_history: &[ConversationMessage],
         inline_context: Option<&ConversationMessage>,
-    ) {
+    ) -> Result<(), lingxi_core::settings::SettingsError> {
         let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
-            return;
+            return Ok(());
         };
-        let mut params = self.build_cache_safe_params(system, model, tools).await;
+        let mut params = self.build_cache_safe_params(system, model, tools).await?;
         params.fork_context_messages = request_history
             .iter()
             .filter(|message| inline_context.is_none_or(|context| message.id() != context.id()))
@@ -1806,6 +2131,7 @@ impl ConversationOrchestrator {
             params.user_context_message = Some(inline_context.clone());
         }
         slot.save(params).await;
+        Ok(())
     }
 
     /// Assemble a prefix without publishing it as a main-thread request.
@@ -1814,7 +2140,7 @@ impl ConversationOrchestrator {
         system: Option<&SystemPromptInput>,
         model: &str,
         tools: &[lingxi_core::host::SourceToolWireDefinition],
-    ) -> sidequery::CacheSafeParams {
+    ) -> Result<sidequery::CacheSafeParams, lingxi_core::settings::SettingsError> {
         let (fork_context_messages, session_id, model_profile) = {
             let s = self.session.lock().await;
             let fork_context_messages = s.model_context_history();
@@ -1839,10 +2165,13 @@ impl ConversationOrchestrator {
         let user_context_message = if self.uses_announced_context().await {
             None
         } else {
-            self.additional_context_message().await
+            self.additional_context_message().await?
         };
+        let model_source = self
+            .main_model_source_for_request(model, model_profile.as_deref())
+            .await;
         let typed_attachment_ids = self.typed_attachment_ids_for_snapshot(&fork_context_messages);
-        sidequery::CacheSafeParams {
+        Ok(sidequery::CacheSafeParams {
             system_prompt: Arc::new(
                 system
                     .map(Self::system_prompt_source_text)
@@ -1865,23 +2194,27 @@ impl ConversationOrchestrator {
                 custom_system_prompt: None,
                 append_system_prompt: None,
             },
+            model_source,
             fork_context_messages,
             typed_attachment_ids,
             task_deliveries,
             transcript_path: (!transcript_path.as_os_str().is_empty()).then_some(transcript_path),
             // Overwritten by the slot on save; the value here is irrelevant.
             generation: 0,
-        }
+        })
     }
 
     /// Seed a resumed session before its first proactive summary can run.
-    pub(crate) async fn seed_compact_cache_safe_params(&self, system: Option<&SystemPromptInput>) {
+    pub(crate) async fn seed_compact_cache_safe_params(
+        &self,
+        system: Option<&SystemPromptInput>,
+    ) -> Result<(), lingxi_core::settings::SettingsError> {
         if self.model_runtime.cache_safe_slot.is_none() {
-            return;
+            return Ok(());
         }
         let model = self.session.lock().await.model.clone();
-        let tools = self.build_wire_tools().await.0;
-        self.save_cache_safe_params(system, &model, &tools).await;
+        let tools = self.build_wire_tools().await?.0;
+        self.save_cache_safe_params(system, &model, &tools).await
     }
 
     /// FORK (codex #5 follow-up): record the rendered system-prompt bytes this
@@ -2426,9 +2759,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 let session = orchestrator.session.lock().await;
                 (session.model.clone(), session.model_profile.clone())
             };
-            let system = orchestrator.provider_system_prompt().await;
-            let (tools, skip_global_cache_for_system_prompt) =
-                orchestrator.build_wire_tools().await;
+            let system = match orchestrator.provider_system_prompt().await {
+                Ok(system) => system,
+                Err(error) => {
+                    tracing::warn!(%error, "skipping startup Responses WebSocket prewarm because prompt settings failed");
+                    return;
+                }
+            };
+            let (tools, skip_global_cache_for_system_prompt) = match orchestrator
+                .build_wire_tools()
+                .await
+            {
+                Ok(tools) => tools,
+                Err(error) => {
+                    tracing::warn!(%error, "skipping startup Responses WebSocket prewarm because tool settings failed");
+                    return;
+                }
+            };
             let _ = orchestrator
                 .api
                 .prewarm_responses_websocket(
@@ -4159,6 +4506,255 @@ mod side_question_reminder_tests {
         assert!(
             no_tools < one_off,
             "source order must be: no-tools, one-off"
+        );
+    }
+}
+
+#[cfg(test)]
+mod configured_model_source_tests {
+    use super::{
+        main_source_owner_is_current, main_source_requires_model_carrier, ConversationOrchestrator,
+        OrchestratorApiClient, OrchestratorApiRequest,
+    };
+    use async_trait::async_trait;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use llm_runtime::{
+        HistoryResponse, LlmError, MediaRoute, PricingModelRef, ProviderId, ResolvedRoute,
+    };
+    use std::sync::Arc;
+
+    struct SourceRouteFixtureApi;
+
+    #[async_trait]
+    impl OrchestratorApiClient for SourceRouteFixtureApi {
+        async fn messages_create(
+            &self,
+            _request: OrchestratorApiRequest,
+        ) -> Result<HistoryResponse, LlmError> {
+            Err(LlmError::ModelUnavailable)
+        }
+
+        fn resolve_media_route(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+        ) -> Result<MediaRoute, LlmError> {
+            let provider_id = ProviderId::AnthropicFirstParty;
+            let profile_name = profile.unwrap_or("configured-profile").to_owned();
+            Ok(MediaRoute {
+                main: ResolvedRoute {
+                    provider_id: provider_id.clone(),
+                    profile_name,
+                    request_model: model.to_owned(),
+                    display_model: model.to_owned(),
+                    pricing_model: PricingModelRef {
+                        pricing_provider_id: provider_id,
+                        billing_model: model.to_owned(),
+                        request_model: model.to_owned(),
+                        display_model: model.to_owned(),
+                    },
+                    capabilities: llm_runtime::Capabilities::default(),
+                    connection_chain: Vec::new(),
+                    failover: Default::default(),
+                },
+                vision_delegate: None,
+            })
+        }
+    }
+
+    #[test]
+    fn explicit_same_route_request_owner_suppresses_only_the_parent_source() {
+        assert!(main_source_owner_is_current(false));
+        assert!(
+            !main_source_owner_is_current(true),
+            "a scoped explicit route owns its request even when route identities compare equal"
+        );
+    }
+
+    #[test]
+    fn denied_turn_step_uses_the_final_configured_route_for_source_ownership() {
+        let api = SourceRouteFixtureApi;
+        let source_units = "claude-original"
+            .encode_utf16()
+            .chain([0xD800])
+            .collect::<Vec<_>>();
+        let configured_source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&source_units), source_units)
+                .expect("source string projection");
+        let original_model = "claude-original";
+        let original_profile = Some("configured-profile");
+        let rejected_model = "claude-denied";
+
+        assert!(
+            ConversationOrchestrator::configured_source_for_effective_route(
+                &api,
+                rejected_model,
+                original_profile,
+                original_model,
+                original_profile,
+                Some(configured_source.clone()),
+            )
+            .is_none(),
+            "the denied pre-fallback request is not the configured route"
+        );
+
+        // The policy-denied turn.step branch has already selected its fallback
+        // tuple by the time it asks whether this source belongs on the request.
+        let (effective_model, effective_profile) = (original_model, original_profile);
+        assert_eq!(
+            ConversationOrchestrator::configured_source_for_effective_route(
+                &api,
+                effective_model,
+                effective_profile,
+                original_model,
+                original_profile,
+                Some(configured_source.clone()),
+            ),
+            Some(configured_source),
+            "a policy-denied rewrite falls back to the original route and keeps its source"
+        );
+    }
+
+    #[test]
+    fn model_carrier_is_only_used_when_the_configured_source_needs_it() {
+        assert!(
+            main_source_requires_model_carrier(true, true, true, None, None, None,),
+            "unresolvable but present source ids must not be swallowed by the selected route"
+        );
+        assert!(
+            main_source_requires_model_carrier(
+                true,
+                true,
+                true,
+                Some(true),
+                Some(true),
+                Some(false),
+            ),
+            "a source that resolves to a different wire id needs the source carrier"
+        );
+        assert!(
+            !main_source_requires_model_carrier(
+                true,
+                true,
+                true,
+                Some(true),
+                Some(true),
+                Some(true),
+            ),
+            "ordinary UTF-8 aliases already mapped to the selected Native route stay on the existing request path"
+        );
+        assert!(
+            !main_source_requires_model_carrier(false, true, true, None, None, None,),
+            "a source without current ownership cannot attach to a request"
+        );
+        assert!(
+            !main_source_requires_model_carrier(true, false, true, None, None, None,),
+            "ordinary non-Claude provider requests keep their current encoding"
+        );
+        assert!(
+            !main_source_requires_model_carrier(true, true, false, None, None, None,),
+            "temporary plan/per-request model routes do not inherit the configured source"
+        );
+        assert!(
+            !main_source_requires_model_carrier(
+                true,
+                true,
+                true,
+                Some(false),
+                Some(false),
+                Some(false),
+            ),
+            "a recognized model owned by another provider keeps its existing route encoding"
+        );
+        assert!(
+            !main_source_requires_model_carrier(
+                true,
+                true,
+                true,
+                Some(true),
+                Some(false),
+                Some(false),
+            ),
+            "a Native Claude source from another profile must not be attached to this profile"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_user_selection_owns_exact_main_source_and_uses_route_guard() {
+        let orchestrator = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(SourceRouteFixtureApi),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(crate::test_support::MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let selection_units = "opusplan"
+            .encode_utf16()
+            .chain([0xD800])
+            .collect::<Vec<_>>();
+        let selection = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&selection_units),
+            selection_units.clone(),
+        )
+        .expect("user-selection source projection");
+        *orchestrator
+            .model_runtime
+            .configured_model_source
+            .write()
+            .expect("configured source lock") = Some(lingxi_core::host::ModelSourceBinding {
+            source: Utf16JsonProjection::from("configured-parent"),
+            effective_source: Utf16JsonProjection::from("configured-parent"),
+            route_anchor: lingxi_core::host::ModelRouteAnchor {
+                model: "claude-session-model".into(),
+                profile: Some("configured-profile".into()),
+            },
+        });
+        {
+            let mut session = orchestrator.session.lock().await;
+            session.model = "claude-session-model".into();
+            session.model_profile = Some("configured-profile".into());
+            session.user_model_setting = Some(lingxi_core::host::ModelSourceBinding {
+                source: selection.clone(),
+                effective_source: selection,
+                route_anchor: lingxi_core::host::ModelRouteAnchor {
+                    model: "claude-session-model".into(),
+                    profile: Some("configured-profile".into()),
+                },
+            });
+            session.user_model_setting_source =
+                lingxi_core::session::SessionModelSettingSource::UserSelection;
+        }
+
+        let attached = orchestrator
+            .main_model_source_for_request("claude-session-model", Some("configured-profile"))
+            .await
+            .expect("the selected Native source cannot be reconstructed from the resolved route");
+        assert_eq!(
+            attached.string_units(""),
+            Some(selection_units),
+            "the configured parent's source must not replace the current user selection"
+        );
+
+        {
+            let mut session = orchestrator.session.lock().await;
+            session.user_model_setting = Some(lingxi_core::host::ModelSourceBinding {
+                source: Utf16JsonProjection::from("claude-session-model"),
+                effective_source: Utf16JsonProjection::from("claude-session-model"),
+                route_anchor: lingxi_core::host::ModelRouteAnchor {
+                    model: "claude-session-model".into(),
+                    profile: Some("configured-profile".into()),
+                },
+            });
+        }
+        assert!(
+            orchestrator
+                .main_model_source_for_request("claude-session-model", Some("configured-profile"))
+                .await
+                .is_none(),
+            "a valid selected source already represented by the same Native route stays on the ordinary route path"
         );
     }
 }

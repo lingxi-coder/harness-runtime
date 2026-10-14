@@ -32,12 +32,12 @@ fn version_is_semver() {
     }
 }
 
-/// Major 24 combines source text carriers, plugin extraction and persisted clocks.
+/// Major 25 moves ClientEvent::Error.message to the source-preserving string carrier.
 ///
 /// This test is the deliberate second lock on the version: the structural guard
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_twenty_four_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "24.0.0");
+fn version_is_twenty_five_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "25.0.0");
 }

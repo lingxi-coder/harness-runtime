@@ -11,11 +11,11 @@ pub(crate) use capacity::TrackedPoolPermit;
 
 use crate::context::SubagentContext;
 use crate::runner::SubagentEvent;
-use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use lingxi_core::host::{BackgroundTaskHandle, CancellationToken, RuntimeError, RuntimeSpawner};
 use lingxi_core::types::AgentId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 #[cfg(test)]
 use tokio::sync::{Notify, Semaphore};
 
@@ -31,6 +31,14 @@ pub struct StateMachineSlot {
     pub task: BackgroundTaskHandle,
     /// Sender used by the host to deliver `Event`s into the slot.
     pub event_tx: mpsc::Sender<lingxi_core::Event>,
+    /// Same cancellation token held by the runner context.
+    pub cancellation_token: CancellationToken,
+    /// Preload handshake used to avoid aborting a live shell future.
+    pub preload_lifecycle: Arc<crate::context::AgentPreloadLifecycle>,
+    /// Set by the unique deallocator before it begins shutdown.
+    deallocating: std::sync::atomic::AtomicBool,
+    /// Published by the runner-task drop guard on every exit path.
+    runner_done: watch::Receiver<bool>,
     /// Capacity permit held for the entire lifetime of this slot.
     _capacity_permit: Arc<TrackedPoolPermit>,
     _identity_reservation: Arc<IdentityReservation>,
@@ -97,6 +105,153 @@ impl Drop for AllocateCancelGuard {
                 let _ = runtime.cancel(&task).await;
             });
         }
+    }
+}
+
+fn is_terminal_event(event: &lingxi_core::Event) -> bool {
+    matches!(
+        event,
+        lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt
+    )
+}
+
+struct RunnerDoneGuard(watch::Sender<bool>);
+impl Drop for RunnerDoneGuard {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
+
+async fn wait_for_runner_done(mut done: watch::Receiver<bool>) {
+    while !*done.borrow_and_update() {
+        if done.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn remove_slot_if_owner(
+    slots: &Arc<RwLock<HashMap<AgentId, StateMachineSlot>>>,
+    agent_id: &AgentId,
+    task: &BackgroundTaskHandle,
+) -> Option<StateMachineSlot> {
+    let mut slots = slots.write().await;
+    let is_owner = slots.get(agent_id).map_or(false, |slot| {
+        slot.task.task_id == task.task_id && slot.task.task_name == task.task_name
+    });
+    if is_owner {
+        slots.remove(agent_id)
+    } else {
+        None
+    }
+}
+
+/// Owns a terminal control until its bounded event send completes.
+struct TerminalEventSendGuard {
+    event_tx: mpsc::Sender<lingxi_core::Event>,
+    event: Option<lingxi_core::Event>,
+    armed: bool,
+}
+
+impl TerminalEventSendGuard {
+    fn new(event_tx: mpsc::Sender<lingxi_core::Event>, event: lingxi_core::Event) -> Self {
+        Self {
+            event_tx,
+            event: Some(event),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TerminalEventSendGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let Some(event) = self.event.take() else {
+            return;
+        };
+        let event_tx = self.event_tx.clone();
+        handle.spawn(async move {
+            let _ = event_tx.send(event).await;
+        });
+    }
+}
+
+/// If the unique deallocator's future is dropped, finish preload shutdown
+/// from an owned task instead of leaving a canceled runner waiting for its
+/// terminal event forever.
+struct DeallocateCancelGuard {
+    slots: Arc<RwLock<HashMap<AgentId, StateMachineSlot>>>,
+    runtime: Arc<dyn RuntimeSpawner>,
+    agent_id: AgentId,
+    task: BackgroundTaskHandle,
+    event_tx: mpsc::Sender<lingxi_core::Event>,
+    runner_done: watch::Receiver<bool>,
+    wait_for_preload: bool,
+    armed: bool,
+}
+
+impl DeallocateCancelGuard {
+    fn new(
+        slots: Arc<RwLock<HashMap<AgentId, StateMachineSlot>>>,
+        runtime: Arc<dyn RuntimeSpawner>,
+        agent_id: AgentId,
+        task: BackgroundTaskHandle,
+        event_tx: mpsc::Sender<lingxi_core::Event>,
+        runner_done: watch::Receiver<bool>,
+        wait_for_preload: bool,
+    ) -> Self {
+        Self {
+            slots,
+            runtime,
+            agent_id,
+            task,
+            event_tx,
+            runner_done,
+            wait_for_preload,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DeallocateCancelGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let slots = self.slots.clone();
+        let runtime = self.runtime.clone();
+        let agent_id = self.agent_id;
+        let task = self.task.clone();
+        let event_tx = self.event_tx.clone();
+        let runner_done = self.runner_done.clone();
+        let wait_for_preload = self.wait_for_preload;
+        handle.spawn(async move {
+            if wait_for_preload {
+                if !*runner_done.borrow() {
+                    let _ = event_tx.send(lingxi_core::Event::UserExit).await;
+                }
+                wait_for_runner_done(runner_done).await;
+            }
+            let removed = remove_slot_if_owner(&slots, &agent_id, &task).await;
+            let _ = runtime.cancel(&task).await;
+            drop(removed);
+        });
     }
 }
 
@@ -268,6 +423,9 @@ impl StateMachinePool {
         }
         let capacity_permit = Arc::new(permit);
         let agent_id = ctx.agent_id;
+        let cancellation_token = ctx.cancellation_token.clone();
+        let preload_lifecycle = ctx.preload_lifecycle.clone();
+        let (runner_done_tx, runner_done_rx) = watch::channel(false);
         let identity_reservation = match reserved {
             Some(reservation)
                 if reservation.agent_id == agent_id
@@ -304,6 +462,7 @@ impl StateMachinePool {
                     // Keep the ID reserved even when allocation is cancelled
                     // before the slot is published and cancel runs asynchronously.
                     let _identity_reservation = runner_identity_reservation;
+                    let _runner_done = RunnerDoneGuard(runner_done_tx);
                     if let Some(startup) = startup {
                         if startup.await.is_err() {
                             return;
@@ -334,6 +493,10 @@ impl StateMachinePool {
                 agent_id,
                 task,
                 event_tx,
+                cancellation_token,
+                preload_lifecycle,
+                deallocating: std::sync::atomic::AtomicBool::new(false),
+                runner_done: runner_done_rx,
                 _capacity_permit: capacity_permit,
                 _identity_reservation: identity_reservation,
             },
@@ -356,12 +519,26 @@ impl StateMachinePool {
         agent_id: &AgentId,
         event: lingxi_core::Event,
     ) -> Result<(), PoolError> {
-        let slots = self.slots.read().await;
-        let slot = slots.get(agent_id).ok_or(PoolError::NoSuchAgent)?;
-        slot.event_tx
-            .send(event)
-            .await
-            .map_err(|_| PoolError::AgentGone)?;
+        let (event_tx, cancellation_token, preload_lifecycle) = {
+            let slots = self.slots.read().await;
+            let slot = slots.get(agent_id).ok_or(PoolError::NoSuchAgent)?;
+            (
+                slot.event_tx.clone(),
+                slot.cancellation_token.clone(),
+                slot.preload_lifecycle.clone(),
+            )
+        };
+        let mut terminal_send_guard = is_terminal_event(&event)
+            .then(|| TerminalEventSendGuard::new(event_tx.clone(), event.clone()));
+        if is_terminal_event(&event) {
+            preload_lifecycle.request_terminal();
+            cancellation_token.cancel();
+        }
+        let send_result = event_tx.send(event).await;
+        if let Some(guard) = &mut terminal_send_guard {
+            guard.disarm();
+        }
+        send_result.map_err(|_| PoolError::AgentGone)?;
         Ok(())
     }
 
@@ -389,10 +566,60 @@ impl StateMachinePool {
 
     /// Remove the slot owned by `agent_id` and cancel its background task.
     pub async fn deallocate(&self, agent_id: &AgentId) -> Result<(), PoolError> {
-        let slot = self.slots.write().await.remove(agent_id);
-        if let Some(slot) = slot {
-            self.runtime.cancel(&slot.task).await?;
+        let (task, event_tx, runner_done, wait_for_preload, already_deallocating) = {
+            let slots = self.slots.read().await;
+            let Some(slot) = slots.get(agent_id) else {
+                return Ok(());
+            };
+            let already_deallocating = slot
+                .deallocating
+                .swap(true, std::sync::atomic::Ordering::AcqRel);
+            if already_deallocating {
+                (
+                    slot.task.clone(),
+                    slot.event_tx.clone(),
+                    slot.runner_done.clone(),
+                    false,
+                    true,
+                )
+            } else {
+                let wait_for_preload = slot.preload_lifecycle.request_deallocate();
+                slot.cancellation_token.cancel();
+                (
+                    slot.task.clone(),
+                    slot.event_tx.clone(),
+                    slot.runner_done.clone(),
+                    wait_for_preload,
+                    false,
+                )
+            }
+        };
+        if already_deallocating {
+            wait_for_runner_done(runner_done).await;
+            return Ok(());
         }
+        let mut cancel_guard = DeallocateCancelGuard::new(
+            self.slots.clone(),
+            self.runtime.clone(),
+            agent_id.clone(),
+            task.clone(),
+            event_tx.clone(),
+            runner_done.clone(),
+            wait_for_preload,
+        );
+        if wait_for_preload {
+            // The terminal event releases the preload cancellation drain. It is
+            // queued behind accepted input, preserving the existing bounded FIFO.
+            let _ = event_tx.send(lingxi_core::Event::UserExit).await;
+            wait_for_runner_done(runner_done).await;
+        }
+        drop(event_tx);
+        let slot = remove_slot_if_owner(&self.slots, agent_id, &task).await;
+        if slot.is_some() {
+            self.runtime.cancel(&task).await?;
+        }
+        drop(slot);
+        cancel_guard.disarm();
         Ok(())
     }
 
@@ -459,6 +686,7 @@ mod tests {
     #[derive(Default)]
     struct PendingModel {
         started: tokio::sync::Notify,
+        calls: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -473,6 +701,7 @@ mod tests {
             >,
             llm_runtime::LlmError,
         > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             std::future::pending().await
         }
@@ -484,6 +713,8 @@ mod tests {
             native_query_depth: 0,
             task_registry: None,
             agent_id: AgentId::new(),
+            cancellation_token: CancellationToken::new(),
+            preload_lifecycle: Arc::new(crate::context::AgentPreloadLifecycle::new()),
             parent_agent_id: None,
             agent_spawn_provenance: Default::default(),
             agent_name: None,
@@ -1132,6 +1363,458 @@ mod tests {
         .await
         .expect("UserExit cancels the actual pending request after its startup date");
         pool.deallocate(&aid).await.unwrap();
+    }
+
+    struct BlockingPreloadLoader {
+        started: Arc<Notify>,
+        cancellation_seen: Arc<Notify>,
+        finish_after_cancel: Arc<Notify>,
+        cleanup_completed: Arc<Notify>,
+        cleanup_finished: Arc<std::sync::atomic::AtomicBool>,
+        dropped_before_cleanup: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct PreloadFutureDropProbe {
+        cleanup_finished: Arc<std::sync::atomic::AtomicBool>,
+        dropped_before_cleanup: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for PreloadFutureDropProbe {
+        fn drop(&mut self) {
+            if !self.cleanup_finished.load(Ordering::SeqCst) {
+                self.dropped_before_cleanup.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl lingxi_core::host::skill_loader::SkillLoader for BlockingPreloadLoader {
+        async fn resolve_and_load(
+            &self,
+            _skill_name: &str,
+            _agent_type: &str,
+            _cwd: Option<&std::path::Path>,
+            _model: Option<&str>,
+            cancellation: CancellationToken,
+        ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
+            let _drop_probe = PreloadFutureDropProbe {
+                cleanup_finished: self.cleanup_finished.clone(),
+                dropped_before_cleanup: self.dropped_before_cleanup.clone(),
+            };
+            self.started.notify_one();
+            cancellation.cancelled().await;
+            self.cancellation_seen.notify_one();
+            self.finish_after_cancel.notified().await;
+            self.cleanup_finished.store(true, Ordering::SeqCst);
+            self.cleanup_completed.notify_one();
+            Err("preload cancelled".into())
+        }
+    }
+
+    struct CleanupCounter(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl lingxi_core::host::ToolInvoker for CleanupCounter {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        ) -> Result<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+            lingxi_core::host::tool_invoker::ToolInvokerError,
+        > {
+            unreachable!("preload cancellation must not dispatch a tool")
+        }
+
+        async fn cleanup_computer_inputs(
+            &self,
+            _agent_id: AgentId,
+            _origin_session_id: Option<lingxi_core::types::SessionId>,
+        ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_terminal_sender_still_delivers_interrupt_after_preload_cleanup() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 2));
+        let mut ctx = make_ctx();
+        ctx.persistent = true;
+        ctx.origin_session_id = Some(lingxi_core::types::SessionId::new());
+        ctx.agent_definition.skills = vec!["blocking".into()];
+
+        let started = Arc::new(Notify::new());
+        let cancellation_seen = Arc::new(Notify::new());
+        let finish_after_cancel = Arc::new(Notify::new());
+        let cleanup_completed = Arc::new(Notify::new());
+        let cleanup_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_before_cleanup = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let model = Arc::new(PendingModel::default());
+        ctx.api_client = Some(model.clone());
+        ctx.skill_loader = Some(Arc::new(BlockingPreloadLoader {
+            started: started.clone(),
+            cancellation_seen: cancellation_seen.clone(),
+            finish_after_cancel: finish_after_cancel.clone(),
+            cleanup_completed: cleanup_completed.clone(),
+            cleanup_finished: cleanup_finished.clone(),
+            dropped_before_cleanup: dropped_before_cleanup.clone(),
+        }));
+        ctx.tool_invoker = Some(Arc::new(CleanupCounter(cleanup_calls.clone())));
+        let agent_id = ctx.agent_id;
+        let cancellation = ctx.cancellation_token.clone();
+        let (id, mut events) = pool.allocate(ctx).await.unwrap();
+        assert_eq!(id, agent_id);
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("preload entered its blocking loader");
+
+        let pending_inputs = (0..100)
+            .map(|index| format!("queued-before-interrupt-{index:03}"))
+            .collect::<Vec<_>>();
+        for content in &pending_inputs {
+            pool.send_event(
+                &agent_id,
+                lingxi_core::Event::UserMessage {
+                    message_id: lingxi_core::types::MessageId::new(),
+                    request_id: lingxi_core::types::RequestId::new(),
+                    content: content.clone(),
+                },
+            )
+            .await
+            .expect("ordinary events fill the bounded inbound queue");
+        }
+        let terminal_pool = pool.clone();
+        let terminal_sender = tokio::spawn(async move {
+            terminal_pool
+                .send_event(&agent_id, lingxi_core::Event::UserInterrupt)
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cancellation_seen.notified(),
+        )
+        .await
+        .expect("terminal control cancels the owner token before waiting for queue space");
+        assert!(cancellation.is_cancelled());
+        assert!(
+            !terminal_sender.is_finished(),
+            "the inbound queue remains full while the loader future is still held"
+        );
+        assert!(!pool.agent_runner_finished(&agent_id).await);
+        terminal_sender.abort();
+        assert!(
+            terminal_sender
+                .await
+                .expect_err("terminal caller task must be canceled")
+                .is_cancelled(),
+            "the test drops the interrupt sender while its bounded send is blocked"
+        );
+
+        finish_after_cancel.notify_one();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut received = Vec::new();
+            while let Some(event) = events.recv().await {
+                received.push(event);
+            }
+            received
+        })
+        .await
+        .expect("preload cancellation reaches one terminal event and closes output");
+        let killed_count = received
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::runner::SubagentEvent::Killed { agent_id: id } if *id == agent_id
+                )
+            })
+            .count();
+        assert_eq!(
+            killed_count, 1,
+            "preload cancellation emits exactly one Killed"
+        );
+        assert!(
+            !received
+                .iter()
+                .any(|event| matches!(event, crate::runner::SubagentEvent::Failed { .. })),
+            "preload cancellation must not become Failed"
+        );
+        assert!(
+            !received
+                .iter()
+                .any(|event| matches!(event, crate::runner::SubagentEvent::Completed { .. })),
+            "preload cancellation must not become Completed"
+        );
+        let snapshot_count = received
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::runner::SubagentEvent::TranscriptSnapshot { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            snapshot_count, 1,
+            "the Killed lifecycle publishes its retained transcript"
+        );
+        let snapshot_inputs = received.iter().find_map(|event| {
+            let crate::runner::SubagentEvent::TranscriptSnapshot { messages, .. } = event else {
+                return None;
+            };
+            Some(
+                messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        lingxi_core::types::ConversationMessage::User { content, .. } => {
+                            content.iter().find_map(|block| match block {
+                                lingxi_core::types::ContentBlock::Text { text, .. } => {
+                                    Some(text.clone())
+                                }
+                                lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => {
+                                    Some(text.clone())
+                                }
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .filter(|text| text.starts_with("queued-before-interrupt-"))
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(
+            model.calls.load(Ordering::SeqCst),
+            0,
+            "preload cancellation must precede the first model request"
+        );
+        assert!(
+            cleanup_calls.load(Ordering::SeqCst) >= 1,
+            "existing input cleanup must run"
+        );
+        assert!(
+            cleanup_finished.load(Ordering::SeqCst),
+            "loader cleanup gate was released before terminal completion"
+        );
+        assert!(
+            !dropped_before_cleanup.load(Ordering::SeqCst),
+            "runner must retain loader future through cleanup"
+        );
+        assert_eq!(snapshot_inputs.expect("terminal snapshot"), pending_inputs);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !pool.agent_runner_finished(&agent_id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("runner releases its inbound receiver after Killed");
+        assert!(matches!(
+            pool.send_event(
+                &agent_id,
+                lingxi_core::Event::UserMessage {
+                    message_id: lingxi_core::types::MessageId::new(),
+                    request_id: lingxi_core::types::RequestId::new(),
+                    content: "after terminal".into(),
+                },
+            )
+            .await,
+            Err(PoolError::AgentGone)
+        ));
+        pool.deallocate(&agent_id).await.unwrap();
+    }
+    #[tokio::test]
+    async fn stale_deallocator_rescue_cannot_remove_same_id_replacement() {
+        struct CancelObserver {
+            inner: MockRuntimeSpawner,
+            cancel_started: Arc<Semaphore>,
+        }
+        #[async_trait::async_trait]
+        impl RuntimeSpawner for CancelObserver {
+            async fn spawn(
+                &self,
+                name: &str,
+                task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+            ) -> Result<BackgroundTaskHandle, RuntimeError> {
+                self.inner.spawn(name, task).await
+            }
+            async fn sleep(&self, duration: std::time::Duration) {
+                self.inner.sleep(duration).await;
+            }
+            async fn cancel(&self, task: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+                self.cancel_started.add_permits(1);
+                self.inner.cancel(task).await
+            }
+        }
+
+        let cancel_started = Arc::new(Semaphore::new(0));
+        let runtime = Arc::new(CancelObserver {
+            inner: MockRuntimeSpawner::default(),
+            cancel_started: cancel_started.clone(),
+        });
+        let pool = StateMachinePool::new(runtime.clone(), 2);
+        let agent_id = AgentId::new();
+        let mut ctx = make_ctx();
+        ctx.agent_id = agent_id;
+        let (_id, _events) = pool.allocate(ctx).await.unwrap();
+        let (current_task, event_tx, runner_done) = {
+            let slots = pool.slots.read().await;
+            let slot = slots.get(&agent_id).expect("replacement slot is published");
+            (
+                slot.task.clone(),
+                slot.event_tx.clone(),
+                slot.runner_done.clone(),
+            )
+        };
+        let stale_task = BackgroundTaskHandle {
+            task_name: current_task.task_name,
+            task_id: current_task.task_id.saturating_sub(1),
+        };
+        let stale_rescue = DeallocateCancelGuard::new(
+            pool.slots.clone(),
+            runtime,
+            agent_id,
+            stale_task,
+            event_tx,
+            runner_done,
+            false,
+        );
+        drop(stale_rescue);
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancel_started.acquire())
+            .await
+            .expect("stale rescue reaches its old task cancellation")
+            .unwrap()
+            .forget();
+
+        assert_eq!(pool.slot_count().await, 1);
+        pool.send_event(&agent_id, lingxi_core::Event::UserExit)
+            .await
+            .expect("replacement remains addressable after stale rescue");
+        pool.deallocate(&agent_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_deallocate_caller_still_finishes_blocked_preload_cleanup() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 2));
+        let mut ctx = make_ctx();
+        ctx.agent_definition.skills = vec!["blocking".into()];
+
+        let started = Arc::new(Notify::new());
+        let cancellation_seen = Arc::new(Notify::new());
+        let finish_after_cancel = Arc::new(Notify::new());
+        let cleanup_completed = Arc::new(Notify::new());
+        let cleanup_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_before_cleanup = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let model = Arc::new(PendingModel::default());
+        ctx.api_client = Some(model.clone());
+        ctx.skill_loader = Some(Arc::new(BlockingPreloadLoader {
+            started: started.clone(),
+            cancellation_seen: cancellation_seen.clone(),
+            finish_after_cancel: finish_after_cancel.clone(),
+            cleanup_completed: cleanup_completed.clone(),
+            cleanup_finished: cleanup_finished.clone(),
+            dropped_before_cleanup: dropped_before_cleanup.clone(),
+        }));
+        ctx.tool_invoker = Some(Arc::new(CleanupCounter(cleanup_calls.clone())));
+        let agent_id = ctx.agent_id;
+        let (_id, mut events) = pool.allocate(ctx).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("preload entered its blocking loader");
+
+        for index in 0..100 {
+            pool.send_event(
+                &agent_id,
+                lingxi_core::Event::UserMessage {
+                    message_id: lingxi_core::types::MessageId::new(),
+                    request_id: lingxi_core::types::RequestId::new(),
+                    content: format!("queued-before-deallocate-{index:03}"),
+                },
+            )
+            .await
+            .expect("ordinary events fill the bounded inbound queue before preload drains it");
+        }
+
+        let deallocating = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.deallocate(&agent_id).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cancellation_seen.notified(),
+        )
+        .await
+        .expect("deallocation cancels the same owner token");
+        assert!(
+            !deallocating.is_finished(),
+            "deallocation must wait while the loader owns cancellation cleanup"
+        );
+        assert!(
+            !cleanup_finished.load(Ordering::SeqCst),
+            "held cleanup gate has not completed"
+        );
+        assert!(
+            !dropped_before_cleanup.load(Ordering::SeqCst),
+            "deallocation must not abort/drop the loader before cleanup settles"
+        );
+
+        deallocating.abort();
+        assert!(
+            deallocating
+                .await
+                .expect_err("caller task must be canceled")
+                .is_cancelled(),
+            "the test drops the deallocation future while cleanup is held"
+        );
+        finish_after_cancel.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cleanup_completed.notified(),
+        )
+        .await
+        .expect("loader completes its held cancellation cleanup");
+        assert!(cleanup_finished.load(Ordering::SeqCst));
+        assert!(!dropped_before_cleanup.load(Ordering::SeqCst));
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut received = Vec::new();
+            while let Some(event) = events.recv().await {
+                received.push(event);
+            }
+            received
+        })
+        .await
+        .expect("runner completion closes output");
+        assert!(cleanup_calls.load(Ordering::SeqCst) >= 1);
+        assert_eq!(
+            model.calls.load(Ordering::SeqCst),
+            0,
+            "preload cancellation never enters the model"
+        );
+        let killed_count = received
+            .iter()
+            .filter(|event| matches!(event, crate::runner::SubagentEvent::Killed { agent_id: id } if *id == agent_id))
+            .count();
+        assert_eq!(killed_count, 1);
+        assert!(!received
+            .iter()
+            .any(|event| matches!(event, crate::runner::SubagentEvent::Failed { .. })));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while pool.slot_count().await != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("drop-owned deallocation cleanup removes the slot after runner completion");
     }
 
     /// `send_event` to an id with no slot is `NoSuchAgent`.

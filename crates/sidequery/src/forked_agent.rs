@@ -308,6 +308,7 @@ impl ForkedAgentRunner {
             native_prompt_context: None,
             model,
             profile: cp.tool_use_options.model_profile.clone(),
+            model_source: cp.model_source.clone(),
             // Replay the parent's already-rendered system prompt verbatim;
             // `user_context` / `system_context` were inputs the parent used to
             // render it and must NOT be re-applied here (double-rendering would
@@ -573,6 +574,7 @@ mod tests {
                 system_context: std::collections::HashMap::new(),
                 user_context_message: None,
                 tool_use_options: tool_use_options(),
+                model_source: None,
                 tools: Vec::new(),
                 effort: None,
                 fork_context_messages: prefix,
@@ -764,6 +766,29 @@ mod tests {
             assert_eq!(sent.model, model);
             assert_eq!(sent.profile.as_deref(), Some(profile));
         }
+    }
+
+    #[tokio::test]
+    async fn forked_agent_preserves_exact_parent_model_source() {
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "SUMMARY".into(),
+            canned_usage: Usage::default(),
+        });
+        let runner =
+            ForkedAgentRunner::new().with_side_query_client(client.clone(), "startup-model".into());
+        let mut req = request_with(vec![user_msg("history")], vec![user_msg("summarize")], None);
+        req.cache_safe_params.model_source =
+            Some(Utf16JsonProjection::parse(r#""claude-\ud800""#).unwrap());
+
+        runner.run(req).await.expect("source-bearing fork succeeds");
+        let sent = client.seen.lock().unwrap().clone().expect("fork request");
+        assert_eq!(
+            sent.model_source
+                .as_ref()
+                .and_then(|source| source.string_units("")),
+            Some("claude-".encode_utf16().chain([0xd800]).collect())
+        );
     }
 
     #[tokio::test]

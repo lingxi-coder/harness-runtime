@@ -5,7 +5,7 @@
 
 use fancy_regex::{Regex, RegexBuilder};
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::LazyLock;
 
 #[derive(Deserialize)]
@@ -57,7 +57,10 @@ pub fn js_trim(text: &str) -> &str {
 }
 
 fn excluded(character: char) -> bool {
-    let codepoint = u32::from(character);
+    excluded_codepoint(u32::from(character))
+}
+
+fn excluded_codepoint(codepoint: u32) -> bool {
     let index = TABLES
         .exclusions
         .partition_point(|range| range[1] < codepoint);
@@ -102,6 +105,132 @@ pub fn sanitize_memory_body(text: &str) -> String {
     }
     result.push_str(&cleaned[copied..]);
     result
+}
+
+/// UTF-16-preserving counterpart used for source strings that may contain
+/// lone surrogate units. The regex scanner sees an unused noncharacter in
+/// place of each lone unit, then maps its match offsets back to the original
+/// UTF-16 buffer before applying the same neutralization.
+#[must_use]
+pub fn sanitize_memory_body_utf16(units: &[u16]) -> Vec<u16> {
+    let mut cleaned = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if unit == b'\r' as u16 {
+            if units.get(index + 1) == Some(&(b'\n' as u16)) {
+                index += 1;
+            }
+            cleaned.push(b'\n' as u16);
+        } else if unit == 0x2028 || unit == 0x2029 {
+            cleaned.push(b'\n' as u16);
+        } else if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let low = units[index + 1];
+            let scalar = 0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + (u32::from(low) - 0xdc00);
+            let character = char::from_u32(scalar).expect("paired surrogate is a scalar");
+            if !excluded(character) {
+                cleaned.extend_from_slice(&units[index..=index + 1]);
+            }
+            index += 1;
+        } else if (0xd800..=0xdfff).contains(&unit) {
+            if !excluded_codepoint(u32::from(unit)) {
+                cleaned.push(unit);
+            }
+        } else {
+            let character = char::from_u32(u32::from(unit)).expect("BMP unit is a scalar");
+            if !excluded(character) {
+                cleaned.push(unit);
+            }
+        }
+        index += 1;
+    }
+
+    let marker = utf16_marker(&cleaned);
+    let mut probe = String::with_capacity(cleaned.len());
+    let mut probe_to_units = Vec::with_capacity(cleaned.len());
+    let mut index = 0;
+    while index < cleaned.len() {
+        let unit_offset = index;
+        let unit = cleaned[index];
+        let character = if (0xd800..=0xdbff).contains(&unit)
+            && cleaned
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let low = cleaned[index + 1];
+            let scalar = 0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + (u32::from(low) - 0xdc00);
+            index += 1;
+            char::from_u32(scalar).expect("paired surrogate is a scalar")
+        } else if (0xd800..=0xdfff).contains(&unit) {
+            marker
+        } else {
+            char::from_u32(u32::from(unit)).expect("BMP unit is a scalar")
+        };
+        probe_to_units.push((probe.len(), unit_offset));
+        probe.push(character);
+        index += 1;
+    }
+
+    let opener_units = native_tag_opener_offsets(&probe, &PATTERNS)
+        .into_iter()
+        .map(|offset| {
+            probe_to_units
+                .binary_search_by_key(&offset, |(probe_offset, _)| *probe_offset)
+                .map(|position| probe_to_units[position].1)
+                .expect("tag opener offset maps to an original source unit")
+        })
+        .collect::<BTreeSet<_>>();
+    let mut result = Vec::with_capacity(cleaned.len() + opener_units.len());
+    let mut copied = 0;
+    for opener in opener_units {
+        result.extend_from_slice(&cleaned[copied..opener]);
+        result.extend("<\\".encode_utf16());
+        copied = opener
+            + usize::from(
+                (0xd800..=0xdbff).contains(&cleaned[opener])
+                    && cleaned
+                        .get(opener + 1)
+                        .is_some_and(|next| (0xdc00..=0xdfff).contains(next)),
+            )
+            + 1;
+    }
+    result.extend_from_slice(&cleaned[copied..]);
+    result
+}
+
+fn utf16_marker(units: &[u16]) -> char {
+    let present = units.iter().copied().collect::<HashSet<_>>();
+    let used_by_source = |character: char| {
+        let mut buffer = [0_u16; 2];
+        let encoded = character.encode_utf16(&mut buffer);
+        encoded.iter().all(|unit| present.contains(unit))
+    };
+    (0xfdd0..=0xfdef)
+        .chain(0xfffe..=0xffff)
+        .chain((1..=16).flat_map(|plane| {
+            let base = plane << 16;
+            [base | 0xfffe, base | 0xffff]
+        }))
+        .chain(0xe000..=0xf8ff)
+        .chain(0xf0000..=0xffffd)
+        .chain(0x100000..=0x10fffd)
+        .filter_map(char::from_u32)
+        .find(|character| {
+            !used_by_source(*character)
+                && !TABLES
+                    .reading
+                    .iter()
+                    .any(|(source, _)| *source == u32::from(*character))
+                && TABLES
+                    .patterns
+                    .iter()
+                    .all(|pattern| !pattern.contains(*character))
+        })
+        .expect("source cannot contain every Unicode noncharacter")
 }
 
 /// Shared native `Eu`/`M` reading and original-offset projection. This does not

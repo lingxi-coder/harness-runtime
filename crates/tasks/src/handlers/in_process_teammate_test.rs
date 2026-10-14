@@ -685,8 +685,10 @@ struct StaticSystemPromptRenderer(&'static str);
 
 #[async_trait]
 impl TeammateSystemPromptRenderer for StaticSystemPromptRenderer {
-    async fn render_default_system_prompt(&self) -> Utf16JsonProjection {
-        Utf16JsonProjection::from(self.0)
+    async fn render_default_system_prompt(
+        &self,
+    ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
+        Ok(Utf16JsonProjection::from(self.0))
     }
 }
 

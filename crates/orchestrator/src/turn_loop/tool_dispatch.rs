@@ -1770,6 +1770,14 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
         let tools = self
             .build_wire_tools()
             .await
+            .map_err(|error| {
+                hooks::mods::ModError::Protocol(
+                    error
+                        .diagnostic_projection()
+                        .to_json_string()
+                        .unwrap_or_else(|_| error.to_string()),
+                )
+            })?
             .0
             .into_iter()
             .map(|tool| {
@@ -7253,7 +7261,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 // unless validation EXPLICITLY fails. No schema → substitute.
                 let schema_ok = match tool_handle.output_schema() {
                     None => Ok(()),
-                    Some(schema) => match Utf16JsonConsumer::new(&[schema, &new_output]) {
+                    Some(schema) => match Utf16JsonConsumer::new_for_json_decoded_sources(&[
+                        schema,
+                        &new_output,
+                    ]) {
                         Ok(consumer) => tool_api::output_schema::validate(
                             &consumer.values()[0],
                             &consumer.values()[1],

@@ -14,6 +14,33 @@ fn source(value: &Value) -> Source {
     Source::from_serde_value(value).expect("generated fixture JSON is valid")
 }
 
+#[test]
+fn rendered_instruction_attachment_keeps_raw_utf16_in_the_user_message() {
+    let attachment = Source::parse(
+        r#"{"type":"instructions","files":[{"path":"<\ud800>","type":"Managed","content":"A\ud800B"}]}"#,
+    )
+    .expect("escaped lone surrogate remains valid source JSON");
+    let message = crate::conversation::context_announcements_impl::context_attachment_projection(
+        lingxi_core::types::MessageId::new(),
+        &attachment,
+    );
+    let lingxi_core::types::ConversationMessage::User { content, .. } = &message else {
+        panic!("rendered attachment is a meta user message");
+    };
+    let ContentBlock::TextJsUtf16 {
+        utf16_code_units, ..
+    } = &content[0]
+    else {
+        panic!("raw instruction text must use the UTF-16 sidecar");
+    };
+    assert!(utf16_code_units
+        .windows(3)
+        .any(|units| units == [b'A' as u16, 0xd800, b'B' as u16]));
+    assert!(utf16_code_units
+        .windows(3)
+        .any(|units| units == [b'<' as u16, 0xd800, b'>' as u16]));
+}
+
 #[tokio::test]
 async fn second_turn_releases_snapshot_lock_before_context_routing() {
     let dir = tempfile::tempdir().unwrap();

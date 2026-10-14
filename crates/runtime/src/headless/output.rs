@@ -18,6 +18,7 @@
 use crate::headless::io::Output;
 use async_trait::async_trait;
 use chrono::Utc;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::json;
 
 /// Sink for CLI output. Implementations live in this module.
@@ -48,6 +49,14 @@ pub trait OutputSink: Send + Sync {
     async fn mod_status(&self, _plugin: &str, _text: Option<&str>) {}
     /// Emit an error. Plain mode goes to stderr; JSON mode goes to stdout.
     async fn error(&self, code: &str, message: &str);
+    /// Emit a source-backed error. Human sinks use the projection's display
+    /// text; machine-readable sinks preserve its exact UTF-16 string value.
+    async fn source_error(&self, code: &str, message: &Utf16JsonProjection) {
+        let display = message
+            .string_at("")
+            .expect("source error message is a root string");
+        self.error(code, display).await;
+    }
 }
 
 /// Plain-text stdout sink (default).
@@ -118,6 +127,12 @@ impl JsonSink {
 
     async fn emit(&self, obj: serde_json::Value) {
         let line = crate::headless::stream_json::serialize_ndjson_line(&obj);
+        let _ = self.out.write_record(line.as_bytes()).await;
+    }
+
+    async fn emit_projected(&self, frame: &Utf16JsonProjection) {
+        let line = crate::headless::stream_json::serialize_projected_ndjson_line(frame)
+            .expect("source error frame is valid JSON");
         let _ = self.out.write_record(line.as_bytes()).await;
     }
 
@@ -223,11 +238,22 @@ impl OutputSink for JsonSink {
         }))
         .await;
     }
+    async fn source_error(&self, code: &str, message: &Utf16JsonProjection) {
+        let frame = Utf16JsonProjection::object(vec![
+            ("event".into(), "error".into()),
+            ("ts".into(), Self::ts().into()),
+            ("code".into(), code.into()),
+            ("message".into(), message.clone()),
+        ])
+        .expect("source error frame has valid fields");
+        self.emit_projected(&frame).await;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn ts_format_rfc3339_z_seconds() {
@@ -247,5 +273,58 @@ mod tests {
             Output::new(tokio::io::sink()),
         );
         sink.command_output("clear", "Conversation cleared.").await;
+    }
+
+    #[tokio::test]
+    async fn json_source_error_writes_exact_utf16_message_frame_bytes() {
+        let cases = [
+            ("lone surrogate", vec![0xd800], r#""message":"\ud800""#),
+            ("surrogate pair", vec![0xd83d, 0xde00], "\"message\":\"😀\""),
+            ("empty string", Vec::new(), r#""message":"""#),
+        ];
+
+        for (case, units, encoded_message) in cases {
+            let (writer, mut reader) = tokio::io::duplex(1024);
+            let output = Output::new(writer);
+            let session_id = lingxi_core::types::SessionId::parse_prefixed(
+                "11111111-2222-3333-4444-555555555555",
+            )
+            .expect("test session id");
+            let sink = JsonSink::new(session_id, output);
+            let message =
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                    .expect("source error message is a root string");
+
+            sink.source_error("startup", &message).await;
+
+            let mut bytes = Vec::new();
+            loop {
+                let mut byte = [0; 1];
+                reader
+                    .read_exact(&mut byte)
+                    .await
+                    .expect("read serialized machine frame");
+                bytes.push(byte[0]);
+                if byte[0] == b'\n' {
+                    break;
+                }
+            }
+            let encoded = std::str::from_utf8(&bytes[..bytes.len() - 1])
+                .expect("machine frame is UTF-8 JSON bytes");
+            assert!(encoded.contains(encoded_message), "{case}: {encoded}");
+
+            let frame = Utf16JsonProjection::parse(encoded).expect("serialized frame is JSON");
+            assert_eq!(frame.string_at("/event"), Some("error"), "{case}");
+            assert_eq!(frame.string_at("/code"), Some("startup"), "{case}");
+            assert_eq!(frame.string_units("/message"), Some(units), "{case}");
+
+            let field_order = ["\"event\"", "\"ts\"", "\"code\"", "\"message\""];
+            let positions = field_order.map(|field| {
+                encoded
+                    .find(field)
+                    .unwrap_or_else(|| panic!("{case}: missing {field}"))
+            });
+            assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{case}");
+        }
     }
 }

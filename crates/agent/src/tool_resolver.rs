@@ -110,8 +110,11 @@ fn coordinator_worker_tool_allowed(tool: &dyn Tool) -> bool {
 
 /// Errors while converting an agent definition's explicit tool policy into the
 /// child-visible schema/allow-list.
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum ToolResolutionError {
+    /// The source-preserving skill settings snapshot failed.
+    #[error(transparent)]
+    Settings(#[from] lingxi_core::settings::SettingsError),
     /// A definition requested tool names the parent tool pool cannot resolve.
     #[error("unknown explicit agent tool(s): {0}")]
     UnknownExplicitTools(String),
@@ -477,7 +480,7 @@ pub async fn resolve_subagent_tools_with_handback(
         .iter()
         .any(|tool| tool.name() == "Skill" || tool.aliases().contains(&"Skill"))
     {
-        registry.bash_precommit_skills().await
+        registry.bash_precommit_skills().await?
     } else {
         tool_api::tool_trait::BashPrecommitSkills::default()
     };
@@ -835,10 +838,10 @@ mod tests {
         registry.set_bash_precommit_skills_provider(move || {
             let enabled = provider_enabled.clone();
             async move {
-                BashPrecommitSkills {
+                Ok(BashPrecommitSkills {
                     custom_verify: enabled.load(Ordering::Relaxed),
                     ..Default::default()
-                }
+                })
             }
         });
         let definition = agent_def(all_policy());

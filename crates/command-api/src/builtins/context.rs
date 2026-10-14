@@ -39,9 +39,11 @@ impl ContextHandler {
 impl BuiltinCommandHandler for ContextHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         let snap = self.handle.get_status_snapshot().await;
-        let usage = self.handle.context_usage_snapshot().await;
-        CommandResult::Done {
-            display: Some((render_context(&snap.model, &usage)).into()),
+        match self.handle.context_usage_snapshot().await {
+            Ok(usage) => CommandResult::Done {
+                display: Some((render_context(&snap.model, &usage)).into()),
+            },
+            Err(source) => CommandResult::Failed { source },
         }
     }
     fn name(&self) -> &str {
@@ -317,6 +319,7 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         mock.set_status_snapshot(lingxi_core::host::StatusSnapshot {
             model: "claude-sonnet-4-6".into(),
+            model_source: None,
             ..lingxi_core::host::StatusSnapshot::default()
         });
         let h = ContextHandler::new(mock);

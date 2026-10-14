@@ -7,6 +7,7 @@
 
 use crate::types::utf16_json::Utf16JsonProjection;
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 /// Result of [`SlashCommandDispatcher::dispatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,11 @@ pub enum SlashDispatchResult {
         /// Ordered Native history rows emitted by UserPromptExpansion hooks.
         hook_messages: Vec<Utf16JsonProjection>,
     },
+    /// A command handler failed before producing a user-visible result.
+    Failed {
+        /// Source-preserving structured diagnostic for the command failure.
+        diagnostic: Utf16JsonProjection,
+    },
     /// Input did not start with `/` — treat as a regular user prompt.
     NotASlashCommand,
     /// Input started with `/` but the parser could not extract a command name.
@@ -63,5 +69,9 @@ pub trait SlashCommandDispatcher: Send + Sync {
     /// Dispatch the raw input (with or without leading `/`) and return the
     /// handler's display string, or the locked unknown-command literal if
     /// the name is not registered.
-    async fn dispatch(&self, raw: Utf16JsonProjection) -> SlashDispatchResult;
+    async fn dispatch(
+        &self,
+        raw: Utf16JsonProjection,
+        cancellation: CancellationToken,
+    ) -> SlashDispatchResult;
 }

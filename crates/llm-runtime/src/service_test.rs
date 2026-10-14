@@ -297,12 +297,12 @@ mod tests {
     }
     use crate::model::retry::DEFAULT_MAX_RETRIES;
     use crate::{
-        AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, LlmError,
-        ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, ProviderRequest,
-        ProviderResponse, StreamingResponse,
+        AuthStrategy, BoxFuture, Capabilities, ClientConfig, Credential, CredentialConfig,
+        CredentialProvider, CredentialScope, LlmError, ModelProfile, PricingConfig, ProtocolFamily,
+        ProviderId, ProviderProfile, ProviderRequest, ProviderResponse, StreamingResponse,
     };
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use std::sync::{atomic::AtomicUsize, Mutex};
 
     // These SDK projection fixtures exercise Native's exact brand-member
     // classifier. An arbitrary opaque header is an ordinary source member,
@@ -359,6 +359,61 @@ mod tests {
                 .get("model")
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
+        }
+    }
+
+    #[derive(Debug)]
+    struct RotatingAnthropicOAuthProvider {
+        token: Mutex<String>,
+        refreshes: AtomicUsize,
+    }
+
+    impl RotatingAnthropicOAuthProvider {
+        fn new() -> Self {
+            Self {
+                token: Mutex::new("rejected-token".into()),
+                refreshes: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl CredentialProvider for RotatingAnthropicOAuthProvider {
+        fn load<'a>(
+            &'a self,
+            _scope: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+            Box::pin(async move {
+                Ok(Credential::AnthropicOAuth {
+                    access_token: self.token.lock().unwrap().clone(),
+                    scopes: vec!["user:inference".into()],
+                })
+            })
+        }
+
+        fn refresh<'a>(
+            &'a self,
+            _scope: &'a CredentialScope,
+            rejected: &'a Credential,
+        ) -> BoxFuture<'a, Result<Option<Credential>, LlmError>> {
+            Box::pin(async move {
+                let Credential::AnthropicOAuth {
+                    access_token,
+                    scopes,
+                } = rejected
+                else {
+                    return Ok(None);
+                };
+                if access_token != "rejected-token" {
+                    return Ok(None);
+                }
+                self.refreshes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *self.token.lock().unwrap() = "refreshed-token".into();
+                Ok(Some(Credential::AnthropicOAuth {
+                    access_token: "refreshed-token".into(),
+                    scopes: scopes.clone(),
+                }))
+            })
         }
     }
 
@@ -723,6 +778,608 @@ mod tests {
             })
         }
     }
+    #[tokio::test]
+    async fn model_validation_request_is_minimal_and_never_retries() {
+        use lingxi_llm_client::protocol::{CacheBreakpoint, CachePosition, CacheTtl, JsonPayload};
+
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse {
+                status: 429,
+                headers: BTreeMap::from([("x-should-retry".into(), "true".into())]),
+                body_json: provider_payload(serde_json::json!({
+                    "type": "error",
+                    "error": {"type": "overloaded_error", "message": "try again"}
+                })),
+                request_id: Some("validation-429".into()),
+            }),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let service = make_adapter(transport.clone());
+        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("Hi");
+        request.input.model_source = Some(JsonPayload::string("claude-unlisted-validation-model"));
+        request.input.max_tokens = Some(1);
+        request
+            .input
+            .prompt_cache
+            .breakpoints
+            .push(CacheBreakpoint {
+                scope: None,
+                position: CachePosition::Message { index: 0, block: 0 },
+                ttl: CacheTtl::FiveMinutes,
+            });
+
+        let result = service.execute_model_validation_request(request).await;
+        assert!(result.is_err(), "a retryable 429 is returned to the caller");
+        assert_eq!(
+            transport.seen_count(),
+            1,
+            "a failed probe must not be retried"
+        );
+
+        let seen = transport.seen.lock().unwrap();
+        let sent = &seen[0];
+        let body = request_body_value(&sent.body_json);
+        assert_eq!(body["model"], "claude-unlisted-validation-model");
+        assert_eq!(body["max_tokens"], 1);
+        assert_eq!(body["messages"][0]["content"][0]["text"], "Hi");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            serde_json::json!({"type": "ephemeral"})
+        );
+        assert!(
+            body.get("system").is_none(),
+            "the probe has no inherited system"
+        );
+        assert!(body.get("tools").is_none(), "the probe has no tools");
+        assert!(
+            body.get("thinking").is_none(),
+            "the probe has no thinking policy"
+        );
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("output_config").is_none());
+        assert!(body.get("effort").is_none());
+        assert!(body.get("stop_sequences").is_none());
+        assert!(
+            !sent.headers.contains_key(DISPATCH_ID_HEADER),
+            "model-validation traffic is auxiliary"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_validation_retries_only_the_native_context_1m_repair() {
+        let _env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore(vec![
+            ("ANTHROPIC_BASE_URL", std::env::var_os("ANTHROPIC_BASE_URL")),
+            (
+                "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+                std::env::var_os("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"),
+            ),
+        ]);
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://proxy.example.test");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                400,
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "The context-1m-2025-08-07 beta is not supported"
+                    }
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://proxy.example.test",
+            "proxy",
+            "claude-sonnet-4-20250514",
+            transport.clone(),
+        )
+        .with_custom_cli_betas(vec![
+            crate::model::context_window::CONTEXT_1M_BETA_HEADER.to_string()
+        ]);
+        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("Hi");
+        request.profile = Some("proxy".into());
+        request.input.max_tokens = Some(1);
+
+        service
+            .execute_model_validation_request(request)
+            .await
+            .expect("the one Native context-beta repair succeeds");
+        assert_eq!(transport.seen_count(), 2);
+        let first = transport.seen_headers(0);
+        let second = transport.seen_headers(1);
+        let has_context_beta = |headers: &BTreeMap<String, String>| {
+            headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+                .is_some_and(|(_, value)| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .any(|beta| beta == crate::model::context_window::CONTEXT_1M_BETA_HEADER)
+                })
+        };
+        assert!(has_context_beta(&first));
+        assert!(!has_context_beta(&second));
+        assert!(
+            !second.contains_key(DISPATCH_ID_HEADER),
+            "the repair remains auxiliary"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_validation_does_not_resend_context_1m_to_native_first_party() {
+        let _env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+        ]);
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                400,
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "The context-1m-2025-08-07 beta is not supported"
+                    }
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let service = make_adapter(transport.clone()).with_custom_cli_betas(vec![
+            crate::model::context_window::CONTEXT_1M_BETA_HEADER.to_string(),
+        ]);
+        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("Hi");
+        request.input.max_tokens = Some(1);
+
+        assert!(service
+            .execute_model_validation_request(request)
+            .await
+            .is_err());
+        assert_eq!(transport.seen_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn model_validation_uses_host_base_url_assumption_for_context_retry_gate() {
+        let _env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore(vec![
+            ("ANTHROPIC_BASE_URL", std::env::var_os("ANTHROPIC_BASE_URL")),
+            (
+                "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+                std::env::var_os("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"),
+            ),
+        ]);
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://proxy.example.test");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                400,
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "The context-1m-2025-08-07 beta is not supported"
+                    }
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let prefix = lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix {
+            compatibility_version: "2.1.295".into(),
+            entrypoint: "cli".into(),
+            host_identity: PromptText::from_string("LingXi"),
+            attribution_enabled: false,
+            assume_first_party_base_url: true,
+        };
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://proxy.example.test",
+            "proxy",
+            "claude-sonnet-4-20250514",
+            transport.clone(),
+        )
+        .with_native_system_prefix(prefix)
+        .with_custom_cli_betas(vec![
+            crate::model::context_window::CONTEXT_1M_BETA_HEADER.to_string()
+        ]);
+        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("Hi");
+        request.profile = Some("proxy".into());
+        request.input.max_tokens = Some(1);
+
+        assert!(service
+            .execute_model_validation_request(request)
+            .await
+            .is_err());
+        assert_eq!(transport.seen_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn model_validation_refreshes_captured_anthropic_oauth_on_native_revocation_403() {
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                403,
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "OAuth token has been revoked"
+                    }
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let provider = Arc::new(RotatingAnthropicOAuthProvider::new());
+        let client = crate::ModelRuntime::from_config(ClientConfig {
+            providers: vec![ProviderProfile {
+                wire_profile: None,
+                regions: crate::Region::all(),
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic-oauth".into(),
+                base_url: "https://api.anthropic.com".into(),
+                protocol: ProtocolFamily::AnthropicMessages,
+                auth: AuthStrategy::ApiKey,
+                credential: CredentialConfig::HostManaged {
+                    id: "anthropic-oauth".into(),
+                },
+                models: vec![ModelProfile {
+                    display_model: "claude-sonnet-4-20250514".into(),
+                    request_model: "claude-sonnet-4-20250514".into(),
+                    billing_model: "claude-sonnet-4".into(),
+                    aliases: Vec::new(),
+                    description: None,
+                    metadata: Default::default(),
+                    capabilities: Capabilities {
+                        streaming: true,
+                        tools: true,
+                        ..Default::default()
+                    },
+                }],
+                pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
+                vision_delegate: None,
+                connection: Default::default(),
+            }],
+        })
+        .expect("OAuth client")
+        .with_credential_provider(provider.clone());
+        let service = ApiService::new(
+            Arc::new(client),
+            transport.clone(),
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".into()),
+                entrypoint: Some("cli".into()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+        );
+        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("Hi");
+        request.profile = Some("anthropic-oauth".into());
+        request.input.max_tokens = Some(1);
+
+        service
+            .execute_model_validation_request(request)
+            .await
+            .expect("one rejected OAuth credential is refreshed and retried");
+        assert_eq!(transport.seen_count(), 2);
+        assert_eq!(
+            provider.refreshes.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let authorization = |index| {
+            transport
+                .seen_headers(index)
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value)
+        };
+        assert_eq!(authorization(0).as_deref(), Some("Bearer rejected-token"));
+        assert_eq!(authorization(1).as_deref(), Some("Bearer refreshed-token"));
+    }
+
+    #[tokio::test]
+    async fn model_validation_replays_once_after_foundry_tool_search_capability_refusal() {
+        let source_units = "custom-foundry-model".encode_utf16().collect::<Vec<_>>();
+        let unsupported = ProviderResponse::json(
+            400,
+            serde_json::json!({
+                "error": {
+                    "message": "tool_search_server, structured_outputs not supported in your workspace"
+                }
+            }),
+        );
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(unsupported),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::FoundryClaude,
+            ProviderId::FoundryClaude,
+            "https://foundry.example/anthropic/",
+            "p",
+            "route-model",
+            transport.clone(),
+        );
+        let mut request = LlmRequest::new("route-model").with_user_text("Hi");
+        request.profile = Some("p".to_owned());
+        request.input.max_tokens = Some(1);
+        request.input.model_source = Some(
+            lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(&source_units),
+        );
+        let schema =
+            lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }))
+            .unwrap();
+        request.input.tools = vec![
+            lingxi_llm_client::protocol::ToolSpec {
+                name: NATIVE_DEFERRED_TOOL_PLACEHOLDER_NAME.to_owned(),
+                description: lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(
+                    &NATIVE_DEFERRED_TOOL_PLACEHOLDER_DESCRIPTION
+                        .encode_utf16()
+                        .collect::<Vec<_>>(),
+                ),
+                input_schema: schema.clone(),
+                strict: false,
+                defer_loading: true,
+                native_options: Vec::new(),
+                tool_type: None,
+                extra: Default::default(),
+            },
+            lingxi_llm_client::protocol::ToolSpec {
+                name: NATIVE_TOOL_SEARCH_NAME.to_owned(),
+                description: lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(
+                    &NATIVE_TOOL_SEARCH_DESCRIPTION
+                        .encode_utf16()
+                        .collect::<Vec<_>>(),
+                ),
+                input_schema: schema.clone(),
+                strict: false,
+                defer_loading: true,
+                native_options: Vec::new(),
+                tool_type: None,
+                extra: Default::default(),
+            },
+            lingxi_llm_client::protocol::ToolSpec {
+                name: "DeferredRead".to_owned(),
+                description: lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(
+                    &"Read a deferred file".encode_utf16().collect::<Vec<_>>(),
+                ),
+                input_schema: schema.clone(),
+                strict: false,
+                defer_loading: true,
+                native_options: Vec::new(),
+                tool_type: None,
+                extra: Default::default(),
+            },
+            lingxi_llm_client::protocol::ToolSpec {
+                name: "StrictOutput".to_owned(),
+                description: lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(
+                    &"Return strict output".encode_utf16().collect::<Vec<_>>(),
+                ),
+                input_schema: schema,
+                strict: true,
+                defer_loading: false,
+                native_options: Vec::new(),
+                tool_type: None,
+                extra: Default::default(),
+            },
+        ];
+
+        service
+            .execute_model_validation_request(request)
+            .await
+            .expect("retry without the Native-rejected deferred tool");
+        assert_eq!(transport.seen_count(), 2);
+        let seen = transport.seen.lock().unwrap();
+        let first = request_body_value(&seen[0].body_json);
+        let second = request_body_value(&seen[1].body_json);
+        let first_tools = first["tools"].as_array().unwrap();
+        assert_eq!(first_tools.len(), 4);
+        assert_eq!(
+            first_tools[0]["name"],
+            NATIVE_DEFERRED_TOOL_PLACEHOLDER_NAME
+        );
+        assert!(first_tools[0]["defer_loading"].as_bool().unwrap());
+        assert_eq!(first_tools[1]["name"], NATIVE_TOOL_SEARCH_NAME);
+        assert!(first_tools[1]["defer_loading"].as_bool().unwrap());
+        assert_eq!(first_tools[2]["name"], "DeferredRead");
+        assert!(first_tools[2]["defer_loading"].as_bool().unwrap());
+        assert_eq!(first_tools[3]["name"], "StrictOutput");
+        assert!(first_tools[3]["strict"].as_bool().unwrap());
+
+        let second_tools = second["tools"].as_array().unwrap();
+        assert_eq!(second_tools.len(), 3);
+        assert!(second_tools
+            .iter()
+            .all(|tool| tool["name"] != NATIVE_DEFERRED_TOOL_PLACEHOLDER_NAME));
+        let tool_search = second_tools
+            .iter()
+            .find(|tool| tool["name"] == NATIVE_TOOL_SEARCH_NAME)
+            .expect("real ToolSearch remains after the placeholder is removed");
+        assert!(tool_search.get("defer_loading").is_none());
+        let deferred_read = second_tools
+            .iter()
+            .find(|tool| tool["name"] == "DeferredRead")
+            .expect("ordinary deferred tool remains after unsupported search is removed");
+        assert!(deferred_read.get("defer_loading").is_none());
+        let strict_output = second_tools
+            .iter()
+            .find(|tool| tool["name"] == "StrictOutput")
+            .expect("strict tool remains after unsupported strict mode is removed");
+        assert!(strict_output.get("strict").is_none());
+    }
+
+    #[test]
+    fn native_v_oauth_revocation_uses_status_specific_exact_substrings() {
+        assert!(native_v_oauth_revocation(
+            403,
+            Some("OAuth token has been revoked for this account")
+        ));
+        assert!(native_v_oauth_revocation(
+            401,
+            Some("OAuth access token has been revoked")
+        ));
+        assert!(!native_v_oauth_revocation(
+            403,
+            Some("OAuth access token has been revoked")
+        ));
+        assert!(!native_v_oauth_revocation(
+            401,
+            Some("oauth access token has been revoked")
+        ));
+        assert!(!native_v_oauth_revocation(403, None));
+    }
+
+    #[test]
+    fn foundry_tool_search_cache_is_negative_only_and_route_scoped() {
+        let model_units = "model".encode_utf16().collect::<Vec<_>>();
+        let formatted_model_units = "model[1m][2M]-[1m]".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            native_foundry_model_key(&formatted_model_units),
+            "model-".encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            foundry_unsupported_feature_names(
+                "tool_search_server, tool_search not supported in your workspace"
+            ),
+            Some(vec!["tool_search_server".into(), "tool_search".into()])
+        );
+        assert_eq!(
+            foundry_unsupported_feature_names(
+                "Features are not available for Azure AI Foundry workspaces: tool_search_server and tool_search"
+            ),
+            Some(vec!["tool_search_server".into(), "tool_search".into()])
+        );
+        assert_eq!(
+            foundry_unsupported_feature_names(
+                "TOOL_SEARCH_SERVER, tool_search not supported in your workspace"
+            ),
+            None,
+            "Jg rejects the whole captured list when any token is not lowercase ASCII"
+        );
+        assert_eq!(
+            foundry_unsupported_feature_names(
+                "features are not available for Azure AI Foundry workspaces: TOOL_SEARCH_SERVER and tool_search"
+            ),
+            Some(vec!["tool_search".into()]),
+            "Xg drops invalid tokens individually after its different split rule"
+        );
+        assert_eq!(
+            foundry_unsupported_feature_names(
+                "Server-side web search is not available in this environment"
+            ),
+            Some(vec!["web_search".into()])
+        );
+        assert_eq!(foundry_unsupported_feature_names("unrelated 400"), None);
+
+        let service = make_adapter_for_protocol(
+            ProtocolFamily::FoundryClaude,
+            ProviderId::FoundryClaude,
+            "https://foundry.example/anthropic/",
+        );
+        assert_eq!(
+            service.foundry_tool_search_supported("model", Some("p"), Some(&model_units)),
+            Some(true),
+            "an unknown deployment is allowed"
+        );
+        let no_observation = provider_payload(serde_json::json!({
+            "error": {"message": "unrelated 400"}
+        }));
+        service.record_foundry_capability_observation(
+            "model",
+            &model_units,
+            "p",
+            ProtocolFamily::FoundryClaude,
+            &ProviderId::FoundryClaude,
+            400,
+            &no_observation,
+            None,
+        );
+        assert_eq!(
+            service.foundry_tool_search_supported("model", Some("p"), Some(&model_units)),
+            Some(true),
+            "unrelated 400s do not poison the capability cache"
+        );
+        let other_source_units = "custom-unlisted-model".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            service.foundry_tool_search_supported("model", Some("p"), Some(&other_source_units)),
+            Some(true),
+            "the route anchor alone does not inherit another Native model source's cache"
+        );
+        let unsupported = provider_payload(serde_json::json!({
+            "error": {"message": "tool_search_server not supported in your workspace"}
+        }));
+        service.record_foundry_capability_observation(
+            "model",
+            &model_units,
+            "p",
+            ProtocolFamily::FoundryClaude,
+            &ProviderId::FoundryClaude,
+            403,
+            &unsupported,
+            None,
+        );
+        assert_eq!(
+            service.foundry_tool_search_supported("model", Some("p"), Some(&model_units)),
+            Some(true),
+            "only source-qualified HTTP 400 observations count"
+        );
+        service.record_foundry_capability_observation(
+            "model",
+            &model_units,
+            "p",
+            ProtocolFamily::FoundryClaude,
+            &ProviderId::FoundryClaude,
+            400,
+            &unsupported,
+            None,
+        );
+        assert_eq!(
+            service.foundry_tool_search_supported("model", Some("p"), Some(&model_units)),
+            Some(false)
+        );
+        assert_eq!(
+            service.foundry_tool_search_supported("model", Some("p"), Some(&other_source_units)),
+            Some(true),
+            "an unsupported observation is keyed by the exact Native model source"
+        );
+        let other_deployment = make_adapter_for_protocol(
+            ProtocolFamily::FoundryClaude,
+            ProviderId::FoundryClaude,
+            "https://other-foundry.example/anthropic/",
+        );
+        assert_eq!(
+            other_deployment.foundry_tool_search_supported("model", Some("p"), Some(&model_units)),
+            Some(true),
+            "negative capability observations are deployment scoped"
+        );
+        assert_eq!(
+            service.model_validation_account_generation(),
+            service.fast_availability.generation()
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn nonstream_deadline_bounds_headers_and_body_and_settles_once() {
         for body in [false, true] {
@@ -1678,9 +2335,11 @@ mod tests {
             None,
             None,
         )
-        .with_fast_policy_source(Arc::new(|| crate::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(crate::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
     }
 
@@ -1747,9 +2406,11 @@ mod tests {
             max_retries,
             None,
         )
-        .with_fast_policy_source(Arc::new(|| crate::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(crate::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
     }
 
@@ -2283,7 +2944,9 @@ mod tests {
             200,
             ok_response_json(),
         )))
-        .with_prompt_cache_ttl_settings_source(Arc::new(move || *source_settings.lock().unwrap()));
+        .with_prompt_cache_ttl_settings_source(Arc::new(move || {
+            Ok(*source_settings.lock().unwrap())
+        }));
         let system_text = format!("{HEADER}{SECTION_SEP}retained settings prompt");
         let system = custom_system_prompt(Some(&system_text));
 
@@ -2370,7 +3033,9 @@ mod tests {
             200,
             ok_response_json(),
         )))
-        .with_prompt_cache_ttl_settings_source(Arc::new(move || *source_settings.lock().unwrap()));
+        .with_prompt_cache_ttl_settings_source(Arc::new(move || {
+            Ok(*source_settings.lock().unwrap())
+        }));
         let system_text = format!("{HEADER}{SECTION_SEP}retained settings prompt");
         let system = custom_system_prompt(Some(&system_text));
 
@@ -8090,6 +8755,7 @@ mod tests {
                 None,
                 std::collections::HashSet::new(),
                 std::collections::HashMap::new(),
+                None,
             ))
             .await;
 
@@ -8136,6 +8802,7 @@ mod tests {
                 None,
                 std::collections::HashSet::new(),
                 std::collections::HashMap::new(),
+                None,
             )
             .await
             .expect("positive control reaches transport");
@@ -8188,6 +8855,7 @@ mod tests {
                 None,
                 std::collections::HashSet::new(),
                 std::collections::HashMap::new(),
+                None,
             )
             .await;
 
@@ -11094,6 +11762,36 @@ mod tests {
                 (4, "system".to_owned(), "medium".to_owned()),
             ],
             "successful response effort stays attached to its historical turn"
+        );
+    }
+
+    #[test]
+    fn main_request_retains_exact_model_source_utf16_units() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let service = make_adapter(transport);
+        let source =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""model-\ud800""#)
+                .unwrap();
+        let mut request = crate::MessagesCreateRequest::new(
+            "claude-sonnet-4-20250514",
+            Some("anthropic"),
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        request.opts.model_source = Some(source);
+
+        let (request, _) = service
+            .build_main_message_request(request, false)
+            .expect("valid route plus source string projection");
+        assert_eq!(
+            request
+                .input
+                .model_source
+                .as_ref()
+                .expect("source carrier reaches SDK request")
+                .as_json_source(),
+            r#""model-\ud800""#
         );
     }
 }

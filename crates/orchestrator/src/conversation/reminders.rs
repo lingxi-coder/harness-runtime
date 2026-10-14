@@ -74,6 +74,50 @@ fn native_mcp_revocation_cause(
     }
 }
 
+/// Native `Ve()` gate used by `GCe()`. JavaScript environment values are
+/// strings: only an absent or empty value is false; values such as `"0"`,
+/// `"false"`, `"off"`, and `"no"` are all truthy.
+fn native_tool_search_env_value_is_truthy(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+fn native_tool_search_gce_enabled(
+    foamy_spring_enabled: bool,
+    simple_mode: Option<&std::ffi::OsStr>,
+    disable_attachments: Option<&std::ffi::OsStr>,
+) -> bool {
+    native_tool_search_gce_enabled_with_env(
+        foamy_spring_enabled,
+        || simple_mode.map(std::ffi::OsStr::to_os_string),
+        || disable_attachments.map(std::ffi::OsStr::to_os_string),
+    )
+}
+
+fn native_tool_search_gce_enabled_with_env(
+    foamy_spring_enabled: bool,
+    read_simple_mode: impl FnOnce() -> Option<std::ffi::OsString>,
+    read_disable_attachments: impl FnOnce() -> Option<std::ffi::OsString>,
+) -> bool {
+    if !foamy_spring_enabled {
+        return false;
+    }
+    let simple_mode = read_simple_mode();
+    if native_tool_search_env_value_is_truthy(simple_mode.as_deref()) {
+        return false;
+    }
+    let disable_attachments = read_disable_attachments();
+    !native_tool_search_env_value_is_truthy(disable_attachments.as_deref())
+}
+
+fn native_tool_search_keeps_deferred_tools(
+    deferral: &tool_api::DeferralState,
+    native_gce_enabled: bool,
+) -> bool {
+    // Native's request-mode test is separate from the host-cached GCe latch.
+    deferral.keeps_deferred_tools() && native_gce_enabled
+}
+
 /// Native `pfr(..., {aheadOfRequest:true})` admission for tool-search-free
 /// tool-change announcements. `None` model support is unavailable evidence and
 /// fails closed; `tool_pool_refreshes` mirrors Native's
@@ -1151,13 +1195,20 @@ impl ConversationOrchestrator {
 
     pub(crate) async fn skill_listing_prompt_ingress_attachment(
         &self,
-    ) -> Option<crate::request_context::PromptIngressAttachment> {
+    ) -> Result<
+        Option<crate::request_context::PromptIngressAttachment>,
+        lingxi_core::settings::SettingsError,
+    > {
         use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 
-        let provider = self.prompt_runtime.skill_listing.as_ref()?;
+        let Some(provider) = self.prompt_runtime.skill_listing.as_ref() else {
+            return Ok(None);
+        };
         // Gate on the Skill tool being available this turn (attachments.ts:2668).
-        self.find_dispatchable_tool("Skill")?;
-        let listing_snapshot = provider.skill_listing_snapshot().await;
+        if self.find_dispatchable_tool("Skill").is_none() {
+            return Ok(None);
+        }
+        let listing_snapshot = provider.skill_listing_snapshot().await?;
         let entries = listing_snapshot.entries;
 
         // DELTA: keep only skills not yet sent this session, then record them as
@@ -1190,7 +1241,7 @@ impl ConversationOrchestrator {
             (delta, is_initial)
         };
         if new_entries.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         // ~1% of the active model's context window (TS getCharBudget). Resolved
@@ -1205,42 +1256,54 @@ impl ConversationOrchestrator {
                 as usize;
         let chars_per_token = memory::native_skill_listing_chars_per_token(Some(&model)) as usize;
         let settings = listing_snapshot.budget_settings;
-        let rendered_source = crate::prompt::skill_listing::render_reminder(
+        let Some(rendered_source) = crate::prompt::skill_listing::render_reminder(
             &new_entries,
             Some(window),
             chars_per_token,
             settings,
-        )?;
-        let rendered_units = rendered_source.string_units("")?;
+        ) else {
+            return Ok(None);
+        };
+        let rendered_units = rendered_source.string_units("").ok_or_else(|| {
+            lingxi_core::settings::SettingsError::SchemaViolation(
+                "skill listing reminder renderer returned a non-string projection".into(),
+            )
+        })?;
         let prefix = "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n"
             .encode_utf16()
             .collect::<Vec<_>>();
         let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
-        let content_units = rendered_units
-            .strip_prefix(prefix.as_slice())?
-            .strip_suffix(suffix.as_slice())?
-            .to_vec();
-        let content =
-            Source::root_string(String::from_utf16_lossy(&content_units), content_units).ok()?;
-        let names =
-            Source::array(new_entries.iter().map(|entry| entry.name.clone()).collect()).ok()?;
-        let skill_count = Source::parse(&new_entries.len().to_string()).ok()?;
-        let is_initial = Source::from_serde_value(&serde_json::Value::Bool(is_initial)).ok()?;
+        let Some(content_units) = rendered_units
+            .strip_prefix(prefix.as_slice())
+            .and_then(|units| units.strip_suffix(suffix.as_slice()))
+        else {
+            return Ok(None);
+        };
+        let content_units = content_units.to_vec();
+        let content = Source::root_string(String::from_utf16_lossy(&content_units), content_units)?;
+        let names = Source::array(new_entries.iter().map(|entry| entry.name.clone()).collect())?;
+        let skill_count = Source::parse(&new_entries.len().to_string())?;
+        let is_initial = Source::from_serde_value(&serde_json::Value::Bool(is_initial))?;
         let payload = Source::object(vec![
             ("type".into(), Source::from("skill_listing")),
             ("content".into(), content),
             ("skillCount".into(), skill_count),
             ("isInitial".into(), is_initial),
             ("names".into(), names),
-        ])
-        .ok()?;
-        prompt_ingress_payload(source_user_meta(MessageId::new(), rendered_source), payload)
+        ])?;
+        Ok(prompt_ingress_payload(
+            source_user_meta(MessageId::new(), rendered_source),
+            payload,
+        ))
     }
 
-    pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
-        self.skill_listing_prompt_ingress_attachment()
-            .await
-            .map(|row| row.message)
+    pub(crate) async fn skill_listing_reminder_message(
+        &self,
+    ) -> Result<Option<ConversationMessage>, lingxi_core::settings::SettingsError> {
+        Ok(self
+            .skill_listing_prompt_ingress_attachment()
+            .await?
+            .map(|row| row.message))
     }
 
     /// Build the source-ordered, tool-gated listing rows used by the Native
@@ -1248,18 +1311,20 @@ impl ConversationOrchestrator {
     /// rendering before Mods screen the request-local copies.
     pub(crate) async fn prompt_ingress_listing_attachments(
         &self,
-    ) -> Vec<crate::request_context::PromptIngressAttachment> {
+    ) -> Result<
+        Vec<crate::request_context::PromptIngressAttachment>,
+        lingxi_core::settings::SettingsError,
+    > {
         let mut rows = Vec::new();
-        for row in [
-            self.agent_listing_prompt_ingress_attachment().await,
-            self.skill_listing_prompt_ingress_attachment().await,
-        ] {
+        let agent = self.agent_listing_prompt_ingress_attachment().await;
+        let skill = self.skill_listing_prompt_ingress_attachment().await?;
+        for row in [agent, skill] {
             let Some(row) = row else {
                 continue;
             };
             rows.push(row);
         }
-        rows
+        Ok(rows)
     }
 
     /// The per-turn, transient `async_hook_response` reminder, or `None` when no
@@ -3164,6 +3229,24 @@ message with multiple tool uses so they run concurrently."
         ))
     }
 
+    /// Native's mutating `GCe()` latch for declared-pool and kept-reference
+    /// helpers. `Foo()` is a separate non-mutating peek and is not represented
+    /// by this initializer. The shared DeferralState scopes the latch to this
+    /// registry/host and its child/fork dispatchers.
+    pub(crate) fn native_kept_deferred_tools_enabled(&self) -> bool {
+        self.tools
+            .deferral()
+            .native_kept_deferred_tools_enabled_with(|| {
+                let foamy_spring_enabled =
+                    telemetry::feature_flags::flag_bool("tengu_foamy_spring", true);
+                native_tool_search_gce_enabled_with_env(
+                    foamy_spring_enabled,
+                    || std::env::var_os(branding::SIMPLE_ENV),
+                    || std::env::var_os(branding::DISABLE_ATTACHMENTS_ENV),
+                )
+            })
+    }
+
     /// `deferred_tools_delta` typed row for THIS outgoing model step.
     ///
     /// Claude Code (`A1s` + the `deferred_tools_delta` attachment renderer)
@@ -3211,6 +3294,9 @@ message with multiple tool uses so they run concurrently."
             let session = self.session.lock().await;
             (session.model.clone(), session.model_profile.clone())
         };
+        let model_source = self
+            .main_model_source_for_request(&model, profile.as_deref())
+            .await;
         let scope = self.native_tool_search_scope_snapshot();
         let native_latches = scope.native_tool_search_state();
         let beta_rejections = scope.beta_rejections();
@@ -3231,7 +3317,16 @@ message with multiple tool uses so they run concurrently."
                 self.api.as_ref(),
                 &model,
                 profile.as_deref(),
+                model_source.as_ref(),
             );
+        let keep_deferred_tools = if tool_search_filtered_out {
+            native_tool_search_keeps_deferred_tools(
+                deferral,
+                self.native_kept_deferred_tools_enabled(),
+            )
+        } else {
+            deferral.keeps_deferred_tools()
+        };
         let tool_search_absent = native_tool_search_absent_admitted(
             tool_search_filtered_out,
             native_mctc_supported,
@@ -3239,7 +3334,7 @@ message with multiple tool uses so they run concurrently."
             mctc_rejected,
             mcs_rejected,
             native_latches.tool_change_header_refused,
-            deferral.keeps_deferred_tools(),
+            keep_deferred_tools,
             prior_declared.is_some(),
             tool_pool_refresh_callback_available,
             foamy_spring_enabled,
@@ -3387,6 +3482,120 @@ message with multiple tool uses so they run concurrently."
 #[cfg(test)]
 mod native_deferred_revocation_tests {
     use super::*;
+
+    #[test]
+    fn native_gce_gate_uses_javascript_environment_truthiness() {
+        use std::ffi::OsStr;
+
+        assert!(native_tool_search_gce_enabled(true, None, None));
+        assert!(native_tool_search_gce_enabled(
+            true,
+            Some(OsStr::new("")),
+            Some(OsStr::new("")),
+        ));
+        for value in ["0", "false", "off", "no", "1"] {
+            assert!(!native_tool_search_gce_enabled(
+                true,
+                Some(OsStr::new(value)),
+                None,
+            ));
+            assert!(!native_tool_search_gce_enabled(
+                true,
+                None,
+                Some(OsStr::new(value)),
+            ));
+        }
+        assert!(!native_tool_search_gce_enabled(false, None, None));
+    }
+
+    #[test]
+    fn native_gce_short_circuits_environment_reads_in_source_order() {
+        let mut simple_reads = 0;
+        let mut disable_reads = 0;
+        assert!(!native_tool_search_gce_enabled_with_env(
+            false,
+            || {
+                simple_reads += 1;
+                None
+            },
+            || {
+                disable_reads += 1;
+                None
+            },
+        ));
+        assert_eq!(simple_reads, 0);
+        assert_eq!(disable_reads, 0);
+
+        assert!(!native_tool_search_gce_enabled_with_env(
+            true,
+            || {
+                simple_reads += 1;
+                Some("0".into())
+            },
+            || {
+                disable_reads += 1;
+                None
+            },
+        ));
+        assert_eq!(simple_reads, 1);
+        assert_eq!(disable_reads, 0);
+    }
+
+    #[test]
+    fn native_gce_gate_latches_initial_inputs_per_shared_registry_context() {
+        use std::ffi::OsStr;
+
+        let host = std::sync::Arc::new(tool_api::DeferralState::new(
+            tool_api::ToolSearchMode::Enabled,
+            false,
+        ));
+        let child = host.clone();
+        let first_host_value = host.native_kept_deferred_tools_enabled_with(|| {
+            native_tool_search_gce_enabled(true, None, None)
+        });
+        assert!(native_tool_search_keeps_deferred_tools(
+            &host,
+            first_host_value
+        ));
+        // A later per-host flag/env snapshot cannot replace the first GCe value.
+        let later_child_value = child.native_kept_deferred_tools_enabled_with(|| {
+            native_tool_search_gce_enabled(false, Some(OsStr::new("0")), Some(OsStr::new("false")))
+        });
+        assert!(native_tool_search_keeps_deferred_tools(
+            &child,
+            later_child_value
+        ));
+
+        let independent_host =
+            tool_api::DeferralState::new(tool_api::ToolSearchMode::Enabled, false);
+        let first_independent_value =
+            independent_host.native_kept_deferred_tools_enabled_with(|| {
+                native_tool_search_gce_enabled(true, Some(OsStr::new("false")), None)
+            });
+        assert!(!native_tool_search_keeps_deferred_tools(
+            &independent_host,
+            first_independent_value,
+        ));
+        let later_independent_value =
+            independent_host.native_kept_deferred_tools_enabled_with(|| {
+                native_tool_search_gce_enabled(true, None, None)
+            });
+        assert!(!native_tool_search_keeps_deferred_tools(
+            &independent_host,
+            later_independent_value,
+        ));
+    }
+
+    #[test]
+    fn native_gce_gate_evaluates_request_mode_outside_host_latch() {
+        let state =
+            tool_api::DeferralState::new(tool_api::ToolSearchMode::Auto { percentage: 10 }, false);
+        let cached_gce = state.native_kept_deferred_tools_enabled_with(|| true);
+        assert!(!native_tool_search_keeps_deferred_tools(&state, cached_gce));
+
+        state.set_auto_active(true);
+        assert!(native_tool_search_keeps_deferred_tools(&state, cached_gce));
+    }
 
     #[test]
     fn native_pfr_tool_search_absence_requires_every_source_gate() {

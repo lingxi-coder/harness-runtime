@@ -654,13 +654,36 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
     route_line_seq(strip_transcript_bom(content).lines())
 }
 
-/// A transcript body without its leading UTF-8 BOM (claude-code json.ts
-/// parseJSONLBuffer: `if(buf[0]===0xef&&buf[1]===0xbb&&buf[2]===0xbf) start=3`,
-/// confirmed live in v2.1.193). Rust `str::trim()` does NOT treat U+FEFF as
-/// whitespace, so without this the BOM survives onto line 1 and
-/// `serde_json::from_str` rejects it → the first message is silently dropped.
+/// Strip a single file-leading BOM, as Native X5e's Buffer parser does before
+/// processing lines. The ordinary per-row parser below separately applies
+/// JavaScript String.trim(), which also handles FEFF at later row boundaries.
 pub(crate) fn strip_transcript_bom(content: &str) -> &str {
     content.strip_prefix('\u{FEFF}').unwrap_or(content)
+}
+
+/// Native 2.1.295 JSONL fallback calls JavaScript String.trim() per row.
+/// Rust str::trim() differs at U+FEFF and U+0085: ECMAScript trims FEFF but
+/// preserves NEL. Keep row boundaries source-equivalent before JSON parsing.
+fn trim_native_json_whitespace(value: &str) -> &str {
+    value.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '\u{0009}'
+                | '\u{000A}'
+                | '\u{000B}'
+                | '\u{000C}'
+                | '\u{000D}'
+                | '\u{0020}'
+                | '\u{00A0}'
+                | '\u{1680}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+        ) || ('\u{2000}'..='\u{200A}').contains(&ch)
+    })
 }
 
 /// [`route_lines`] over some of a transcript's lines: each line exactly as
@@ -668,7 +691,7 @@ pub(crate) fn strip_transcript_bom(content: &str) -> &str {
 pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> LoadedTranscript {
     let mut out = LoadedTranscript::default();
     for line in lines {
-        let line = line.trim();
+        let line = trim_native_json_whitespace(line);
         if line.is_empty() {
             continue;
         }
@@ -686,23 +709,17 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
             row.remove_field(PRIVATE_UTF16_KEY)
                 .expect("removing one private object property preserves source values");
         }
-        let (utf16_overrides, has_non_scalar_key) = collect_utf16_overrides(&row);
-        let plain = utf16_overrides.is_empty() && !has_non_scalar_key;
-        let exact = crate::jsonl::exact_json::ExactJsonValue {
-            value: if plain {
-                std::mem::take(&mut row.value)
-            } else {
-                row.value.clone()
-            },
-            utf16_overrides,
-        };
+        // Routing needs only this pointer side index. The authoritative flat
+        // row is passed directly to the message decoder; no display Value
+        // mirror is needed here, including for non-scalar source keys.
+        let (utf16_overrides, _) = collect_utf16_overrides(&row);
         let ty = row.string_at("/type").unwrap_or("");
         if is_transcript_message_type(ty) {
             let Ok(mut msg) = JsonlMessage::from_projection(&row) else {
                 out.malformed_line_count += 1;
                 continue;
             };
-            let overrides = exact.utf16_overrides;
+            let overrides = utf16_overrides;
             if overrides.is_empty() {
                 out.utf16_by_uuid.remove(&msg.uuid);
             } else {
@@ -1097,6 +1114,21 @@ mod tests {
         format!(
             r#"{{"parentUuid":null,"isSidechain":false{payload_member},"type":"attachment","uuid":"u-attachment","timestamp":"2026-10-06T00:00:00.000Z","sessionId":"s"}}"#
         )
+    }
+
+    #[test]
+    fn route_lines_uses_native_javascript_trim_for_each_jsonl_row() {
+        let base = attachment_row("");
+        let inner_bom = base.replace("u-attachment", "u-inner-bom");
+        let nel = base.replace("u-attachment", "u-nel");
+        let content = format!("{base}\n\u{FEFF}{inner_bom}\n\u{0085}{nel}");
+
+        let loaded = route_lines(&content);
+
+        assert_eq!(loaded.messages_in_order.len(), 2);
+        assert_eq!(loaded.malformed_line_count, 1);
+        assert_eq!(loaded.messages_in_order[0].uuid.as_str(), "u-attachment");
+        assert_eq!(loaded.messages_in_order[1].uuid.as_str(), "u-inner-bom");
     }
 
     #[test]

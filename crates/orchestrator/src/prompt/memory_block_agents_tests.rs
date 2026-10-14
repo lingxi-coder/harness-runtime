@@ -4,6 +4,15 @@ use memory::lingxi_md::LingxiMdTier;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+fn user_context_text(
+    context: &lingxi_core::host::instructions::InstructionContext,
+    key: &str,
+) -> String {
+    context
+        .user_context_utf8(key)
+        .expect("test fixture userContext value is valid UTF-8")
+}
+
 fn write(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, body).unwrap();
@@ -196,8 +205,8 @@ async fn actual_main_request_uses_agents_with_telemetry_disabled_and_frozen_fork
         .contains("AGENTS_ACTUAL_REQUEST"));
     write(&cwd.join("AGENTS.md"), "CHANGED_AFTER_PARENT_DISPATCH");
     let snapshot = orch.instruction_context_snapshot().await;
-    assert!(snapshot.user_context["instructions"].contains("AGENTS_ACTUAL_REQUEST"));
-    assert!(!snapshot.user_context["instructions"].contains("CHANGED_AFTER_PARENT_DISPATCH"));
+    assert!(user_context_text(&snapshot, "instructions").contains("AGENTS_ACTUAL_REQUEST"));
+    assert!(!user_context_text(&snapshot, "instructions").contains("CHANGED_AFTER_PARENT_DISPATCH"));
 }
 
 #[tokio::test]
@@ -273,24 +282,24 @@ async fn managed_only_retains_policy_and_empty_injection_never_discovers_disk() 
         .load(&cwd, InstructionScope::ManagedOnly)
         .await
         .unwrap();
-    assert!(managed.user_context["instructions"].contains("POLICY"));
-    assert!(!managed.user_context["instructions"].contains("PROJECT"));
+    assert!(user_context_text(&managed, "instructions").contains("POLICY"));
+    assert!(!user_context_text(&managed, "instructions").contains("PROJECT"));
     let (empty, _empty_owner) = root_provider(
         Arc::new(crate::test_support::StaticMemoryProvider::empty()),
         &cwd,
     );
     let mut context = empty.load(&cwd, InstructionScope::Full).await.unwrap();
     assert_eq!(context.eager_instructions, Some(Vec::new()));
-    assert_eq!(context.user_context["instructions"], "");
+    assert_eq!(user_context_text(&context, "instructions"), "");
     assert_eq!(
-        context.user_context["currentDate"],
+        user_context_text(&context, "currentDate"),
         format!(
             "Today's date is {}.",
             crate::prompt::env_meta::current_date_string()
         )
     );
     assert_eq!(
-        context.user_context.len(),
+        context.user_context_entries().len(),
         2,
         "known empty instructions retain the native context anchor and date"
     );

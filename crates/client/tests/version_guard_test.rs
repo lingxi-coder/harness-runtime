@@ -277,7 +277,7 @@ fn current_contract_index() -> ContractIndex {
     // ── ClientEvent (events.rs) ───────────────────────────────────────────
     put("ClientEvent::Error", "error");
     put("ClientEvent::Error.kind", "ErrorKindDto");
-    put("ClientEvent::Error.message", "String");
+    put("ClientEvent::Error.message", "ClientTextDto");
     put("ClientEvent::TerminalApiError", "terminal_api_error");
     put(
         "ClientEvent::TerminalApiError.api_error_status",
@@ -1027,7 +1027,7 @@ fn current_contract_index() -> ContractIndex {
     put("ProviderCredentialSecretDto.value", "String");
 
     put("ClientCommand::SetModel", "set_model");
-    put("ClientCommand::SetModel.model", "String");
+    put("ClientCommand::SetModel.model", "ClientTextDto");
 
     put("ClientCommand::ListModels", "list_models");
     put(
@@ -1066,7 +1066,7 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::NewSession", "new_session");
     put("ClientCommand::NewSession.cwd", "Option<String>");
-    put("ClientCommand::NewSession.model", "Option<String>");
+    put("ClientCommand::NewSession.model", "Option<ClientTextDto>");
 
     put("ClientCommand::ResumeSession", "resume_session");
     put("ClientCommand::ResumeSession.session_id", "String");
@@ -2287,7 +2287,7 @@ fn contract_index_covers_every_dto() {
     let _ev: Vec<ClientEvent> = vec![
         ClientEvent::Error {
             kind: ErrorKindDto::Internal,
-            message: String::new(),
+            message: String::new().into(),
         },
         ClientEvent::TerminalApiError {
             api_error_status: Some(413),
@@ -2993,6 +2993,7 @@ fn contract_index_covers_every_dto() {
         StatusSnapshotDto {
             session_id: String::new(),
             model: String::new(),
+            model_source: None,
             n_messages: 0,
             total_cost_usd: 0.0,
             input_tokens: 0,

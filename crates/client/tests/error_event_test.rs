@@ -19,7 +19,7 @@ use client::protocol::events::{ClientEvent, ErrorKindDto};
 fn error_event_round_trips() {
     let ev = ClientEvent::Error {
         kind: ErrorKindDto::Transport,
-        message: "connection reset".to_string(),
+        message: "connection reset".into(),
     };
 
     let json = serde_json::to_value(&ev).expect("serialize ClientEvent::Error");
@@ -36,6 +36,28 @@ fn error_event_round_trips() {
     // Round-trip is byte-stable.
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize ClientEvent::Error");
     assert_eq!(back, ev);
+}
+
+#[test]
+fn error_event_message_preserves_lone_surrogates_as_json_string() {
+    let event = ClientEvent::Error {
+        kind: ErrorKindDto::Internal,
+        message: client::protocol::text::ClientTextDto::from_code_units(vec![
+            b'x' as u16,
+            0xd800,
+            b'y' as u16,
+        ]),
+    };
+    let encoded = serde_json::to_string(&event).expect("serialize exact error");
+    assert_eq!(
+        encoded,
+        r#"{"type":"error","kind":{"type":"internal"},"message":"x\ud800y"}"#
+    );
+    let decoded: ClientEvent = serde_json::from_str(&encoded).expect("deserialize exact error");
+    let ClientEvent::Error { message, .. } = decoded else {
+        panic!("expected error event");
+    };
+    assert_eq!(message.code_units, vec![b'x' as u16, 0xd800, b'y' as u16]);
 }
 
 /// Every `ErrorKindDto` variant round-trips and serializes `snake_case`.

@@ -1126,6 +1126,8 @@ pub struct MockOrchestratorHandle {
     switch_model_last: StdMutex<Option<String>>,
     /// Most-recent profile passed to `switch_model`, or `None`.
     switch_model_last_profile: StdMutex<Option<Option<String>>>,
+    /// Exact UTF-16 source of the most-recent `switch_model_with_source` call.
+    switch_model_last_selection: StdMutex<Option<Utf16JsonProjection>>,
     /// If `Some`, `switch_model` returns `ActionFailed(_)`.
     switch_model_error: StdMutex<Option<String>>,
     /// Live permission-mode wire id used by bridge/mobile routing tests.
@@ -1236,6 +1238,7 @@ impl MockOrchestratorHandle {
             switch_model_calls: AtomicUsize::new(0),
             switch_model_last: StdMutex::new(None),
             switch_model_last_profile: StdMutex::new(None),
+            switch_model_last_selection: StdMutex::new(None),
             switch_model_error: StdMutex::new(None),
             permission_mode: StdMutex::new(Some("default".to_string())),
             effort: StdMutex::new(None),
@@ -1363,6 +1366,10 @@ impl MockOrchestratorHandle {
         let model = self.switch_model_last.lock().unwrap().clone()?;
         let profile = self.switch_model_last_profile.lock().unwrap().clone()?;
         Some((model, profile))
+    }
+    /// Exact selection source most recently passed to `switch_model_with_source`.
+    pub fn last_switch_model_selection(&self) -> Option<Utf16JsonProjection> {
+        self.switch_model_last_selection.lock().unwrap().clone()
     }
     /// Make the next `switch_model` call return `ActionFailed(reason)`.
     pub fn set_switch_model_error(&self, reason: String) {
@@ -1618,6 +1625,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         self.switch_model_calls.fetch_add(1, Ordering::SeqCst);
         *self.switch_model_last.lock().unwrap() = Some(model.to_string());
         *self.switch_model_last_profile.lock().unwrap() = Some(profile.map(str::to_string));
+        *self.switch_model_last_selection.lock().unwrap() = None;
         if let Some(reason) = self.switch_model_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));
         }
@@ -1625,6 +1633,42 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             controls.model_reference = lingxi_core::host::qualified_model_ref(model, profile);
         }
         Ok(())
+    }
+
+    async fn validate_model_selection(
+        &self,
+        _request: &lingxi_core::host::ModelSelectionRequest,
+    ) -> Result<(), HandleError> {
+        Ok(())
+    }
+
+    async fn select_model(
+        &self,
+        request: lingxi_core::host::ModelSelectionRequest,
+    ) -> Result<(), HandleError> {
+        match request {
+            lingxi_core::host::ModelSelectionRequest::Reset { .. } => {
+                self.switch_model("default", None).await
+            }
+            lingxi_core::host::ModelSelectionRequest::Select {
+                source, route_hint, ..
+            } => {
+                let model = route_hint
+                    .as_ref()
+                    .map(|route| route.model.as_str())
+                    .or_else(|| source.string_at(""))
+                    .unwrap_or_default();
+                self.switch_model(
+                    model,
+                    route_hint
+                        .as_ref()
+                        .and_then(|route| route.profile.as_deref()),
+                )
+                .await?;
+                *self.switch_model_last_selection.lock().unwrap() = Some(source);
+                Ok(())
+            }
+        }
     }
 
     async fn permission_mode(&self) -> Option<String> {

@@ -67,6 +67,7 @@ impl MemorySelector {
 
         let prompt = build_selector_prompt(query, &candidates, recent_tools);
         let req = SideQueryRequest {
+            model_source: None,
             model_attempt: None,
             native_prompt_context: None,
             model: model.to_string(),

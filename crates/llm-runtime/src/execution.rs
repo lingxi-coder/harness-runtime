@@ -41,6 +41,9 @@ pub(crate) fn wire_error(error: LlmError) -> wire::LlmError {
             }
         }
         LlmError::TlsCert { message, .. } => wire::LlmError::TlsCert { message },
+        LlmError::SettingsSource { .. } => {
+            unreachable!("host settings failures are returned before SDK wire execution")
+        }
         other => wire::LlmError::Transport {
             message: other.to_string(),
         },

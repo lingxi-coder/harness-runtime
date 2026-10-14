@@ -85,7 +85,10 @@ impl crate::OrchestratorApiClient for NativeModelRouteApi {
         model: &str,
         _profile: Option<&str>,
     ) -> Result<llm_runtime::MediaRoute, llm_runtime::LlmError> {
-        assert_eq!(model, "claude-sonnet-4-6");
+        assert!(
+            matches!(model, "claude-sonnet-4-6" | "claude-opus-4-8"),
+            "unexpected model route in the model-complete denial fixture: {model}"
+        );
         let provider_id = llm_runtime::ProviderId::AnthropicFirstParty;
         let pricing_model = llm_runtime::PricingModelRef {
             pricing_provider_id: provider_id.clone(),
@@ -247,6 +250,7 @@ async fn model_fork_uses_captured_prefix_and_reports_cold_session() {
     orch.session.lock().await.history = vec![history.clone(), latest];
 
     slot.save(sidequery::CacheSafeParams {
+        model_source: None,
         system_prompt: Arc::new("shared prefix".into()),
         system_prompt_input: Some(SystemPromptInput::custom_prompt("shared prefix".into())),
         tools: vec![source_read_tool()],
@@ -372,7 +376,8 @@ async fn model_fork_uses_restored_task_deliveries_for_only_the_cached_history_pr
         &[history],
         None,
     )
-    .await;
+    .await
+    .unwrap();
     let cached = slot.get_last().await.expect("request snapshot is cached");
     assert_eq!(cached.task_deliveries.len(), 1);
     let cached_delivery = cached
@@ -432,7 +437,8 @@ async fn model_fork_denies_tools_and_joins_two_replies() {
         "parent-model",
         &[],
     )
-    .await;
+    .await
+    .unwrap();
     let answer = orch
         .mod_model_fork(source_json!({"prompt":"question"}))
         .await

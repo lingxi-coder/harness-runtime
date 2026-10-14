@@ -5,7 +5,7 @@ use command_api::{
 };
 use hooks::mods::ModSessionContext;
 use hooks::HookRegistry;
-use lingxi_core::host::SlashDispatchResult;
+use lingxi_core::host::{CancellationToken, SlashDispatchResult};
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
 use orchestrator::ConversationOrchestrator;
 use serde_json::Value;
@@ -199,6 +199,9 @@ fn core_result_projection(result: &SlashDispatchResult, run_ref: usize) -> Utf16
         // registered command name before dispatch, so ParseFailure is
         // unreachable there. Keep its result shape in the no-display branch;
         // the top-level host handles syntax failure and ordinary-turn fallback.
+        SlashDispatchResult::Failed { diagnostic } => {
+            fields.push(("error".to_owned(), diagnostic.clone()));
+        }
         SlashDispatchResult::RunAsTurn { .. }
         | SlashDispatchResult::RunSkillAsTurn { .. }
         | SlashDispatchResult::NotASlashCommand
@@ -376,6 +379,10 @@ impl ModCommandExecutor for DesktopModCommandExecutor {
             source_string_at(&outcome.result_projection, "/text").unwrap_or_else(
                 || match &result {
                     SlashDispatchResult::Handled { display } => display.clone(),
+                    SlashDispatchResult::Failed { diagnostic } => {
+                        source_string_at(diagnostic, "/message")
+                            .unwrap_or_else(|| source_string("command settings failed"))
+                    }
                     _ => source_string(""),
                 },
             );
@@ -395,13 +402,18 @@ impl ModCommandRunInterceptor for DesktopModCommandExecutor {
         command: &Utf16JsonProjection,
         args: &Utf16JsonProjection,
         context: ModCommandRunContext,
+        cancellation: CancellationToken,
     ) -> SlashDispatchResult {
         let original = command_line(command, args);
         let Some(orch) = self.orchestrator.upgrade() else {
-            return dispatcher.dispatch_without_mod_hooks(&original).await;
+            return dispatcher
+                .dispatch_without_mod_hooks(&original, cancellation.clone())
+                .await;
         };
         let Some(host) = self.hooks.read().await.mod_host() else {
-            return dispatcher.dispatch_without_mod_hooks(&original).await;
+            return dispatcher
+                .dispatch_without_mod_hooks(&original, cancellation.clone())
+                .await;
         };
         let runs = Arc::new(StdMutex::new(Vec::<SlashDispatchResult>::new()));
         let command_name = command.clone();
@@ -415,9 +427,11 @@ impl ModCommandRunInterceptor for DesktopModCommandExecutor {
                 orch.as_ref(),
                 {
                     let runs = runs.clone();
+                    let cancellation = cancellation.clone();
                     move |event| {
                         let command_name = command_name.clone();
                         let runs = runs.clone();
+                        let cancellation = cancellation.clone();
                         async move {
                             let event = event.ok_or_else(|| {
                                 hooks::mods::ModError::Hook("command.run event is missing".into())
@@ -436,7 +450,10 @@ impl ModCommandRunInterceptor for DesktopModCommandExecutor {
                                 )
                             })?;
                             let result = dispatcher
-                                .dispatch_without_mod_hooks(&command_line(&command_name, &args))
+                                .dispatch_without_mod_hooks(
+                                    &command_line(&command_name, &args),
+                                    cancellation.clone(),
+                                )
                                 .await;
                             let run_ref = {
                                 let mut runs = runs
@@ -487,7 +504,11 @@ impl ModCommandRunInterceptor for DesktopModCommandExecutor {
                 tracing::warn!(command = %display_text(command), %error, "Mod command.run dispatch failed");
                 match runs.last() {
                     Some(result) => result.clone(),
-                    None => dispatcher.dispatch_without_mod_hooks(&original).await,
+                    None => {
+                        dispatcher
+                            .dispatch_without_mod_hooks(&original, cancellation.clone())
+                            .await
+                    }
                 }
             }
         }

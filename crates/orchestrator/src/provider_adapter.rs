@@ -163,6 +163,7 @@ impl ProviderApiAdapter {
             lingxi_core::types::MessageId,
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
+        model_source: Option<Utf16JsonProjection>,
     ) -> Result<llm_runtime::LlmRequest, LlmError> {
         let route = crate::query_model::current();
         if let Some(route) = route.as_ref() {
@@ -186,6 +187,7 @@ impl ProviderApiAdapter {
         request.opts.task_deliveries = task_deliveries;
         request.opts.skip_global_cache_for_system_prompt = skip_global_cache_for_system_prompt;
         request.opts.query_source = Some("scheduled_task".into());
+        request.opts.model_source = model_source;
         self.service
             .build_scheduled_request(request, settings.thinking, settings.effort)
     }
@@ -388,6 +390,25 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.protocol_for_model(model, profile).ok()
     }
 
+    fn foundry_tool_search_supported(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        model_source: Option<&Utf16JsonProjection>,
+    ) -> Option<bool> {
+        let source_units = model_source.and_then(|source| source.string_units(""));
+        self.service
+            .foundry_tool_search_supported(model, profile, source_units.as_deref())
+    }
+
+    fn model_validation_custom_model_option(&self) -> Option<Vec<u16>> {
+        self.service.model_validation_custom_model_option()
+    }
+
+    fn model_validation_account_generation(&self) -> Option<u64> {
+        Some(self.service.model_validation_account_generation())
+    }
+
     async fn credential_source(
         &self,
         model: &str,
@@ -446,6 +467,44 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     ) -> Result<(), LlmError> {
         self.service.validate_fast_enable(model, profile).await
     }
+
+    async fn probe_model(
+        &self,
+        route_model: &str,
+        profile: Option<&str>,
+        source_model: &Utf16JsonProjection,
+    ) -> Result<(), LlmError> {
+        let source_units =
+            source_model
+                .string_units("")
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: "model source must be a JSON string projection".to_owned(),
+                })?;
+        let mut request = llm_runtime::LlmRequest::new(route_model).with_user_text("Hi");
+        request.profile = profile.map(str::to_owned);
+        request.input.model_source = Some(
+            lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(&source_units),
+        );
+        request.input.max_tokens = Some(1);
+        request
+            .input
+            .prompt_cache
+            .breakpoints
+            .push(lingxi_llm_client::protocol::CacheBreakpoint {
+                scope: None,
+                position: lingxi_llm_client::protocol::CachePosition::Message {
+                    index: 0,
+                    block: 0,
+                },
+                ttl: lingxi_llm_client::protocol::CacheTtl::FiveMinutes,
+            });
+
+        self.service
+            .execute_model_validation_request(request)
+            .await
+            .map(|_| ())
+    }
+
     fn active_betas(&self) -> Vec<String> {
         self.service.active_custom_betas().to_vec()
     }
@@ -506,6 +565,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
                         opts.tool_result_reminder_suffixes,
                         opts.typed_attachment_ids,
                         opts.task_deliveries,
+                        opts.model_source,
                     )?;
                     canonical.input.controls.anthropic.context_hint =
                         opts.context_hint.map(|value| {
@@ -1160,6 +1220,7 @@ impl StreamingApiClient for ProviderApiAdapter {
             None,
             Default::default(),
             Default::default(),
+            None,
         )
         .await
     }
@@ -1183,6 +1244,7 @@ impl StreamingApiClient for ProviderApiAdapter {
             lingxi_core::types::MessageId,
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
+        model_source: Option<Utf16JsonProjection>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.build_scheduled_request(
@@ -1195,6 +1257,7 @@ impl StreamingApiClient for ProviderApiAdapter {
                 tool_result_reminder_suffixes,
                 typed_attachment_ids,
                 task_deliveries,
+                model_source,
             )?;
             let mut request = request;
             request
@@ -1212,10 +1275,7 @@ impl StreamingApiClient for ProviderApiAdapter {
         // service's `beta_context` reads it back to add the fast-mode beta.
         // `None` (flag off, or an unsupported model) keeps the body unchanged.
         let speed = if self.fast_mode.load(std::sync::atomic::Ordering::SeqCst)
-            && self
-                .service
-                .fast_model_allowed(model, profile)
-                .unwrap_or(false)
+            && self.service.fast_model_allowed(model, profile)?
         {
             Some("fast".to_string())
         } else {
@@ -1240,6 +1300,7 @@ impl StreamingApiClient for ProviderApiAdapter {
                 native_anthropic_request_context,
                 typed_attachment_ids,
                 task_deliveries,
+                model_source,
             )
             .await
     }
@@ -1445,6 +1506,55 @@ mod tests {
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 5, "output_tokens": 2}
         })
+    }
+
+    #[tokio::test]
+    async fn model_probe_builds_one_minimal_request_and_preserves_source_units() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport.clone());
+        let source = Utf16JsonProjection::parse(r#""unlisted-\ud800""#).unwrap();
+        let mut expected_source_units = "unlisted-".encode_utf16().collect::<Vec<_>>();
+        expected_source_units.push(0xd800);
+        assert_eq!(source.string_units(""), Some(expected_source_units));
+
+        adapter
+            .probe_model("claude-sonnet-4-20250514", Some("anthropic"), &source)
+            .await
+            .unwrap();
+
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "the dedicated probe dispatches once");
+        let body_source = seen[0].body_json.as_json_source();
+        let body_projection = Utf16JsonProjection::parse(body_source).unwrap();
+        let mut expected_wire_model_units = "unlisted-".encode_utf16().collect::<Vec<_>>();
+        expected_wire_model_units.push(0xfffd);
+        assert_eq!(
+            body_projection.string_units("/model"),
+            Some(expected_wire_model_units),
+            "the SDK well-forms the physical JSON body after retaining the exact source input"
+        );
+
+        let body: serde_json::Value = serde_json::from_str(body_source).unwrap();
+        assert_eq!(body["max_tokens"], 1);
+        assert_eq!(body["messages"][0]["content"][0]["text"], "Hi");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            serde_json::json!({"type": "ephemeral"})
+        );
+        for inherited in [
+            "system",
+            "tools",
+            "thinking",
+            "temperature",
+            "output_config",
+            "effort",
+            "stop_sequences",
+        ] {
+            assert!(
+                body.get(inherited).is_none(),
+                "unexpected {inherited}: {body}"
+            );
+        }
     }
 
     struct OwnedRequestWireCapture {
@@ -2035,27 +2145,62 @@ mod tests {
             thinking: llm_runtime::model::thinking::ThinkingConfig::Disabled,
             effort: None,
         };
+        let model_source = Utf16JsonProjection::parse(r#""claude-\ud800""#).unwrap();
+        let scheduled_request = adapter
+            .build_scheduled_request(
+                settings.clone(),
+                None,
+                false,
+                Vec::new(),
+                Vec::new(),
+                None,
+                Vec::new(),
+                Default::default(),
+                Default::default(),
+                Some(model_source.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            scheduled_request
+                .input
+                .model_source
+                .as_ref()
+                .and_then(|source| source.root_string_code_units()),
+            model_source.string_units(""),
+            "scheduled API input must keep the exact source until SDK finalization"
+        );
         let _ = crate::scheduled_turn::SETTINGS
             .scope(
                 settings,
-                StreamingApiClient::stream(
+                StreamingApiClient::stream_with_effort_override(
                     &adapter,
                     "ignored/default",
                     None,
                     None,
                     Vec::new(),
                     Vec::new(),
+                    None,
+                    Vec::new(),
                     "sdk",
                     false,
                     None,
+                    None,
+                    None,
+                    Default::default(),
+                    Default::default(),
+                    Some(model_source),
                 ),
             )
             .await;
         let request = transport.seen.lock().unwrap()[0].body_json.clone();
-        assert_eq!(
-            request.string_at("/model").as_deref(),
-            Some("claude-sonnet-4-20250514")
+        // Native PGn/t1e sanitizes only the outgoing generation payload.
+        // The API-input assertion above protects the distinct original source.
+        assert!(
+            request.as_json_source().contains(r#""model":"claude-�""#),
+            "the sealed Claude body must match Native's toWellFormed boundary: {}",
+            request.as_json_source()
         );
+        assert!(!request.as_json_source().contains(r"\ud800"));
         assert!(
             request.payload_at("/output_config/effort").is_none(),
             "scheduled None must not inherit the adapter's initial effort"
@@ -2309,6 +2454,20 @@ mod tests {
         main_choice: Option<llm_runtime::ToolChoice>,
         request_model: &str,
     ) -> ProviderApiAdapter {
+        make_adapter_with_session_tool_choice_configured(
+            transport,
+            main_choice,
+            request_model,
+            |service| service,
+        )
+    }
+
+    fn make_adapter_with_session_tool_choice_configured(
+        transport: Arc<dyn Transport>,
+        main_choice: Option<llm_runtime::ToolChoice>,
+        request_model: &str,
+        configure_service: impl FnOnce(ApiService) -> ApiService,
+    ) -> ProviderApiAdapter {
         std::env::set_var("ADAPTER_TEST_KEY", "test-key");
         let client = Arc::new(
             ModelRuntime::from_config(ClientConfig {
@@ -2367,7 +2526,7 @@ mod tests {
             })
             .expect("client"),
         );
-        let service = ApiService::new(
+        let service = configure_service(ApiService::new(
             client,
             transport,
             SubscriberState::default(),
@@ -2379,12 +2538,90 @@ mod tests {
             "0.0.0",
             None,
             None,
-        );
+        ));
         let service = match main_choice {
             Some(choice) => service.with_forced_tool_choice(choice),
             None => service,
         };
         ProviderApiAdapter::new(Arc::new(service))
+    }
+
+    #[tokio::test]
+    async fn main_stream_propagates_fast_policy_source_error_before_transport() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let projection_from_json = |json: &str| {
+            let units = json.encode_utf16().collect::<Vec<_>>();
+            Utf16JsonProjection::parse_utf16_json(&units)
+                .expect("test JSON keeps its source-preserving UTF-16 projection")
+        };
+        let expected_error = LlmError::SettingsSource {
+            kind: "managed-settings".to_string(),
+            message: projection_from_json(r#""fast policy \ud800 failed""#),
+            diagnostics: projection_from_json(r#"{"source":"managed","detail":"\udfff"}"#),
+            effective: Some(projection_from_json(
+                r#"{"model":"claude-opus-4-8","note":"\ud801"}"#,
+            )),
+        };
+        let policy_error = expected_error.clone();
+        let adapter = make_adapter_with_session_tool_choice_configured(
+            transport.clone(),
+            None,
+            "claude-opus-4-8",
+            move |service| {
+                service.with_fast_policy_source(Arc::new(move || Err(policy_error.clone())))
+            },
+        )
+        .with_fast_mode(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+
+        let actual_error = StreamingApiClient::stream(
+            &adapter,
+            "claude-opus-4-8",
+            Some("anthropic"),
+            None,
+            Vec::new(),
+            Vec::new(),
+            "main",
+            false,
+            None,
+        )
+        .await
+        .err()
+        .expect("enabled Fast mode must propagate settings-source failures");
+
+        assert_eq!(actual_error, expected_error);
+        let LlmError::SettingsSource { message, .. } = &actual_error else {
+            panic!("expected the original SettingsSource error")
+        };
+        assert_eq!(
+            message.string_units(""),
+            Some(vec![
+                b'f' as u16,
+                b'a' as u16,
+                b's' as u16,
+                b't' as u16,
+                b' ' as u16,
+                b'p' as u16,
+                b'o' as u16,
+                b'l' as u16,
+                b'i' as u16,
+                b'c' as u16,
+                b'y' as u16,
+                b' ' as u16,
+                0xd800,
+                b' ' as u16,
+                b'f' as u16,
+                b'a' as u16,
+                b'i' as u16,
+                b'l' as u16,
+                b'e' as u16,
+                b'd' as u16,
+            ])
+        );
+        assert_eq!(
+            transport.seen_count(),
+            0,
+            "policy failure must precede dispatch"
+        );
     }
 
     #[tokio::test]
@@ -4110,7 +4347,10 @@ fn hosted_search_error(error: llm_runtime::LlmError) -> tool_api::HostedSearchEr
     tool_api::HostedSearchError {
         http_status,
         timeout: matches!(classification, LlmError::TransportTimeout { .. }),
-        message: Utf16JsonProjection::from(error.to_string()),
+        message: match &error {
+            LlmError::SettingsSource { message, .. } => message.clone(),
+            _ => Utf16JsonProjection::from(error.to_string()),
+        },
     }
 }
 

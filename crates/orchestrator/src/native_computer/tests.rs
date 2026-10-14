@@ -850,7 +850,7 @@ impl Fixture {
         crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(cancel, lock)
     }
     async fn native(&self) {
-        let (tools, _) = self.orch.build_wire_tools().await;
+        let (tools, _) = self.orch.build_wire_tools().await.unwrap();
         prepare_projection(&self.orch, MODEL, None, &tools)
             .await
             .unwrap();
@@ -1523,7 +1523,7 @@ async fn recovering_existing_prepared_receipt_preserves_a_later_transcript_tip()
         .unwrap();
     fixture.orch.session.lock().await.history.push(message);
     fixture.forget_runtime().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap();
@@ -1544,7 +1544,7 @@ async fn recovering_existing_prepared_receipt_preserves_a_later_transcript_tip()
 async fn compacted_completed_receipt_cannot_block_a_reused_call_in_a_new_response() {
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
     fixture.prepared_receipt().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -1612,7 +1612,7 @@ async fn confirmed_gemini_output_recovers_without_any_in_memory_safety_acknowled
         .values()
         .any(|record| record.acknowledged_safety_checks == vec![check.clone()]));
     fixture.forget_runtime().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     let recovered = prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -1651,7 +1651,7 @@ async fn confirmed_but_failed_gemini_input_recovers_as_a_failed_receipt() {
                 && record.acknowledged_safety_checks == vec![check.clone()]
         ));
     fixture.forget_runtime().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     let recovered = prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -1792,7 +1792,7 @@ async fn live_unfinished_native_outputs_abandon_the_old_call_without_replaying_i
             let calls = fixture.computer.calls.lock().unwrap().len();
             let hooks = fixture.hooks.lock().unwrap().len();
             let facts = fixture.journal.executions.lock().unwrap().clone();
-            let (catalog, _) = fixture.orch.build_wire_tools().await;
+            let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
             let next = prepare_projection(&fixture.orch, MODEL, None, &catalog)
                 .await
                 .unwrap()
@@ -1871,7 +1871,7 @@ async fn dynamic_scope_denial_removes_declaration_and_rejects_inflight_native_wo
     fixture.gate.denied.store(true, Ordering::SeqCst);
     let error = fixture.bind(&claude_screenshot()).await.unwrap_err();
     assert!(error.to_string().contains("scope"));
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     assert!(!catalog.iter().any(|tool| tool.name == "computer"));
     assert!(catalog.iter().any(|tool| tool.name == "Read"));
     assert!(catalog
@@ -2046,7 +2046,7 @@ async fn post_hook_removed_image_is_absent_from_model_frame_and_receipt() {
 #[tokio::test]
 async fn function_native_function_switch_uses_registered_catalog_and_final_history() {
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     assert!(prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2096,7 +2096,7 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
     let native_results = dispatched.results.iter().filter(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if native_ids.contains(tool_use_id))).cloned().collect::<Vec<_>>();
     fixture.publish(&native_results).await;
     prepare_receipts(&fixture.orch, &native_ids).await.unwrap();
-    let (next_catalog, _) = fixture.orch.build_wire_tools().await;
+    let (next_catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     let next = prepare_projection(&fixture.orch, MODEL, None, &next_catalog)
         .await
         .unwrap()
@@ -2144,7 +2144,7 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
 async fn partial_backend_keeps_working_function_tools_without_native_declaration() {
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
     fixture.computer.partial.store(true, Ordering::SeqCst);
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap();
@@ -2188,7 +2188,7 @@ async fn fresh_owner_reuses_prepared_receipt_and_published_output_without_input(
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
     let (blocks, saved) = fixture.prepared_receipt().await;
     fixture.forget_runtime().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     let projection = prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2223,7 +2223,7 @@ async fn fresh_owner_reuses_prepared_receipt_and_published_output_without_input(
 async fn fresh_owner_refuses_uncertain_submitted_receipt_without_input_or_resubmission() {
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
     let (_, saved) = fixture.prepared_receipt().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     let projection = prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2277,7 +2277,7 @@ async fn completed_native_rows_stay_compacted_when_preparing_the_next_request() 
             "Observe the desktop once.".into(),
         ));
     let (_, saved) = fixture.prepared_receipt().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2341,7 +2341,7 @@ async fn completed_native_rows_stay_compacted_when_preparing_the_next_request() 
         );
     }
     let transcript_before = std::fs::read(&fixture.transcript_path).unwrap();
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     let next = prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2363,7 +2363,7 @@ async fn completed_native_rows_stay_compacted_when_preparing_the_next_request() 
 async fn fresh_owner_does_not_append_completed_rows_after_a_retained_successor_boundary() {
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
     let (_, saved) = fixture.prepared_receipt().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2433,7 +2433,7 @@ async fn old_unknown_call_id_does_not_invalidate_a_new_successful_response_scope
     prepare_receipts(&fixture.orch, &result_ids(&old_results.results))
         .await
         .unwrap();
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     assert!(prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2532,7 +2532,7 @@ async fn compacted_unknown_input_uses_its_durable_binding_without_replaying_or_r
         "Compacted context: input outcome unknown, observe again.".into(),
     )];
     fixture.forget_runtime().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     let next = prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2567,7 +2567,7 @@ async fn compacted_unknown_input_uses_its_durable_binding_without_replaying_or_r
 async fn saved_complete_successor_repairs_received_acknowledgement_without_resubmission() {
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
     let (_, receipt) = fixture.prepared_receipt().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2640,7 +2640,7 @@ async fn saved_complete_successor_repairs_received_acknowledgement_without_resub
 async fn altered_response_attempt_is_rejected_before_repairing_history() {
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
     let (_, receipt) = fixture.prepared_receipt().await;
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2690,7 +2690,7 @@ async fn partially_prepared_response_batch_repairs_all_receipts_from_one_complet
     prepare_receipts(&fixture.orch, &result_ids(&dispatched.results))
         .await
         .unwrap();
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     let submission = prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2867,7 +2867,7 @@ async fn gemini_member_name_collision_falls_back_with_the_actual_registry_catalo
         "collision-fixture",
         Arc::new(Other("click", false, fixture.trace.clone())),
     );
-    let (catalog, _) = fixture.orch.build_wire_tools().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
     assert!(catalog.iter().any(|tool| tool.name == "click"));
     let projection = prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await

@@ -1285,6 +1285,87 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// Append checkpointed UserPromptExpansion rows with restart-stable UUIDs.
+    /// The durable write completes before the corresponding live history row
+    /// is published; UUID/source mismatches fail the pending turn closed.
+    pub(super) async fn append_native_prompt_expansion_history_rows_once(
+        &self,
+        rows: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+        row_ids: &[MessageId],
+    ) -> Result<(), OrchestratorError> {
+        if rows.len() != row_ids.len() {
+            return Err(OrchestratorError::Internal(format!(
+                "pending prompt hook identity count mismatch: {} rows, {} ids",
+                rows.len(),
+                row_ids.len()
+            )));
+        }
+        for (row, id) in rows.iter().zip(row_ids.iter().copied()) {
+            if row.string_at("/type") == Some("hook_success")
+                && row.string_at("/hookEvent") == Some("UserPromptExpansion")
+            {
+                if let Some(message) = Self::native_hook_success_message_for_api(id, row) {
+                    self.persist_pending_prompt_attachment_once(id, row.clone())
+                        .await?;
+                    self.register_mod_persisted_attachment(
+                        &message,
+                        "hook_success",
+                        serde_json::json!({"kind":"hook","event":"UserPromptExpansion"}),
+                    )
+                    .await;
+                    self.append_pending_prompt_message_to_history_once(&message)
+                        .await?;
+                    continue;
+                }
+            }
+
+            if row.string_at("/type") != Some("hook_additional_context") {
+                self.persist_pending_prompt_attachment_once(id, row.clone())
+                    .await?;
+                continue;
+            }
+
+            let count = row
+                .at_pointer("/content")
+                .and_then(|content| content.array_len())
+                .unwrap_or_default();
+            let contexts = (0..count)
+                .filter_map(|index| {
+                    ExactHookText::from_json_projection(row, &format!("/content/{index}"))
+                })
+                .collect::<Vec<_>>();
+            if contexts.is_empty() {
+                self.persist_pending_prompt_attachment_once(id, row.clone())
+                    .await?;
+                continue;
+            }
+
+            let hook_name = ExactHookText::from_json_projection(row, "/hookName")
+                .unwrap_or_else(|| ExactHookText::from_text("UserPromptExpansion"));
+            self.persist_pending_prompt_attachment_once(id, row.clone())
+                .await?;
+            let message = Self::native_hook_additional_context_message_for_api(id, row)
+                .unwrap_or_else(|| {
+                    let mut rendered = ExactHookText::from_text("<system-reminder>\n");
+                    rendered.push(&hook_name);
+                    rendered.push_text(" hook additional context: ");
+                    rendered.push(&ExactHookText::join(&contexts, "\n"));
+                    rendered.push_text("\n</system-reminder>");
+                    rendered.to_conversation_message(id, true)
+                });
+            let event = row.string_at("/hookEvent").unwrap_or("UserPromptExpansion");
+            self.register_mod_persisted_attachment(
+                &message,
+                "hook_additional_context",
+                serde_json::json!({"kind":"hook","event":event}),
+            )
+            .await;
+            self.append_pending_prompt_message_to_history_once(&message)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn append_mod_prompt_context(
         &self,
         context: &lingxi_core::types::utf16_json::Utf16JsonProjection,
@@ -3109,7 +3190,7 @@ impl ConversationOrchestrator {
         &self,
         from_model: &str,
         to_model: &str,
-        requested_model: Option<&str>,
+        requested_model: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         to_profile: Option<&str>,
         source: &str,
     ) -> hooks::response::AggregateHookResult {
@@ -3128,7 +3209,7 @@ impl ConversationOrchestrator {
                 HookEvent::PreModelSwitch {
                     from_model: from_model.to_string(),
                     to_model: to_model.to_string(),
-                    requested_model: requested_model.map(str::to_string),
+                    requested_model: requested_model.cloned(),
                     source: source.to_string(),
                     context_tokens,
                     prompt_cache_warm,
@@ -3149,7 +3230,7 @@ impl ConversationOrchestrator {
         &self,
         from_model: &str,
         to_model: &str,
-        requested_model: Option<&str>,
+        requested_model: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         to_profile: Option<&str>,
         source: &str,
     ) -> hooks::response::AggregateHookResult {
@@ -3169,7 +3250,7 @@ impl ConversationOrchestrator {
                 HookEvent::PostModelSwitch {
                     from_model: from_model.to_string(),
                     to_model: to_model.to_string(),
-                    requested_model: requested_model.map(str::to_string),
+                    requested_model: requested_model.cloned(),
                     source: source.to_string(),
                     context_tokens,
                     prompt_cache_warm,

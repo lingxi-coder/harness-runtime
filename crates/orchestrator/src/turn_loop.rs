@@ -1013,7 +1013,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
             &final_request_history,
             context_announcements.inline_context.as_ref(),
         )
-        .await;
+        .await?;
     }
     // FORK (codex #5 follow-up): record the rendered system prompt this turn
     // handed the model, so a fork-subagent spawn dispatched below in this same

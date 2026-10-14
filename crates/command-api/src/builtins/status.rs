@@ -102,6 +102,7 @@ mod tests {
         let snap = StatusSnapshot {
             session_id: "abc-123".into(),
             model: "claude-opus-4-7".into(),
+            model_source: None,
             model_profile: None,
             n_messages: 17,
             total_cost_usd: 0.0421,

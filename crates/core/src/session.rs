@@ -12,7 +12,9 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
-fn deserialize_todo_source_text<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+pub(crate) fn deserialize_todo_source_text<'de, D>(
+    deserializer: D,
+) -> Result<Utf16JsonProjection, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -206,10 +208,11 @@ pub struct SessionState {
     /// across providers). `None` = resolve unscoped. Set by `switch_model`.
     #[serde(default)]
     pub model_profile: Option<String>,
-    /// Raw user model setting used by Native Plan-mode selection (`opusplan`
-    /// and `haiku`), distinct from the resolved wire model above.
+    /// Exact user-selected model source plus its known routing anchor and
+    /// display identity. Plan-mode aliases and main-request source use inspect
+    /// this binding without ever replacing the routed model above.
     #[serde(default)]
-    pub user_model_setting: Option<String>,
+    pub user_model_setting: Option<crate::host::ModelSourceBinding>,
     /// Provenance for the configured raw model setting. A live session pick
     /// uses `UserOrEnv` provenance and is distinguished by `user_model_setting_source`.
     #[serde(default)]
@@ -427,6 +430,54 @@ impl SessionState {
                 )
             })
             .count() as u64
+    }
+}
+
+#[cfg(test)]
+mod user_model_setting_source_tests {
+    use super::{SessionModelSettingSource, SessionState};
+    use crate::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn session_keeps_the_exact_selection_units_with_its_original_route_anchor() {
+        let units = "opusplan"
+            .encode_utf16()
+            .chain([0xD800])
+            .collect::<Vec<_>>();
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .expect("exact selection source");
+        let mut session = SessionState::empty(crate::types::SessionId::new(), "claude-opus".into());
+        session.user_model_setting = Some(crate::host::ModelSourceBinding {
+            source: source.clone(),
+            effective_source: source,
+            route_anchor: crate::host::ModelRouteAnchor {
+                model: "claude-opus".into(),
+                profile: Some("anthropic".into()),
+            },
+        });
+        session.user_model_setting_source = SessionModelSettingSource::UserSelection;
+
+        let json = serde_json::to_string(&session).expect("serialize current session state");
+        assert!(json.contains("\"source\":\"opusplan\\ud800\""));
+        assert!(json.contains("\"route_anchor\""));
+
+        let restored: SessionState =
+            serde_json::from_str(&json).expect("restore current session state");
+        assert_eq!(
+            restored
+                .user_model_setting
+                .as_ref()
+                .and_then(|selection| selection.source.string_units("")),
+            Some(units)
+        );
+        assert_eq!(
+            restored
+                .user_model_setting
+                .as_ref()
+                .map(|selection| selection.route_anchor.profile.as_deref()),
+            Some(Some("anthropic"))
+        );
     }
 }
 

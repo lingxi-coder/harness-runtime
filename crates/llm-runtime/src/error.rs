@@ -57,6 +57,20 @@ pub enum LlmError {
         /// Provider or validation message explaining why the request is invalid.
         message: String,
     },
+    /// A host-owned settings source failed while preparing a request. Both
+    /// projections remain available to orchestration and machine consumers;
+    /// callers must not reduce this to a default settings value.
+    #[error("host settings could not be resolved")]
+    SettingsSource {
+        /// Native source-state discriminator.
+        kind: String,
+        /// Source-preserving user-facing message.
+        message: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        /// Full source-preserving diagnostic rows.
+        diagnostics: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        /// Healthy effective source assembled alongside incomplete readers.
+        effective: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    },
     /// Provider rate-limited the request.
     #[error("rate limited")]
     RateLimited {
@@ -240,6 +254,30 @@ pub enum LlmError {
         /// Usage and call accounting from completed/started batches.
         accounting: MediaDelegationAccounting,
     },
+}
+
+impl From<lingxi_core::settings::SettingsError> for LlmError {
+    fn from(error: lingxi_core::settings::SettingsError) -> Self {
+        match error {
+            lingxi_core::settings::SettingsError::SourceFailure {
+                kind,
+                message,
+                diagnostics,
+                effective,
+            } => Self::SettingsSource {
+                kind,
+                message,
+                diagnostics,
+                effective,
+            },
+            error => Self::SettingsSource {
+                kind: "settings_error".to_owned(),
+                message: error.message_projection(),
+                diagnostics: error.diagnostic_projection(),
+                effective: None,
+            },
+        }
+    }
 }
 
 /// Cost/accounting counters carried across a failed multi-batch delegation.
@@ -481,6 +519,12 @@ impl LlmError {
 /// unwrap — and no Bedrock content-type validation exists here to branch on.
 #[must_use]
 pub fn error_display_text(error: &LlmError) -> String {
+    if let LlmError::SettingsSource { message, .. } = error.classification_source() {
+        return message
+            .string_at("")
+            .expect("settings source message is a root string")
+            .to_owned();
+    }
     if crate::model::stream_watchdog::is_stream_no_response(error) {
         return "No response from API".to_string();
     }
@@ -547,6 +591,9 @@ pub fn error_display_source(
     error: &LlmError,
 ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    if let LlmError::SettingsSource { message, .. } = error.classification_source() {
+        return message.clone();
+    }
     let display = error_display_text(error);
     let Some(text) = error.provider_error_text() else {
         return display.into();
@@ -704,6 +751,39 @@ mod api_error_status_tests {
             error_display_source(&error).to_json_string().unwrap(),
             r#""529 provider \ud800😀""#
         );
+    }
+
+    #[test]
+    fn settings_source_error_preserves_its_message_projection() {
+        let message = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "policy � failed".to_string(),
+            "policy "
+                .encode_utf16()
+                .chain([0xd800, 0x20, 0x66, 0x61, 0x69, 0x6c, 0x65, 0x64])
+                .collect(),
+        )
+        .unwrap();
+        let diagnostic = lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+            ("kind".into(), "incomplete_managed_selection".into()),
+            ("message".into(), message.clone()),
+        ])
+        .unwrap();
+        let error = LlmError::SettingsSource {
+            kind: "incomplete_managed_selection".to_owned(),
+            message: message.clone(),
+            diagnostics: diagnostic,
+            effective: None,
+        };
+
+        assert_eq!(error_display_source(&error), message);
+        assert_eq!(
+            error_display_source(&error).string_units(""),
+            Some(vec![
+                0x70, 0x6f, 0x6c, 0x69, 0x63, 0x79, 0x20, 0xd800, 0x20, 0x66, 0x61, 0x69, 0x6c,
+                0x65, 0x64,
+            ])
+        );
+        assert_eq!(error_display_text(&error), "policy � failed");
     }
 
     #[test]

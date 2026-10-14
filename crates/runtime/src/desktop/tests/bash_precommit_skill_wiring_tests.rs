@@ -65,18 +65,21 @@ async fn eligible_skill_provenance_matches_native_precommit_fixture() {
                 // exercising the source-backed allow path for this fixture.
                 native_settings.policy_remembered_core_skills = Some(None);
             }
-            let settings_loader = Arc::new(move || native_settings.clone());
+            let settings_loader = Arc::new(move || Ok(native_settings.clone()));
             let provider = super::registry_skill_listing_provider_with_sources(
                 Arc::new(RwLock::new(registry)),
                 tool_api::read_file_state::new_read_file_state_map(),
-                Arc::new(move || enabled),
+                Arc::new(move || Ok(enabled)),
                 settings_loader,
                 Arc::new(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
                 None,
             );
-            let snapshot = provider.skill_listing_snapshot().await;
+            let snapshot = provider.skill_listing_snapshot().await.unwrap();
             assert_eq!(
-                provider.bash_precommit_skills(&snapshot.entries).await,
+                provider
+                    .bash_precommit_skills(&snapshot.entries)
+                    .await
+                    .unwrap(),
                 BashPrecommitSkills {
                     custom_verify: output["skills"]["verify"].as_bool().unwrap(),
                     custom_simplify: output["skills"]["simplify"].as_bool().unwrap(),
@@ -101,11 +104,14 @@ async fn disabled_and_conditional_skills_do_not_reach_precommit_suggestions() {
     let provider = registry_skill_listing_provider(
         Arc::new(RwLock::new(registry)),
         tool_api::read_file_state::new_read_file_state_map(),
-        Arc::new(|| true),
+        Arc::new(|| Ok(true)),
     );
-    let snapshot = provider.skill_listing_snapshot().await;
+    let snapshot = provider.skill_listing_snapshot().await.unwrap();
     assert_eq!(
-        provider.bash_precommit_skills(&snapshot.entries).await,
+        provider
+            .bash_precommit_skills(&snapshot.entries)
+            .await
+            .unwrap(),
         BashPrecommitSkills::default()
     );
 }
@@ -180,13 +186,13 @@ async fn desktop_skill_listing_uses_native_catalog_overrides_and_usage_snapshot(
     let provider = super::registry_skill_listing_provider_with_sources(
         Arc::new(RwLock::new(registry)),
         tool_api::read_file_state::new_read_file_state_map(),
-        Arc::new(|| false),
-        Arc::new(move || settings.clone()),
+        Arc::new(|| Ok(false)),
+        Arc::new(move || Ok(settings.clone())),
         Arc::new(move || root.clone()),
         Some(home.path().to_path_buf()),
     );
 
-    let snapshot = provider.skill_listing_snapshot().await;
+    let snapshot = provider.skill_listing_snapshot().await.unwrap();
     let entries = &snapshot.entries;
     assert_eq!(
         entries
@@ -254,7 +260,7 @@ impl lingxi_core::host::PermissionGate for LiveSkillGate {
 }
 
 async fn bash_description(orchestrator: &ConversationOrchestrator) -> String {
-    let tools = orchestrator.mcp_tool_definitions().await;
+    let tools = orchestrator.mcp_tool_definitions().await.unwrap();
     tools
         .iter()
         .find(|tool| tool.string_at("/name") == Some("Bash"))
@@ -300,7 +306,7 @@ async fn actual_bash_wire_description_tracks_reload_settings_and_offered_skill_t
     let provider = registry_skill_listing_provider(
         registry.clone(),
         tool_api::read_file_state::new_read_file_state_map(),
-        Arc::new(move || enabled.load(Ordering::Relaxed)),
+        Arc::new(move || Ok(enabled.load(Ordering::Relaxed))),
     );
     let mut tools = ToolRegistry::new();
     tools.register_builtin(Arc::new(tool_shell::BashTool::new(ctx.clone())));
@@ -432,9 +438,9 @@ async fn code_review_suggestion_uses_live_owned_settings_and_session_cwd() {
     let cwd = SessionCwd::new(cfg.cwd.clone(), vec![]);
     let provider = code_review_suggestion_provider(cfg.clone(), cwd.clone());
     std::fs::write(&settings, r#"{"includeCodeReviewSuggestion":false}"#).unwrap();
-    assert!(!provider());
+    assert!(!provider().unwrap());
     std::fs::write(&settings, r#"{"includeCodeReviewSuggestion":true}"#).unwrap();
-    assert!(provider());
+    assert!(provider().unwrap());
 
     let next_cwd = cfg.cwd.join("next-project");
     std::fs::create_dir_all(next_cwd.join(branding::DOT_DIR)).unwrap();
@@ -444,7 +450,7 @@ async fn code_review_suggestion_uses_live_owned_settings_and_session_cwd() {
     )
     .unwrap();
     cwd.swap(next_cwd, vec![]);
-    assert!(!provider());
+    assert!(!provider().unwrap());
 }
 
 #[tokio::test]
@@ -531,7 +537,7 @@ async fn native_295_skill_description_lines_reach_outbound_messages_unchanged() 
         let listing_provider = registry_skill_listing_provider(
             command_registry.clone(),
             tool_api::read_file_state::new_read_file_state_map(),
-            Arc::new(|| false),
+            Arc::new(|| Ok(false)),
         );
 
         let context = tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {

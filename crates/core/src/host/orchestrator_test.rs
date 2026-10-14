@@ -370,6 +370,15 @@ mod tests {
             async fn switch_model(&self, _: &str, _: Option<&str>) -> Result<(), HandleError> {
                 Ok(())
             }
+            async fn validate_model_selection(
+                &self,
+                _: &ModelSelectionRequest,
+            ) -> Result<(), HandleError> {
+                Ok(())
+            }
+            async fn select_model(&self, _: ModelSelectionRequest) -> Result<(), HandleError> {
+                Ok(())
+            }
             async fn request_exit(&self) {}
             async fn current_should_exit(&self) -> bool {
                 false

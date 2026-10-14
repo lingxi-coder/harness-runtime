@@ -103,7 +103,7 @@ impl PhysicalStepResponse {
         profile: Option<String>,
         duration: Duration,
         params: &PhysicalObservation,
-    ) -> Self {
+    ) -> Result<Self, lingxi_core::settings::SettingsError> {
         let retries = orch.api.last_retry_count();
         let request_id = orch.api.last_request_id();
         let cache_read = response.usage.counts().cache_read_tokens;
@@ -167,14 +167,16 @@ impl PhysicalStepResponse {
         orch.record_response_input_tokens(&response.usage);
         orch.record_inline_prompt_tools_after_success(&params.tools)
             .await;
-        orch.save_cache_safe_params_for_request(
-            params.system.as_ref(),
-            &model,
-            &params.tools,
-            &request_history,
-            params.inline_context.as_ref(),
-        )
-        .await;
+        let cache_safe_error = orch
+            .save_cache_safe_params_for_request(
+                params.system.as_ref(),
+                &model,
+                &params.tools,
+                &request_history,
+                params.inline_context.as_ref(),
+            )
+            .await
+            .err();
         orch.emit_rate_limit_if_changed().await;
         orch.emit_raw_utilization_if_changed().await;
         if let Some((receipt, model_ref)) = cost_receipt {
@@ -232,7 +234,10 @@ impl PhysicalStepResponse {
                 .await;
             }
         }
-        Self {
+        if let Some(error) = cache_safe_error {
+            return Err(error);
+        }
+        Ok(Self {
             response,
             request_history,
             model,
@@ -240,7 +245,7 @@ impl PhysicalStepResponse {
             duration,
             retries,
             request_id,
-        }
+        })
     }
 }
 
@@ -427,7 +432,11 @@ pub(super) async fn dispatch(
                 started.elapsed(),
                 &observation,
             )
-            .await;
+            .await
+            .map_err(|error| {
+                *call_error.lock().unwrap() = Some(OrchestratorError::Settings(error));
+                hooks::mods::ModError::Hook("turn.step could not save cache-safe settings".into())
+            })?;
             physical_responses.lock().unwrap().push(physical);
             let held = wire
                 .lock()
@@ -556,7 +565,7 @@ pub(super) async fn dispatch(
                         started.elapsed(),
                         &observation,
                     )
-                    .await,
+                    .await?,
                 ],
                 _ => Vec::new(),
             };

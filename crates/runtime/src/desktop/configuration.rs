@@ -266,6 +266,9 @@ pub struct DesktopConfig {
     /// successfully loaded empty policy.
     pub(super) managed_policy_snapshot_cache: super::settings_watch::ManagedPolicySnapshotCache,
     pub diagnostics: Option<Arc<dyn DesktopDiagnosticSink>>,
+    /// Host-owned Native policy-helper warning sink. Embedded hosts leave this
+    /// absent unless they explicitly supply the Native debug output boundary.
+    pub native_policy_warning_logger: Option<Arc<dyn super::NativePolicyWarningLogger>>,
     /// Decorate the platform MCP transport without replacing its registry or
     /// lifecycle. The factory is called once during assembly.
     pub mcp_services_factory:
@@ -1138,6 +1141,7 @@ impl Default for DesktopConfig {
             managed_policy_snapshot_cache:
                 super::settings_watch::ManagedPolicySnapshotCache::default(),
             diagnostics: None,
+            native_policy_warning_logger: None,
             build_info: command_api::builtins::BuildInfo::default(),
             mcp_services_factory: None,
             enable_automation_scheduler: true,

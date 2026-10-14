@@ -66,8 +66,17 @@ pub struct SettingsAdmittedLayer {
     pub source: tracer::Source,
     /// File path for disk-backed settings; absent for synthesized layers.
     pub path: Option<PathBuf>,
-    /// Fully parsed and validated settings for this source tier.
+    /// Typed convenience view for this source tier. Native policy projections
+    /// can be partial when valid JavaScript UTF-16 values cannot fit Rust
+    /// `String`; consult the exact source projection before treating a missing
+    /// typed value as absent.
     pub settings: SettingsJson,
+    /// Managed fields retained in the authoritative source but not represented
+    /// in this typed convenience view.
+    pub typed_view_unrepresented_fields: Vec<String>,
+    /// This layer was admitted by Native's policy parser rather than by the
+    /// ordinary all-fields `SettingsJson` parser.
+    pub native_policy_projection: bool,
 }
 
 /// Raw non-file settings sources, ordered exactly as their merge precedence.
@@ -220,17 +229,13 @@ impl Settings {
             Some(env_layer),
         );
 
-        let mut merged = Utf16JsonProjection::parse("{}")
-            .map_err(|error| SettingsError::SchemaViolation(error.to_string()))?;
+        let mut merged = Utf16JsonProjection::parse("{}")?;
         for layer in &layers {
-            merger::merge_raw_source_layer(&mut merged, &layer.projection)
-                .map_err(|error| SettingsError::SchemaViolation(error.to_string()))?;
+            merger::merge_raw_source_layer(&mut merged, &layer.projection)?;
         }
-        let mut admitted_merged = Utf16JsonProjection::parse("{}")
-            .map_err(|error| SettingsError::SchemaViolation(error.to_string()))?;
+        let mut admitted_merged = Utf16JsonProjection::parse("{}")?;
         for layer in &admitted_raw_layers {
-            merger::merge_raw_source_layer(&mut admitted_merged, &layer.projection)
-                .map_err(|error| SettingsError::SchemaViolation(error.to_string()))?;
+            merger::merge_raw_source_layer(&mut admitted_merged, &layer.projection)?;
         }
 
         Ok(SettingsRawLayerStack {
@@ -259,6 +264,82 @@ impl SettingsRawLayerStack {
         &self.admitted_merged
     }
 
+    /// Build an effective convenience view from this exact source snapshot.
+    /// Source projections remain authoritative and include fields which cannot
+    /// be represented by `SettingsJson`.
+    pub fn into_effective_settings(
+        &self,
+    ) -> Result<crate::settings::EffectiveSettings, SettingsError> {
+        let mut settings = SettingsJson::default();
+        let mut trace = tracer::ProvenanceTrace::default();
+        let mut effort_layers = Vec::new();
+        let mut typed_view_unrepresented_fields = Vec::new();
+        let mut managed_typed_view_is_partial = false;
+
+        for layer in &self.admitted_layers {
+            trace.record_layer(layer.source, &layer.settings);
+            for path in &layer.typed_view_unrepresented_fields {
+                let Some(segment) = path.strip_prefix('/') else {
+                    continue;
+                };
+                let top_level = segment
+                    .split('/')
+                    .next()
+                    .unwrap_or(segment)
+                    .replace("~1", "/")
+                    .replace("~0", "~");
+                if top_level.is_empty() || top_level.starts_with('<') {
+                    continue;
+                }
+                let source = trace.by_field.entry(top_level.clone()).or_insert_with(|| {
+                    tracer::FieldProvenance {
+                        contributors: Vec::new(),
+                    }
+                });
+                match crate::settings::schema::strategy_for(&top_level)
+                    .unwrap_or(crate::settings::schema::MergeStrategy::Override)
+                {
+                    crate::settings::schema::MergeStrategy::ConcatDedup
+                    | crate::settings::schema::MergeStrategy::DeepMerge => {
+                        if !source.contributors.contains(&layer.source) {
+                            source.contributors.push(layer.source);
+                        }
+                    }
+                    crate::settings::schema::MergeStrategy::Override => {
+                        source.contributors.clear();
+                        source.contributors.push(layer.source);
+                    }
+                }
+            }
+            effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                layer.source,
+                &layer.settings,
+            ));
+            settings = merger::merge(settings, layer.settings.clone())?;
+            if layer.source == tracer::Source::Managed {
+                managed_typed_view_is_partial = layer.native_policy_projection;
+            }
+            typed_view_unrepresented_fields
+                .extend(layer.typed_view_unrepresented_fields.iter().cloned());
+        }
+
+        Ok(crate::settings::EffectiveSettings {
+            settings,
+            trace,
+            effort_layers,
+            source_projection: Some(self.admitted_merged.clone()),
+            source_layers: self.admitted_raw_layers.clone(),
+            typed_view_unrepresented_fields,
+            managed_typed_view_is_partial,
+            source_incomplete: self
+                .managed_policy_selection
+                .as_ref()
+                .is_some_and(|selection| !selection.complete),
+            source_message: None,
+            source_diagnostics: None,
+        })
+    }
+
     /// Return the source tiers with an optional typed Core view.
     ///
     /// Ordinary tiers mirror Native's per-file `safeParse` behavior: a known
@@ -281,15 +362,125 @@ fn record_layer(
     layer: SettingsRawLayer,
     admitted: Option<SettingsJson>,
 ) {
-    if let Some(settings) = admitted {
+    let (settings, typed_view_unrepresented_fields) = match admitted {
+        Some(settings) => (settings, Vec::new()),
+        None => match partial_typed_view_for_unpaired_utf16(&layer.projection) {
+            Some(partial) => partial,
+            None => {
+                layers.push(layer);
+                return;
+            }
+        },
+    };
+    {
         admitted_raw_layers.push(layer.clone());
         admitted_layers.push(SettingsAdmittedLayer {
             source: layer.source,
             path: layer.path.clone(),
             settings,
+            typed_view_unrepresented_fields,
+            native_policy_projection: false,
         });
     }
     layers.push(layer);
+}
+
+/// Preserve a narrowly representable ordinary layer when serde rejected it
+/// only because a JSON string contains an unpaired UTF-16 code unit. The
+/// original source remains untouched; only those strings (or array fields
+/// whose element positions cannot be represented) are omitted from the typed
+/// convenience view. Every remaining field still passes the existing
+/// whole-`SettingsJson` parse and validation, so an unrelated schema error
+/// rejects the entire ordinary layer as before.
+fn partial_typed_view_for_unpaired_utf16(
+    source: &Utf16JsonProjection,
+) -> Option<(SettingsJson, Vec<String>)> {
+    let mut unrepresented = Vec::new();
+    let cleaned = strip_only_unpaired_utf16_strings(source, "", &mut unrepresented)?;
+    if unrepresented.is_empty() {
+        return None;
+    }
+    let json = cleaned.to_json_string().ok()?;
+    let settings = serde_json::from_str::<SettingsJson>(&json).ok()?;
+    settings.validate().ok()?;
+    Some((settings, unrepresented))
+}
+
+fn strip_only_unpaired_utf16_strings(
+    source: &Utf16JsonProjection,
+    pointer: &str,
+    unrepresented: &mut Vec<String>,
+) -> Option<Utf16JsonProjection> {
+    let value = source.at_pointer("")?;
+    if let Some(units) = value.code_units() {
+        if String::from_utf16(units).is_ok() {
+            return Some(source.clone());
+        }
+        unrepresented.push(pointer.to_owned());
+        return None;
+    }
+    if value.is_null() || value.as_bool().is_some() || value.as_number().is_some() {
+        return Some(source.clone());
+    }
+    if let Some((logical_length, entries)) = value.array_entries() {
+        if entries.len() != logical_length as usize {
+            unrepresented.push(pointer.to_owned());
+            return None;
+        }
+        let mut values = Vec::with_capacity(entries.len());
+        let mut changed = false;
+        for (index, _) in entries {
+            let child_pointer = format!("{pointer}/{index}");
+            let child = source.subprojection(&format!("/{index}")).ok()?;
+            let Some(child) =
+                strip_only_unpaired_utf16_strings(&child, &child_pointer, unrepresented)
+            else {
+                // Dropping an element would shift all later indexes, so omit
+                // the entire array from the typed view and keep its exact
+                // source projection alongside it.
+                unrepresented.push(pointer.to_owned());
+                return None;
+            };
+            changed |= child != source.subprojection(&format!("/{index}")).ok()?;
+            values.push(child);
+        }
+        return if changed {
+            Utf16JsonProjection::array(values).ok()
+        } else {
+            Some(source.clone())
+        };
+    }
+    if let Some(entries) = value.object_entries() {
+        let mut fields = Vec::with_capacity(entries.len());
+        let mut changed = false;
+        for entry in entries {
+            let key = entry.code_units.to_vec();
+            let Ok(key_text) = String::from_utf16(&key) else {
+                unrepresented.push(format!("{pointer}/<unpaired-key>"));
+                changed = true;
+                continue;
+            };
+            let child_pointer = format!(
+                "{pointer}/{}",
+                key_text.replace('~', "~0").replace('/', "~1")
+            );
+            let original = source.subprojection_property_units(&key).ok()?;
+            if let Some(child) =
+                strip_only_unpaired_utf16_strings(&original, &child_pointer, unrepresented)
+            {
+                changed |= child != original;
+                fields.push((key, child));
+            } else {
+                changed = true;
+            }
+        }
+        return if changed {
+            Utf16JsonProjection::object_units(fields).ok()
+        } else {
+            Some(source.clone())
+        };
+    }
+    Some(source.clone())
 }
 
 fn record_native_policy_layer(
@@ -303,14 +494,162 @@ fn record_native_policy_layer(
     // source. Keep the projection even when the optional typed Core view cannot
     // represent a setting field; raw-policy consumers still need the source.
     admitted_raw_layers.push(layer.clone());
-    if let Some(settings) = settings {
-        admitted_layers.push(SettingsAdmittedLayer {
-            source: layer.source,
-            path: layer.path.clone(),
-            settings,
-        });
-    }
+    let (settings, typed_view_unrepresented_fields) = settings.map_or_else(
+        || parse_native_policy_typed_view(&layer.projection),
+        |settings| (settings, Vec::new()),
+    );
+    admitted_layers.push(SettingsAdmittedLayer {
+        source: layer.source,
+        path: layer.path.clone(),
+        settings,
+        typed_view_unrepresented_fields,
+        native_policy_projection: true,
+    });
     layers.push(layer);
+}
+
+fn parse_native_policy_typed_view(source: &Utf16JsonProjection) -> (SettingsJson, Vec<String>) {
+    let Some(entries) = source.object_entries() else {
+        return (SettingsJson::default(), vec!["<non-object-root>".into()]);
+    };
+
+    let mut representable = Vec::new();
+    let mut unrepresented = Vec::new();
+    for entry in entries {
+        let field = String::from_utf16(entry.code_units)
+            .unwrap_or_else(|_| format!("<key-units:{:x?}>", entry.code_units));
+        let Some(original) = source.subprojection_property_units(entry.code_units).ok() else {
+            unrepresented.push(format!("/{field}"));
+            continue;
+        };
+        let Ok(original_field) =
+            Utf16JsonProjection::object_units(vec![(entry.code_units.to_vec(), original.clone())])
+        else {
+            unrepresented.push(format!("/{field}"));
+            continue;
+        };
+        let Ok(original_json) = original_field.to_json_string() else {
+            unrepresented.push(format!("/{field}"));
+            continue;
+        };
+        if serde_json::from_str::<SettingsJson>(&original_json).is_ok() {
+            representable.push((entry.code_units.to_vec(), original));
+            continue;
+        }
+
+        let Some(value) =
+            strip_unrepresentable_strings(&original, &format!("/{field}"), &mut unrepresented)
+        else {
+            unrepresented.push(format!("/{field}"));
+            continue;
+        };
+        let Ok(single_field) =
+            Utf16JsonProjection::object_units(vec![(entry.code_units.to_vec(), value.clone())])
+        else {
+            unrepresented.push(format!("/{field}"));
+            continue;
+        };
+        let Ok(json) = single_field.to_json_string() else {
+            unrepresented.push(format!("/{field}"));
+            continue;
+        };
+        if serde_json::from_str::<SettingsJson>(&json).is_ok() {
+            representable.push((entry.code_units.to_vec(), value));
+        } else {
+            unrepresented.push(format!("/{field}"));
+        }
+    }
+
+    let typed_projection = Utf16JsonProjection::object_units(representable)
+        .unwrap_or_else(|_| Utf16JsonProjection::parse("{}").expect("empty JSON object"));
+    let settings = typed_projection
+        .to_json_string()
+        .ok()
+        .and_then(|json| serde_json::from_str::<SettingsJson>(&json).ok())
+        .unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    unrepresented.retain(|field| seen.insert(field.clone()));
+    (settings, unrepresented)
+}
+
+/// Make a typed convenience subtree from the subset that can cross serde's
+/// UTF-8 `String` boundary. The exact managed source remains untouched in the
+/// adjacent `SettingsRawLayer`; this function only prevents one unpaired
+/// sibling string from erasing other representable settings fields.
+fn strip_unrepresentable_strings(
+    source: &Utf16JsonProjection,
+    pointer: &str,
+    unrepresented: &mut Vec<String>,
+) -> Option<Utf16JsonProjection> {
+    let value = source.at_pointer("")?;
+    if let Some(units) = value.code_units() {
+        if String::from_utf16(units).is_ok() {
+            return Some(source.clone());
+        }
+        unrepresented.push(pointer.to_owned());
+        return None;
+    }
+    if value.is_null() || value.as_bool().is_some() || value.as_number().is_some() {
+        return Some(source.clone());
+    }
+    if let Some((logical_length, entries)) = value.array_entries() {
+        // A serde vector cannot represent Native `undefined` holes. Do not
+        // densify sparse arrays (their logical length can be very large); keep
+        // them solely in the exact source projection.
+        if entries.len() != logical_length as usize {
+            unrepresented.push(pointer.to_owned());
+            return None;
+        }
+        let mut retained = Vec::with_capacity(entries.len());
+        let mut changed = false;
+        for (index, _) in entries {
+            let child_pointer = format!("{pointer}/{index}");
+            let child_source = source.subprojection(&format!("/{index}")).ok()?;
+            if let Some(child) =
+                strip_unrepresentable_strings(&child_source, &child_pointer, unrepresented)
+            {
+                changed |= child != child_source;
+                retained.push((index, child));
+            } else {
+                changed = true;
+            }
+        }
+        if !changed {
+            return Some(source.clone());
+        }
+        // Dropping an unrepresentable array member would shift following
+        // string indexes in a dense typed vector. Keep the entire array out of
+        // the typed convenience view instead of silently changing the rule.
+        unrepresented.push(pointer.to_owned());
+        return None;
+    }
+    if let Some(entries) = value.object_entries() {
+        let mut retained = Vec::with_capacity(entries.len());
+        let mut changed = false;
+        for entry in entries {
+            let Ok(key) = String::from_utf16(entry.code_units) else {
+                unrepresented.push(format!("{pointer}/<unrepresentable-key>"));
+                changed = true;
+                continue;
+            };
+            let child_pointer = format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1"));
+            let child_source = source.subprojection_property_units(entry.code_units).ok()?;
+            if let Some(child) =
+                strip_unrepresentable_strings(&child_source, &child_pointer, unrepresented)
+            {
+                changed |= child != child_source;
+                retained.push((entry.code_units.to_vec(), child));
+            } else {
+                changed = true;
+            }
+        }
+        if !changed {
+            return Some(source.clone());
+        }
+        return Utf16JsonProjection::object_units(retained).ok();
+    }
+    unrepresented.push(pointer.to_owned());
+    None
 }
 
 fn read_file_layer_or_skip(path: &Path) -> Option<loader::SettingsLayerSnapshot> {
@@ -331,8 +670,7 @@ fn read_file_layer_or_skip(path: &Path) -> Option<loader::SettingsLayerSnapshot>
 fn projection_from_settings(settings: &SettingsJson) -> Result<Utf16JsonProjection, SettingsError> {
     let source = serde_json::to_string(settings)
         .map_err(|error| SettingsError::SchemaViolation(error.to_string()))?;
-    Utf16JsonProjection::parse(&source)
-        .map_err(|error| SettingsError::SchemaViolation(error.to_string()))
+    Ok(Utf16JsonProjection::parse(&source)?)
 }
 
 fn parse_supplemental_layer(raw: &str) -> Option<(Utf16JsonProjection, Option<SettingsJson>)> {
@@ -367,6 +705,173 @@ mod tests {
             managed_file_documents: vec![document],
             ..NativePolicyInputs::default()
         })
+    }
+
+    #[test]
+    fn admitted_model_with_unpaired_utf16_keeps_native_source_and_typed_siblings() {
+        let selection = managed_policy(
+            r#"{"model":"\ud800","askUserQuestionTimeout":"60s","permissions":{"allow":["Read(\ud800)"],"deny":["Bash"]}}"#,
+        );
+        assert!(selection.complete);
+        let native = selection.effective.as_ref().expect("managed projection");
+        assert!(native.settings.is_none());
+        assert_eq!(native.projection.string_units("/model"), Some(vec![0xd800]));
+
+        let stack = Settings::load_raw_layer_stack_from_user_path(
+            LoadInputs {
+                env: &BTreeMap::new(),
+                project_dir: Path::new("/source-authoritative-settings-test"),
+                defaults: SettingsJson::default(),
+            },
+            FileLayerScope {
+                include_user: false,
+                include_project: false,
+                include_local: false,
+            },
+            RawSupplementalLayers {
+                cli_layer: None,
+                managed_policy: Some(&selection),
+            },
+            None,
+        )
+        .expect("Native-admitted projection remains in the stack");
+
+        let managed = stack
+            .admitted_typed_layers()
+            .into_iter()
+            .find(|layer| layer.source == Source::Managed)
+            .expect("a partial managed convenience view is available");
+        assert_eq!(managed.settings.model, None);
+        assert_eq!(
+            managed.settings.ask_user_question_timeout.as_deref(),
+            Some("60s")
+        );
+        assert_eq!(
+            managed
+                .settings
+                .permissions
+                .as_ref()
+                .and_then(|permissions| permissions.get("deny")),
+            Some(&serde_json::json!(["Bash"]))
+        );
+        assert!(managed
+            .typed_view_unrepresented_fields
+            .contains(&"/model".to_owned()));
+        assert!(managed
+            .typed_view_unrepresented_fields
+            .contains(&"/permissions/allow".to_owned()));
+
+        let effective = stack
+            .into_effective_settings()
+            .expect("ordinary layers and Native source compose independently");
+        assert_eq!(
+            effective.settings.ask_user_question_timeout.as_deref(),
+            Some("60s")
+        );
+        assert_eq!(
+            effective
+                .source_field("model")
+                .as_ref()
+                .and_then(|model| model.string_units("")),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            effective.source_field_contributors("model"),
+            [Source::Managed]
+        );
+        assert!(effective
+            .typed_view_unrepresented_fields
+            .contains(&"/model".to_owned()));
+    }
+
+    #[test]
+    fn ordinary_layer_with_only_unpaired_strings_keeps_valid_typed_siblings() {
+        let root = tempfile::tempdir().unwrap();
+        let settings_path = root.path().join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"model":"\ud800","language":"English","permissions":{"allow":["Read(\ud800)"],"deny":["Bash"]}}"#,
+        )
+        .unwrap();
+
+        let stack = Settings::load_raw_layer_stack_from_user_path(
+            LoadInputs {
+                env: &BTreeMap::new(),
+                project_dir: root.path(),
+                defaults: SettingsJson::default(),
+            },
+            FileLayerScope {
+                include_user: true,
+                include_project: false,
+                include_local: false,
+            },
+            RawSupplementalLayers::default(),
+            Some(&settings_path),
+        )
+        .expect("valid source JSON remains loadable");
+
+        let admitted = stack
+            .admitted_typed_layers()
+            .into_iter()
+            .find(|layer| layer.source == Source::User)
+            .expect("only the unpaired strings are absent from the typed view");
+        assert_eq!(admitted.settings.model, None);
+        assert_eq!(
+            admitted
+                .settings
+                .language
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("English")
+        );
+        assert_eq!(
+            admitted
+                .settings
+                .permissions
+                .as_ref()
+                .and_then(|permissions| permissions.get("deny")),
+            Some(&serde_json::json!(["Bash"]))
+        );
+        assert!(admitted
+            .typed_view_unrepresented_fields
+            .contains(&"/model".to_owned()));
+        assert!(admitted
+            .typed_view_unrepresented_fields
+            .contains(&"/permissions/allow".to_owned()));
+        assert_eq!(
+            stack.admitted_merged().string_units("/model"),
+            Some(vec![0xd800])
+        );
+
+        let invalid_path = root.path().join("invalid-settings.json");
+        std::fs::write(
+            &invalid_path,
+            r#"{"model":"\ud800","askUserQuestionTimeout":4}"#,
+        )
+        .unwrap();
+        let invalid = Settings::load_raw_layer_stack_from_user_path(
+            LoadInputs {
+                env: &BTreeMap::new(),
+                project_dir: root.path(),
+                defaults: SettingsJson::default(),
+            },
+            FileLayerScope {
+                include_user: true,
+                include_project: false,
+                include_local: false,
+            },
+            RawSupplementalLayers::default(),
+            Some(&invalid_path),
+        )
+        .expect("schema-invalid source remains evidence");
+        assert!(!invalid
+            .admitted_typed_layers()
+            .iter()
+            .any(|layer| layer.source == Source::User));
+        assert!(invalid.layers.iter().any(|layer| {
+            layer.source == Source::User
+                && layer.projection.string_units("/model") == Some(vec![0xd800])
+        }));
     }
 
     #[test]
@@ -774,17 +1279,43 @@ mod tests {
             vec![Source::Defaults, Source::User, Source::Env],
             "accepted raw tiers retain the same source precedence"
         );
+        let allow_write = "/sandbox/filesystem/allowWrite";
+        let user_units = "/user-".encode_utf16().chain([0xd800]).collect::<Vec<_>>();
         assert_eq!(
-            stack.merged.string_at("/sandbox/filesystem/allowWrite/0"),
+            stack.merged.array_len(allow_write),
+            Some(2),
+            "all-source evidence includes both syntactically valid source arrays"
+        );
+        assert_eq!(
+            stack
+                .merged
+                .string_units("/sandbox/filesystem/allowWrite/0"),
+            Some(user_units.clone()),
+            "the lower user entry remains first in Native's array merge"
+        );
+        assert_eq!(
+            stack.merged.string_at("/sandbox/filesystem/allowWrite/1"),
             Some("/rejected-project"),
-            "all-source evidence still shows the schema-rejected project's raw value"
+            "all-source evidence retains the schema-rejected project's raw value"
+        );
+        assert_eq!(
+            stack.admitted_merged().array_len(allow_write),
+            Some(1),
+            "the prompt-facing raw merge excludes the rejected project's array entry"
         );
         assert_eq!(
             stack
                 .admitted_merged()
                 .string_units("/sandbox/filesystem/allowWrite/0"),
-            Some("/user-".encode_utf16().chain([0xd800]).collect::<Vec<_>>()),
-            "the prompt-facing raw merge uses the accepted source and keeps its exact units"
+            Some(user_units),
+            "the admitted source keeps the user's exact UTF-16 units"
+        );
+        assert!(
+            stack
+                .admitted_merged()
+                .at_pointer("/sandbox/filesystem/allowWrite/1")
+                .is_none(),
+            "the rejected project value is absent from the admitted merge"
         );
         assert_eq!(
             stack.admitted_merged().string_units("/futureSetting/label"),

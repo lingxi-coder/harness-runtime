@@ -1075,6 +1075,7 @@ mod tests {
             .with_side_query_client(Arc::new(Client), "claude-haiku-4-5".into());
 
         let cache_safe = CacheSafeParams {
+            model_source: None,
             system_prompt: Arc::new("SYS".into()),
             system_prompt_input: None,
             user_context: std::collections::HashMap::new(),
@@ -1202,6 +1203,7 @@ mod tests {
         let runner = ForkedAgentRunner::new()
             .with_side_query_client(Arc::new(Client), "claude-haiku-4-5".into());
         let cache_safe = CacheSafeParams {
+            model_source: None,
             system_prompt: Arc::new("SYS".into()),
             system_prompt_input: None,
             user_context: std::collections::HashMap::new(),

@@ -32,6 +32,7 @@
 
 use crate::model::FrontmatterShell;
 use async_trait::async_trait;
+use lingxi_core::host::CancellationToken;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::fmt;
 use std::sync::Arc;
@@ -118,6 +119,7 @@ pub trait ShellRunner: Send + Sync {
         &self,
         command: &Ujp,
         shell: Option<FrontmatterShell>,
+        cancellation: CancellationToken,
     ) -> Result<ShellOut, ShellRunError>;
 }
 
@@ -175,7 +177,7 @@ pub trait ShellExpansionProvider: Send + Sync {
     /// the base policy for this expansion only; `shell` is the
     /// frontmatter-selected shell (`None` → bash; builtins always pass `None`).
     fn build(&self, allowed_tools: &[String], shell: Option<FrontmatterShell>)
-    -> ShellExpansionCtx;
+        -> ShellExpansionCtx;
 }
 
 /// A single extracted shell command: its full matched span (for replacement)
@@ -242,6 +244,7 @@ pub async fn execute_shell_commands_in_prompt(
     ctx: &ShellExpansionCtx,
     slash_command_name: &Ujp,
     shell: Option<FrontmatterShell>,
+    cancellation: CancellationToken,
 ) -> Result<Ujp, ShellExpansionError> {
     let source_units = text
         .string_units("")
@@ -276,13 +279,19 @@ pub async fn execute_shell_commands_in_prompt(
     let result = Arc::new(std::sync::Mutex::new(source_units.to_vec()));
     let mut tasks = tokio::task::JoinSet::new();
     let mut previous_launch = None;
+    let mut cancellation_seen = false;
     for (command, decision) in matches {
+        if cancellation.is_cancelled() {
+            cancellation_seen = true;
+            break;
+        }
         let (launch_next, launch_next_rx) = tokio::sync::oneshot::channel();
         let launch_previous = previous_launch.take();
         previous_launch = Some(launch_next_rx);
         let command_name = slash_command_name.clone();
         let runner = ctx.runner.clone();
         let result = result.clone();
+        let cancellation = cancellation.clone();
         tasks.spawn(async move {
             if let Some(launch_previous) = launch_previous {
                 let _ = launch_previous.await;
@@ -307,12 +316,10 @@ pub async fn execute_shell_commands_in_prompt(
             // launch baton is passed while any asynchronous process work stays
             // concurrent. Native's ready permission continuations are queued
             // FIFO; only the subsequent I/O completion order is nondeterministic.
-            let mut run = runner.run(&command.command, shell);
-            let first_poll = std::future::poll_fn(|cx| {
-                match run.as_mut().poll(cx) {
-                    std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
-                    std::task::Poll::Pending => std::task::Poll::Ready(None),
-                }
+            let mut run = runner.run(&command.command, shell, cancellation);
+            let first_poll = std::future::poll_fn(|cx| match run.as_mut().poll(cx) {
+                std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
+                std::task::Poll::Pending => std::task::Poll::Ready(None),
             })
             .await;
             let _ = launch_next.send(());
@@ -334,10 +341,16 @@ pub async fn execute_shell_commands_in_prompt(
         });
     }
 
+    let mut cancellation_error = None;
     while let Some(completion) = tasks.join_next().await {
         match completion {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
+                if cancellation.is_cancelled() {
+                    cancellation_seen = true;
+                    cancellation_error.get_or_insert(error);
+                    continue;
+                }
                 // JavaScript Promise.all rejects on the first failed promise,
                 // but does not cancel the other already-started promises.
                 tasks.detach_all();
@@ -351,6 +364,12 @@ pub async fn execute_shell_commands_in_prompt(
                 panic!("embedded shell expansion task was cancelled unexpectedly");
             }
         }
+    }
+
+    if cancellation_seen || cancellation.is_cancelled() {
+        return Err(cancellation_error.unwrap_or_else(|| {
+            ShellExpansionError::Malformed(Ujp::from("Shell command interrupted"))
+        }));
     }
 
     let result = Arc::try_unwrap(result)
@@ -532,7 +551,7 @@ fn trim_js_whitespace_units(input: &[u16]) -> &[u16] {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use tokio::sync::{Semaphore, watch};
+    use tokio::sync::{watch, Semaphore};
 
     struct ScriptRunner {
         calls: Mutex<Vec<Ujp>>,
@@ -552,6 +571,8 @@ mod tests {
             &self,
             command: &Ujp,
             _shell: Option<FrontmatterShell>,
+
+            _cancellation: lingxi_core::host::CancellationToken,
         ) -> Result<ShellOut, ShellRunError> {
             self.calls.lock().unwrap().push(command.clone());
             Ok(ShellOut {
@@ -572,6 +593,8 @@ mod tests {
             &self,
             command: &Ujp,
             _shell: Option<FrontmatterShell>,
+
+            _cancellation: lingxi_core::host::CancellationToken,
         ) -> Result<ShellOut, ShellRunError> {
             self.calls.lock().unwrap().push(command.clone());
             Ok(ShellOut {
@@ -617,7 +640,14 @@ mod tests {
     }
 
     async fn expand(text: &str, ctx: &ShellExpansionCtx) -> Result<Ujp, ShellExpansionError> {
-        execute_shell_commands_in_prompt(&Ujp::from(text), ctx, &Ujp::from("/x"), None).await
+        execute_shell_commands_in_prompt(
+            &Ujp::from(text),
+            ctx,
+            &Ujp::from("/x"),
+            None,
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await
     }
 
     #[test]
@@ -659,9 +689,15 @@ mod tests {
         ]
         .concat();
         let text = Ujp::root_string(String::from_utf16_lossy(&units), units.clone()).unwrap();
-        let output = execute_shell_commands_in_prompt(&text, &ctx, &"/x".into(), None)
-            .await
-            .unwrap();
+        let output = execute_shell_commands_in_prompt(
+            &text,
+            &ctx,
+            &"/x".into(),
+            None,
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output.string_units(""), Some(units));
         assert!(runner.calls.lock().unwrap().is_empty());
     }
@@ -737,6 +773,8 @@ mod tests {
             &self,
             command: &Ujp,
             _shell: Option<FrontmatterShell>,
+
+            _cancellation: lingxi_core::host::CancellationToken,
         ) -> Result<ShellOut, ShellRunError> {
             let call = self
                 .next_call
@@ -776,7 +814,14 @@ mod tests {
         let ctx = Arc::new(ctx_with(runner.clone(), Arc::new(AllowAll)));
         let text = Ujp::from("!`same` and !`same`");
         let execution = tokio::spawn(async move {
-            execute_shell_commands_in_prompt(&text, &ctx, &Ujp::from("/x"), None).await
+            execute_shell_commands_in_prompt(
+                &text,
+                &ctx,
+                &Ujp::from("/x"),
+                None,
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
         });
 
         // Both calls must have reached the runner while neither is released.
@@ -885,7 +930,14 @@ mod tests {
         let ctx = Arc::new(ctx_with(runner.clone(), gate));
         let text = Ujp::from("!`slow` then !`other` then !`deny`");
         let execution = tokio::spawn(async move {
-            execute_shell_commands_in_prompt(&text, &ctx, &Ujp::from("/x"), None).await
+            execute_shell_commands_in_prompt(
+                &text,
+                &ctx,
+                &Ujp::from("/x"),
+                None,
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
         });
 
         tokio::time::timeout(
@@ -946,9 +998,15 @@ mod tests {
         ]
         .concat();
         let text = Ujp::root_string(String::from_utf16_lossy(&units), units.clone()).unwrap();
-        let output = execute_shell_commands_in_prompt(&text, &ctx, &"/exact�".into(), None)
-            .await
-            .unwrap();
+        let output = execute_shell_commands_in_prompt(
+            &text,
+            &ctx,
+            &"/exact�".into(),
+            None,
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let expected = [
             "before".encode_utf16().collect::<Vec<_>>(),
             vec![0xd800],
@@ -999,9 +1057,15 @@ mod tests {
             Arc::new(DenyAll(Some(reason))),
         );
 
-        let error = execute_shell_commands_in_prompt(&text, &ctx, &"/x".into(), None)
-            .await
-            .unwrap_err();
+        let error = execute_shell_commands_in_prompt(
+            &text,
+            &ctx,
+            &"/x".into(),
+            None,
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         let expected = [
             "Shell command permission check failed for pattern \""
                 .encode_utf16()
@@ -1023,6 +1087,8 @@ mod tests {
                 &self,
                 _command: &Ujp,
                 _shell: Option<FrontmatterShell>,
+
+                _cancellation: lingxi_core::host::CancellationToken,
             ) -> Result<ShellOut, ShellRunError> {
                 Err(ShellRunError {
                     stdout: String::new(),
@@ -1046,6 +1112,8 @@ mod tests {
                 &self,
                 _command: &Ujp,
                 _shell: Option<FrontmatterShell>,
+
+                _cancellation: lingxi_core::host::CancellationToken,
             ) -> Result<ShellOut, ShellRunError> {
                 Ok(ShellOut {
                     stdout: " hello ".into(),

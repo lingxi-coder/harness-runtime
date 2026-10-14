@@ -751,6 +751,7 @@ fn spawn_query(
     join_set.spawn(async move {
         let response = client
             .query(SideQueryRequest {
+                model_source: None,
                 model_attempt: None,
                 native_prompt_context: None,
                 model: packet.model.clone(),

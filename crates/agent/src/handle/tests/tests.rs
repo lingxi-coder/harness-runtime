@@ -2488,6 +2488,7 @@ impl lingxi_core::host::skill_loader::SkillLoader for NoopSkillLoader {
         _agent_type: &str,
         _cwd: Option<&std::path::Path>,
         _model: Option<&str>,
+        _cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
         Ok(None)
     }

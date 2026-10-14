@@ -397,6 +397,16 @@ mod upgrade_tests {
             thinking_resumption_refused: true,
             thinking_resumption_beta_requested: Some(true),
             thinking_resumption_beta_refused: false,
+            response: Some(wire::NativeAnthropicErrorResponse {
+                body: Some(
+                    wire::JsonPayload::parse(
+                        r#"{"type":"error","error":{"type":"rate_limit_error","message":"billing","details":{"error_code":"credits_required"}}}"#,
+                    )
+                    .unwrap(),
+                ),
+                unified_representative_claim: Some("claim".into()),
+                unified_overage_disabled_reason: Some("out_of_credits".into()),
+            }),
         };
         let mut units = "400 ".encode_utf16().collect::<Vec<_>>();
         units.push(0xd800);
@@ -414,6 +424,29 @@ mod upgrade_tests {
             LlmError::InvalidRequest { .. }
         ));
         assert_eq!(translated.native_anthropic_error_facts(), Some(&facts));
+        let response = translated
+            .native_anthropic_error_facts()
+            .and_then(|facts| facts.response.as_ref())
+            .expect("Native response evidence survives translation");
+        assert_eq!(
+            response
+                .body
+                .as_ref()
+                .map(wire::JsonPayload::as_json_source),
+            facts
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref())
+                .map(wire::JsonPayload::as_json_source)
+        );
+        assert_eq!(
+            response.unified_representative_claim.as_deref(),
+            Some("claim")
+        );
+        assert_eq!(
+            response.unified_overage_disabled_reason.as_deref(),
+            Some("out_of_credits")
+        );
         assert_eq!(
             translated.provider_error_text().unwrap().utf16_code_units(),
             units
@@ -433,6 +466,7 @@ mod upgrade_tests {
             thinking_resumption_refused: false,
             thinking_resumption_beta_requested: None,
             thinking_resumption_beta_refused: false,
+            response: None,
         };
         let mut units = "407 ".encode_utf16().collect::<Vec<_>>();
         units.push(0xd800);

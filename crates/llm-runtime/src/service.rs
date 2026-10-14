@@ -465,6 +465,10 @@ pub struct MessagesCreateOptions {
     pub initial_consecutive_overloaded: Option<u8>,
     /// Ordered fallback policy for this logical request.
     pub fallback: FallbackPolicy,
+    /// Exact Native-effective model source for requests whose configured route
+    /// cannot reproduce the same wire model. This is intentionally separate
+    /// from the route selector and stays empty for ordinary catalog models.
+    pub model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Trusted host accounting authority; never enters model input.
     pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     /// Sanitized Native `querySource` used by cache-TTL policy and accounting.
@@ -855,10 +859,20 @@ pub trait RetryReporter: Send + Sync {
     fn report(&self, info: RetryInfo);
 }
 
-type EffortSettingsSource =
-    Arc<dyn Fn() -> Vec<lingxi_core::host::effort::EffortSettingsLayer> + Send + Sync>;
-type PromptCacheTtlSettingsSource =
-    Arc<dyn Fn() -> lingxi_core::settings::schema::PromptCacheTtlSettings + Send + Sync>;
+type EffortSettingsSource = Arc<
+    dyn Fn() -> Result<
+            Vec<lingxi_core::host::effort::EffortSettingsLayer>,
+            lingxi_core::settings::SettingsError,
+        > + Send
+        + Sync,
+>;
+type PromptCacheTtlSettingsSource = Arc<
+    dyn Fn() -> Result<
+            lingxi_core::settings::schema::PromptCacheTtlSettings,
+            lingxi_core::settings::SettingsError,
+        > + Send
+        + Sync,
+>;
 /// Live session owner for calls that begin outside a scoped turn.
 pub type RequestSessionIdSource =
     Arc<dyn Fn() -> crate::BoxFuture<'static, Option<String>> + Send + Sync>;
@@ -1143,6 +1157,12 @@ pub struct ApiService {
     /// a newer rate-limit snapshot (2.1.196 flicker fix). `None` until the
     /// first record.
     last_rate_limit_record_ts_ms: Mutex<Option<u128>>,
+    /// Native Foundry deployment capability observations. Only negative
+    /// observations are stored; an unseen deployment/feature remains allowed.
+    /// The key is the selected endpoint plus the Native model identity after
+    /// removing `[1m]`/`[2m]` tags, matching `pl(e)`/`Fn(e)`.
+    foundry_capabilities:
+        Mutex<std::collections::HashMap<FoundryDeploymentKey, std::collections::HashSet<String>>>,
     /// Test-only override for the streaming idle-watchdog timeout. `Some(d)`
     /// forces `d` (bypassing the env resolver whose floor is 5 min, which is
     /// otherwise untestable); `None` (production) uses
@@ -1163,6 +1183,167 @@ pub struct ApiService {
     /// with Codex's Guardian pool, they never share the conversation's
     /// socket, which stays busy while its own response streams.
     side_ws_sessions: Arc<Mutex<Vec<ResponsesSession>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FoundryDeploymentKey {
+    endpoint: String,
+    /// Exact Native X.model UTF-16 identity after removing [1m]/[2m] tags.
+    model: Vec<u16>,
+}
+
+fn native_foundry_model_key(model_units: &[u16]) -> Vec<u16> {
+    let mut result = Vec::with_capacity(model_units.len());
+    let mut index = 0;
+    while index < model_units.len() {
+        if index + 3 < model_units.len()
+            && model_units[index] == u16::from(b'[')
+            && (model_units[index + 1] == u16::from(b'1')
+                || model_units[index + 1] == u16::from(b'2'))
+            && (model_units[index + 2] == u16::from(b'm')
+                || model_units[index + 2] == u16::from(b'M'))
+            && model_units[index + 3] == u16::from(b']')
+        {
+            index += 4;
+            continue;
+        }
+        result.push(model_units[index]);
+        index += 1;
+    }
+    result
+}
+
+fn native_request_model_identity(request: &LlmRequest) -> Vec<u16> {
+    request
+        .input
+        .model_source
+        .as_ref()
+        .and_then(lingxi_llm_client::protocol::JsonPayload::root_string_code_units)
+        .unwrap_or_else(|| request.input.model.encode_utf16().collect())
+}
+
+fn native_foundry_deployment_endpoint(profile_base_url: &str) -> String {
+    // `pl` keys the built-in Foundry client by `fl()`, which omits the
+    // `/anthropic/` suffix when `ANTHROPIC_FOUNDRY_RESOURCE` supplies the
+    // endpoint. Reuse that host value only when this is exactly the profile
+    // URL produced from those same environment inputs; custom profiles stay
+    // isolated by their own configured endpoint.
+    match (
+        crate::foundry_base_host_from_env(),
+        crate::foundry_messages_base_url_from_env(),
+    ) {
+        (Some(host), Some(messages_url)) if messages_url == profile_base_url => host,
+        _ => profile_base_url.to_owned(),
+    }
+}
+
+fn foundry_unsupported_feature_names(message: &str) -> Option<Vec<String>> {
+    static NOT_SUPPORTED: OnceLock<regex::Regex> = OnceLock::new();
+    static AZURE_FEATURES: OnceLock<regex::Regex> = OnceLock::new();
+    static WEB_SEARCH_UNAVAILABLE: OnceLock<regex::Regex> = OnceLock::new();
+    let not_supported = NOT_SUPPORTED.get_or_init(|| {
+        regex::RegexBuilder::new(r"([a-z0-9_, ]+?)\s+not supported in your workspace")
+            .case_insensitive(true)
+            .build()
+            .expect("fixed Foundry capability pattern compiles")
+    });
+    if let Some(captures) = not_supported.captures(message) {
+        if let Some(found) = captures.get(1) {
+            let names = found
+                .as_str()
+                .split(',')
+                .map(str::trim)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if !names.is_empty() && names.iter().all(|name| native_foundry_feature_name(name)) {
+                return Some(names);
+            }
+        }
+    }
+
+    let azure_features = AZURE_FEATURES.get_or_init(|| {
+        regex::RegexBuilder::new(
+            r"features are not available for Azure AI Foundry workspaces?:\s*([a-z0-9_, ]+)",
+        )
+        .case_insensitive(true)
+        .build()
+        .expect("fixed Foundry capability pattern compiles")
+    });
+    if let Some(captures) = azure_features.captures(message) {
+        if let Some(found) = captures.get(1) {
+            let names = found
+                .as_str()
+                .split(|character: char| character == ',' || character.is_whitespace())
+                .filter(|name| !name.is_empty() && *name != "and")
+                .filter(|name| native_foundry_feature_name(name))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if !names.is_empty() {
+                return Some(names);
+            }
+        }
+    }
+
+    let web_search_unavailable = WEB_SEARCH_UNAVAILABLE.get_or_init(|| {
+        regex::RegexBuilder::new(r"server-side web search is not available in this environment")
+            .case_insensitive(true)
+            .build()
+            .expect("fixed Foundry capability pattern compiles")
+    });
+    web_search_unavailable
+        .is_match(message)
+        .then(|| vec!["web_search".to_owned()])
+}
+
+#[cfg(test)]
+const NATIVE_TOOL_SEARCH_NAME: &str = "ToolSearch";
+#[cfg(test)]
+const NATIVE_TOOL_SEARCH_DESCRIPTION: &str = concat!(
+    "Fetches full schema definitions for deferred tools so they can be called.\n\n",
+    "Deferred tools appear by name in <system-reminder> messages. Until fetched, only the name is known ",
+    "— there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it ",
+    "against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside ",
+    "a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool ",
+    "defined at the top of the prompt.\n\n",
+    "Result format: each matched tool appears as one <function>{\"description\": \"...\", ",
+    "\"name\": \"...\", \"parameters\": {...}}</function> line inside the <functions> block — ",
+    "the same encoding as the tool list at the top of this prompt.\n\n",
+    "Query forms:\n- \"select:Read,Edit,Grep\" — fetch these exact tools by name\n",
+    "- \"notebook jupyter\" — keyword search, up to max_results best matches\n",
+    "- \"+slack send\" — require \"slack\" in the name, rank by remaining terms",
+);
+
+// Native x_s removes this exact synthetic placeholder when hosted search is unsupported.
+const NATIVE_DEFERRED_TOOL_PLACEHOLDER_NAME: &str = "DeferredToolPlaceholder";
+const NATIVE_DEFERRED_TOOL_PLACEHOLDER_DESCRIPTION: &str =
+    "Reserved placeholder that keeps deferred tool loading active; never call this tool.";
+
+fn native_deferred_tool_placeholder_matches(tool: &lingxi_llm_client::protocol::ToolSpec) -> bool {
+    tool.defer_loading
+        && tool.name == NATIVE_DEFERRED_TOOL_PLACEHOLDER_NAME
+        && tool
+            .description
+            .root_string_code_units()
+            .is_some_and(|units| {
+                units
+                    == NATIVE_DEFERRED_TOOL_PLACEHOLDER_DESCRIPTION
+                        .encode_utf16()
+                        .collect::<Vec<_>>()
+            })
+}
+
+fn native_v_oauth_revocation(status: u16, message: Option<&str>) -> bool {
+    let Some(message) = message else {
+        return false;
+    };
+    (status == 403 && message.contains("OAuth token has been revoked"))
+        || (status == 401 && message.contains("OAuth access token has been revoked"))
+}
+
+fn native_foundry_feature_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|first| first.is_ascii_lowercase())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 /// A pooled session held for one stream. Dropping it, when the stream ends
@@ -1215,6 +1396,14 @@ impl DispatchHeaderState {
             ..Self::default()
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonStreamDrivePolicy {
+    Standard,
+    /// Native `/model` probe: no ordinary retry/fallback/effort inheritance or
+    /// internal request deadline; retain only its explicit one-shot repairs.
+    ModelValidation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1564,6 +1753,57 @@ impl ApiService {
             .await
     }
 
+    /// Execute Native model validation through the shared provider driver with
+    /// a request-local Native repair policy.
+    ///
+    /// `request` supplies the selected route/profile plus the model-validation body
+    /// (including its exact `model_source`, `Hi` user message, one-token cap, and
+    /// ephemeral message breakpoint). The caller owns Native's outer 15-second
+    /// Promise race. This method must not add a deadline or cancel the request: a
+    /// late probe is allowed to finish and update the caller's validation cache.
+    ///
+    /// The request uses the shared route, credential, SDK codec, and transport.
+    /// Ordinary retries, timeout retries, model fallback, inherited effort and
+    /// connection failover are disabled by `ModelValidation`. The shared driver
+    /// keeps only Native request-specific repairs: context-1m refusal,
+    /// dispatch-header fallback, captured OAuth revocation, and a Foundry
+    /// capability refusal when the cached observation changes the request body.
+    pub async fn execute_model_validation_request(
+        &self,
+        mut request: LlmRequest,
+    ) -> Result<HistoryResponse, LlmError> {
+        if request.execution.model_attempt.is_some() {
+            return Err(crate::model_attempt::missing_hooks_error());
+        }
+
+        request.stream = false;
+        // This is an isolated utility query, not a turn. Clear session-derived
+        // prompt/effort/identity sidecars while preserving the SDK ChatRequest
+        // body supplied by the caller.
+        request.execution = Default::default();
+        request.execution.query_source = Some("model_validation".to_owned());
+        request.execution.anthropic_request_kind =
+            lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+
+        let mut retry_control = RetryControl {
+            primary_model: request.input.model.clone(),
+            ..RetryControl::default()
+        };
+        retry_control.max_retries = 0;
+        retry_control.fallback_model = None;
+        retry_control.allow_fallback = false;
+        retry_control.watchdog = false;
+        self.drive_non_stream_seeded_with_chain(
+            request,
+            retry_control,
+            0,
+            &[],
+            DispatchHeaderState::AUXILIARY,
+            NonStreamDrivePolicy::ModelValidation,
+        )
+        .await
+    }
+
     /// Stream a canonical request through the accounting-aware physical driver.
     pub async fn stream_request(
         &self,
@@ -1737,6 +1977,159 @@ impl ApiService {
         profile: Option<&str>,
     ) -> Result<crate::ProtocolFamily, LlmError> {
         self.client.protocol_for_model(model, profile)
+    }
+
+    /// Account epoch used to fence model-validation probes. This is the
+    /// existing account observer generation, so token refreshes within the
+    /// same account do not invalidate a probe or its cache.
+    pub fn model_validation_account_generation(&self) -> u64 {
+        self.fast_availability.generation()
+    }
+
+    /// Native process-wide ANTHROPIC_CUSTOM_MODEL_OPTION source, kept as UTF-16 units.
+    pub fn model_validation_custom_model_option(&self) -> Option<Vec<u16>> {
+        std::env::var("ANTHROPIC_CUSTOM_MODEL_OPTION")
+            .ok()
+            .map(|value| value.encode_utf16().collect())
+    }
+
+    /// Native YKe semantics for the current Foundry deployment. An unobserved
+    /// deployment or feature is allowed; only an explicit unsupported feature
+    /// observation makes the result false. Non-Foundry routes have no answer.
+    pub fn foundry_tool_search_supported(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        model_source_units: Option<&[u16]>,
+    ) -> Option<bool> {
+        let fallback_units;
+        let model_units = match model_source_units {
+            Some(units) => units,
+            None => {
+                fallback_units = model.encode_utf16().collect::<Vec<_>>();
+                &fallback_units
+            }
+        };
+        let key = self.foundry_deployment_key(model, profile, model_units)?;
+        let capabilities = self
+            .foundry_capabilities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let unsupported = capabilities.get(&key);
+        Some(!unsupported.is_some_and(|observed| {
+            observed.contains("tool_search_server") || observed.contains("tool_search")
+        }))
+    }
+
+    fn foundry_deployment_key(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        model_source_units: &[u16],
+    ) -> Option<FoundryDeploymentKey> {
+        if self.client.protocol_for_model(model, profile).ok()?
+            != crate::ProtocolFamily::FoundryClaude
+        {
+            return None;
+        }
+        let route = self.client.resolve_media_route(model, profile).ok()?.main;
+        if route.provider_id != crate::ProviderId::FoundryClaude {
+            return None;
+        }
+        let selected_profile = self
+            .client
+            .search_profile(model, Some(&route.profile_name))?;
+        Some(FoundryDeploymentKey {
+            endpoint: native_foundry_deployment_endpoint(&selected_profile.base_url),
+            model: native_foundry_model_key(model_source_units),
+        })
+    }
+
+    fn strip_cached_foundry_tool_features(
+        &self,
+        request: &mut LlmRequest,
+        model_source_units: &[u16],
+    ) -> bool {
+        let Some(key) = self.foundry_deployment_key(
+            &request.input.model,
+            request.profile.as_deref(),
+            model_source_units,
+        ) else {
+            return false;
+        };
+        let unsupported = self
+            .foundry_capabilities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        let Some(unsupported) = unsupported else {
+            return false;
+        };
+        let mut changed = false;
+        let search_unsupported =
+            unsupported.contains("tool_search_server") || unsupported.contains("tool_search");
+        if search_unsupported {
+            let mut retained = Vec::with_capacity(request.input.tools.len());
+            for mut tool in request.input.tools.drain(..) {
+                if tool.defer_loading {
+                    if native_deferred_tool_placeholder_matches(&tool) {
+                        changed = true;
+                        continue;
+                    }
+                    tool.defer_loading = false;
+                    changed = true;
+                }
+                retained.push(tool);
+            }
+            request.input.tools = retained;
+        }
+        if unsupported.contains("structured_outputs") {
+            for tool in &mut request.input.tools {
+                if tool.strict {
+                    tool.strict = false;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    fn record_foundry_capability_observation(
+        &self,
+        model: &str,
+        model_source_units: &[u16],
+        profile_name: &str,
+        protocol: crate::ProtocolFamily,
+        provider_id: &crate::ProviderId,
+        status: u16,
+        body: &lingxi_llm_client::protocol::JsonPayload,
+        provider_message: Option<&str>,
+    ) -> Option<Vec<String>> {
+        if protocol != crate::ProtocolFamily::FoundryClaude
+            || provider_id != &crate::ProviderId::FoundryClaude
+            || status != 400
+        {
+            return None;
+        }
+        let Some(key) = self.foundry_deployment_key(model, Some(profile_name), model_source_units)
+        else {
+            return None;
+        };
+        // Native UNn first reads `error.error.message`, then falls back to the
+        // provider error's message. The raw SDK body maps to the first shape;
+        // `/message` is the source-body counterpart of the fallback.
+        let message = body
+            .string_at("/error/message")
+            .or_else(|| provider_message.map(str::to_owned))?;
+        let features = foundry_unsupported_feature_names(&message)?;
+        self.foundry_capabilities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(key)
+            .or_default()
+            .extend(features.iter().cloned());
+        Some(features)
     }
 
     /// Native `hQ` decision for placing a model-facing system attachment
@@ -2047,7 +2440,7 @@ impl ApiService {
             prompt_cache_overage: prompt_cache_overage.clone(),
         });
         Self {
-            fast_policy: Arc::new(crate::model::fast_admission::Policy::default),
+            fast_policy: Arc::new(|| Ok(crate::model::fast_admission::Policy::default())),
             fast_availability,
             account_change_observer: account_change_observer.clone(),
             account_change_observer_keepalive: vec![account_change_observer],
@@ -2098,6 +2491,7 @@ impl ApiService {
             near_limit_wrap_up_window_key: Mutex::new(None),
             aws_auth: None,
             last_rate_limit_record_ts_ms: Mutex::new(None),
+            foundry_capabilities: Mutex::new(Default::default()),
             stream_idle_timeout_override: None,
             stream_first_byte_timeout_override: None,
             responses_ws_session: tokio::sync::Mutex::new(ResponsesSession::new()),
@@ -2253,11 +2647,13 @@ impl ApiService {
     /// Install the host's admitted settings source. It is sampled before each
     /// physical preparation, so edits and route fallback use current caps.
     /// An empty result clears caps and never triggers ambient settings loading.
-    #[must_use]
-    pub fn with_effort_settings_source(mut self, source: EffortSettingsSource) -> Self {
-        self.inherited_effort_settings = Some(source());
+    pub fn with_effort_settings_source(
+        mut self,
+        source: EffortSettingsSource,
+    ) -> Result<Self, lingxi_core::settings::SettingsError> {
+        self.inherited_effort_settings = Some(source()?);
         self.effort_settings_source = Some(source);
-        self
+        Ok(self)
     }
 
     /// Install the host's merged current main/subagent cache-TTL settings.
@@ -2295,7 +2691,7 @@ impl ApiService {
             return Ok(false);
         }
         let account = self.client.fast_account_identity(model, profile)?;
-        let policy = (self.fast_policy)();
+        let policy = (self.fast_policy)()?;
         let (org, oauth) = self.fast_availability.observed(&account.profile, &policy);
         let inputs = policy.inputs(&account, org, oauth, !self.interactive_session_for_policy());
         Ok(lingxi_core::host::fast_mode::decline(&inputs).is_none())
@@ -2343,7 +2739,7 @@ impl ApiService {
         profile: Option<&str>,
     ) -> Result<(), LlmError> {
         let identity = self.client.fast_account_identity(model, profile)?;
-        let policy = (self.fast_policy)();
+        let policy = (self.fast_policy)()?;
         if identity.first_party
             && !policy.no_user_account
             && !crate::structured_output::bool_environment(branding::DISABLE_FAST_MODE_ENV)
@@ -2393,11 +2789,11 @@ impl ApiService {
         let mut request = LlmRequest::new(model);
         request.profile = profile.map(str::to_owned);
         request.execution.resolve_native_effort = true;
-        self.refresh_effort_settings(&mut request);
+        self.refresh_effort_settings(&mut request)?;
         self.client.effort_command_snapshot(&request)
     }
 
-    fn refresh_effort_settings(&self, request: &mut LlmRequest) {
+    fn refresh_effort_settings(&self, request: &mut LlmRequest) -> Result<(), LlmError> {
         request
             .execution
             .inherited_effort_settings
@@ -2412,8 +2808,9 @@ impl ApiService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(source) = &self.effort_settings_source {
-            request.execution.effort_settings = Some(source());
+            request.execution.effort_settings = Some(source()?);
         }
+        Ok(())
     }
 
     /// Set the session thinking configuration. Builder-style; the default is
@@ -3075,11 +3472,12 @@ impl ApiService {
 
     fn enforce_fast_route(&self, prepared: &mut crate::PreparedLlmCall) -> Result<(), LlmError> {
         let route = &prepared.route.resolved_route;
-        let admitted = self
+        let admitted = match self
             .client
             .fast_account_identity(&route.request_model, Some(&route.profile_name))
-            .is_ok_and(|account| {
-                let policy = (self.fast_policy)();
+        {
+            Ok(account) => {
+                let policy = (self.fast_policy)()?;
                 let (org, oauth) = prepared.fast_account_binding.map_or_else(
                     || self.fast_availability.observed(&account.profile, &policy),
                     |binding| {
@@ -3093,7 +3491,9 @@ impl ApiService {
                 inputs.disabled = false;
                 inputs.model_fast = prepared.fast_mode_allowed;
                 lingxi_core::host::fast_mode::decline(&inputs).is_none()
-            });
+            }
+            Err(_) => false,
+        };
         let allowed = Self::direct_anthropic_api_route(prepared)
             && prepared.fast_mode_allowed
             && admitted
@@ -3579,6 +3979,85 @@ impl ApiService {
         true
     }
 
+    fn remove_context_1m_beta(prepared: &mut crate::PreparedLlmCall) {
+        let Some((name, value)) = prepared
+            .provider_request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+            .map(|(name, value)| (name.clone(), value.clone()))
+        else {
+            return;
+        };
+        let kept = value
+            .split(',')
+            .map(str::trim)
+            .filter(|beta| *beta != crate::model::betas::CONTEXT_1M)
+            .collect::<Vec<_>>();
+        if kept.is_empty() {
+            prepared.provider_request.headers.remove(&name);
+        } else {
+            prepared
+                .provider_request
+                .headers
+                .insert(name, kept.join(","));
+        }
+    }
+
+    fn captured_request_credential(
+        request: &LlmRequest,
+        profile: &str,
+    ) -> Option<crate::Credential> {
+        let credentials = request.execution.request_credentials.as_ref()?;
+        let snapshots = credentials
+            .snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshots.get(profile)?.credential.get()?.clone()
+    }
+
+    fn replace_request_credential(
+        request: &mut LlmRequest,
+        profile: &str,
+        credential: crate::Credential,
+    ) {
+        let credentials = request
+            .execution
+            .request_credentials
+            .get_or_insert_with(crate::RequestCredentials::default);
+        let snapshot = Arc::new(crate::execution::RequestCredentialSnapshot {
+            profile: profile.to_owned(),
+            credential: tokio::sync::OnceCell::new(),
+        });
+        snapshot
+            .credential
+            .set(Some(credential))
+            .expect("new request credential snapshot is empty");
+        credentials
+            .snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(profile.to_owned(), snapshot);
+    }
+
+    fn native_context_1m_refusal(
+        status: u16,
+        body: &lingxi_llm_client::protocol::JsonPayload,
+    ) -> bool {
+        if status != 400 {
+            return false;
+        }
+        let Some(message) = body
+            .string_at("/error/message")
+            .or_else(|| body.string_at("/message"))
+        else {
+            return false;
+        };
+        message.contains(crate::model::betas::CONTEXT_1M)
+            || message.contains("long context beta")
+            || message.to_lowercase().contains("invalid beta flag")
+    }
+
     fn apply_refusal_headers(prepared: &mut crate::PreparedLlmCall) {
         let Some(context) = &prepared.refusal_fallback_context else {
             return;
@@ -3896,6 +4375,20 @@ impl ApiService {
     /// `d6r()` requires the configured base to be unset or to parse to host
     /// `api.anthropic.com` (`T1e`; an unparseable URL is false). A first-party
     /// route pointed at an enterprise gateway must get NO header.
+    fn native_first_party_endpoint(prepared: &crate::PreparedLlmCall) -> bool {
+        if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty {
+            return false;
+        }
+        // Native compares URL.host, including non-default ports. `url::Url`
+        // normalizes the default port, while a custom port stays explicit.
+        url::Url::parse(&prepared.provider_request.url).is_ok_and(|url| {
+            url.host_str().is_some_and(|host| match url.port() {
+                Some(port) => format!("{host}:{port}") == FIRST_PARTY_API_HOST,
+                None => host == FIRST_PARTY_API_HOST,
+            })
+        })
+    }
+
     fn dispatch_first_party(prepared: &crate::PreparedLlmCall) -> bool {
         if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty {
             return false;
@@ -3906,16 +4399,22 @@ impl ApiService {
         {
             return true;
         }
-        // The port always resolves a concrete base (default
-        // `https://api.anthropic.com`), so the oracle's "unset ⇒ true" arm is
-        // the default host itself. `URL.host` keeps a non-default port, which
-        // is what `url::Url::port()` reports.
-        url::Url::parse(&prepared.provider_request.url).is_ok_and(|u| {
-            u.host_str().is_some_and(|h| match u.port() {
-                Some(p) => format!("{h}:{p}") == FIRST_PARTY_API_HOST,
-                None => h == FIRST_PARTY_API_HOST,
-            })
-        })
+        Self::native_first_party_endpoint(prepared)
+    }
+
+    /// Native `eRe(cc(model))` gate for the model-validation 1m repair. The
+    /// host-captured assumption wins when present; only a service without a
+    /// NativeSystemPrefix snapshot falls back to the process-env dispatch gate.
+    fn native_context_1m_resend_allowed(&self, prepared: &crate::PreparedLlmCall) -> bool {
+        if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty {
+            return true;
+        }
+        match self.native_system_prefix_snapshot() {
+            Some(prefix) => {
+                !prefix.assume_first_party_base_url && !Self::native_first_party_endpoint(prepared)
+            }
+            None => !Self::dispatch_first_party(prepared),
+        }
     }
 
     /// Native XMe/hYe: recovery uses v2p for the remainder of this query.
@@ -4231,6 +4730,7 @@ impl ApiService {
             LlmError::FileUploadOutcomeUnknown { .. } => "file_upload_outcome_unknown",
             LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. } => "media_delegation_unavailable",
+            LlmError::SettingsSource { .. } => "settings_source",
             LlmError::UnsupportedCapability { .. } => "unsupported_capability",
             LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
                 unreachable!("classification_source removes carrier wrappers")
@@ -4976,6 +5476,7 @@ impl ApiService {
             | LlmError::UnsupportedCapability { .. }
             | LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. }
+            | LlmError::SettingsSource { .. }
             | LlmError::RequestDispatchRejected { .. } => None,
             LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
                 unreachable!("classification_source removes carrier wrappers")
@@ -5017,8 +5518,15 @@ impl ApiService {
         retry_control: RetryControl,
         dispatch: DispatchHeaderState,
     ) -> Result<HistoryResponse, LlmError> {
-        self.drive_non_stream_seeded_with_chain(req, retry_control, 0, &[], dispatch)
-            .await
+        self.drive_non_stream_seeded_with_chain(
+            req,
+            retry_control,
+            0,
+            &[],
+            dispatch,
+            NonStreamDrivePolicy::Standard,
+        )
+        .await
     }
 
     /// Non-stream retry driver with a pre-seeded `consecutive_overloaded` counter
@@ -5043,6 +5551,7 @@ impl ApiService {
         initial_consecutive_overloaded: u8,
         chain: &'a [String],
         dispatch: DispatchHeaderState,
+        policy: NonStreamDrivePolicy,
     ) -> crate::BoxFuture<'a, Result<HistoryResponse, LlmError>> {
         Box::pin(self.drive_non_stream_inner(
             req,
@@ -5050,6 +5559,7 @@ impl ApiService {
             initial_consecutive_overloaded,
             chain,
             dispatch,
+            policy,
         ))
     }
 
@@ -5061,8 +5571,11 @@ impl ApiService {
         initial_consecutive_overloaded: u8,
         chain: &[String],
         mut dispatch: DispatchHeaderState,
+        policy: NonStreamDrivePolicy,
     ) -> Result<HistoryResponse, LlmError> {
-        self.capture_request_session_id(&mut req).await;
+        if policy == NonStreamDrivePolicy::Standard {
+            self.capture_request_session_id(&mut req).await;
+        }
         if req.execution.request_credentials.is_none()
             && self.native_api_system_route(&req.input.model, req.profile.as_deref())
         {
@@ -5070,7 +5583,9 @@ impl ApiService {
         }
         let mut safety = crate::safety_observation::SafetyObservation::capture(&mut req);
         dispatch.context_hint_beta = req.execution.context_hint_beta;
-        if req.execution.thinking_recovery_scope.is_none() {
+        if policy == NonStreamDrivePolicy::Standard
+            && req.execution.thinking_recovery_scope.is_none()
+        {
             req.execution.thinking_recovery_scope = Some(self.thinking_recovery_scope());
         }
 
@@ -5118,7 +5633,10 @@ impl ApiService {
             rate_limit_terminal: rate_limit_cannot_clear(req.profile.as_deref(), &req.input.model),
             ..RetryState::default()
         };
-        let retry_scope = ModelCallRetryScope::current_or_new();
+        let retry_scope = match policy {
+            NonStreamDrivePolicy::Standard => ModelCallRetryScope::current_or_new(),
+            NonStreamDrivePolicy::ModelValidation => ModelCallRetryScope::default(),
+        };
         retry_control = retry_scope.configure(&retry_control, &mut state);
         // thinking_budget for telemetry: Adaptive → 0, Enabled{b} → b.
         let thinking_budget: u32 = reasoning_budget(req.input.thinking.as_ref());
@@ -5132,17 +5650,32 @@ impl ApiService {
         // Native `oSe` is scoped to this logical query and survives every
         // prepare/retry within it; a later query gets a fresh one-shot repair.
         let mut server_fallback_beta_repair_attempted = false;
-        let timeout = crate::model::request_timeout::non_stream_timeout()?;
+        let mut model_validation_context_1m_retried = false;
+        let mut model_validation_oauth_refreshed = false;
+        let mut suppress_context_1m_for_retry = false;
+        let timeout = match policy {
+            NonStreamDrivePolicy::Standard => {
+                Some(crate::model::request_timeout::non_stream_timeout()?)
+            }
+            NonStreamDrivePolicy::ModelValidation => None,
+        };
         let mut timeout_retries = crate::model::request_timeout::TimeoutRetryCount::default();
         loop {
+            let model_source_units = native_request_model_identity(&req);
+            self.strip_cached_foundry_tool_features(&mut req, &model_source_units);
             // Strip rejected thinking before encode so Gemini / OpenAI-compat
             // thinking models can prepare. DeepSeek / Kimi skip this.
             // prepare → inject headers → execute.
             let preparing = tokio::time::Instant::now();
-            let prepared = crate::execution::non_stream_bound(timeout, async {
-                self.refresh_effort_settings(&mut req);
-                req.execution.resolve_native_effort = true;
+            let prepare_future = async {
+                if policy == NonStreamDrivePolicy::Standard {
+                    self.refresh_effort_settings(&mut req)?;
+                    req.execution.resolve_native_effort = true;
+                }
                 let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
+                if suppress_context_1m_for_retry {
+                    Self::remove_context_1m_beta(&mut prepared);
+                }
                 self.capture_fast_account(&mut prepared).await?;
                 prepared.thinking_display_probe = retry_scope.display_probe();
                 Self::log_deepseek_prepared_request(&req.input.model, &prepared, false);
@@ -5150,8 +5683,11 @@ impl ApiService {
                     self.inject_headers(&mut prepared, dispatch)?;
                 self.client.seal_prepared(&mut prepared).await?;
                 Ok((prepared, dispatch_attempt, server_fallback_parameter_added))
-            })
-            .await;
+            };
+            let prepared = match timeout {
+                Some(timeout) => crate::execution::non_stream_bound(timeout, prepare_future).await,
+                None => prepare_future.await,
+            };
             let (mut prepared, dispatch_attempt, server_fallback_parameter_added) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -5168,12 +5704,14 @@ impl ApiService {
             };
             if !connections_captured {
                 connections_captured = true;
-                connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
-                failover = prepared.route.resolved_route.failover;
+                if policy == NonStreamDrivePolicy::Standard {
+                    connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
+                    failover = prepared.route.resolved_route.failover;
+                }
             }
             // Pause the provider deadline while waiting for host admission.
             let prepare_elapsed = preparing.elapsed();
-            let remaining = timeout.saturating_sub(prepare_elapsed);
+            let remaining = timeout.map(|timeout| timeout.saturating_sub(prepare_elapsed));
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
             safety.inherit_if_missing(attempt.model_safety_observer());
             let dispatch_started = tokio::time::Instant::now();
@@ -5200,7 +5738,7 @@ impl ApiService {
                         },
                     )
                 });
-            let resp_result = crate::execution::non_stream_bound(remaining, async {
+            let dispatch_future = async {
                 if req.execution.computer_submission.is_some()
                     && admission
                         .as_ref()
@@ -5243,8 +5781,13 @@ impl ApiService {
                     .await
                     .map_err(crate::upstream::error)?;
                 received.collect().await.map_err(crate::upstream::error)
-            })
-            .await;
+            };
+            let resp_result = match remaining {
+                Some(remaining) => {
+                    crate::execution::non_stream_bound(remaining, dispatch_future).await
+                }
+                None => dispatch_future.await,
+            };
 
             if dispatch_callback_rejected {
                 if let Some(submission) = req.execution.computer_submission.as_ref() {
@@ -5262,12 +5805,14 @@ impl ApiService {
                             prior_dispatch: any_dispatched,
                         });
                     }
-                    let timeout_limit_exhausted = timeout_retries.exhausted_from_environment(
-                        req.execution.failed_stream_outlasted_timeout,
-                        &transport_err,
-                        timeout,
-                        prepare_elapsed.saturating_add(dispatch_started.elapsed()),
-                    );
+                    let timeout_limit_exhausted = timeout.is_some_and(|timeout| {
+                        timeout_retries.exhausted_from_environment(
+                            req.execution.failed_stream_outlasted_timeout,
+                            &transport_err,
+                            timeout,
+                            prepare_elapsed.saturating_add(dispatch_started.elapsed()),
+                        )
+                    });
                     attempt.finish().await?;
                     if timeout_limit_exhausted {
                         telemetry::emit_failed(
@@ -5304,6 +5849,26 @@ impl ApiService {
                         return Err(transport_err);
                     }
                     if transport_err.is_proxy_tunnel_auth_rejection() {
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.input.model,
+                            &request_id,
+                            Self::error_kind(&transport_err),
+                            Self::status_of(&transport_err),
+                        )
+                        .await;
+                        return Err(transport_err);
+                    }
+                    if policy == NonStreamDrivePolicy::ModelValidation {
+                        if let Some(fallback) = Self::note_dispatch_header_failure(
+                            &mut dispatch,
+                            &dispatch_attempt,
+                            &transport_err,
+                            None,
+                        ) {
+                            self.report_dispatch_fallback(&req, fallback, None).await;
+                            continue;
+                        }
                         telemetry::emit_failed(
                             &self.analytics,
                             &req.input.model,
@@ -5578,6 +6143,95 @@ impl ApiService {
                                 .await;
                                 return Err(decode_err);
                             }
+                            if policy == NonStreamDrivePolicy::ModelValidation
+                                && !model_validation_context_1m_retried
+                                && Self::request_beta_tokens(&prepared)
+                                    .iter()
+                                    .any(|beta| beta == crate::model::betas::CONTEXT_1M)
+                                && self.native_context_1m_resend_allowed(&prepared)
+                                && Self::native_context_1m_refusal(
+                                    provider_resp.status,
+                                    &provider_resp.body_json,
+                                )
+                            {
+                                model_validation_context_1m_retried = true;
+                                suppress_context_1m_for_retry = true;
+                                continue;
+                            }
+                            if policy == NonStreamDrivePolicy::ModelValidation
+                                && !model_validation_oauth_refreshed
+                                && (provider_resp.status == 401
+                                    || native_v_oauth_revocation(
+                                        provider_resp.status,
+                                        decode_err.provider_message(),
+                                    ))
+                            {
+                                let profile = &prepared.route.resolved_route.profile_name;
+                                if let Some(rejected) =
+                                    Self::captured_request_credential(&req, profile)
+                                {
+                                    if let Some(refreshed) = self
+                                        .client
+                                        .refresh_rejected_anthropic_oauth(
+                                            &req.input.model,
+                                            Some(profile),
+                                            &rejected,
+                                        )
+                                        .await?
+                                    {
+                                        model_validation_oauth_refreshed = true;
+                                        Self::replace_request_credential(
+                                            &mut req, profile, refreshed,
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            if policy == NonStreamDrivePolicy::ModelValidation {
+                                let model_source_units = native_request_model_identity(&req);
+                                let foundry_observation = self
+                                    .record_foundry_capability_observation(
+                                        &req.input.model,
+                                        &model_source_units,
+                                        &prepared.route.resolved_route.profile_name,
+                                        prepared.route.protocol,
+                                        &prepared.route.resolved_route.provider_id,
+                                        provider_resp.status,
+                                        &provider_resp.body_json,
+                                        decode_err.provider_message(),
+                                    );
+                                if foundry_observation.is_some()
+                                    && self.strip_cached_foundry_tool_features(
+                                        &mut req,
+                                        &model_source_units,
+                                    )
+                                {
+                                    continue;
+                                }
+                                if let Some(fallback) = Self::note_dispatch_header_failure(
+                                    &mut dispatch,
+                                    &dispatch_attempt,
+                                    &decode_err,
+                                    Some((provider_resp.status, x_should_retry_false)),
+                                ) {
+                                    self.report_dispatch_fallback(
+                                        &req,
+                                        fallback,
+                                        provider_resp.request_id.as_deref(),
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                                telemetry::emit_failed(
+                                    &self.analytics,
+                                    &req.input.model,
+                                    &request_id,
+                                    Self::error_kind(&decode_err),
+                                    Self::status_of(&decode_err),
+                                )
+                                .await;
+                                return Err(decode_err);
+                            }
                             if Self::repair_server_fallback_beta_rejection(
                                 &prepared,
                                 provider_resp.status,
@@ -5624,6 +6278,25 @@ impl ApiService {
                                     .await;
                                     continue;
                                 }
+                            }
+                            let model_source_units = native_request_model_identity(&req);
+                            let foundry_observation = self.record_foundry_capability_observation(
+                                &req.input.model,
+                                &model_source_units,
+                                &prepared.route.resolved_route.profile_name,
+                                prepared.route.protocol,
+                                &prepared.route.resolved_route.provider_id,
+                                provider_resp.status,
+                                &provider_resp.body_json,
+                                decode_err.provider_message(),
+                            );
+                            if foundry_observation.is_some()
+                                && self.strip_cached_foundry_tool_features(
+                                    &mut req,
+                                    &model_source_units,
+                                )
+                            {
+                                continue;
                             }
                             // Capacity acceptance precedes retry-decline headers in native eWo.
                             if crate::model::retry_scope::http_retry_decline_is_terminal(
@@ -5951,6 +6624,7 @@ impl ApiService {
             retry.initial_consecutive_overloaded.unwrap_or(0),
             &chain,
             dispatch,
+            NonStreamDrivePolicy::Standard,
         )
         .await
     }
@@ -6454,7 +7128,7 @@ impl ApiService {
             skip_global_cache_for_system_prompt,
             PromptCacheQuerySource::Unspecified,
         )?;
-        self.refresh_effort_settings(&mut req);
+        self.refresh_effort_settings(&mut req)?;
         req.execution.resolve_native_effort = true;
         let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
         // Responses-WebSocket prewarm only — never a first-party Anthropic
@@ -6585,7 +7259,7 @@ impl ApiService {
         loop {
             // Prepare so we can inject headers, then call execute_stream via
             // a thin wrapper transport that uses our already-modified request.
-            self.refresh_effort_settings(&mut req);
+            self.refresh_effort_settings(&mut req)?;
             req.execution.resolve_native_effort = true;
             let mut prepared = match self.client.prepare_on(&req, self.transport.clone()).await {
                 Ok(p) => p,
@@ -7015,6 +7689,23 @@ impl ApiService {
                                 .await;
                                 continue;
                             }
+                        }
+                        let model_source_units = native_request_model_identity(&req);
+                        let foundry_observation = self.record_foundry_capability_observation(
+                            &req.input.model,
+                            &model_source_units,
+                            &prepared.route.resolved_route.profile_name,
+                            prepared.route.protocol,
+                            &prepared.route.resolved_route.provider_id,
+                            response_status,
+                            &body_json,
+                            decode_err.provider_message(),
+                        );
+                        if foundry_observation.is_some()
+                            && self
+                                .strip_cached_foundry_tool_features(&mut req, &model_source_units)
+                        {
+                            continue;
                         }
                         if !allow_replay
                             || crate::model::retry_scope::http_retry_decline_is_terminal(
@@ -8211,7 +8902,7 @@ impl ApiService {
             admitted.execution.resolve_native_effort = true;
             admitted.execution.native_anthropic_base_url_fingerprint =
                 self.native_anthropic_endpoint_fingerprint(model, profile);
-            self.refresh_effort_settings(&mut admitted);
+            self.refresh_effort_settings(&mut admitted)?;
             if let Ok(effort) = MOD_REQUEST_EFFORT.try_with(Clone::clone) {
                 admitted.set_effort(Some(effort))?;
             }
@@ -8291,15 +8982,18 @@ impl ApiService {
         }
 
         use lingxi_llm_client::providers::anthropic::system_prompt as prompt_cache;
+        let host_cache_ttl_settings = self
+            .prompt_cache_ttl_settings_source
+            .as_ref()
+            .map(|source| source())
+            .transpose()?
+            .unwrap_or_default();
         let cache_policy = prompt_cache::CachePolicy::from_process(
             lingxi_core::host::compliance_taints::is_tainted("hipaa"),
             agent_prompt_cache_ttl_override(),
             skip_global_cache_for_system_prompt,
             query_source,
-            self.prompt_cache_ttl_settings_source
-                .as_ref()
-                .map(|source| sdk_prompt_cache_ttl_settings(source()))
-                .unwrap_or_default(),
+            sdk_prompt_cache_ttl_settings(host_cache_ttl_settings),
             self.prompt_cache_ttl_inputs(),
         );
         let enable_caching = prompt_cache::prompt_caching_enabled(model, family);
@@ -8513,6 +9207,20 @@ impl ApiService {
             .map_err(|error| LlmError::InvalidRequest {
                 message: format!("context hint could not be encoded as source: {error}"),
             })?;
+        req.input.model_source = opts
+            .model_source
+            .as_ref()
+            .map(|source| {
+                let units = source
+                    .string_units("")
+                    .ok_or_else(|| LlmError::InvalidRequest {
+                        message: "model source must be a JSON string projection".into(),
+                    })?;
+                Ok::<_, LlmError>(
+                    lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(&units),
+                )
+            })
+            .transpose()?;
         req.execution.context_hint_beta = opts.context_hint_beta;
         req.execution.model_attempt = opts.model_attempt;
         req.execution
@@ -8579,6 +9287,7 @@ impl ApiService {
             lingxi_core::types::MessageId,
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
+        model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req = self.build_main_request(
             model,
@@ -8594,6 +9303,19 @@ impl ApiService {
             &typed_attachment_ids,
             &task_deliveries,
         )?;
+        req.input.model_source = model_source
+            .as_ref()
+            .map(|source| {
+                let units = source
+                    .string_units("")
+                    .ok_or_else(|| LlmError::InvalidRequest {
+                        message: "model source must be a JSON string projection".into(),
+                    })?;
+                Ok::<_, LlmError>(
+                    lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(&units),
+                )
+            })
+            .transpose()?;
         req.set_effort(effort)?;
         req.set_speed(speed)?;
         req.execution.query_source = query_source.map(str::to_owned);

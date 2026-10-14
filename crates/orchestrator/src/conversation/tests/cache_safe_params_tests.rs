@@ -41,7 +41,8 @@ async fn request_cache_snapshot_uses_physical_history_and_extracts_inline_contex
         &physical_request,
         Some(&inline_context),
     )
-    .await;
+    .await
+    .unwrap();
 
     let cached = slot.get_last().await.expect("request snapshot saved");
     assert_eq!(

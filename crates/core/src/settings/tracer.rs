@@ -168,7 +168,9 @@ mod tests {
             vec![Source::Project]
         );
         assert_eq!(
-            crate::settings::merger::merge(user, project).disable_bundled_skills,
+            crate::settings::merger::merge(user, project)
+                .expect("test settings layers remain mergeable")
+                .disable_bundled_skills,
             Some(false)
         );
     }
@@ -297,7 +299,8 @@ mod tests {
             vec![Source::User, Source::Project]
         );
 
-        let merged = crate::settings::merger::merge(user, project);
+        let merged = crate::settings::merger::merge(user, project)
+            .expect("test settings layers remain mergeable");
         let overrides = merged.skill_overrides.expect("merged skill overrides");
         let units = |name: &str| name.encode_utf16().collect::<Vec<_>>();
         assert_eq!(

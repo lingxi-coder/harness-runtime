@@ -321,7 +321,9 @@ pub fn teammate_message_envelope(from: &str, text: &Utf16JsonProjection) -> Utf1
 #[async_trait]
 pub trait TeammateSystemPromptRenderer: Send + Sync {
     /// Render the default (not main-thread overridden) system prompt.
-    async fn render_default_system_prompt(&self) -> Utf16JsonProjection;
+    async fn render_default_system_prompt(
+        &self,
+    ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError>;
 }
 
 fn render_teammate_system_prompt(
@@ -1295,7 +1297,17 @@ impl InProcessTeammateHandler {
         // A standalone/test handler without a renderer still receives the
         // teammate addendum; production always wires the live renderer.
         let base_system_prompt = match self.system_prompt_renderer.get() {
-            Some(renderer) => renderer.render_default_system_prompt().await,
+            Some(renderer) => renderer
+                .render_default_system_prompt()
+                .await
+                .map_err(|error| {
+                    TaskError::Internal(
+                        error
+                            .diagnostic_projection()
+                            .to_json_string()
+                            .unwrap_or_else(|_| "settings operation failed".to_owned()),
+                    )
+                })?,
             None => Utf16JsonProjection::from(""),
         };
         let rendered_system_prompt =
@@ -1307,6 +1319,8 @@ impl InProcessTeammateHandler {
             handback_restore_start: None,
             task_registry: self.status_sink.task_registry(),
             agent_id,
+            cancellation_token: lingxi_core::host::CancellationToken::new(),
+            preload_lifecycle: Arc::new(agent::context::AgentPreloadLifecycle::new()),
             parent_agent_id: None,
             agent_spawn_provenance: Default::default(),
             // Coordinator-managed teammates are launched by the team service,

@@ -1,10 +1,10 @@
-//! Positional variant locks for the current Client protocol 24.0.0 baseline.
+//! Positional variant locks for the current Client protocol 25.0.0 baseline.
 //!
 //! UniFFI encodes each enum variant by declaration index, so inserting, removing,
 //! or reordering a variant can change the mobile ABI even when JSON tags remain
 //! stable. The arrays below are an explicit re-cut of the complete command and
 //! event order in the current protocol macro invocations, reviewed against
-//! `CLIENT_PROTOCOL_VERSION = 24.0.0` and `snapshots/blessed_major.txt = 24`.
+//! `CLIENT_PROTOCOL_VERSION = 25.0.0` and `snapshots/blessed_major.txt = 24`.
 //! They are not generated from a snapshot update. A later append remains
 //! compatible with this frozen prefix; any ordinal change requires a deliberate
 //! major-version re-cut.
@@ -12,7 +12,7 @@
 const COMMANDS_SRC: &str = include_str!("../src/protocol/commands.rs");
 const EVENTS_SRC: &str = include_str!("../src/protocol/events.rs");
 
-const CLIENT_COMMAND_ORDINALS_AT_24_0_0: &[&str] = &[
+const CLIENT_COMMAND_ORDINALS_AT_25_0_0: &[&str] = &[
     "StartRealtimeAudio",
     "RealtimeAudioInput",
     "StopRealtimeAudio",
@@ -86,7 +86,7 @@ const CLIENT_COMMAND_ORDINALS_AT_24_0_0: &[&str] = &[
     "UiClientOperation",
 ];
 
-const CLIENT_EVENT_ORDINALS_AT_24_0_0: &[&str] = &[
+const CLIENT_EVENT_ORDINALS_AT_25_0_0: &[&str] = &[
     "RealtimeAudioEvent",
     "AudioSessionContext",
     "Error",
@@ -281,7 +281,7 @@ fn assert_frozen_prefix(enum_name: &str, source_path: &str, actual: &[String], f
     assert!(
         actual.len() >= frozen.len(),
         "`{enum_name}` ({source_path}) now has {} variants, fewer than the {} frozen at the \
-         24.0.0 bless. A REMOVED variant shifts every later ordinal on the positional UniFFI \
+         25.0.0 bless. A REMOVED variant shifts every later ordinal on the positional UniFFI \
          mobile bindings and is a breaking change: it needs a MAJOR CLIENT_PROTOCOL_VERSION \
          bump and a re-bless of snapshots/blessed_major.txt.\nCurrent order: {actual:?}",
         actual.len(),
@@ -294,12 +294,12 @@ fn assert_frozen_prefix(enum_name: &str, source_path: &str, actual: &[String], f
             found,
             *expected,
             "`{enum_name}` ordinal {ordinal} (UniFFI ordinal {uniffi}) is `{found}`, but \
-             `{expected}` was frozen there at the 24.0.0 bless.\n\
+             `{expected}` was frozen there at the 25.0.0 bless.\n\
              \n\
              UniFFI encodes a variant as its DECLARATION INDEX, so a variant inserted, removed \
              or reordered ahead of ordinal {ordinal} shifts this and every later variant. An \
              old mobile client and a new host would both still advertise \
-             CLIENT_PROTOCOL_VERSION 24.0.0, the handshake would accept, and `{expected}` would \
+             CLIENT_PROTOCOL_VERSION 25.0.0, the handshake would accept, and `{expected}` would \
              decode as `{found}`.\n\
              \n\
              FIX: move the new variant to the END of `{enum_name}` in {source_path}. Appending \
@@ -314,24 +314,24 @@ fn assert_frozen_prefix(enum_name: &str, source_path: &str, actual: &[String], f
 }
 
 #[test]
-fn client_command_keeps_every_24_0_0_variant_at_its_ordinal() {
+fn client_command_keeps_every_25_0_0_variant_at_its_ordinal() {
     let actual = variants_in_declaration_order(COMMANDS_SRC, "ClientCommand");
     assert_frozen_prefix(
         "ClientCommand",
         "client/src/protocol/commands.rs",
         &actual,
-        CLIENT_COMMAND_ORDINALS_AT_24_0_0,
+        CLIENT_COMMAND_ORDINALS_AT_25_0_0,
     );
 }
 
 #[test]
-fn client_event_keeps_every_24_0_0_variant_at_its_ordinal() {
+fn client_event_keeps_every_25_0_0_variant_at_its_ordinal() {
     let actual = variants_in_declaration_order(EVENTS_SRC, "ClientEvent");
     assert_frozen_prefix(
         "ClientEvent",
         "client/src/protocol/events.rs",
         &actual,
-        CLIENT_EVENT_ORDINALS_AT_24_0_0,
+        CLIENT_EVENT_ORDINALS_AT_25_0_0,
     );
 }
 
@@ -344,12 +344,12 @@ fn the_parser_reads_the_whole_enum_body() {
     let events = variants_in_declaration_order(EVENTS_SRC, "ClientEvent");
 
     assert!(
-        commands.len() >= CLIENT_COMMAND_ORDINALS_AT_24_0_0.len(),
+        commands.len() >= CLIENT_COMMAND_ORDINALS_AT_25_0_0.len(),
         "parsed only {} ClientCommand variants",
         commands.len()
     );
     assert!(
-        events.len() >= CLIENT_EVENT_ORDINALS_AT_24_0_0.len(),
+        events.len() >= CLIENT_EVENT_ORDINALS_AT_25_0_0.len(),
         "parsed only {} ClientEvent variants",
         events.len()
     );

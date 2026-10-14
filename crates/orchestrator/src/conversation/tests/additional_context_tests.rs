@@ -560,6 +560,274 @@ async fn mod_turn_step_rewrites_live_model_stream_and_persisted_text() {
     assert_eq!(result["stopReason"], "end_turn");
 }
 
+#[derive(Debug, Clone)]
+struct CapturedConfiguredModelStream {
+    model: String,
+    profile: Option<String>,
+    model_source: Option<Utf16JsonProjection>,
+}
+
+struct ConfiguredModelSourceStreamingApi {
+    events: tokio::sync::Mutex<Option<Vec<llm_runtime::HistoryEvent>>>,
+    calls: tokio::sync::Mutex<Vec<CapturedConfiguredModelStream>>,
+}
+
+impl ConfiguredModelSourceStreamingApi {
+    fn with_events(events: Vec<llm_runtime::HistoryEvent>) -> Self {
+        Self {
+            events: tokio::sync::Mutex::new(Some(events)),
+            calls: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::conversation::StreamingApiClient for ConfiguredModelSourceStreamingApi {
+    async fn stream(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<llm_runtime::ToolDeclaration>,
+        _query_source: &str,
+        _skip_global_cache_for_system_prompt: bool,
+        _request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        Err(llm_runtime::LlmError::ModelUnavailable)
+    }
+
+    async fn stream_with_effort_override(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<llm_runtime::ToolDeclaration>,
+        _effort: Option<&str>,
+        _tool_result_reminder_suffixes: Vec<
+            llm_runtime::convert::AnthropicToolResultReminderSuffix,
+        >,
+        _query_source: &str,
+        _skip_global_cache_for_system_prompt: bool,
+        _request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+        _request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
+        _native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+        _typed_attachment_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
+        _task_deliveries: std::collections::HashMap<
+            lingxi_core::types::MessageId,
+            lingxi_core::host::task_delivery::TaskDeliveryRequest,
+        >,
+        model_source: Option<Utf16JsonProjection>,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        self.calls.lock().await.push(CapturedConfiguredModelStream {
+            model: model.to_owned(),
+            profile: profile.map(str::to_owned),
+            model_source,
+        });
+        let events =
+            self.events
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| llm_runtime::LlmError::Transport {
+                    message: "configured model source test stream was opened more than once".into(),
+                })?;
+        use futures::StreamExt;
+        Ok(futures::stream::iter(events.into_iter().map(Ok::<_, llm_runtime::LlmError>)).boxed())
+    }
+}
+
+#[derive(Default)]
+struct DenyRewrittenModelReader {
+    checked: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl hooks::mods::ModSettingsReader for DenyRewrittenModelReader {
+    async fn read(
+        &self,
+        _input: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        Ok(Utf16JsonProjection::parse("{}").expect("empty reader result"))
+    }
+
+    async fn model_allowed(&self, model: &str) -> Result<Option<bool>, hooks::mods::ModError> {
+        self.checked.lock().unwrap().push(model.to_owned());
+        Ok(Some(false))
+    }
+}
+
+struct ManagedModelRouteApi;
+
+#[async_trait::async_trait]
+impl crate::OrchestratorApiClient for ManagedModelRouteApi {
+    async fn messages_create(
+        &self,
+        _request: crate::OrchestratorApiRequest,
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+        Err(llm_runtime::LlmError::ModelUnavailable)
+    }
+
+    fn resolve_media_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<llm_runtime::MediaRoute, llm_runtime::LlmError> {
+        let provider_id = llm_runtime::ProviderId::AnthropicFirstParty;
+        let profile_name = profile.unwrap_or("configured-profile").to_owned();
+        let pricing_model = llm_runtime::PricingModelRef {
+            pricing_provider_id: provider_id.clone(),
+            billing_model: model.to_owned(),
+            request_model: model.to_owned(),
+            display_model: model.to_owned(),
+        };
+        Ok(llm_runtime::MediaRoute {
+            main: llm_runtime::ResolvedRoute {
+                provider_id,
+                profile_name,
+                request_model: model.to_owned(),
+                display_model: model.to_owned(),
+                pricing_model,
+                capabilities: llm_runtime::Capabilities::default(),
+                connection_chain: Vec::new(),
+                failover: Default::default(),
+            },
+            vision_delegate: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn denied_turn_step_model_rewrite_streams_configured_source_on_original_route() {
+    use crate::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("denied-model-rewrite.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+          on('turn.step', async function* ($, event, next) {
+            if (event.index !== 0) throw new Error('unexpected turn.step index');
+            const below = next({ ...event, model: 'claude-opus-4-8' });
+            for await (const chunk of below) yield chunk;
+            return await below.result;
+          });
+        }"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "denied-model-rewrite",
+        dir.path(),
+        &module,
+        empty_mod_options(),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+
+    let mut configured_model_units = "claude-sonnet-4-6".encode_utf16().collect::<Vec<_>>();
+    configured_model_units.push(0xD800);
+    let configured_model_source = Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&configured_model_units),
+        configured_model_units.clone(),
+    )
+    .expect("configured model source keeps its exact UTF-16 units");
+    let policy = Arc::new(DenyRewrittenModelReader::default());
+    let streaming = Arc::new(ConfiguredModelSourceStreamingApi::with_events(vec![
+        message_start("msg_denied_model_rewrite", "claude-sonnet-4-6"),
+        content_block_start_text(0),
+        text_delta(0, "continued on the configured route"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]));
+    let config = OrchestratorConfig {
+        model: "claude-sonnet-4-6".into(),
+        ..OrchestratorConfig::default()
+    };
+    let mut orchestrator = ConversationOrchestrator::new_with_streaming(
+        config,
+        Arc::new(ManagedModelRouteApi),
+        streaming.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)))
+    .with_mod_settings_reader(policy.clone());
+    orchestrator.session.lock().await.model_profile = Some("configured-profile".into());
+    orchestrator = orchestrator
+        .with_main_model_selection(
+            Some(String::from_utf16_lossy(&configured_model_units)),
+            Some(configured_model_source.clone()),
+            lingxi_core::host::ModelProvenance::ManagedAdministratorDefault,
+            None,
+        )
+        .await;
+    let orchestrator = ConversationOrchestrator::into_shared(orchestrator);
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        orchestrator.run_turn_streaming("question"),
+    )
+    .await
+    .expect("the denied rewrite continues on the configured stream")
+    .unwrap();
+
+    assert_eq!(
+        *policy.checked.lock().unwrap(),
+        vec!["claude-opus-4-8"],
+        "the live settings reader must check the rewritten model before fallback"
+    );
+    let stream_calls = streaming.calls.lock().await;
+    assert_eq!(stream_calls.len(), 1);
+    let call = &stream_calls[0];
+    assert_eq!(call.model, "claude-sonnet-4-6");
+    assert_eq!(call.profile.as_deref(), Some("configured-profile"));
+    let sent_model_units = call
+        .model_source
+        .as_ref()
+        .and_then(|source| source.string_units(""));
+    assert_eq!(
+        sent_model_units.as_deref(),
+        Some(configured_model_units.as_slice()),
+        "the denied Opus rewrite must not replace the configured lone-surrogate source"
+    );
+    assert_ne!(call.model, "claude-opus-4-8");
+
+    let history = orchestrator.session.lock().await.history.clone();
+    assert!(history.iter().any(|message| matches!(
+        message,
+        ConversationMessage::Assistant { content, .. }
+            if content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text { text, .. }
+                    if text == "continued on the configured route"
+            ))
+    )));
+}
+
 #[tokio::test]
 async fn mod_turn_step_stream_keeps_synthetic_and_physical_assistant_records() {
     use crate::test_support_stream::{
@@ -2441,7 +2709,7 @@ async fn prompt_section_mod_rewrites_and_removes_named_system_sections() {
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)))
         .with_session_cwd(session_cwd.clone());
-    let prompt = orch.build_system_prompt().await;
+    let prompt = orch.build_system_prompt().await.unwrap();
     assert!(prompt.contains("MOD PRONOUNS 1"));
     assert!(prompt.contains("MOD BRIEF"));
     assert!(!prompt.contains("# Context management"));
@@ -2456,24 +2724,24 @@ async fn prompt_section_mod_rewrites_and_removes_named_system_sections() {
             "invalidated section was cached again"
         );
     }
-    let refreshed = orch.build_system_prompt().await;
+    let refreshed = orch.build_system_prompt().await.unwrap();
     assert!(refreshed.contains("MOD PRONOUNS 2"));
-    let cached = orch.build_system_prompt().await;
+    let cached = orch.build_system_prompt().await.unwrap();
     assert!(cached.contains("MOD PRONOUNS 2"));
     assert!(!cached.contains("MOD PRONOUNS 3"));
     session_cwd.swap(second_cwd.clone(), Vec::new());
-    let moved = orch.build_system_prompt().await;
+    let moved = orch.build_system_prompt().await.unwrap();
     assert!(moved.contains("MOD PRONOUNS 3"));
     assert!(moved.contains(&format!(
         "Primary working directory: {}",
         second_cwd.canonicalize().unwrap().display()
     )));
     orch.session.lock().await.model = "claude-opus-5".into();
-    let lean = orch.build_system_prompt().await;
+    let lean = orch.build_system_prompt().await.unwrap();
     assert!(lean.contains("MOD COMMUNICATION"));
     assert!(lean.contains("# Harness"));
     host.unload("section-mod").await.unwrap();
-    let unloaded = orch.build_system_prompt().await;
+    let unloaded = orch.build_system_prompt().await.unwrap();
     assert!(!unloaded.contains("MOD PRONOUNS"));
     assert!(!unloaded.contains("MOD BRIEF"));
     assert!(unloaded.contains("# Context management"));
@@ -2515,7 +2783,7 @@ async fn prompt_sections_resolve_concurrently_and_keep_slot_order() {
     registry.set_mod_host(host);
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-    let prompt = orch.build_system_prompt().await;
+    let prompt = orch.build_system_prompt().await.unwrap();
     let communication = prompt.find("CONCURRENT SECTIONS").expect("parallel hooks");
     let pronouns = prompt.find("PRONOUNS PROBE").expect("pronouns rewrite");
     assert!(communication < pronouns, "section output order changed");
@@ -2558,16 +2826,16 @@ async fn prompt_compose_mod_can_reorder_and_replace_system_sections() {
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
     orch.session.lock().await.model = "claude-opus-4-7".into();
-    let prompt = orch.build_system_prompt().await;
+    let prompt = orch.build_system_prompt().await.unwrap();
     assert!(prompt.contains("MOD COMPOSE POLICY"));
     assert!(!prompt.contains("# Context management"));
     assert!(prompt.ends_with("MOD COMPOSE POLICY"));
-    let provider_prompt = orch.provider_system_prompt().await.display_text();
+    let provider_prompt = orch.provider_system_prompt().await.unwrap().display_text();
     assert!(!provider_prompt
         .contains(lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY));
     assert_eq!(provider_prompt, prompt);
     orch.session.lock().await.model = "claude-opus-5".into();
-    let lean = orch.build_system_prompt().await;
+    let lean = orch.build_system_prompt().await.unwrap();
     assert!(lean.ends_with("MOD COMPOSE LEAN BASE"));
 }
 
@@ -2618,7 +2886,7 @@ async fn prompt_compose_scopes_reach_the_main_request_without_leaking_into_previ
     let marker = lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY;
     assert!(sent.starts_with("SHARED MOD TEXT\n\nSESSION MOD TEXT"));
     assert!(!sent.contains(marker));
-    let preview = orch.assemble_system_prompt_preview().await;
+    let preview = orch.assemble_system_prompt_preview().await.unwrap();
     assert!(!preview.contains(marker));
     assert!(preview.starts_with("SHARED MOD TEXT\n\nSESSION MOD TEXT"));
 }
@@ -2650,7 +2918,7 @@ async fn prompt_compose_next_can_recompute_sdk_sections() {
     registry.set_mod_host(host);
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-    let prompt = orch.build_system_prompt().await;
+    let prompt = orch.build_system_prompt().await.unwrap();
     assert!(prompt.contains("RECOMPOSED SDK"));
     assert!(!prompt.contains("Primary working directory:"));
     assert!(prompt.contains("# Context management"));
@@ -2697,6 +2965,7 @@ async fn prompt_compose_api_returns_detached_hooked_sections() {
         &orch
             .additional_context_message()
             .await
+            .unwrap()
             .expect("context message"),
     );
     assert!(body.contains("# composeProof\nCOMPOSE API OK"));
@@ -2890,8 +3159,8 @@ async fn prompt_context_is_cached_until_mod_invalidate_or_gv_refresh() {
         dir.path().to_path_buf(),
     )
     .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-    let first = text(&orch.additional_context_message().await.unwrap());
-    let second = text(&orch.additional_context_message().await.unwrap());
+    let first = text(&orch.additional_context_message().await.unwrap().unwrap());
+    let second = text(&orch.additional_context_message().await.unwrap().unwrap());
     assert!(first.contains("# run\n1"));
     assert_eq!(first, second);
 
@@ -2904,18 +3173,18 @@ async fn prompt_context_is_cached_until_mod_invalidate_or_gv_refresh() {
     )
     .await
     .unwrap();
-    let after_invalidate = text(&orch.additional_context_message().await.unwrap());
+    let after_invalidate = text(&orch.additional_context_message().await.unwrap().unwrap());
     assert!(after_invalidate.contains("# run\n2"));
 
     let next_cwd = dir.path().join("next");
     std::fs::create_dir(&next_cwd).unwrap();
     orch.session_cwd.change_cwd(next_cwd);
-    let after_cwd_change = text(&orch.additional_context_message().await.unwrap());
+    let after_cwd_change = text(&orch.additional_context_message().await.unwrap().unwrap());
     assert!(after_cwd_change.contains("# run\n2"));
     orch.invalidate_instruction_context(
         lingxi_core::host::instructions::InstructionRefreshReason::SettingsSync,
     );
-    let after_context_refresh = text(&orch.additional_context_message().await.unwrap());
+    let after_context_refresh = text(&orch.additional_context_message().await.unwrap().unwrap());
     assert!(after_context_refresh.contains("# run\n3"));
 }
 
@@ -2966,9 +3235,10 @@ async fn prompt_context_mod_instruction_files_reach_the_model_reminder() {
     assert!(announcements.contains("FOLLOW AGENT RULES"));
     let context = orch.instruction_context_snapshot().await;
     assert!(context.eager_instructions.as_ref().is_some_and(|files| {
-        files
-            .iter()
-            .any(|file| file.path == "/project/AGENTS.md" && file.content == "FOLLOW AGENT RULES")
+        files.iter().any(|file| {
+            file.path.string_at("") == Some("/project/AGENTS.md")
+                && file.content.string_at("") == Some("FOLLOW AGENT RULES")
+        })
     }));
 }
 
@@ -3008,7 +3278,7 @@ async fn prompt_context_repeated_names_keep_first_position_and_last_value() {
         lingxi_core::host::instructions::InstructionRendering::Announced,
     )
     .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-    let body = text(&orch.additional_context_message().await.unwrap());
+    let body = text(&orch.additional_context_message().await.unwrap().unwrap());
     assert_eq!(body.matches("# repeat\n").count(), 1);
     assert!(!body.contains("# repeat\nfirst"));
     assert!(body.find("# repeat\nlast").unwrap() < body.find("# after\nmiddle").unwrap());
@@ -3057,7 +3327,7 @@ async fn prompt_context_mod_sees_import_source_and_can_remove_all_blocks() {
     }]));
     let orch =
         orch_with(memory, None).with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-    assert!(orch.additional_context_message().await.is_none());
+    assert!(orch.additional_context_message().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -3076,7 +3346,11 @@ async fn all_three_keys_byte_exact_order_and_wrapper() {
         content_differs_from_disk: false,
     }]));
     let orch = orch_with(mem, Some("u@example.com"));
-    let msg = orch.additional_context_message().await.expect("present");
+    let msg = orch
+        .additional_context_message()
+        .await
+        .unwrap()
+        .expect("present");
     // It is a META user message (claude-code `isMeta:!0`).
     assert!(msg.is_meta(), "additionalContext must be isMeta");
     let body = text(&msg);
@@ -3115,6 +3389,7 @@ async fn omits_lingxi_md_and_email_when_absent_keeps_date() {
     let msg = orch
         .additional_context_message()
         .await
+        .unwrap()
         .expect("date always present");
     let body = text(&msg);
     assert!(!body.contains("# instructions"));
@@ -3141,7 +3416,13 @@ async fn native_email_truthiness_omits_empty_and_preserves_raw_whitespace() {
     // surrounding whitespace in the complete privacy text.
     for email in ["", "   ", " \t raw@example.test \n"] {
         let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), Some(email));
-        let body = text(&orch.additional_context_message().await.expect("date"));
+        let body = text(
+            &orch
+                .additional_context_message()
+                .await
+                .unwrap()
+                .expect("date"),
+        );
         if email.is_empty() {
             assert!(!body.contains("# userEmail"));
         } else {
@@ -3167,7 +3448,7 @@ async fn runtime_message_is_prepended_before_additional_context() {
     let mut messages = vec![original.clone()];
 
     let context = crate::conversation::context_announcements_impl::PreparedContextAnnouncements {
-        inline_context: orch.additional_context_message().await,
+        inline_context: orch.additional_context_message().await.unwrap(),
         ..Default::default()
     };
     orch.prepend_leading_context(&mut messages, &context).await;
@@ -3193,7 +3474,7 @@ async fn unresolved_native_workspace_path_falls_back_to_guest_coordinate() {
     let mut messages = Vec::new();
 
     let context = crate::conversation::context_announcements_impl::PreparedContextAnnouncements {
-        inline_context: orch.additional_context_message().await,
+        inline_context: orch.additional_context_message().await.unwrap(),
         ..Default::default()
     };
     orch.prepend_leading_context(&mut messages, &context).await;
@@ -3303,7 +3584,13 @@ async fn runtime_message_keeps_dynamic_environment_separate() {
     orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
     orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/workspace/a".into())));
 
-    let body = text(&orch.additional_context_message().await.expect("date"));
+    let body = text(
+        &orch
+            .additional_context_message()
+            .await
+            .unwrap()
+            .expect("date"),
+    );
     assert!(body.contains("# Environment\n"));
     assert!(body.contains("# currentDate\nToday's date is "));
 }
@@ -3328,7 +3615,13 @@ async fn non_guest_mobile_runtime_keeps_environment_re_emission_when_excluded() 
         None,
     ));
 
-    let body = text(&orch.additional_context_message().await.expect("date"));
+    let body = text(
+        &orch
+            .additional_context_message()
+            .await
+            .unwrap()
+            .expect("date"),
+    );
     assert!(body.contains("# Environment\n"));
     assert!(body.contains("# currentDate\nToday's date is "));
 }
@@ -3412,6 +3705,7 @@ async fn additional_context_keeps_the_session_start_date_after_rollover() {
         &orch
             .additional_context_message()
             .await
+            .unwrap()
             .expect("date context"),
     );
     assert!(body.contains("# currentDate\nToday's date is 2000-01-01."));
@@ -3536,7 +3830,13 @@ async fn claude_md_is_probed_at_the_host_dir_behind_a_guest_session_cwd() {
             resolver_root.clone()
         }));
 
-    let body = text(&orch.additional_context_message().await.expect("present"));
+    let body = text(
+        &orch
+            .additional_context_message()
+            .await
+            .unwrap()
+            .expect("present"),
+    );
     assert!(
         body.contains("MARKER-host-probed-workspace-contract"),
         "workspace LINGXI.md must reach the model; body was:\n{body}"
@@ -3566,7 +3866,13 @@ async fn claude_md_without_a_resolver_still_probes_the_session_cwd() {
             tool_api::SessionCwd::new(root.path().to_path_buf(), Vec::new()),
         );
 
-    let body = text(&orch.additional_context_message().await.expect("present"));
+    let body = text(
+        &orch
+            .additional_context_message()
+            .await
+            .unwrap()
+            .expect("present"),
+    );
     assert!(
         body.contains("MARKER-desktop-session-cwd-probe"),
         "no-resolver path must keep probing the session cwd; body was:\n{body}"
@@ -3604,7 +3910,7 @@ async fn git_status_uses_the_host_dir_behind_a_guest_session_cwd() {
             resolver_root.clone()
         }));
 
-    let _prompt = orch.build_system_prompt().await;
+    let _prompt = orch.build_system_prompt().await.unwrap();
     let announced = orch.context_announcement_messages().await;
     let announced = announced.iter().map(text).collect::<String>();
     assert!(
@@ -3650,7 +3956,7 @@ async fn prompt_mod_sections_and_context_keep_exact_utf16_until_provider_project
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
     let expected = [0xd800, 0x03a9, 0xdc00];
 
-    let provider_input = orch.provider_system_prompt().await;
+    let provider_input = orch.provider_system_prompt().await.unwrap();
     let lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::SourceVector {
         elements,
         ..
@@ -3665,6 +3971,7 @@ async fn prompt_mod_sections_and_context_keep_exact_utf16_until_provider_project
     let context = orch
         .additional_context_message()
         .await
+        .unwrap()
         .expect("context block");
     let ConversationMessage::User { content, .. } = context else {
         panic!("additional context is a user message");

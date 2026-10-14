@@ -8,12 +8,12 @@
 //! M5-11 Task 15.
 
 use async_trait::async_trait;
-use command_api::CommandRegistry;
-use command_api::RegistrySlashDispatcher;
 use command_api::builtins::{
     register_all_builtin_commands, register_bundled_skills, register_core_batch_1,
     register_core_batch_2,
 };
+use command_api::CommandRegistry;
+use command_api::RegistrySlashDispatcher;
 use lingxi_core::host::{
     AgentInfo, AuthError, AuthHandle, HookInfo, LoginInfo, McpServerInfo, McpStatus,
     SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
@@ -115,7 +115,10 @@ async fn cost_and_stats_dispatch_through_usage_alias() {
     let (d, _mock) = fresh();
     let expected = "/usage is available in interactive TUI mode only.";
     for raw in ["/cost", "/stats", "/usage"] {
-        match d.dispatch(raw.into()).await {
+        match d
+            .dispatch(raw.into(), lingxi_core::host::CancellationToken::new())
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert_eq!(display, expected.into(), "{raw}")
             }
@@ -127,7 +130,12 @@ async fn cost_and_stats_dispatch_through_usage_alias() {
 #[tokio::test]
 async fn config_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/config".into()).await;
+    let r = d
+        .dispatch(
+            "/config".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     assert!(matches!(
         r,
         SlashDispatchResult::Handled { ref display } if display.string_at("").unwrap().starts_with("Edited ")
@@ -140,10 +148,13 @@ async fn model_list_dispatch() {
     mock.set_available_models(vec!["claude-opus-4-7".into()]);
     let snap = StatusSnapshot {
         model: "claude-opus-4-7".into(),
+        model_source: None,
         ..StatusSnapshot::default()
     };
     mock.set_status_snapshot(snap);
-    let r = d.dispatch("/model".into()).await;
+    let r = d
+        .dispatch("/model".into(), lingxi_core::host::CancellationToken::new())
+        .await;
     if let SlashDispatchResult::Handled { display } = r {
         assert_eq!(
             display,
@@ -157,7 +168,12 @@ async fn model_list_dispatch() {
 #[tokio::test]
 async fn model_switch_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/model claude-sonnet-4-6".into()).await;
+    let r = d
+        .dispatch(
+            "/model claude-sonnet-4-6".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     if let SlashDispatchResult::Handled { display } = r {
         assert_eq!(display, "Switched to model: claude-sonnet-4-6".into());
     } else {
@@ -168,7 +184,12 @@ async fn model_switch_dispatch() {
 #[tokio::test]
 async fn permissions_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/permissions".into()).await;
+    let r = d
+        .dispatch(
+            "/permissions".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     assert!(matches!(
         r,
         SlashDispatchResult::Handled { ref display } if display.string_at("").unwrap().starts_with("Edited ")
@@ -183,7 +204,9 @@ async fn mcp_dispatch() {
         status: McpStatus::Connected,
         transport: "stdio".into(),
     }]);
-    let r = d.dispatch("/mcp".into()).await;
+    let r = d
+        .dispatch("/mcp".into(), lingxi_core::host::CancellationToken::new())
+        .await;
     if let SlashDispatchResult::Handled { display } = r {
         assert_eq!(display, "MCP servers (1):\n  m  connected  stdio\n".into());
     } else {
@@ -201,7 +224,9 @@ async fn hooks_dispatch() {
         timeout_ms: 60_000,
         ..HookInfo::default()
     }]);
-    let r = d.dispatch("/hooks".into()).await;
+    let r = d
+        .dispatch("/hooks".into(), lingxi_core::host::CancellationToken::new())
+        .await;
     if let SlashDispatchResult::Handled { display } = r {
         assert_eq!(display, "Hooks (1):\n  fmt  PostToolUse  60000ms\n".into());
     } else {
@@ -219,7 +244,12 @@ async fn agents_dispatch() {
         wildcard_tools: false,
         ..AgentInfo::default()
     }]);
-    let r = d.dispatch("/agents".into()).await;
+    let r = d
+        .dispatch(
+            "/agents".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     if let SlashDispatchResult::Handled { display } = r {
         // cc 2.1.198 removed the interactive /agents wizard (M4): the command
         // now emits static product guidance regardless of registered agents.
@@ -240,7 +270,9 @@ async fn agents_dispatch() {
 #[tokio::test]
 async fn login_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/login".into()).await;
+    let r = d
+        .dispatch("/login".into(), lingxi_core::host::CancellationToken::new())
+        .await;
     if let SlashDispatchResult::Handled { display } = r {
         assert_eq!(display, "Logged in as u@x.com (org: org).".into());
     } else {
@@ -251,7 +283,12 @@ async fn login_dispatch() {
 #[tokio::test]
 async fn logout_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/logout".into()).await;
+    let r = d
+        .dispatch(
+            "/logout".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     if let SlashDispatchResult::Handled { display } = r {
         assert_eq!(display, "Logged out.".into());
     } else {
@@ -262,7 +299,12 @@ async fn logout_dispatch() {
 #[tokio::test]
 async fn version_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/version".into()).await;
+    let r = d
+        .dispatch(
+            "/version".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     if let SlashDispatchResult::Handled { display } = r {
         assert!(display.string_at("").unwrap().starts_with("lingxi-cli "));
     } else {
@@ -273,7 +315,12 @@ async fn version_dispatch() {
 #[tokio::test]
 async fn status_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/status".into()).await;
+    let r = d
+        .dispatch(
+            "/status".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     if let SlashDispatchResult::Handled { display } = r {
         let text = display.string_at("").unwrap();
         assert!(text.starts_with("Status:\n"));
@@ -286,7 +333,12 @@ async fn status_dispatch() {
 #[tokio::test]
 async fn doctor_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/doctor".into()).await;
+    let r = d
+        .dispatch(
+            "/doctor".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     let SlashDispatchResult::RunSkillAsTurn {
         command,
         body,

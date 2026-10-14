@@ -206,7 +206,10 @@ impl Fixture {
                     let (_, files) = tokio::try_join!(released, files.get())?;
                     let body = files
                         .iter()
-                        .map(|file| file.content.as_str())
+                        .map(|file| {
+                            String::from_utf16(&file.content_units())
+                                .expect("cache fixture content is valid UTF-16")
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
                     let mut blocks: BTreeMap<String, String> = snapshot
@@ -218,7 +221,18 @@ impl Fixture {
                         .unwrap_or_default();
                     blocks.insert("instructions".to_owned(), body.clone());
                     let context = InstructionContext {
-                        user_context: blocks,
+                        user_context: crate::types::utf16_json::Utf16JsonProjection::object(
+                            blocks
+                                .into_iter()
+                                .map(|(key, value)| {
+                                    (
+                                        key,
+                                        crate::types::utf16_json::Utf16JsonProjection::from(value),
+                                    )
+                                })
+                                .collect(),
+                        )
+                        .expect("fixture userContext is an object"),
                         eager_instructions: Some(files.as_ref().clone()),
                         ..InstructionContext::default()
                     };
@@ -363,7 +377,14 @@ impl Fixture {
                 return match &self.handles[&handle()] {
                     Handle::Context(load) => match load.get().await {
                         Ok(context) => {
-                            json!({"status": "fulfilled", "value": context.user_context})
+                            let value: Value = serde_json::from_str(
+                                &context
+                                    .user_context
+                                    .to_json_string()
+                                    .expect("userContext is valid JSON"),
+                            )
+                            .expect("ordinary fixture userContext is serde JSON");
+                            json!({"status": "fulfilled", "value": value})
                         }
                         Err(error) => json!({"status": "rejected", "error": error}),
                     },
@@ -596,24 +617,28 @@ async fn atomic_reservation_keeps_old_files_when_refresh_precedes_first_producer
 }
 
 fn lifecycle_file(content: &str) -> InstructionFile {
-    InstructionFile {
-        path: "/fixture/instructions.md".to_owned(),
-        kind: super::super::instructions::InstructionFileType::Project,
-        content: content.to_owned(),
-    }
+    InstructionFile::new(
+        "/fixture/instructions.md",
+        super::super::instructions::InstructionFileType::Project,
+        content,
+    )
 }
 
 fn lifecycle_build(files: Arc<Vec<InstructionFile>>) -> InstructionContextBuild<InstructionFile> {
     let body = files
         .iter()
-        .map(|file| file.content.as_str())
+        .map(|file| {
+            String::from_utf16(&file.content_units()).expect("fixture content is valid UTF-16")
+        })
         .collect::<Vec<_>>()
         .join("\n");
-    let context = InstructionContext {
+    let mut context = InstructionContext {
         eager_instructions: Some(files.as_ref().clone()),
-        user_context: BTreeMap::from([("instructions".to_owned(), body.clone())]),
         ..Default::default()
     };
+    context
+        .set_user_context_text("instructions", body.clone())
+        .unwrap();
     InstructionContextBuild::new(context, files)
         .with_classifier_context((!body.is_empty()).then_some(body))
 }
@@ -688,7 +713,7 @@ async fn compound_lifecycles_keep_original_results_with_distinct_classifier_fenc
     release_compact.send(()).unwrap();
     let old_context = retired_by_compaction.get().await.unwrap();
     assert_eq!(
-        old_context.user_context["instructions"],
+        String::from_utf16(&old_context.user_context_text("instructions").unwrap()).unwrap(),
         "before compaction"
     );
     assert!(!cache.is_current_context(key, &old_context));
@@ -741,7 +766,7 @@ async fn compound_lifecycles_keep_original_results_with_distinct_classifier_fenc
     release_reset.send(()).unwrap();
     let reset_old_context = retired_by_reset.get().await.unwrap();
     assert_eq!(
-        reset_old_context.user_context["instructions"],
+        String::from_utf16(&reset_old_context.user_context_text("instructions").unwrap()).unwrap(),
         "after compaction"
     );
     assert!(!cache.is_current_context(key, &reset_old_context));

@@ -610,6 +610,7 @@ impl WebFetchTool {
         let model_prompt =
             crate::markdown::make_secondary_model_prompt(&truncated, prompt, is_preapproved);
         let req = SideQueryRequest {
+            model_source: None,
             model_attempt: None,
             native_prompt_context: None,
             model: self.apply_model(),

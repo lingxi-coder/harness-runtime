@@ -61,6 +61,7 @@ impl SideQueryClient for BlockingSideQuery {
 
 fn cache_safe_params() -> sidequery::CacheSafeParams {
     sidequery::CacheSafeParams {
+        model_source: None,
         system_prompt: Arc::new("SYS".into()),
         system_prompt_input: Some(SystemPromptInput::custom_prompt("SYS".into())),
         tools: Vec::new(),
@@ -119,7 +120,8 @@ async fn compact_snapshot_keeps_request_tool_schema_profile_and_effort() {
         None,
     );
     orch.save_cache_safe_params(Some(&system), "claude-sonnet-4-6", &tools)
-        .await;
+        .await
+        .unwrap();
     let captured = slot.get_last().await.unwrap();
     assert_eq!(captured.tools, tools);
     assert_eq!(captured.effort, Some(serde_json::json!("high")));

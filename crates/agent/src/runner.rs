@@ -2490,6 +2490,52 @@ fn subagent_hook_inheritance(
 /// A `None` `hook_executor` / `skill_loader` (tests / minimal builds) makes the
 /// respective step a strict no-op, so the child history stays byte-identical to
 /// legacy.
+async fn drain_preload_cancellation_events(
+    ctx: &SubagentContext,
+    event_rx: &mut mpsc::Receiver<lingxi_core::Event>,
+    history: &mut Vec<lingxi_core::types::ConversationMessage>,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) {
+    use lingxi_core::types::{ConversationMessage, MessageId};
+    let mut pending_peer_messages = Vec::new();
+    let mut transcript_written = 0;
+
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt => break,
+            lingxi_core::Event::UserMessage { content, .. } => {
+                history.push(ConversationMessage::user(MessageId::new(), content));
+            }
+            lingxi_core::Event::UserMessageJsUtf16 {
+                content,
+                utf16_code_units,
+                ..
+            } => {
+                history.push(
+                    ExactHookText {
+                        display: content,
+                        utf16_code_units,
+                    }
+                    .to_conversation_message(MessageId::new(), false),
+                );
+            }
+            lingxi_core::Event::PeerMessage { envelope } => {
+                pending_peer_messages.push(envelope);
+                drain_peer_messages(
+                    ctx,
+                    &mut pending_peer_messages,
+                    history,
+                    None,
+                    &mut transcript_written,
+                    out_tx,
+                )
+                .await;
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn build_preload_messages(
     ctx: &SubagentContext,
 ) -> Result<Vec<lingxi_core::types::ConversationMessage>, String> {
@@ -2534,16 +2580,18 @@ async fn build_preload_messages(
                 agent_type: Some(agent_type.clone()),
                 ..Default::default()
             };
-            let agg = hooks
-                .execute(
+            let agg = tokio::select! {
+                biased;
+                _ = ctx.cancellation_token.cancelled() => return Ok(out),
+                agg = hooks.execute(
                     hooks::events::HookEvent::SubagentStart {
                         agent_id: ctx.agent_id,
                         agent_type: agent_type.clone(),
                         parent_agent_id: ctx.parent_agent_id,
                     },
                     hook_ctx,
-                )
-                .await;
+                ) => agg,
+            };
             if !agg.additional_contexts.is_empty() {
                 let joined = hooks::ExactHookText::join(&agg.additional_contexts, "\n");
                 out.push(
@@ -2564,14 +2612,21 @@ async fn build_preload_messages(
     // skill.progressMessage)` followed by the loaded content blocks
     // (runAgent.ts:577-646). A missing / non-prompt skill logs claude's exact
     // warn and is skipped.
+    if ctx.cancellation_token.is_cancelled() {
+        return Ok(out);
+    }
     if let Some(loader) = &ctx.skill_loader {
         for skill_name in &ctx.agent_definition.skills {
+            if ctx.cancellation_token.is_cancelled() {
+                return Ok(out);
+            }
             match loader
                 .resolve_and_load(
                     skill_name,
                     &agent_type,
                     ctx.cwd.as_deref(),
                     Some(resolve_model(ctx).as_str()),
+                    ctx.cancellation_token.clone(),
                 )
                 .await?
             {
@@ -3182,6 +3237,18 @@ fn apply_nested_tool_context_modifiers(
 /// `llm_runtime::stream_accumulator::accumulate_stream_salvaging`) and races a `UserExit` /
 /// `UserInterrupt` on `event_rx` via [`tokio::select!`]; a termination event
 /// aborts the loop and surfaces [`SubagentEvent::Killed`].
+async fn announce_turn_start_context(
+    ctx: &mut SubagentContext,
+    history: &mut Vec<ConversationMessage>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    written: &mut usize,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) {
+    append_native_settings_prompt_attachments(ctx, history, transcript, written, out_tx).await;
+    fold_task_notifications(ctx, history).await;
+    announce_instruction_context(ctx, history, transcript, written, out_tx).await;
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "imperative multi-turn agentic loop — splitting the turn body hurts readability"
@@ -3424,7 +3491,40 @@ async fn run_subagent_loop(
         // `SubagentContext::rendered_system_prompt`, and the resumed tool list
         // is pinned by the same SHA-256 definition snapshot AG-5 turns on.
         // Re-open this only with a measured prefix diff across two turns.
-        match build_preload_messages(&ctx).await {
+        let entered_preload = ctx.preload_lifecycle.begin();
+        let preload = if entered_preload {
+            build_preload_messages(&ctx).await
+        } else {
+            Ok(Vec::new())
+        };
+        let preload_phase = ctx.preload_lifecycle.settle();
+        if preload_phase == crate::context::AgentPreloadPhase::Skipped {
+            return;
+        }
+        if ctx.cancellation_token.is_cancelled()
+            || preload_phase == crate::context::AgentPreloadPhase::Cancelled
+        {
+            // A cancellation received before the first model turn still follows
+            // the normal startup announcement order. In particular, the date
+            // attachment precedes the queued terminal event in the public stream.
+            let mut transcript_written = 0;
+            announce_turn_start_context(&mut ctx, history, None, &mut transcript_written, &out_tx)
+                .await;
+            drain_preload_cancellation_events(&ctx, &mut event_rx, history, &out_tx).await;
+            emit_killed(
+                &ctx,
+                &out_tx,
+                None,
+                history,
+                &mut transcript_written,
+                agent_id,
+                &llm_runtime::ExecutionUsage::default(),
+                live_hook_model_selection,
+            )
+            .await;
+            return;
+        }
+        match preload {
             Ok(messages) => history.extend(messages),
             Err(error) => {
                 emit_transcript_snapshot(&out_tx, agent_id, history).await;
@@ -3770,16 +3870,7 @@ async fn run_subagent_loop(
                     }
                 }
             }
-            append_native_settings_prompt_attachments(
-                &mut ctx,
-                history,
-                transcript.as_ref(),
-                &mut transcript_written,
-                &out_tx,
-            )
-            .await;
-            fold_task_notifications(&ctx, history).await;
-            announce_instruction_context(
+            announce_turn_start_context(
                 &mut ctx,
                 history,
                 transcript.as_ref(),
@@ -6779,10 +6870,17 @@ fn instruction_request_messages(
     if context.rendering != lingxi_core::host::instructions::InstructionRendering::Inline {
         return cap_input_bytes(history, max_bytes);
     }
-    let Some(reminder) = context.reminder() else {
+    let Some(reminder) = context.reminder_source() else {
         return cap_input_bytes(history, max_bytes);
     };
-    let prefix = ConversationMessage::user_meta(MessageId::new(), reminder);
+    let reminder_units = reminder
+        .string_units("")
+        .expect("instruction reminder is a root string");
+    let prefix = ConversationMessage::user_meta_js_utf16(
+        MessageId::new(),
+        String::from_utf16_lossy(&reminder_units),
+        reminder_units,
+    );
     if history.is_empty() {
         return cap_input_bytes(&[prefix], max_bytes);
     }
@@ -6822,8 +6920,12 @@ async fn announce_instruction_context(
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     for attachment in context_attachments(&ctx.instruction_context, &date, "session_start") {
         let id = MessageId::new();
-        let message = render_instruction_attachment(&attachment)
-            .map(|text| ConversationMessage::user_meta(id, text));
+        let message = render_instruction_attachment(&attachment).map(|text| {
+            let units = text
+                .string_units("")
+                .expect("rendered instruction attachment is a root string");
+            ConversationMessage::user_meta_js_utf16(id, String::from_utf16_lossy(&units), units)
+        });
         flush_transcript(transcript, history, written).await;
         if let Some(writer) = transcript {
             if *written == history.len()

@@ -28,7 +28,7 @@
 //! request and blocks on the host's `control_response`.
 
 use futures::future::BoxFuture;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 /// Byte-faithful `notification_type` discriminator (`notificationType:
@@ -91,7 +91,7 @@ pub trait PermissionPromptNotifier: Send + Sync {
 /// [`orchestrator::ConversationOrchestrator::fire_notification`] with the
 /// byte-faithful message + `permission_prompt` type.
 pub struct OrchestratorPermissionPromptNotifier {
-    orch: Arc<orchestrator::ConversationOrchestrator>,
+    orch: Weak<orchestrator::ConversationOrchestrator>,
     host: Arc<dyn crate::headless::host::HeadlessHostServices>,
 }
 
@@ -99,10 +99,13 @@ impl OrchestratorPermissionPromptNotifier {
     /// Build a notifier over the concrete orchestrator.
     #[must_use]
     pub fn new(
-        orch: Arc<orchestrator::ConversationOrchestrator>,
+        orch: &Arc<orchestrator::ConversationOrchestrator>,
         host: Arc<dyn crate::headless::host::HeadlessHostServices>,
     ) -> Self {
-        Self { orch, host }
+        Self {
+            orch: Arc::downgrade(orch),
+            host,
+        }
     }
 }
 
@@ -112,7 +115,9 @@ impl PermissionPromptNotifier for OrchestratorPermissionPromptNotifier {
     }
 
     fn fire(&self, display_name: String) -> BoxFuture<'static, ()> {
-        let orch = self.orch.clone();
+        let Some(orch) = self.orch.upgrade() else {
+            return Box::pin(async {});
+        };
         Box::pin(async move {
             orch.fire_notification(
                 &permission_prompt_message(&display_name),

@@ -1467,6 +1467,7 @@ mod tests {
             OutboundMsg::Heartbeats(_) => panic!("unexpected heartbeat message"),
             OutboundMsg::Flush(_)
             | OutboundMsg::Shutdown(_)
+            | OutboundMsg::ShutdownBeforeRuntime(_)
             | OutboundMsg::PublishJson(_)
             | OutboundMsg::RefreshHeldResultTotals(_) => {
                 panic!("unexpected output barrier")

@@ -100,7 +100,7 @@ pub async fn emit_operation(
 pub async fn emit_error(sink: &dyn ClientEventSink, message: impl Into<String>) {
     sink.emit(ClientEvent::Error {
         kind: ErrorKindDto::Internal,
-        message: message.into(),
+        message: client::protocol::text::ClientTextDto::from(message.into()),
     })
     .await;
 }

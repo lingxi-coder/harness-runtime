@@ -594,10 +594,13 @@ impl ConversationOrchestrator {
     /// [`execute_one_turn`]: crate::turn_loop::execute_one_turn
     pub(crate) async fn build_wire_tools(
         &self,
-    ) -> (Vec<lingxi_core::host::SourceToolWireDefinition>, bool) {
+    ) -> Result<
+        (Vec<lingxi_core::host::SourceToolWireDefinition>, bool),
+        lingxi_core::settings::SettingsError,
+    > {
         let (wire, skip_global_cache_for_system_prompt, _) =
-            self.build_wire_tools_with_complete().await;
-        (wire, skip_global_cache_for_system_prompt)
+            self.build_wire_tools_with_complete().await?;
+        Ok((wire, skip_global_cache_for_system_prompt))
     }
 
     /// Return the exact pre-deferral schema snapshot alongside the final
@@ -606,12 +609,19 @@ impl ConversationOrchestrator {
     /// or registry filters.
     pub(crate) async fn build_wire_tools_with_complete(
         &self,
-    ) -> (
-        Vec<lingxi_core::host::SourceToolWireDefinition>,
-        bool,
-        Vec<lingxi_core::host::SourceToolWireDefinition>,
-    ) {
+    ) -> Result<
+        (
+            Vec<lingxi_core::host::SourceToolWireDefinition>,
+            bool,
+            Vec<lingxi_core::host::SourceToolWireDefinition>,
+        ),
+        lingxi_core::settings::SettingsError,
+    > {
         use tool_api::tool_trait::PromptOptions;
+        // Native `rls()` initializes the host's GCe latch before declared-pool
+        // helpers run. Initialize it before this builder assembles the tool view
+        // and before the later pfr/reminder producer reads the shared cache.
+        let _ = self.native_kept_deferred_tools_enabled();
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
@@ -627,6 +637,9 @@ impl ConversationOrchestrator {
         // second `session` lock, which would deadlock the callers that already
         // hold one.
         self.refresh_main_loop_model_for_route(&model, model_profile.as_deref());
+        let model_source = self
+            .main_model_source_for_request(&model, model_profile.as_deref())
+            .await;
         let tools = self.filtered_available_tools().await;
         let mod_host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
             registry.read().await.mod_host()
@@ -652,8 +665,8 @@ impl ConversationOrchestrator {
         let bash_precommit_skills =
             match (skill_tool_advertised, &self.prompt_runtime.skill_listing) {
                 (true, Some(provider)) => {
-                    let snapshot = provider.skill_listing_snapshot().await;
-                    provider.bash_precommit_skills(&snapshot.entries).await
+                    let snapshot = provider.skill_listing_snapshot().await?;
+                    provider.bash_precommit_skills(&snapshot.entries).await?
                 }
                 _ => tool_api::tool_trait::BashPrecommitSkills::default(),
             };
@@ -755,6 +768,7 @@ impl ConversationOrchestrator {
                 self.api.as_ref(),
                 &model,
                 model_profile.as_deref(),
+                model_source.as_ref(),
             );
         self.tools
             .deferral()
@@ -771,6 +785,7 @@ impl ConversationOrchestrator {
                     self.api.as_ref(),
                     &model,
                     model_profile.as_deref(),
+                    model_source.as_ref(),
                 ),
         );
         let mut complete_wire = wire.clone();
@@ -873,7 +888,7 @@ impl ConversationOrchestrator {
                     .find(|definition| definition.name == tool.name())
                     .is_some_and(|definition| !definition.defer_loading)
         });
-        (wire, skip_global_cache_for_system_prompt, complete_wire)
+        Ok((wire, skip_global_cache_for_system_prompt, complete_wire))
     }
 
     async fn mod_tool_provider(&self, tool: &dyn tool_api::tool_trait::Tool) -> serde_json::Value {
@@ -1252,10 +1267,12 @@ impl ConversationOrchestrator {
     /// restrictions, descriptions, and ordering cannot drift between hosts.
     pub async fn mcp_tool_definitions(
         &self,
-    ) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
-        self.build_wire_tools()
-            .await
-            .0
+    ) -> Result<
+        Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        lingxi_core::settings::SettingsError,
+    > {
+        let (wire, _) = self.build_wire_tools().await?;
+        Ok(wire
             .into_iter()
             .filter_map(|wire| {
                 let mut fields = vec![
@@ -1270,7 +1287,7 @@ impl ConversationOrchestrator {
                 }
                 lingxi_core::types::utf16_json::Utf16JsonProjection::object(fields).ok()
             })
-            .collect()
+            .collect())
     }
 
     /// Count the current model-visible MCP tools after the same filtering the
@@ -1281,6 +1298,36 @@ impl ConversationOrchestrator {
             .into_iter()
             .filter(|tool| tool.is_mcp())
             .count()
+    }
+
+    /// Execute an explicit Native-style Bash input against the registered Shell
+    /// tool. This direct-user path intentionally skips the model tool dispatcher,
+    /// its Pre/PostToolUse hooks, and AdapterPermissionGate; the Shell tool still
+    /// applies its own command validation, platform restrictions, sandbox, and
+    /// owned-process cancellation boundary.
+    pub async fn call_direct_bash_from_host(
+        &self,
+        command: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        let tool = self
+            .find_tool_for_dispatch("Shell")
+            .ok_or_else(|| tool_api::ToolError::NotFound("Shell".into()))?;
+        let disable_sandbox = Utf16JsonProjection::parse("true")
+            .map_err(|error| tool_api::ToolError::InvalidInput(error.to_string().into()))?;
+        let input = Utf16JsonProjection::object(vec![
+            ("command".into(), command),
+            ("dangerouslyDisableSandbox".into(), disable_sandbox),
+        ])
+        .map_err(|error| tool_api::ToolError::InvalidInput(error.to_string().into()))?;
+        let history = self.snapshot_history().await;
+        let mut context = crate::turn_loop::streaming_tool_context_base(self, history).await;
+        context.tool_use_id = Some(lingxi_core::types::ToolUseId::new());
+        context.cancel = Some(cancel);
+        let (progress, _progress_receiver) = tool_api::progress_channel();
+        tool_api::Tool::call(tool.as_ref(), input, context, progress).await
     }
 
     /// Execute one host-originated tool request through the same dispatcher as

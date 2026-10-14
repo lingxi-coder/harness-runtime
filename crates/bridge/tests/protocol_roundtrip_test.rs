@@ -102,6 +102,17 @@ fn bridge_response_roundtrip() {
 }
 
 #[test]
+fn bridge_wire_error_preserves_utf16_as_a_json_string() {
+    let error = BridgeWireError {
+        code: -32000,
+        message: client::protocol::text::ClientTextDto::from_code_units(vec![b'x' as u16, 0xd800]),
+    };
+    let encoded = serde_json::to_string(&error).unwrap();
+    assert_eq!(encoded, r#"{"code":-32000,"message":"x\ud800"}"#);
+    assert_eq!(roundtrip(&error), error);
+}
+
+#[test]
 fn auth_roundtrip() {
     let c = AuthChallenge {
         nonce: "abc".into(),

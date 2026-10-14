@@ -145,7 +145,10 @@ async fn every_correct_by_design_stub_still_returns_the_locked_literal() {
     for (name, reason) in CORRECT_BY_DESIGN_STUBS {
         let expected = UnimplementedCommandHandler::stub_literal(name);
         match d
-            .dispatch(Utf16JsonProjection::from(format!("/{name}")))
+            .dispatch(
+                Utf16JsonProjection::from(format!("/{name}")),
+                lingxi_core::host::CancellationToken::new(),
+            )
             .await
         {
             SlashDispatchResult::Handled { display } => {
@@ -168,7 +171,10 @@ async fn host_bound_deferred_gaps_also_currently_stub_but_are_not_locked_as_fait
     for (name, _reason) in HOST_BOUND_DEFERRED_GAPS {
         let expected = UnimplementedCommandHandler::stub_literal(name);
         match d
-            .dispatch(Utf16JsonProjection::from(format!("/{name}")))
+            .dispatch(
+                Utf16JsonProjection::from(format!("/{name}")),
+                lingxi_core::host::CancellationToken::new(),
+            )
             .await
         {
             SlashDispatchResult::Handled { display } => {

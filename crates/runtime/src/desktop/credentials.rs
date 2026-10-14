@@ -80,12 +80,12 @@ impl lingxi_core::host::auth::AccountChangeObserver for SubscriptionRefreshGener
 
 use super::{
     anthropic_models_for, api_provider, connected_provider_fallback, desktop_fusion_catalog_row,
-    filter_fusion_catalog, fusion_route_flag, load_effective_settings_for_config,
-    managed_model_policy_source, managed_model_setting_for_config, model_provenance_for_config,
-    provider_profile_label, register_fusion_catalog_refresher, subscription_seed,
-    subscription_snapshot_from, ApiProvider, BuildError, DefaultModelFallbackNotice, DesktopConfig,
-    FusionCatalogClearingAuth, FusionCatalogModelSource, FusionCatalogRefresher,
-    FusionCatalogRegistry,
+    effective_model_source_for_config, filter_fusion_catalog, fusion_route_flag,
+    load_effective_settings_for_config, managed_model_policy_source,
+    managed_model_setting_for_config, model_provenance_for_config, provider_profile_label,
+    register_fusion_catalog_refresher, subscription_seed, subscription_snapshot_from, ApiProvider,
+    BuildError, DefaultModelFallbackNotice, DesktopConfig, FusionCatalogClearingAuth,
+    FusionCatalogModelSource, FusionCatalogRefresher, FusionCatalogRegistry,
 };
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -220,6 +220,10 @@ pub struct LlmStack {
         Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
     /// Raw configured model setting that drives main-loop Plan selection.
     pub main_model_setting: String,
+    /// Exact winning managed `settings.model` source. It remains separate from
+    /// the UTF-8 route selector so valid JavaScript strings with lone UTF-16
+    /// units and uncatalogued Native model ids are not replaced by a default.
+    pub main_model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Provenance of the raw setting before any connected-provider fallback.
     pub main_model_setting_provenance: lingxi_core::host::ModelProvenance,
     /// See [`build`] for the resolution rules behind `model_setting_for_spawns`.
@@ -435,17 +439,15 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // administrator-owned default; explicit CLI/env pins remain user-owned.
     let managed_settings_for_model =
         crate::desktop::settings_watch::managed_settings_snapshot_for_config(cfg).await;
-    let managed_policy_layer = managed_settings_for_model
-        .effective_json()
-        .into_iter()
-        .collect::<Vec<_>>();
     let effective_settings_for_model =
-        load_effective_settings_for_config(cfg, &managed_policy_layer);
+        load_effective_settings_for_config(cfg, Some(&managed_settings_for_model))?;
     let mut model_provenance =
-        model_provenance_for_config(cfg, effective_settings_for_model.as_ref());
+        model_provenance_for_config(cfg, Some(&effective_settings_for_model));
     let configured_model =
-        managed_model_setting_for_config(cfg, effective_settings_for_model.as_ref())
+        managed_model_setting_for_config(cfg, Some(&effective_settings_for_model))
             .unwrap_or_else(|| cfg.default_model.clone());
+    let main_model_source =
+        effective_model_source_for_config(cfg, Some(&effective_settings_for_model));
     let main_model_setting = configured_model.clone();
     let main_model_setting_provenance = model_provenance;
     // (1) Platform-minimal façade shared byte-for-byte with CLI/TUI auth.
@@ -827,8 +829,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // Other processes on this home (another CLI, say) store the same OAuth
     // sessions; each refresh happens behind one lock file, and a session
     // another process already rotated is adopted rather than refreshed again.
-    let oauth_refresh_lock: Arc<dyn llm_runtime::auth::token_manager::SharedRefreshLock> =
-        Arc::new(super::oauth_refresh_lock::OAuthRefreshLockFile::new(&cfg.lingxi_home));
+    let oauth_refresh_lock: Arc<dyn llm_runtime::auth::token_manager::SharedRefreshLock> = Arc::new(
+        super::oauth_refresh_lock::OAuthRefreshLockFile::new(&cfg.lingxi_home),
+    );
     if let Some(state) = &oauth_auth_state {
         state.share_refresh_across_processes(oauth_refresh_lock.clone());
     }
@@ -967,8 +970,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     };
 
     let provider_region = match effective_settings_for_model
-        .as_ref()
-        .and_then(|settings| settings.settings.provider_region)
+        .settings
+        .provider_region
         .unwrap_or_default()
     {
         lingxi_core::settings::ProviderRegion::ChinaMainland => llm_runtime::Region::ChinaMainland,
@@ -1563,6 +1566,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         model_provenance,
         session_model_restriction,
         main_model_setting,
+        main_model_source,
         main_model_setting_provenance,
         model_setting_for_spawns,
         session_auto_mode_provider,
@@ -1603,7 +1607,7 @@ pub async fn build_api_service(
     cwd: &std::path::Path,
 ) -> Result<Arc<llm_runtime::ApiService>, BuildError> {
     let stack = resolve_llm_stack(cfg).await?;
-    Ok(Arc::new(api_service_from_stack(cfg, cwd, stack)))
+    Ok(Arc::new(api_service_from_stack(cfg, cwd, stack)?))
 }
 
 /// Assemble the drive service (retry / rate-limit / betas loop) over an
@@ -1616,7 +1620,7 @@ pub fn api_service_from_stack(
     cfg: &DesktopConfig,
     cwd: &std::path::Path,
     stack: LlmStack,
-) -> llm_runtime::ApiService {
+) -> Result<llm_runtime::ApiService, BuildError> {
     // Same CHAINS BRIDGE as `build`: the assembled per-model chain becomes the
     // adapter's `fallback_overrides`, keyed by model id.
     let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = stack
@@ -1654,16 +1658,16 @@ pub fn api_service_from_stack(
     .with_effort_settings_source({
         let effort_cfg = cfg.clone();
         Arc::new(move || {
-            let Ok(managed) =
-                crate::desktop::settings_watch::managed_policy_layers_sync(&effort_cfg)
-            else {
-                return Default::default();
-            };
-            super::load_effective_settings_for_config(&effort_cfg, &managed)
+            let snapshot = crate::desktop::settings_watch::managed_settings_snapshot_sync(
+                &effort_cfg,
+            )
+            .ok_or(lingxi_core::settings::SettingsError::SourceUnavailable(
+                "managed policy snapshot",
+            ))?;
+            super::load_effective_settings_for_config(&effort_cfg, Some(&snapshot))
                 .map(|settings| settings.effort_layers)
-                .unwrap_or_default()
         })
-    })
+    })?
     .with_prompt_cache_ttl_settings_source({
         let cache_cfg = cfg.clone();
         Arc::new(move || super::prompt_cache_ttl_settings_for_config(&cache_cfg))
@@ -1678,9 +1682,9 @@ pub fn api_service_from_stack(
         service
     };
 
-    match aws_auth_refresher(cfg, cwd, analytics_bus) {
-        Some(refresher) => service.with_aws_auth(refresher),
-        None => service,
+    match aws_auth_refresher(cfg, cwd, analytics_bus)? {
+        Some(refresher) => Ok(service.with_aws_auth(refresher)),
+        None => Ok(service),
     }
 }
 
@@ -1695,56 +1699,46 @@ pub(super) fn aws_auth_refresher(
     cfg: &DesktopConfig,
     cwd: &std::path::Path,
     analytics_bus: Arc<telemetry::AnalyticsBus>,
-) -> Option<Arc<llm_runtime::AwsAuthRefresher>> {
+) -> Result<Option<Arc<llm_runtime::AwsAuthRefresher>>, lingxi_core::settings::SettingsError> {
     let aws_settings = if cfg.restricted {
-        match crate::desktop::settings_watch::managed_policy_layers_sync(cfg) {
-            Ok(managed) => load_effective_settings_for_config(cfg, &managed),
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    "managed settings unavailable for restricted AWS auth"
-                );
-                None
-            }
-        }
+        let snapshot = crate::desktop::settings_watch::managed_settings_snapshot_sync(cfg).ok_or(
+            lingxi_core::settings::SettingsError::SourceUnavailable("managed policy snapshot"),
+        )?;
+        load_effective_settings_for_config(cfg, Some(&snapshot))?
     } else {
         let env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
         lingxi_core::settings::Settings::load(lingxi_core::settings::LoadInputs {
             env: &env_vars,
             project_dir: cwd,
             defaults: lingxi_core::settings::schema::SettingsJson::default(),
+        })?
+    };
+    let from_project = |field: &str| {
+        aws_settings.effective_for(field).is_some_and(|p| {
+            p.contributors.last() == Some(&lingxi_core::settings::tracer::Source::Project)
         })
-        .ok()
-    }
-    .map(|eff| {
-        let from_project = |field: &str| {
-            eff.effective_for(field).is_some_and(|p| {
-                p.contributors.last() == Some(&lingxi_core::settings::tracer::Source::Project)
-            })
-        };
-        llm_runtime::AwsAuthSettings {
-            aws_auth_refresh: eff.settings.aws_auth_refresh.clone(),
-            aws_auth_refresh_from_project: from_project("awsAuthRefresh"),
-            aws_credential_export: eff.settings.aws_credential_export.clone(),
-            aws_credential_export_from_project: from_project("awsCredentialExport"),
-            // No global config path ⇒ the CLI trust gate proceeds (mode.rs
-            // `trust_gate_should_prompt` — nothing to check against), so treat
-            // as trusted like the gate does.
-            workspace_trusted: match migrations::global_config::global_config_path() {
-                Some(p) => migrations::global_config::check_has_trust_dialog_accepted(&p, cwd),
-                None => true,
-            },
-        }
-    })
-    .unwrap_or_default();
+    };
+    let aws_settings = llm_runtime::AwsAuthSettings {
+        aws_auth_refresh: aws_settings.settings.aws_auth_refresh.clone(),
+        aws_auth_refresh_from_project: from_project("awsAuthRefresh"),
+        aws_credential_export: aws_settings.settings.aws_credential_export.clone(),
+        aws_credential_export_from_project: from_project("awsCredentialExport"),
+        // No global config path ⇒ the CLI trust gate proceeds (mode.rs
+        // `trust_gate_should_prompt` — nothing to check against), so treat
+        // as trusted like the gate does.
+        workspace_trusted: match migrations::global_config::global_config_path() {
+            Some(p) => migrations::global_config::check_has_trust_dialog_accepted(&p, cwd),
+            None => true,
+        },
+    };
     if aws_settings.aws_auth_refresh.is_none() && aws_settings.aws_credential_export.is_none() {
-        return None;
+        return Ok(None);
     }
-    Some(Arc::new(llm_runtime::AwsAuthRefresher::new(
+    Ok(Some(Arc::new(llm_runtime::AwsAuthRefresher::new(
         aws_settings,
         Arc::new(llm_runtime::ShellAwsAuthProcess),
         Some(analytics_bus),
-    )))
+    ))))
 }
 
 /// Read the pre-V1 project `lastCost` only when its session tag matches the

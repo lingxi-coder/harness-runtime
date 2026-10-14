@@ -310,7 +310,7 @@ impl ConversationOrchestrator {
         let profile_name = Some(self.current_audio_profile().await?);
         let tools = self
             .build_wire_tools()
-            .await
+            .await?
             .0
             .into_iter()
             .filter(|tool| !audio_tool(&tool.name))
@@ -325,7 +325,7 @@ impl ConversationOrchestrator {
         Ok(RealtimeAgentContext {
             session_id,
             profile_name,
-            instructions: self.effective_system_prompt().await,
+            instructions: self.effective_system_prompt().await?,
             history: realtime_history(&history)?,
             tools,
         })

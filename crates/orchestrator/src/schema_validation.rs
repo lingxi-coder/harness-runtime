@@ -289,7 +289,7 @@ pub(crate) fn validate_tool_schema_projected(
     sources.push(schema);
     sources.push(input);
     sources.extend(native_issues.iter());
-    let consumer = Utf16JsonConsumer::new(&sources)
+    let consumer = Utf16JsonConsumer::new_for_json_decoded_sources(&sources)
         .map_err(|error| source_error(format!("Could not validate tool input: {error}")))?;
     let values = consumer.values();
     let schema_value = &values[0];

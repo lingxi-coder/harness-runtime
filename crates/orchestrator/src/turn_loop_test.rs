@@ -3971,6 +3971,7 @@ mod read_file_state_tests {
         assert!(orch
             .build_wire_tools()
             .await
+            .unwrap()
             .0
             .iter()
             .any(|entry| entry.name == "mcp__mod-test__echo"
@@ -4351,7 +4352,7 @@ mod read_file_state_tests {
             }),
         ];
         let orch = orch_with_tools(cwd, tools);
-        let wire = orch.build_wire_tools().await.0;
+        let wire = orch.build_wire_tools().await.unwrap().0;
 
         let names: Vec<&str> = wire.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["Bash", "Read"], "sorted by name");
@@ -4367,7 +4368,7 @@ mod read_file_state_tests {
     #[tokio::test]
     async fn build_wire_tools_empty_registry_is_empty() {
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
-        assert!(orch.build_wire_tools().await.0.is_empty());
+        assert!(orch.build_wire_tools().await.unwrap().0.is_empty());
     }
 
     #[tokio::test]
@@ -4424,7 +4425,7 @@ mod read_file_state_tests {
         )
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hooks)));
 
-        let initially_built = orch.build_wire_tools().await.0;
+        let initially_built = orch.build_wire_tools().await.unwrap().0;
         assert!(
             !initially_built.iter().any(|tool| tool.name == "Read"),
             "the deferred Read tool is omitted from the initial wire schema"
@@ -4441,7 +4442,7 @@ mod read_file_state_tests {
             Some("mod description 1")
         );
         deferral.mark_loaded(["Read".to_string()]);
-        let cached = orch.build_wire_tools().await.0;
+        let cached = orch.build_wire_tools().await.unwrap().0;
         let read = cached.iter().find(|entry| entry.name == "Read").unwrap();
         assert_eq!(read.description.string_at(""), Some("mod description 1"));
         assert!(read.defer_loading);
@@ -4455,11 +4456,11 @@ mod read_file_state_tests {
         )
         .await
         .unwrap();
-        let refreshed = orch.build_wire_tools().await.0;
+        let refreshed = orch.build_wire_tools().await.unwrap().0;
         let read = refreshed.iter().find(|entry| entry.name == "Read").unwrap();
         assert_eq!(read.description.string_at(""), Some("mod description 2"));
         host.unload("describe").await.unwrap();
-        let ordinary = orch.build_wire_tools().await.0;
+        let ordinary = orch.build_wire_tools().await.unwrap().0;
         let read = ordinary.iter().find(|entry| entry.name == "Read").unwrap();
         assert_eq!(read.description.string_at(""), Some(""));
         assert!(!read.defer_loading);
@@ -4514,7 +4515,7 @@ mod read_file_state_tests {
             .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }))
             .with_coordinator_simple_mode_for_test(false)
             .with_coordinator_pool_for_test(false, &[]);
-        let wire = orch.build_wire_tools().await.0;
+        let wire = orch.build_wire_tools().await.unwrap().0;
         let names: Vec<&str> = wire.iter().map(|t| t.name.as_str()).collect();
         let mut actual = names;
         actual.sort_unstable();
@@ -4604,7 +4605,7 @@ mod read_file_state_tests {
             }),
         ];
         let orch = orch_with_deny_rules(builtins, vec![], &["WebFetch"]);
-        let names = wire_tool_names(&orch.build_wire_tools().await.0);
+        let names = wire_tool_names(&orch.build_wire_tools().await.unwrap().0);
         assert_eq!(names, vec!["Read"], "deny:[WebFetch] hides WebFetch");
     }
 
@@ -4632,7 +4633,7 @@ mod read_file_state_tests {
             }),
         ];
         let orch = orch_with_deny_rules(builtins, mcp, &["mcp__github"]);
-        let names = wire_tool_names(&orch.build_wire_tools().await.0);
+        let names = wire_tool_names(&orch.build_wire_tools().await.unwrap().0);
         assert_eq!(
             names,
             vec!["Read", "mcp__slack__post"],
@@ -4662,10 +4663,12 @@ mod read_file_state_tests {
         let baseline = orch_with_tools(cwd.clone(), mk())
             .build_wire_tools()
             .await
+            .unwrap()
             .0;
         let gated = orch_with_deny_rules(mk(), vec![], &[])
             .build_wire_tools()
             .await
+            .unwrap()
             .0;
         assert_eq!(
             gated, baseline,

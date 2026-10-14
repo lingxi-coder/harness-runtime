@@ -196,6 +196,7 @@ impl MidTurnInputSource for SdkInputQueue {
             .iter()
             .map(|turn| MidTurnInput {
                 text: content_to_prompt_projection(&turn.content_projection),
+                images: Vec::new(),
                 origin_kind: None,
                 projected_content: Some(turn.content_projection.clone()),
                 queue_delivery: turn.queue_delivery.clone(),
@@ -204,6 +205,7 @@ impl MidTurnInputSource for SdkInputQueue {
                     .subprojection("/uuid")
                     .ok()
                     .filter(|uuid| uuid.string_at("").is_some_and(|uuid| !uuid.is_empty())),
+                pending_prompt_identity: None,
             })
             .collect();
         self.state.lock().await.folded.extend(accepted);
@@ -264,6 +266,20 @@ mod tests {
         StreamInput::User(UserTurn {
             queue_delivery: None,
             content: serde_json::json!(text),
+            content_projection: frame.subprojection("/message/content").unwrap(),
+            frame_projection: frame,
+            uuid: Some(id.into()),
+        })
+    }
+
+    fn user_with_content(id: &str, content: &serde_json::Value) -> StreamInput {
+        let frame = Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"uuid":id,"message":{"content":content}}),
+        )
+        .unwrap();
+        StreamInput::User(UserTurn {
+            queue_delivery: None,
+            content: content.clone(),
             content_projection: frame.subprojection("/message/content").unwrap(),
             frame_projection: frame,
             uuid: Some(id.into()),
@@ -604,6 +620,37 @@ mod tests {
             source.lifecycle.queued.take_current_turn_uuids(),
             [first, last]
         );
+    }
+
+    #[tokio::test]
+    async fn sdk_mixed_content_stays_on_its_source_preserving_queue_path() {
+        let (source, tx, _api, _orch) = setup(vec![]).await;
+        let id = "00000000-0000-4000-8000-000000000044";
+        let content = serde_json::json!([
+            {"type":"text","text":"before image"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}},
+            {"type":"text","text":"after image"}
+        ]);
+        let expected = Utf16JsonProjection::from_serde_value(&content).unwrap();
+        source.lifecycle.queued.on_queued(id);
+        tx.send(user_with_content(id, &content)).await.unwrap();
+
+        let batch = source
+            .take_mid_turn_batch()
+            .await
+            .unwrap()
+            .expect("the SDK frame is admitted as one source-preserving input");
+        assert_eq!(batch.len(), 1);
+        assert!(batch[0]
+            .projected_content
+            .as_ref()
+            .unwrap()
+            .semantically_eq(&expected));
+        assert_eq!(
+            batch[0].source_message_uuid.as_ref().unwrap().string_at(""),
+            Some(id)
+        );
+        source.input_consumed(&batch).await.unwrap();
     }
 
     #[tokio::test]

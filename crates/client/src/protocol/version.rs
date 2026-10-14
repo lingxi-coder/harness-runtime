@@ -161,5 +161,7 @@
 /// Bumped to 21.0.0 for persisted message clocks. `MessageDto` gains an optional
 /// timestamp; JSON remains additive, while the UniFFI record layout grows and
 /// native clients must regenerate their version-locked bindings.
-/// Version 24 combines exact source carriers with plugin extraction and persisted clocks.
-pub const CLIENT_PROTOCOL_VERSION: &str = "24.0.0";
+/// Version 25 carries source-preserving UTF-16 strings in ClientEvent::Error and
+/// the SetModel/NewSession model-selection fields. JSON remains string-shaped,
+/// while the generated native layouts change.
+pub const CLIENT_PROTOCOL_VERSION: &str = "25.0.0";

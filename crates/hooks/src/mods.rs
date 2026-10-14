@@ -1486,6 +1486,23 @@ pub trait ModSettingsReader: Send + Sync {
     async fn model_allowed(&self, _model: &str) -> Result<Option<bool>, ModError> {
         Ok(None)
     }
+
+    /// Evaluate an exact Native model projection without converting malformed
+    /// UTF-16 to a display replacement. Readers that cannot inspect exact
+    /// source fail closed for such a value rather than deciding on a different
+    /// model name.
+    async fn model_allowed_projection(
+        &self,
+        model: &Utf16JsonProjection,
+    ) -> Result<Option<bool>, ModError> {
+        let Some(units) = model.string_units("") else {
+            return Ok(Some(false));
+        };
+        let Ok(model) = String::from_utf16(&units) else {
+            return Ok(Some(false));
+        };
+        self.model_allowed(&model).await
+    }
 }
 
 /// Host-owned slash-command view used by `$.command.list`.

@@ -1916,6 +1916,16 @@ pub(crate) struct ModelRuntime {
     /// Managed model restriction and the catalog used for Native Plan upgrades.
     pub(crate) main_model_restriction:
         std::sync::RwLock<Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>>,
+    /// Exact winning managed settings.model source. The session origin gate
+    /// decides whether this configured value still owns a request; keeping it
+    /// separate from the UTF-8 route selector avoids replacing valid Native
+    /// UTF-16 strings that have no Rust String representation.
+    pub(crate) configured_model_source:
+        Arc<std::sync::RwLock<Option<lingxi_core::host::ModelSourceBinding>>>,
+    /// Native's validated model-name cache owned by this live runtime.
+    pub(crate) native_model_validation_cache: crate::model_validation::NativeModelValidationCache,
+    /// Account epoch the Native model-name cache was last paired with.
+    pub(crate) native_model_validation_account_generation: std::sync::Mutex<Option<u64>>,
 
     /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
     /// when not configured — `snapshot_cost` then falls back to the M5-10
@@ -2021,6 +2031,10 @@ impl ModelRuntime {
             refusal_selection: Default::default(),
             main_loop_latest_assistant_usage: std::sync::Mutex::new(None),
             main_model_restriction: std::sync::RwLock::new(None),
+            configured_model_source: Arc::new(std::sync::RwLock::new(None)),
+            native_model_validation_cache:
+                crate::model_validation::NativeModelValidationCache::default(),
+            native_model_validation_account_generation: std::sync::Mutex::new(None),
             cost_tracker: None,
             loop_usage: None,
             observer_pairings: None,
@@ -2097,6 +2111,20 @@ impl ModelRuntime {
             .try_lock()
             .map(|mut c| c.reset_routing())
             .ok();
+    }
+
+    /// Retire validated Native model names when the provider account epoch
+    /// changes. The shared cache belongs to the current account, not merely to
+    /// a route/profile string.
+    pub(crate) fn reset_native_model_validation_for_account(&self, generation: u64) {
+        let mut observed = self
+            .native_model_validation_account_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *observed != Some(generation) {
+            self.native_model_validation_cache.clear();
+            *observed = Some(generation);
+        }
     }
 }
 

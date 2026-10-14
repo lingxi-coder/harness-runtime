@@ -23,12 +23,27 @@ mod model_preference_tests {
                     .await
                     .unwrap();
                 assert_eq!(selected_model(&handle).await, selected);
+                let session = handle.inner().orchestrator.session();
+                let selection = session.lock().await.user_model_setting.clone();
+                assert_eq!(
+                    selection.and_then(|binding| {
+                        binding.source.string_at("").map(str::to_owned)
+                    }),
+                    Some(selected.to_string()),
+                    "the selected provider-qualified source must remain distinct from its resolved route"
+                );
                 assert_eq!(model_preference::load(&home).as_deref(), Some(selected));
             });
             drop(handle);
             let (restarted, _) = build_submit_handle(tmp.path());
             restarted.runtime().block_on(async {
                 assert_eq!(selected_model(&restarted).await, selected);
+                let session = restarted.inner().orchestrator.session();
+                assert_eq!(
+                    session.lock().await.user_model_setting_source,
+                    lingxi_core::session::SessionModelSettingSource::Configured,
+                    "startup model preference must remain configured state, not fabricate a fresh session pick"
+                );
                 restarted
                     .submit(ClientCommand::NewSession {
                         cwd: None,

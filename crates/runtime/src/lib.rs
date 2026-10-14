@@ -58,6 +58,9 @@ pub mod insights;
 #[cfg(feature = "desktop")]
 mod insights_bun_worker;
 
+#[cfg(feature = "desktop")]
+mod bun_policy_js_semantics_worker;
+
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod model_resolution;
 

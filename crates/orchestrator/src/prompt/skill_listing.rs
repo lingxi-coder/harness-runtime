@@ -12,7 +12,7 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
-use lingxi_core::settings::{SkillOverride, SkillOverrides};
+use lingxi_core::settings::{SettingsError, SkillOverride, SkillOverrides};
 use lingxi_core::types::utf16_json::{Utf16JsonBuilder, Utf16JsonProjection as Source};
 use std::future::Future;
 use std::pin::Pin;
@@ -357,14 +357,14 @@ pub struct NativeSkillListingDiagnostics {
 pub trait SkillListingProvider: Send + Sync {
     /// Return one complete view so entries, mode, priority, and settings do
     /// not come from separate registry/settings reads.
-    async fn skill_listing_snapshot(&self) -> SkillListingSnapshot;
+    async fn skill_listing_snapshot(&self) -> Result<SkillListingSnapshot, SettingsError>;
 
     /// Snapshot precommit suggestions using the same eligible skill catalog.
     async fn bash_precommit_skills(
         &self,
         _entries: &[SkillListingEntry],
-    ) -> tool_api::tool_trait::BashPrecommitSkills {
-        tool_api::tool_trait::BashPrecommitSkills::default()
+    ) -> Result<tool_api::tool_trait::BashPrecommitSkills, SettingsError> {
+        Ok(tool_api::tool_trait::BashPrecommitSkills::default())
     }
 }
 
@@ -375,17 +375,25 @@ pub trait SkillListingProvider: Send + Sync {
 /// every listing request, so registry/plugin mutations made after orchestrator
 /// construction are visible to the next turn.
 pub struct LazySkillListingProvider {
-    loader:
-        Arc<dyn Fn() -> Pin<Box<dyn Future<Output = SkillListingSnapshot> + Send>> + Send + Sync>,
+    loader: Arc<
+        dyn Fn()
+                -> Pin<Box<dyn Future<Output = Result<SkillListingSnapshot, SettingsError>> + Send>>
+            + Send
+            + Sync,
+    >,
     precommit_loader: Option<PrecommitSkillsLoader>,
 }
 
 type PrecommitSkillsLoader = Arc<
     dyn Fn(
             Vec<SkillListingEntry>,
-        )
-            -> Pin<Box<dyn Future<Output = tool_api::tool_trait::BashPrecommitSkills> + Send>>
-        + Send
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<tool_api::tool_trait::BashPrecommitSkills, SettingsError>,
+                    > + Send,
+            >,
+        > + Send
         + Sync,
 >;
 
@@ -394,10 +402,10 @@ impl LazySkillListingProvider {
     pub fn new<F, Fut>(loader: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = SkillListingSnapshot> + Send + 'static,
+        Fut: Future<Output = Result<SkillListingSnapshot, SettingsError>> + Send + 'static,
     {
         let loader = Arc::new(
-            move || -> Pin<Box<dyn Future<Output = SkillListingSnapshot> + Send>> {
+            move || -> Pin<Box<dyn Future<Output = Result<SkillListingSnapshot, SettingsError>> + Send>> {
                 Box::pin(loader())
             },
         );
@@ -411,7 +419,9 @@ impl LazySkillListingProvider {
     pub fn with_bash_precommit_skills<F, Fut>(mut self, loader: F) -> Self
     where
         F: Fn(Vec<SkillListingEntry>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = tool_api::tool_trait::BashPrecommitSkills> + Send + 'static,
+        Fut: Future<Output = Result<tool_api::tool_trait::BashPrecommitSkills, SettingsError>>
+            + Send
+            + 'static,
     {
         self.precommit_loader = Some(Arc::new(move |entries| Box::pin(loader(entries))));
         self
@@ -420,16 +430,16 @@ impl LazySkillListingProvider {
 
 #[async_trait]
 impl SkillListingProvider for LazySkillListingProvider {
-    async fn skill_listing_snapshot(&self) -> SkillListingSnapshot {
+    async fn skill_listing_snapshot(&self) -> Result<SkillListingSnapshot, SettingsError> {
         (self.loader)().await
     }
 
     async fn bash_precommit_skills(
         &self,
         entries: &[SkillListingEntry],
-    ) -> tool_api::tool_trait::BashPrecommitSkills {
+    ) -> Result<tool_api::tool_trait::BashPrecommitSkills, SettingsError> {
         let Some(loader) = self.precommit_loader.as_ref() else {
-            return tool_api::tool_trait::BashPrecommitSkills::default();
+            return Ok(tool_api::tool_trait::BashPrecommitSkills::default());
         };
         loader(entries.to_vec()).await
     }
@@ -1584,21 +1594,21 @@ mod tests {
         let provider = LazySkillListingProvider::new(move || {
             calls_for_loader.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             async {
-                SkillListingSnapshot {
+                Ok(SkillListingSnapshot {
                     entries: vec![entry("live", "loaded from the current source", None, false)],
                     budget_settings: SkillListingBudgetSettings::default(),
-                }
+                })
             }
         });
 
         assert_eq!(
-            provider.skill_listing_snapshot().await.entries[0]
+            provider.skill_listing_snapshot().await.unwrap().entries[0]
                 .name
                 .string_at(""),
             Some("live")
         );
         assert_eq!(
-            provider.skill_listing_snapshot().await.entries[0]
+            provider.skill_listing_snapshot().await.unwrap().entries[0]
                 .name
                 .string_at(""),
             Some("live")

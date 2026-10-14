@@ -6,9 +6,9 @@
 //!
 //! M5-10 Task 12.
 
+use command_api::builtins::{register_all_builtin_commands, register_core_batch_1, INIT_PROMPT};
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
-use command_api::builtins::{INIT_PROMPT, register_all_builtin_commands, register_core_batch_1};
 use lingxi_core::host::{CompactionSummary, SlashCommandDispatcher, SlashDispatchResult};
 use orchestrator::test_support::MockOrchestratorHandle;
 use std::sync::Arc;
@@ -26,7 +26,9 @@ fn fresh() -> (RegistrySlashDispatcher, Arc<MockOrchestratorHandle>) {
 #[tokio::test]
 async fn clear_dispatch() {
     let (d, mock) = fresh();
-    let r = d.dispatch("/clear".into()).await;
+    let r = d
+        .dispatch("/clear".into(), lingxi_core::host::CancellationToken::new())
+        .await;
     match r {
         SlashDispatchResult::Handled { display } => {
             assert_eq!(display, "Conversation cleared.".into());
@@ -45,7 +47,12 @@ async fn compact_dispatch() {
         bytes_saved: 4_096,
         summary: "kept context".into(),
     });
-    let r = d.dispatch("/compact".into()).await;
+    let r = d
+        .dispatch(
+            "/compact".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     match r {
         SlashDispatchResult::Handled { display } => {
             assert_eq!(display, "Compacted (ctrl+o to see full summary)".into());
@@ -57,7 +64,9 @@ async fn compact_dispatch() {
 #[tokio::test]
 async fn help_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/help".into()).await;
+    let r = d
+        .dispatch("/help".into(), lingxi_core::host::CancellationToken::new())
+        .await;
     match r {
         SlashDispatchResult::Handled { display } => {
             let text = display.string_at("").unwrap();
@@ -80,7 +89,9 @@ async fn help_dispatch() {
 #[tokio::test]
 async fn exit_dispatch() {
     let (d, mock) = fresh();
-    let r = d.dispatch("/exit".into()).await;
+    let r = d
+        .dispatch("/exit".into(), lingxi_core::host::CancellationToken::new())
+        .await;
     match r {
         SlashDispatchResult::Handled { display } => {
             assert_eq!(display, "Exiting.".into());
@@ -95,7 +106,12 @@ async fn memory_dispatch() {
     let (d, mock) = fresh();
     mock.set_memory_path(std::path::PathBuf::from("/tmp/LINGXI.md"));
     mock.set_editor_exit_code(0);
-    let r = d.dispatch("/memory".into()).await;
+    let r = d
+        .dispatch(
+            "/memory".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     match r {
         SlashDispatchResult::Handled { display } => {
             assert_eq!(display, "Edited /tmp/LINGXI.md (exit 0).".into());
@@ -107,7 +123,9 @@ async fn memory_dispatch() {
 #[tokio::test]
 async fn init_dispatch_preserves_native_prompt_envelope_and_locked_template() {
     let (d, _) = fresh();
-    let r = d.dispatch("/init".into()).await;
+    let r = d
+        .dispatch("/init".into(), lingxi_core::host::CancellationToken::new())
+        .await;
     match r {
         SlashDispatchResult::RunSkillAsTurn {
             command,
@@ -130,7 +148,12 @@ async fn non_batch_1_command_still_returns_stub() {
     let (d, _) = fresh();
     // `x402` left the 105-name surface, so it is no longer a registered stub;
     // `teleport` remains a faithful compiled stub.
-    let r = d.dispatch("/teleport".into()).await;
+    let r = d
+        .dispatch(
+            "/teleport".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     match r {
         SlashDispatchResult::Handled { display } => {
             assert_eq!(display, "teleport: not implemented in v0.6.0 (M5)".into());

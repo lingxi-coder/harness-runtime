@@ -223,17 +223,25 @@ fn provider_credential_command_round_trips_without_debug_leak() {
     assert_eq!(back, command);
 }
 
-/// `SetModel` — names the model to switch to.
+/// `SetModel` — keeps exact model-selection UTF-16 while preserving JSON text.
 #[test]
 fn set_model_round_trips() {
+    let model =
+        ClientTextDto::from_code_units("claude-opus-4-8".encode_utf16().chain([0xD800]).collect());
     let cmd = ClientCommand::SetModel {
-        model: "claude-opus-4-8".to_string(),
+        model: model.clone(),
     };
-    let json = serde_json::to_value(&cmd).expect("serialize SetModel");
-    assert_eq!(json["type"], "set_model");
-    assert_eq!(json["model"], "claude-opus-4-8");
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize SetModel");
+    let json = serde_json::to_string(&cmd).expect("serialize SetModel");
+    assert!(json.contains("claude-opus-4-8\\ud800"));
+    let back: ClientCommand = serde_json::from_str(&json).expect("deserialize SetModel");
     assert_eq!(back, cmd);
+    let ClientCommand::SetModel {
+        model: round_tripped,
+    } = back
+    else {
+        panic!("SetModel tag must round-trip")
+    };
+    assert_eq!(round_tripped.code_units, model.code_units);
 }
 
 /// `ListModels` — a unit-style pull command.
@@ -405,19 +413,22 @@ fn listing_kind_coordinator_roundtrip() {
 /// NO `session_id` (the new id is reported back via `SessionStarted`, §0.5).
 #[test]
 fn new_session_round_trips() {
+    let model = ClientTextDto::from_code_units(
+        "claude-sonnet-4-6".encode_utf16().chain([0xD800]).collect(),
+    );
     let cmd = ClientCommand::NewSession {
         cwd: Some("/home/dev/proj".to_string()),
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some(model.clone()),
     };
-    let json = serde_json::to_value(&cmd).expect("serialize NewSession");
-    assert_eq!(json["type"], "new_session");
-    assert_eq!(json["cwd"], "/home/dev/proj");
-    assert_eq!(json["model"], "claude-sonnet-4-6");
+    let json = serde_json::to_string(&cmd).expect("serialize NewSession");
+    assert!(json.contains("\"type\":\"new_session\""));
+    assert!(json.contains("\"cwd\":\"/home/dev/proj\""));
+    assert!(json.contains("\"model\":\"claude-sonnet-4-6\\ud800\""));
     assert!(
-        json.get("session_id").is_none(),
+        !json.contains("session_id"),
         "NewSession must NOT carry session_id (§0.5)"
     );
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize NewSession");
+    let back: ClientCommand = serde_json::from_str(&json).expect("deserialize NewSession");
     assert_eq!(back, cmd);
 
     // Both optionals absent ⇒ skipped.
@@ -749,7 +760,7 @@ fn no_live_command_carries_session_id() {
         },
         ClientCommand::DenyPermission { request_id: 1 },
         ClientCommand::SetModel {
-            model: "m".to_string(),
+            model: ClientTextDto::from_utf8("m"),
         },
         ClientCommand::ListModels,
         ClientCommand::GetConversationControls,
@@ -765,7 +776,7 @@ fn no_live_command_carries_session_id() {
         },
         ClientCommand::NewSession {
             cwd: Some("/p".to_string()),
-            model: Some("m".to_string()),
+            model: Some(ClientTextDto::from_utf8("m")),
         },
         ClientCommand::ListSessions { limit: Some(5) },
         ClientCommand::Login,

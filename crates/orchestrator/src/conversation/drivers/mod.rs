@@ -42,6 +42,8 @@ pub struct QueuedPromptInput {
     pub goal_retry_id: Option<String>,
     /// The already-expanded text to deliver to the model.
     pub text: Utf16JsonProjection,
+    /// Image sources attached to this queued prompt entry.
+    pub images: Vec<ImageSource>,
     /// Synthetic scheduled input stays meta even beside a human prompt.
     pub is_meta: bool,
     /// Native `turnCompanion:true` marker for a paired meta message.
@@ -56,8 +58,19 @@ pub struct QueuedPromptInput {
     pub message_origin: Option<Utf16JsonProjection>,
     /// Native outer `promptSource` value when the source is known.
     pub prompt_source: Option<Utf16JsonProjection>,
+    /// Trusted source kind stamped by a host and retained through durable
+    /// queue recovery. `DirectBash` is a one-step classification, never read
+    /// back from the rendered transcript row.
+    pub prompt_ingress_kind: Option<crate::request_context::PromptIngressKind>,
+    /// Persist this source row and finish without requesting another model step.
+    /// Used only by the host-stamped DirectBash result/recovery path.
+    pub skip_model_query: bool,
     /// Queue-supplied identity; generated when absent.
     pub message_id: Option<MessageId>,
+    /// Restart-stable identities for a pending prompt row and its trailing
+    /// source attachments. Set only by a host that durably checkpoints the
+    /// pending batch before starting the turn.
+    pub pending_prompt_identity: Option<PendingPromptIdentity>,
     /// TUI-owned row correlation token, resolved to the actual persisted JSONL
     /// UUID only after the corresponding append succeeds.
     pub transcript_row_token: Option<String>,
@@ -74,19 +87,44 @@ impl Default for QueuedPromptInput {
         Self {
             goal_retry_id: None,
             text: String::new().into(),
+            images: Vec::new(),
             is_meta: false,
             turn_companion: false,
             trailing_history_rows: Vec::new(),
             mod_origin: None,
             message_origin: None,
             prompt_source: None,
+            prompt_ingress_kind: None,
+            skip_model_query: false,
             message_id: None,
+            pending_prompt_identity: None,
             transcript_row_token: None,
             queue_priority: None,
             scheduled_task_id: None,
             scheduled_fire_id: None,
         }
     }
+}
+
+fn queued_inputs_are_direct_bash(inputs: &[QueuedPromptInput]) -> bool {
+    inputs.iter().filter(|input| !input.is_meta).count() == 1
+        && inputs.iter().filter(|input| !input.is_meta).all(|input| {
+            input.prompt_ingress_kind == Some(crate::request_context::PromptIngressKind::DirectBash)
+        })
+        && inputs.iter().all(|input| {
+            input.is_meta
+                || input.prompt_ingress_kind
+                    == Some(crate::request_context::PromptIngressKind::DirectBash)
+        })
+}
+
+/// Stable transcript identities retained by a host pending-turn checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingPromptIdentity {
+    /// The row's stable per-prompt `promptId` value.
+    pub prompt_id: String,
+    /// Stable UUIDs for this input's ordered trailing history attachments.
+    pub trailing_history_row_ids: Vec<MessageId>,
 }
 
 /// Build the exact queued input pair for an inline directory Skill. Hook rows
@@ -396,9 +434,13 @@ impl ConversationOrchestrator {
             {
                 Some(batch) if batch.is_empty() => break,
                 Some(batch) => {
-                    let mut groups: Vec<(Option<&'static str>, Vec<Utf16JsonProjection>)> =
-                        Vec::new();
-                    for input in batch {
+                    let mut groups: Vec<(
+                        Option<&'static str>,
+                        Vec<Utf16JsonProjection>,
+                        Vec<lingxi_core::types::ImageSource>,
+                        Option<crate::prompt::mid_turn_input::PendingMidTurnPromptIdentity>,
+                    )> = Vec::new();
+                    for input in batch.iter().cloned() {
                         let text = if let Some(kind) = input.origin_kind {
                             self.screen_mod_queued_receive_source(&input.text, kind)
                                 .await
@@ -406,28 +448,56 @@ impl ConversationOrchestrator {
                             Some(input.text)
                         };
                         if let Some(text) = text {
-                            if let Some((kind, texts)) = groups.last_mut() {
+                            if let Some((kind, texts, images, identity)) = groups.last_mut() {
                                 if *kind == input.origin_kind {
                                     texts.push(text);
+                                    images.extend(input.images);
+                                    if identity.is_none() {
+                                        *identity = input.pending_prompt_identity;
+                                    }
                                     continue;
                                 }
                             }
-                            groups.push((input.origin_kind, vec![text]));
+                            groups.push((
+                                input.origin_kind,
+                                vec![text],
+                                input.images,
+                                input.pending_prompt_identity,
+                            ));
                         }
                     }
-                    if !groups.is_empty() {
-                        self.reset_goal_interruption();
-                        let wrapped = groups
-                            .into_iter()
-                            .map(|(kind, texts)| {
-                                let joined = join_source_texts(&texts, "\n");
-                                wrap_mid_turn_source(&joined, kind)
-                            })
-                            .collect::<Vec<_>>();
-                        let wrapped = join_source_texts(&wrapped, "\n\n");
-                        self.inject_user_projection(&wrapped, false).await;
-                        injected = true;
+                    if groups.is_empty() {
+                        source
+                            .input_consumed(&batch)
+                            .await
+                            .map_err(OrchestratorError::Internal)?;
+                        continue;
                     }
+                    self.reset_goal_interruption();
+                    let mut wrapped = Vec::new();
+                    let mut images = Vec::new();
+                    let mut identity = None;
+                    for (kind, texts, mut group_images, group_identity) in groups {
+                        let joined = join_source_texts(&texts, "\n");
+                        wrapped.push(wrap_mid_turn_source(&joined, kind));
+                        images.append(&mut group_images);
+                        if identity.is_none() {
+                            identity = group_identity;
+                        }
+                    }
+                    let wrapped = join_source_texts(&wrapped, "\n\n");
+                    if let Some(identity) = identity {
+                        self.inject_pending_user_projection_once(&wrapped, images, identity)
+                            .await?;
+                    } else {
+                        self.inject_user_projection_with_images(&wrapped, false, images)
+                            .await;
+                    }
+                    source
+                        .input_consumed(&batch)
+                        .await
+                        .map_err(OrchestratorError::Internal)?;
+                    injected = true;
                 }
                 None => break,
             }
@@ -456,7 +526,9 @@ impl ConversationOrchestrator {
         }
         self.reset_goal_interruption();
         // Native ordinary SDK humans are separate attachments; initial-turn
-        // uC merging and verified-Slack batch rendering do not apply here.
+        // uC merging and verified-Slack batch rendering do not apply here. The
+        // SDK adapter keeps structured content in each source projection, so
+        // this path stays outside Mu's plain-string batch join.
         for input in &batch {
             let prompt = input
                 .projected_content
@@ -593,12 +665,46 @@ impl ConversationOrchestrator {
     /// Inject a projected root-string user message without lowering its UTF-16
     /// code units in history, JSONL, or the following provider request.
     pub(crate) async fn inject_user_projection(&self, text: &Utf16JsonProjection, is_meta: bool) {
-        let msg = user_message_from_projection(MessageId::new(), text, is_meta, Vec::new());
+        self.inject_user_projection_with_images(text, is_meta, Vec::new())
+            .await;
+    }
+
+    async fn inject_user_projection_with_images(
+        &self,
+        text: &Utf16JsonProjection,
+        is_meta: bool,
+        images: Vec<lingxi_core::types::ImageSource>,
+    ) {
+        let msg = user_message_from_projection(MessageId::new(), text, is_meta, images);
         {
             let mut session = self.session.lock().await;
             session.history.push(msg.clone());
         }
         self.persist_message_to_jsonl(&msg).await;
+    }
+
+    async fn inject_pending_user_projection_once(
+        &self,
+        text: &Utf16JsonProjection,
+        images: Vec<lingxi_core::types::ImageSource>,
+        identity: crate::prompt::mid_turn_input::PendingMidTurnPromptIdentity,
+    ) -> Result<(), OrchestratorError> {
+        let input = QueuedPromptInput {
+            text: text.clone(),
+            images: images.clone(),
+            message_id: Some(identity.message_id),
+            pending_prompt_identity: Some(PendingPromptIdentity {
+                prompt_id: identity.prompt_id.clone(),
+                trailing_history_row_ids: Vec::new(),
+            }),
+            ..QueuedPromptInput::default()
+        };
+        let message = user_message_from_projection(identity.message_id, text, false, images);
+        let stored = self
+            .persist_pending_prompt_queued_message_once(&message, &input, &identity.prompt_id)
+            .await?;
+        self.append_pending_prompt_message_to_history_once(&stored)
+            .await
     }
 
     /// Inject hook-authored text while preserving isolated UTF-16 code units
@@ -849,7 +955,7 @@ impl ConversationOrchestrator {
         // the `--agent`-adopted main-thread agent's prompt; else the default.
         let system_prompt: Option<
             lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
-        > = Some(self.provider_system_prompt().await);
+        > = Some(self.provider_system_prompt().await?);
 
         // A side query left unfinished when the previous user turn ended was
         // keyed to that previous prompt. Never surface it against new intent.
@@ -886,7 +992,12 @@ impl ConversationOrchestrator {
             s.history.push(user_msg.clone());
         }
         self.persist_message_to_jsonl(&user_msg).await;
-        crate::request_context::persist_prompt_ingress_after_user(self, user_msg.id(), true).await;
+        crate::request_context::persist_prompt_ingress_after_user(
+            self,
+            user_msg.id(),
+            crate::request_context::prompt_ingress_kind_for_user_submission(false),
+        )
+        .await?;
         self.append_mod_prompt_context(&mod_context).await;
 
         // hooks B4: fire UserPromptSubmit. A Block decision aborts the turn
@@ -2682,7 +2793,7 @@ impl ConversationOrchestrator {
         // `--agent` main-thread agent's prompt; else the default (`build_system_prompt`).
         let system_prompt: Option<
             lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
-        > = Some(self.provider_system_prompt().await);
+        > = Some(self.provider_system_prompt().await?);
 
         // A side query left unfinished when the previous user turn ended was
         // keyed to that previous prompt. Never surface it against new intent.
@@ -2778,9 +2889,11 @@ impl ConversationOrchestrator {
                 crate::request_context::persist_prompt_ingress_after_user(
                     self,
                     submissions[primary].1.id(),
-                    true,
+                    crate::request_context::prompt_ingress_kind_for_user_submission(
+                        submissions.iter().any(|(input, _, _)| input.turn_companion),
+                    ),
                 )
-                .await;
+                .await?;
             }
             let user_msg = submissions[primary].1.clone();
             if submissions.iter().any(|(input, _, _)| input.turn_companion) {
@@ -2835,8 +2948,12 @@ impl ConversationOrchestrator {
                 s.history.push(user_msg.clone());
             }
             self.persist_message_to_jsonl(&user_msg).await;
-            crate::request_context::persist_prompt_ingress_after_user(self, user_msg.id(), true)
-                .await;
+            crate::request_context::persist_prompt_ingress_after_user(
+                self,
+                user_msg.id(),
+                crate::request_context::prompt_ingress_kind_for_user_submission(false),
+            )
+            .await?;
             self.append_mod_prompt_context(&mod_context).await;
 
             // hooks B4: UserPromptSubmit (cancelable REPL twin). A Block aborts
@@ -3227,8 +3344,18 @@ impl ConversationOrchestrator {
         if inputs.iter().any(|input| !input.is_meta) {
             self.reset_goal_interruption();
         }
-        let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-            return Ok(TurnOutcome::Cancelled);
+        let turn_guard = if queued_inputs_are_direct_bash(&inputs) {
+            // A directly executed Shell command has already crossed its
+            // side-effect boundary and its result is durable. Even if the
+            // user cancels before this queued turn acquires the gate, finish
+            // appending the Native rows; the cancellation token still
+            // suppresses the model request.
+            self.turn_gate.lock().await
+        } else {
+            let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                return Ok(TurnOutcome::Cancelled);
+            };
+            turn_guard
         };
         let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
         let prompt = inputs[primary]
@@ -3267,12 +3394,13 @@ impl ConversationOrchestrator {
         self.run_turn_streaming_inputs_locked(
             turn_guard,
             &display,
-            images,
+            images.clone(),
             cancel,
             message_id,
             in_human_turn,
             Some(vec![QueuedPromptInput {
                 text: prompt,
+                images,
                 is_meta: !in_human_turn,
                 message_origin: native_user_source.message_origin,
                 prompt_source: native_user_source.prompt_source,
@@ -3320,6 +3448,24 @@ impl ConversationOrchestrator {
                 return Ok(TurnOutcome::EndTurn);
             }
         }
+        if cancel.is_cancelled() {
+            if let Some(inputs) = queued_inputs.as_mut() {
+                if queued_inputs_are_direct_bash(inputs) {
+                    for input in inputs {
+                        if input.prompt_ingress_kind
+                            == Some(crate::request_context::PromptIngressKind::DirectBash)
+                        {
+                            input.skip_model_query = true;
+                        }
+                    }
+                }
+            }
+        }
+        let cancelled_direct_bash_no_query = cancel.is_cancelled()
+            && queued_inputs.as_ref().is_some_and(|inputs| {
+                queued_inputs_are_direct_bash(inputs)
+                    && inputs.iter().any(|input| input.skip_model_query)
+            });
         let admitted_prompt = queued_inputs
             .as_ref()
             .and_then(|inputs| {
@@ -3338,7 +3484,7 @@ impl ConversationOrchestrator {
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
         );
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() && !cancelled_direct_bash_no_query {
             self.abort_startup_responses_websocket_prewarm();
             if let Err(err) = self.api.close_responses_websocket_session().await {
                 tracing::warn!(

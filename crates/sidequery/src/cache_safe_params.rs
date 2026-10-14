@@ -43,6 +43,9 @@ pub struct CacheSafeParams {
     pub user_context_message: Option<ConversationMessage>,
     /// Tool-set options the parent rendered in this turn.
     pub tool_use_options: tool_api::ToolUseOptions,
+    /// Exact Native model source when the parent request needed a source
+    /// carrier instead of its ordinary resolved route.
+    pub model_source: Option<Utf16JsonProjection>,
     /// Tool schemas sent with the parent's prompt, in their original order.
     /// Compaction replays these even though it never executes tool calls.
     pub tools: Vec<lingxi_core::host::SourceToolWireDefinition>,

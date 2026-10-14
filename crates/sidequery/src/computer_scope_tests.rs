@@ -92,6 +92,7 @@ async fn direct_plain_and_strict_queries_ignore_the_parent_computer_continuation
             let messages = vec![user("early context"), user("summarize all context")];
             let plain = client
                 .query(SideQueryRequest {
+                    model_source: None,
                     enable_prompt_caching: false,
                     model_attempt: None,
                     native_prompt_context: None,
@@ -216,6 +217,7 @@ async fn session_compaction_fork_preserves_typed_attachment_bytes_and_function_c
         async {
             let estimate = client
                 .estimate_request(CanonicalSideQueryRequest::Plain(SideQueryRequest {
+                    model_source: None,
                     enable_prompt_caching: false,
                     model_attempt: None,
                     native_prompt_context: None,
@@ -244,6 +246,7 @@ async fn session_compaction_fork_preserves_typed_attachment_bytes_and_function_c
                 .run(ForkedAgentRequest {
                     prompt_messages: vec![user("summarize all context")],
                     cache_safe_params: CacheSafeParams {
+                        model_source: None,
                         system_prompt: Arc::new(
                             lingxi_core::types::utf16_json::Utf16JsonProjection::from("Summarize"),
                         ),

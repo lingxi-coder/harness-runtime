@@ -2,7 +2,17 @@
 
 use super::*;
 
-struct ToolSearchGateApi(Option<llm_runtime::ProtocolFamily>);
+struct ToolSearchGateApi(
+    Option<llm_runtime::ProtocolFamily>,
+    Option<bool>,
+    Option<Vec<u16>>,
+);
+
+impl ToolSearchGateApi {
+    fn new(protocol: Option<llm_runtime::ProtocolFamily>) -> Self {
+        Self(protocol, None, None)
+    }
+}
 
 #[async_trait::async_trait]
 impl OrchestratorApiClient for ToolSearchGateApi {
@@ -14,12 +24,43 @@ impl OrchestratorApiClient for ToolSearchGateApi {
         self.0
     }
 
+    fn foundry_tool_search_supported(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        model_source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    ) -> Option<bool> {
+        if self.2.as_ref().is_some_and(|expected| {
+            model_source
+                .and_then(|source| source.string_units(""))
+                .as_ref()
+                != Some(expected)
+        }) {
+            return Some(true);
+        }
+        self.1
+    }
+
     async fn messages_create(
         &self,
         _request: OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
         Err(LlmError::ModelUnavailable)
     }
+}
+
+#[tokio::test]
+async fn api_clients_without_probe_support_fail_explicitly() {
+    let api = ToolSearchGateApi::new(None);
+    let source = lingxi_core::types::utf16_json::Utf16JsonProjection::from("unlisted-model");
+    let result = api
+        .probe_model("claude-sonnet-4-20250514", None, &source)
+        .await;
+    assert!(matches!(
+        result,
+        Err(LlmError::InvalidRequest { message })
+            if message == "model validation is unsupported by this API client"
+    ));
 }
 
 struct ToolSearchFlagOverride;
@@ -40,63 +81,99 @@ impl Drop for ToolSearchFlagOverride {
 #[test]
 fn tool_search_uses_overridable_native_unsupported_model_list_case_insensitively() {
     let _flag_override = ToolSearchFlagOverride::set(vec!["blocked-family".to_owned()]);
-    let api = ToolSearchGateApi(None);
+    let api = ToolSearchGateApi::new(None);
     assert!(!tool_search_supported_for_request(
         &api,
         "Vendor/BLOCKED-FAMILY-v2",
+        None,
         None
     ));
     assert!(tool_search_supported_for_request(
         &api,
         "Vendor/allowed-family-v2",
+        None,
         None
     ));
 }
 
 #[test]
+fn foundry_tool_search_gate_applies_the_observed_negative_capability() {
+    let _flag_override = ToolSearchFlagOverride::set(Vec::new());
+    let source = lingxi_core::types::utf16_json::Utf16JsonProjection::from("native-custom-model");
+    let source_units = source.string_units("").unwrap();
+    let denied = ToolSearchGateApi(
+        Some(llm_runtime::ProtocolFamily::FoundryClaude),
+        Some(false),
+        Some(source_units),
+    );
+    assert!(!tool_search_supported_for_request(
+        &denied,
+        "foundry-route-model",
+        Some("foundry-profile"),
+        Some(&source),
+    ));
+    assert!(
+        tool_search_supported_for_request(
+            &denied,
+            "foundry-route-model",
+            Some("foundry-profile"),
+            None,
+        ),
+        "the capability observation belongs to the exact model source"
+    );
+}
+
+#[test]
 fn vertex_tool_search_gate_strips_complete_native_formatting_and_date_suffix_before_45_floor() {
     let _flag_override = ToolSearchFlagOverride::set(Vec::new());
-    let vertex = ToolSearchGateApi(Some(llm_runtime::ProtocolFamily::VertexClaude));
+    let vertex = ToolSearchGateApi::new(Some(llm_runtime::ProtocolFamily::VertexClaude));
     assert!(!tool_search_supported_for_request(
         &vertex,
         "claude-sonnet-3-7-20250301",
+        None,
         None
     ));
     assert!(!tool_search_supported_for_request(
         &vertex,
         "claude-opus-4-4@20250301",
+        None,
         None
     ));
     assert!(tool_search_supported_for_request(
         &vertex,
         "claude-sonnet-[1m]4-5-20250301",
+        None,
         None
     ));
     assert!(tool_search_supported_for_request(
         &vertex,
         "claude-sonnet-[2M]4-5-20250301",
+        None,
         None
     ));
     assert!(!tool_search_supported_for_request(
         &vertex,
         "claude-sonnet-[2m]4-4-20250301",
+        None,
         None
     ));
     assert!(
-        tool_search_supported_for_request(&vertex, "claude-sonnet-[1m4-4-20250301", None),
+        tool_search_supported_for_request(&vertex, "claude-sonnet-[1m4-4-20250301", None, None),
         "Native Fn does not strip an unterminated formatting marker"
     );
     assert!(tool_search_supported_for_request(
         &vertex,
         "claude-haiku-4-5-1-20250301",
+        None,
         None
     ));
 
     // The same model name follows the generic route rule outside Vertex.
-    let generic = ToolSearchGateApi(None);
+    let generic = ToolSearchGateApi::new(None);
     assert!(tool_search_supported_for_request(
         &generic,
         "claude-opus-4-4",
+        None,
         None
     ));
 }

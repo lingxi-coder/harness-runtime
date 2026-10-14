@@ -828,18 +828,52 @@ impl ConversationOrchestrator {
     pub async fn refresh_main_model_selection(
         &self,
         raw_model_setting: Option<String>,
+        model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         provenance: lingxi_core::host::ModelProvenance,
         restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
     ) {
+        let fallback_anchor = self
+            .model_runtime
+            .configured_model_source
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|binding| binding.route_anchor.clone())
+            .unwrap_or_else(|| lingxi_core::host::ModelRouteAnchor {
+                model: self.config.model.clone(),
+                profile: self
+                    .session
+                    .try_lock()
+                    .ok()
+                    .and_then(|s| s.model_profile.clone()),
+            });
+        let source = model_source.or_else(|| {
+            raw_model_setting.map(lingxi_core::types::utf16_json::Utf16JsonProjection::from)
+        });
+        let binding = source.as_ref().map(|source| {
+            Self::bind_model_source(
+                source,
+                fallback_anchor,
+                self.model_resolution_context_provider.as_deref(),
+            )
+        });
         {
             let mut session = self.session.lock().await;
             if session.user_model_setting_source
                 == lingxi_core::session::SessionModelSettingSource::Configured
             {
-                session.user_model_setting = raw_model_setting;
+                session.user_model_setting = binding.clone();
                 session.user_model_setting_provenance = provenance;
             }
         }
+        // The source is the current configured value even while a session
+        // selection temporarily owns the route. That selection gate prevents
+        // it from being used until the user returns to Configured.
+        *self
+            .model_runtime
+            .configured_model_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = binding;
         *self
             .model_runtime
             .main_model_restriction
@@ -863,7 +897,12 @@ impl ConversationOrchestrator {
         }
         let raw_model_setting = {
             let session = self.session.lock().await;
-            session.user_model_setting.clone()
+            session.user_model_setting.as_ref().and_then(|binding| {
+                let source = &binding.source;
+                source
+                    .string_units("")
+                    .and_then(|units| String::from_utf16(&units).ok())
+            })
         };
         let Some(raw_model_setting) = raw_model_setting else {
             return (main_loop_model.to_owned(), model_profile.map(str::to_owned));
@@ -994,14 +1033,17 @@ impl ConversationOrchestrator {
 
     async fn cache_safe_system_prompt_input(
         &self,
-    ) -> lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput {
+    ) -> Result<
+        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        lingxi_core::settings::SettingsError,
+    > {
         if let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() {
             if let Some(input) = slot
                 .get_last()
                 .await
                 .and_then(|params| params.system_prompt_input)
             {
-                return input;
+                return Ok(input);
             }
         }
         self.provider_system_prompt().await
@@ -1624,10 +1666,10 @@ impl ConversationOrchestrator {
                 labelled_context.as_ref(),
             );
 
-            let system_prompt = self.cache_safe_system_prompt_input().await;
-            let tools = self.build_wire_tools().await.0;
+            let system_prompt = self.cache_safe_system_prompt_input().await?;
+            let tools = self.build_wire_tools().await?.0;
             self.save_cache_safe_params(Some(&system_prompt), &model, &tools)
-                .await;
+                .await?;
 
             let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
                 lingxi_core::host::HandleError::ActionFailed(format!(
@@ -1793,7 +1835,8 @@ impl ConversationOrchestrator {
         if let Err(error) = &outcome {
             let detail = match error {
                 lingxi_core::host::HandleError::ActionFailed(detail) => detail.as_str(),
-                lingxi_core::host::HandleError::Unimplemented(_) => "compaction failed",
+                lingxi_core::host::HandleError::Unimplemented(_)
+                | lingxi_core::host::HandleError::Settings(_) => "compaction failed",
             };
             self.output.emit_compaction_finished(Some(detail)).await;
         }
@@ -1918,10 +1961,10 @@ impl ConversationOrchestrator {
             // and live history so manual compaction works immediately after resume.
             // Autocompactor replaces the slot's potentially stale message clone with
             // `history_before`'s selected prefix before issuing the request.
-            let system_prompt = self.cache_safe_system_prompt_input().await;
-            let tools = self.build_wire_tools().await.0;
+            let system_prompt = self.cache_safe_system_prompt_input().await?;
+            let tools = self.build_wire_tools().await?.0;
             self.save_cache_safe_params(Some(&system_prompt), &model, &tools)
-                .await;
+                .await?;
 
             // Run the 5-layer compactor, racing against the cancel token.
             // process_iteration takes no CancellationToken; drop-on-cancel
@@ -2063,7 +2106,8 @@ impl ConversationOrchestrator {
         if let Err(error) = &outcome {
             let detail = match error {
                 lingxi_core::host::HandleError::ActionFailed(detail) => detail.as_str(),
-                lingxi_core::host::HandleError::Unimplemented(_) => "compaction failed",
+                lingxi_core::host::HandleError::Unimplemented(_)
+                | lingxi_core::host::HandleError::Settings(_) => "compaction failed",
             };
             self.output.emit_compaction_finished(Some(detail)).await;
         }
@@ -4123,6 +4167,7 @@ mod session_compact_mod_tests {
         let orch = orch
             .with_main_model_selection(
                 Some("opusplan".into()),
+                None,
                 lingxi_core::host::ModelProvenance::UserOrEnv,
                 None,
             )
@@ -4240,6 +4285,7 @@ mod session_compact_mod_tests {
         .with_model_resolution_context_provider(Arc::new(main_model_selection_context))
         .with_main_model_selection(
             Some("opusplan".into()),
+            None,
             lingxi_core::host::ModelProvenance::UserOrEnv,
             None,
         )

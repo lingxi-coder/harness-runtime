@@ -216,7 +216,7 @@ impl ApiClientHookPromptRunner {
                 // so we synthesize a zero-duration timeout for the hook error.
                 PromptHookError::Timeout(std::time::Duration::ZERO)
             }
-            _ => PromptHookError::Query(err.to_string()),
+            _ => PromptHookError::Query(llm_runtime::error_display_text(&err)),
         }
     }
 }

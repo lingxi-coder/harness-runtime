@@ -6,9 +6,9 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 7.
 
+use command_api::builtins::register_all_builtin_commands;
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
-use command_api::builtins::register_all_builtin_commands;
 use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -24,7 +24,10 @@ fn build_dispatcher() -> RegistrySlashDispatcher {
 async fn dataviz_dispatches_bundled_body_and_optional_user_request() {
     let d = build_dispatcher();
     let outcome = d
-        .dispatch("/dataviz make the revenue chart keyboard accessible".into())
+        .dispatch(
+            "/dataviz make the revenue chart keyboard accessible".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
         .await;
     let SlashDispatchResult::RunSkillAsTurn {
         command,
@@ -50,7 +53,9 @@ async fn dataviz_dispatches_bundled_body_and_optional_user_request() {
 #[tokio::test]
 async fn happy_path_known_core_command() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("/help".into()).await;
+    let outcome = d
+        .dispatch("/help".into(), lingxi_core::host::CancellationToken::new())
+        .await;
     match outcome {
         SlashDispatchResult::Handled { display } => {
             assert_eq!(display, "help: not implemented in v0.6.0 (M5)".into());
@@ -64,7 +69,12 @@ async fn happy_path_known_unimplemented_command() {
     let d = build_dispatcher();
     // `x402` left the 105-name surface with the re-lock; `teleport` is a
     // still-registered stub.
-    let outcome = d.dispatch("/teleport".into()).await;
+    let outcome = d
+        .dispatch(
+            "/teleport".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     match outcome {
         SlashDispatchResult::Handled { display } => {
             assert_eq!(display, "teleport: not implemented in v0.6.0 (M5)".into());
@@ -76,7 +86,12 @@ async fn happy_path_known_unimplemented_command() {
 #[tokio::test]
 async fn known_command_with_args_ignored_by_stub() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("/exit --force --soon=now".into()).await;
+    let outcome = d
+        .dispatch(
+            "/exit --force --soon=now".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     match outcome {
         SlashDispatchResult::Handled { display } => {
             assert_eq!(display, "exit: not implemented in v0.6.0 (M5)".into());
@@ -88,7 +103,12 @@ async fn known_command_with_args_ignored_by_stub() {
 #[tokio::test]
 async fn native_doctor_dispatches_the_bundled_prompt() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("/doctor".into()).await;
+    let outcome = d
+        .dispatch(
+            "/doctor".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     let SlashDispatchResult::RunSkillAsTurn {
         command,
         body,
@@ -110,7 +130,12 @@ async fn native_doctor_dispatches_the_bundled_prompt() {
 #[tokio::test]
 async fn unknown_command_path() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("/zzz-fake".into()).await;
+    let outcome = d
+        .dispatch(
+            "/zzz-fake".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     match outcome {
         SlashDispatchResult::Unknown { name, display } => {
             assert_eq!(name, "zzz-fake".into());
@@ -123,7 +148,12 @@ async fn unknown_command_path() {
 #[tokio::test]
 async fn non_slash_input_path() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("hello /clear world".into()).await;
+    let outcome = d
+        .dispatch(
+            "hello /clear world".into(),
+            lingxi_core::host::CancellationToken::new(),
+        )
+        .await;
     assert!(matches!(outcome, SlashDispatchResult::NotASlashCommand));
 }
 
@@ -132,7 +162,12 @@ async fn many_dispatches_against_one_registry() {
     let d = build_dispatcher();
     for name in ["clear", "compact", "teleport", "version", "help"] {
         let raw = format!("/{name}");
-        let outcome = d.dispatch(raw.clone().into()).await;
+        let outcome = d
+            .dispatch(
+                raw.clone().into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
         let expected = format!("{name}: not implemented in v0.6.0 (M5)");
         match outcome {
             SlashDispatchResult::Handled { display } => assert_eq!(display, expected.into()),
@@ -150,7 +185,12 @@ async fn concurrent_dispatches_against_one_registry() {
         let raw = format!("/{name}");
         let expected = format!("{name}: not implemented in v0.6.0 (M5)");
         handles.push(tokio::spawn(async move {
-            let outcome = dispatcher.dispatch(raw.clone().into()).await;
+            let outcome = dispatcher
+                .dispatch(
+                    raw.clone().into(),
+                    lingxi_core::host::CancellationToken::new(),
+                )
+                .await;
             match outcome {
                 SlashDispatchResult::Handled { display } => assert_eq!(display, expected.into()),
                 other => panic!("/{name} {other:?}"),

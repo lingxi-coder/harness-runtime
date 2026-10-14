@@ -354,7 +354,12 @@ pub enum HookEvent {
         /// Model requested by the switch operation.
         to_model: String,
         /// Original requested model, when one was supplied by the caller.
-        requested_model: Option<String>,
+        #[serde(
+            default,
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+        )]
+        requested_model: Option<Utf16JsonProjection>,
         /// What initiated the switch (`command`, `picker`, or `sdk`).
         source: String,
         /// Input-context token count used to estimate prompt-cache writes.
@@ -376,7 +381,12 @@ pub enum HookEvent {
         /// Model active after the switch.
         to_model: String,
         /// Original requested model, when one was supplied by the caller.
-        requested_model: Option<String>,
+        #[serde(
+            default,
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+        )]
+        requested_model: Option<Utf16JsonProjection>,
         /// What initiated the switch (`command`, `picker`, `sdk`, `auto`, or
         /// `resume`).
         source: String,

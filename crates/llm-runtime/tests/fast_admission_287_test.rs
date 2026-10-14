@@ -96,7 +96,7 @@ fn service(
         Some(0),
         None,
     )
-    .with_fast_policy_source(Arc::new(move || policy.lock().unwrap().clone()))
+    .with_fast_policy_source(Arc::new(move || Ok(policy.lock().unwrap().clone())))
     .with_interactive_session(false)
     .with_thinking(ThinkingConfig::Disabled)
 }

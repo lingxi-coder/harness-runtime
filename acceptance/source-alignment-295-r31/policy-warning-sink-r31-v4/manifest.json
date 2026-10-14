@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "status": "detached_review_candidate_not_applied",
+  "source_heads": {
+    "harness_runtime": "cbb720052be8bf80370e6af70a972852d03a59bf",
+    "lingxi_app": "6cfb3fcdd7ab990b9a1e4fdf6a39b88629bf306d"
+  },
+  "files": {
+    "harness_runtime/crates/runtime/src/bun_policy_js_semantics_worker.rs": {
+      "preimage_sha256": "07bf322d31877689fb91facede4debcd6f97f188dace49da4415a887ffd83808",
+      "postimage_sha256": "896f8b619755c796ef4e349ec9f48ec54fae941cf81910e009281509b0f820d5"
+    },
+    "harness_runtime/crates/runtime/assets/bun_policy_semantics_worker.mjs": {
+      "preimage_sha256": "0a62f9013ed55ad019c42f0cdb35d316d65d9aae9d486a629907908c20968333",
+      "postimage_sha256": "2f55468cdbf1ca9734484a4d859ff4d267a79aac0c93dadb41b319e03f96ea40"
+    },
+    "harness_runtime/crates/runtime/src/desktop/policy_helpers.rs": {
+      "preimage_sha256": "913b0ee4f83ae6839c5822d7d5edbcdf4d399c7d495a91aed95dd1eccc03881c",
+      "postimage_sha256": "9c7c471339cfdf15ccb156bdf7f5944a9c164273d3e1edce78600c3c2b3817d1"
+    },
+    "lingxi_app/apps/cli/host/src/logging.rs": {
+      "preimage_sha256": "a06fb1fe74290fef9520cf5aef499da4a5741b22720598aab6e8eb8780392795",
+      "postimage_sha256": "6bb25471c08829869626a840cdddce241f49d3ad9fca117633f0724821413944"
+    }
+  },
+  "patches": {
+    "harness_runtime": {
+      "path": "harness-runtime-v4.patch",
+      "sha256": "9ab4a8dfd2e9a59fd31ae39bc77da74e8b82a171dd21100e625e2dd48399b4d5",
+      "bytes": 46874
+    },
+    "lingxi_app": {
+      "path": "lingxi-app-v4.patch",
+      "sha256": "a06c817aed629ff0cad0e2e3c732b610634be44ab99c43b6f3cc78768764c4da",
+      "bytes": 9871
+    }
+  },
+  "validation": {
+    "rustfmt_edition": "2021",
+    "rustfmt_check": "passed",
+    "harness_git_apply_check": "passed",
+    "product_git_apply_check": "passed",
+    "direct_pinned_bun_worker": "passed",
+    "cargo": "not_run_by_assignment",
+    "native_cli": "not_run"
+  },
+  "worker_runtime": {
+    "path": "/private/tmp/claude-295-bun-1.4.3/bun",
+    "version": "1.4.3",
+    "revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+    "binary_sha256": "28c7dd0a06916aba284d570ef44a2d70e9c538eaf2ba58dfe0910525563b3f79",
+    "worker_protocol": 4,
+    "worker_id": "native-policy-js-semantics-2.1.295-v4"
+  },
+  "source_binding": {
+    "path": "native-nl-source/src_186240709.js",
+    "sha256": "e3196d36258c99d66c4d3ea2401745eae6e9a94e148380f6ff0fe1f4723043bf",
+    "slices": [
+      {
+        "name": "Jn/Yn/Xn/Ot",
+        "bytes": [
+          4953,
+          6006
+        ],
+        "sha256": "d6fee11520c553afb8e404228e87946e86413d6142815e75c21e56ed972f3e60"
+      },
+      {
+        "name": "D.redact closure",
+        "bytes": [
+          6006,
+          34006
+        ],
+        "sha256": "505c725f218082e51085c4709850e949aeae14e2ec84811a226804a040e89cfd"
+      },
+      {
+        "name": "Je",
+        "bytes": [
+          44351,
+          44444
+        ],
+        "sha256": "c2bde4f27969f79ff0aa6c718c947d07bed9579c5ce125d0d7bb040d5b9c0c24"
+      },
+      {
+        "name": "debug level and ki",
+        "bytes": [
+          44853,
+          44951
+        ],
+        "sha256": "efdc7ca65818a10a5b52fad71dff1dfe694f55caa1b6dab9db960477fe9bf54f"
+      },
+      {
+        "name": "Sn.log",
+        "bytes": [
+          48111,
+          48625
+        ],
+        "sha256": "3a01c5afad3a17501731d4ce56a62fd389f06686e1767e199013a08f3382b272"
+      },
+      {
+        "name": "Sn.emit",
+        "bytes": [
+          48625,
+          48856
+        ],
+        "sha256": "eae9fc70082306df5775d49757fe59d50f42d4c21b52e10d3eece91b75573e9d"
+      },
+      {
+        "name": "telemetry-wrapped JSON.stringify",
+        "bytes": [
+          57146,
+          57230
+        ],
+        "sha256": "8b98c8266718d1d2a57c3775a2c4d1796908a4b211e39e522c5ac6fc1fdc3cf1"
+      }
+    ]
+  },
+  "synthetic_worker_evidence": {
+    "worker-input.jsonl": {
+      "sha256": "38fa4895227178783d854393808a61c62627aab51e164d4c3698d9a5712737a6",
+      "bytes": 891
+    },
+    "worker-output.jsonl": {
+      "sha256": "c9046c5655ac1ef5f6f9685c669f21ebdeaf7de1ccaa7bd9c0ae4142d5600958",
+      "bytes": 1768
+    },
+    "verify_worker_output.py": {
+      "sha256": "ea668651c5b1ecc72b1639ef5ec19e2bd0e1fdd58a88e3eb6d7bd5e243bb9f64",
+      "bytes": 1574
+    },
+    "source-evidence.md": {
+      "sha256": "f1602259403533f84dade1982adc2b5cd706e2c66f2546a5bee1a13bd876a5ef",
+      "bytes": 3740
+    }
+  }
+}

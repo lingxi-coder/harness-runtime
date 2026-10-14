@@ -360,6 +360,21 @@ pub fn is_model_allowed(
     allowlist: Option<&Utf16JsonProjection>,
     overrides: Option<&BTreeMap<String, String>>,
 ) -> bool {
+    is_model_allowed_utf16(
+        &model.encode_utf16().collect::<Vec<_>>(),
+        allowlist,
+        overrides,
+    )
+}
+
+/// Exact-source form of [`is_model_allowed`] for a Native model string that
+/// cannot be represented as a Rust `String`.
+#[must_use]
+pub fn is_model_allowed_utf16(
+    model: &[u16],
+    allowlist: Option<&Utf16JsonProjection>,
+    overrides: Option<&BTreeMap<String, String>>,
+) -> bool {
     let entries = match allowlist {
         None => return true, // `if(!n)return!0`
         Some(allowlist) => match normalized_allowlist(allowlist) {
@@ -367,11 +382,7 @@ pub fn is_model_allowed(
             None => return false,
         },
     };
-    is_model_allowed_normalized(
-        &model.encode_utf16().collect::<Vec<_>>(),
-        &entries,
-        overrides,
-    )
+    is_model_allowed_normalized(model, &entries, overrides)
 }
 
 /// Effective admission state for model-picker and explicit model-selection
@@ -399,10 +410,25 @@ pub fn model_allowed_under_catalog(
     restriction: &CatalogRestriction,
     overrides: Option<&BTreeMap<String, String>>,
 ) -> bool {
+    model_allowed_under_catalog_utf16(
+        &model.encode_utf16().collect::<Vec<_>>(),
+        restriction,
+        overrides,
+    )
+}
+
+/// Exact-source form of [`model_allowed_under_catalog`] for a Native model
+/// string whose UTF-16 units include an unpaired surrogate.
+#[must_use]
+pub fn model_allowed_under_catalog_utf16(
+    model: &[u16],
+    restriction: &CatalogRestriction,
+    overrides: Option<&BTreeMap<String, String>>,
+) -> bool {
     match restriction {
         CatalogRestriction::Unrestricted => true,
         CatalogRestriction::Restricted(allowlist) => {
-            is_model_allowed(model, Some(allowlist), overrides)
+            is_model_allowed_utf16(model, Some(allowlist), overrides)
         }
         CatalogRestriction::Refused => false,
     }
@@ -787,6 +813,41 @@ mod tests {
             "claude-opus-4-8",
             Some(&only_unpaired),
             None
+        ));
+    }
+
+    #[test]
+    fn source_model_allowlist_does_not_match_its_display_replacement() {
+        let restriction = CatalogRestriction::Restricted(
+            Utf16JsonProjection::parse(r#"["model-\ufffd"]"#).unwrap(),
+        );
+        let source_units = [
+            b'm' as u16,
+            b'o' as u16,
+            b'd' as u16,
+            b'e' as u16,
+            b'l' as u16,
+            b'-' as u16,
+            0xd800,
+        ];
+        assert!(!model_allowed_under_catalog_utf16(
+            &source_units,
+            &restriction,
+            None,
+        ));
+        assert!(model_allowed_under_catalog(
+            "model-\u{fffd}",
+            &restriction,
+            None,
+        ));
+
+        let exact = CatalogRestriction::Restricted(
+            Utf16JsonProjection::parse(r#"["model-\ud800"]"#).unwrap(),
+        );
+        assert!(model_allowed_under_catalog_utf16(
+            &source_units,
+            &exact,
+            None,
         ));
     }
 

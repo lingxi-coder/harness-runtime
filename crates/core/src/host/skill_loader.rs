@@ -18,6 +18,7 @@
 //! loader is wired (tests / minimal builds) the runner skips skill preloading
 //! entirely, keeping the child's history byte-identical to legacy.
 
+use crate::host::CancellationToken;
 use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::ContentBlock;
 use async_trait::async_trait;
@@ -58,6 +59,9 @@ pub trait SkillLoader: Send + Sync {
     /// plugin prefix the impl tries for the plugin-qualified resolution strategy.
     /// `cwd` overrides the parent session cwd for isolated/worktree children.
     /// `model` is the child's selected model, including inherited resolution.
+    /// `cancellation` is owned by the live Agent run and is canceled by its host
+    /// before a terminal UserInterrupt/UserExit is queued. Implementations must
+    /// pass it through any shell work and await cancellation cleanup before returning.
     /// Read/expansion failures return `Err`; they must not look like missing skills.
     async fn resolve_and_load(
         &self,
@@ -65,5 +69,6 @@ pub trait SkillLoader: Send + Sync {
         agent_type: &str,
         cwd: Option<&std::path::Path>,
         model: Option<&str>,
+        cancellation: CancellationToken,
     ) -> Result<Option<SkillLoad>, String>;
 }

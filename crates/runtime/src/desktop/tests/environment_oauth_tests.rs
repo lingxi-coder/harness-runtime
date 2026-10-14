@@ -247,12 +247,13 @@ async fn environment_oauth_worker() {
                 let capture = Arc::new(Capture::default());
                 stack.llm_transport = capture.clone();
                 let service = api_service_from_stack(&cfg, home.path(), stack)
+                    .expect("settings source is initialized by credential resolution")
                     .with_interactive_session(false)
                     .with_fast_policy_source(Arc::new(|| {
-                        llm_runtime::model::fast_admission::Policy {
+                        Ok(llm_runtime::model::fast_admission::Policy {
                             flag_fast: true,
                             ..Default::default()
-                        }
+                        })
                     }));
                 let admitted = api_key || scopes.is_some();
                 assert_eq!(

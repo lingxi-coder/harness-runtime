@@ -195,7 +195,9 @@ mod tests {
         root.run_turn("third").await.unwrap();
         assert_eq!(
             context(&api).await.as_deref(),
-            Some("<system-reminder>\nThe session context was re-read after the account changed; the values announced earlier (account, project, git status) no longer apply.\n</system-reminder>"),
+            Some(
+                "<system-reminder>\nThe session context was re-read after the account changed; the values announced earlier (account, project, git status) no longer apply.\n</system-reminder>"
+            ),
             "logout sends the native correction after the prior account announcement"
         );
         let provider = orchestrator::prompt::memory_block::RootInstructionContextProvider::new();
@@ -209,7 +211,7 @@ mod tests {
             .await
             .unwrap()
             .user_context
-            .contains_key("userEmail")
+            .contains_property("userEmail")
         );
         assert!(!serde_json::to_string(&api.captured_msgs().await)
             .unwrap()

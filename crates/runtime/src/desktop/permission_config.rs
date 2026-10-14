@@ -710,14 +710,9 @@ pub(super) fn model_provenance_for_config(
     if cfg.default_model_explicit || cfg.default_model_env_pinned {
         return lingxi_core::host::ModelProvenance::UserOrEnv;
     }
-    match effective_settings
-        .and_then(|settings| settings.effective_for("model"))
-        .and_then(|provenance| provenance.contributors.last())
-    {
+    match effective_settings.and_then(model_source_contributor) {
         Some(lingxi_core::settings::tracer::Source::Managed)
-            if effective_settings
-                .and_then(|settings| settings.settings.model.as_deref())
-                .is_some_and(|model| !model.trim().is_empty()) =>
+            if effective_settings.is_some_and(model_setting_is_nonempty) =>
         {
             lingxi_core::host::ModelProvenance::ManagedAdministratorDefault
         }
@@ -728,13 +723,66 @@ pub(super) fn model_provenance_for_config(
             | lingxi_core::settings::tracer::Source::Local
             | lingxi_core::settings::tracer::Source::Cli,
         ) => lingxi_core::host::ModelProvenance::UserOrEnv,
-        Some(lingxi_core::settings::tracer::Source::Managed) => {
-            lingxi_core::host::ModelProvenance::ProviderCatalogTier
-        }
-        Some(lingxi_core::settings::tracer::Source::Defaults) | None => {
-            lingxi_core::host::ModelProvenance::ProviderCatalogTier
-        }
+        Some(lingxi_core::settings::tracer::Source::Managed)
+        | Some(lingxi_core::settings::tracer::Source::Defaults)
+        | None => lingxi_core::host::ModelProvenance::ProviderCatalogTier,
     }
+}
+
+/// Return the exact winning configured `settings.model` string projection.
+///
+/// The source projection is authoritative: a valid JavaScript UTF-16 string
+/// from any admitted settings tier can contain an unpaired surrogate and
+/// therefore be absent from the typed convenience field without being absent
+/// from Native's effective settings. Explicit CLI and environment pins retain
+/// ownership and suppress this configured-source carrier.
+#[must_use]
+pub(super) fn effective_model_source_for_config(
+    cfg: &DesktopConfig,
+    effective_settings: Option<&lingxi_core::settings::EffectiveSettings>,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    if cfg.default_model_explicit || cfg.default_model_env_pinned {
+        return None;
+    }
+    let settings = effective_settings?;
+    let source = model_source_contributor(settings)?;
+    if source == lingxi_core::settings::tracer::Source::Defaults {
+        return None;
+    }
+    model_source_from_effective_settings(settings)
+}
+
+fn model_source_contributor(
+    settings: &lingxi_core::settings::EffectiveSettings,
+) -> Option<lingxi_core::settings::tracer::Source> {
+    settings
+        .source_field_contributors("model")
+        .last()
+        .copied()
+        .or_else(|| {
+            settings
+                .effective_for("model")
+                .and_then(|provenance| provenance.contributors.last().copied())
+        })
+}
+
+fn model_setting_is_nonempty(settings: &lingxi_core::settings::EffectiveSettings) -> bool {
+    model_source_from_effective_settings(settings).is_some()
+        || settings
+            .settings
+            .model
+            .as_deref()
+            .is_some_and(|model| !lingxi_core::host::effort::trim_js_whitespace(model).is_empty())
+}
+
+fn model_source_from_effective_settings(
+    settings: &lingxi_core::settings::EffectiveSettings,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    let model = settings.source_field("model")?;
+    let units = model.string_units("")?;
+    // Native uses JavaScript truthiness for the configured model. Whitespace
+    // strings are truthy; only the empty string is pruned here.
+    (!units.is_empty()).then_some(model)
 }
 
 /// Return the effective managed `settings.model`, when it is the winning model
@@ -749,17 +797,20 @@ pub(super) fn managed_model_setting_for_config(
         return None;
     }
     let settings = effective_settings?;
-    let source = settings
-        .effective_for("model")
-        .and_then(|provenance| provenance.contributors.last());
-    if source != Some(&lingxi_core::settings::tracer::Source::Managed) {
+    if model_source_contributor(settings) != Some(lingxi_core::settings::tracer::Source::Managed) {
         return None;
+    }
+    if let Some(source) = settings.source_field("model") {
+        let units = source.string_units("")?;
+        let model = String::from_utf16(&units).ok()?;
+        return (!lingxi_core::host::effort::trim_js_whitespace(&model).is_empty())
+            .then_some(model);
     }
     settings
         .settings
         .model
         .clone()
-        .filter(|model| !model.trim().is_empty())
+        .filter(|model| !lingxi_core::host::effort::trim_js_whitespace(model).is_empty())
 }
 
 /// The MANAGED `availableModels` allowlist + `modelOverrides` in effect for the
@@ -1482,6 +1533,85 @@ mod sandbox_utf16_execution_tests {
                 r#"{"sandbox":{"network":{"strictAllowlist":true},"filesystem":{"allowWrite":["/tmp/\ud800"]}}}"#
             ),
             Some(true)
+        );
+    }
+}
+
+#[cfg(test)]
+mod model_source_projection_tests {
+    use super::model_source_from_effective_settings;
+    use lingxi_core::settings::{
+        raw_layer_stack::SettingsRawLayer, tracer::Source, EffectiveSettings, SettingsJson,
+    };
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    fn effective_with_model_sources(
+        sources: &[Source],
+        effective_model_json: &str,
+    ) -> EffectiveSettings {
+        let projection = Utf16JsonProjection::parse(effective_model_json)
+            .expect("valid source-preserving settings JSON");
+        EffectiveSettings {
+            settings: SettingsJson::default(),
+            trace: Default::default(),
+            effort_layers: Vec::new(),
+            source_projection: Some(projection.clone()),
+            source_layers: sources
+                .iter()
+                .copied()
+                .map(|source| SettingsRawLayer {
+                    source,
+                    path: None,
+                    projection: projection.clone(),
+                })
+                .collect(),
+            typed_view_unrepresented_fields: vec!["/model".into()],
+            managed_typed_view_is_partial: true,
+            source_incomplete: false,
+            source_message: None,
+            source_diagnostics: None,
+        }
+    }
+
+    #[test]
+    fn effective_model_source_retains_admitted_nonmanaged_surrogate() {
+        for source in [Source::User, Source::Project, Source::Local, Source::Cli] {
+            let effective = effective_with_model_sources(&[source], r#"{"model":"claude-\ud800"}"#);
+            let model = model_source_from_effective_settings(&effective)
+                .expect("an admitted non-managed model remains source-authoritative");
+            assert_eq!(
+                model.string_units(""),
+                Some("claude-".encode_utf16().chain([0xd800]).collect())
+            );
+        }
+    }
+
+    #[test]
+    fn effective_model_source_preserves_whitespace_and_prunes_only_empty() {
+        let whitespace = effective_with_model_sources(&[Source::User], r#"{"model":" \t "}"#);
+        let source = model_source_from_effective_settings(&whitespace)
+            .expect("Native treats a nonempty whitespace model as truthy");
+        assert_eq!(source.string_units(""), Some(vec![0x20, 0x09, 0x20]));
+
+        let empty = effective_with_model_sources(&[Source::User], r#"{"model":""}"#);
+        assert!(model_source_from_effective_settings(&empty).is_none());
+    }
+
+    #[test]
+    fn effective_model_source_uses_highest_contributing_layer() {
+        let effective = effective_with_model_sources(
+            &[Source::User, Source::Project],
+            r#"{"model":"project-model"}"#,
+        );
+        assert_eq!(
+            effective.source_field_contributors("model").last(),
+            Some(&Source::Project)
+        );
+        assert_eq!(
+            model_source_from_effective_settings(&effective)
+                .and_then(|model| model.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("project-model")
         );
     }
 }

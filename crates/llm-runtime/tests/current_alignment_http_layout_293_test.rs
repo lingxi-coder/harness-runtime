@@ -335,6 +335,7 @@ async fn capture_anthropic(
             // transcript-attachment rows with typed message identities.
             std::collections::HashSet::new(),
             std::collections::HashMap::new(),
+            None,
         ),
     )
     .await

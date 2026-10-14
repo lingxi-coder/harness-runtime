@@ -301,7 +301,7 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
     let (orchestrator, registry, supported_actions, schema_revision) = live_audio_orchestrator();
     let search_view = registry.tool_search_view();
 
-    let unknown = orchestrator.build_wire_tools().await.0;
+    let unknown = orchestrator.build_wire_tools().await.unwrap().0;
     assert!(wire_tool(&unknown, "speech").is_none());
     assert!(search_view.entries().is_empty());
 
@@ -311,7 +311,7 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
     // Model the successful ToolSearch selection: its shared deferral state
     // makes this discovered schema visible in the next request.
     registry.deferral().mark_loaded(["speech"]);
-    let known = orchestrator.build_wire_tools().await.0;
+    let known = orchestrator.build_wire_tools().await.unwrap().0;
     assert_eq!(
         action_enum(wire_tool(&known, "speech").unwrap()),
         r#"["transcribe","speak"]"#
@@ -337,7 +337,7 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
 
     *supported_actions.write().expect("support lock") = Some(vec!["transcribe".into()]);
     schema_revision.store(2, Ordering::Release);
-    let changed = orchestrator.build_wire_tools().await.0;
+    let changed = orchestrator.build_wire_tools().await.unwrap().0;
     assert_eq!(
         action_enum(wire_tool(&changed, "speech").unwrap()),
         r#"["transcribe"]"#
@@ -358,7 +358,7 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
 
     *supported_actions.write().expect("support lock") = None;
     schema_revision.store(3, Ordering::Release);
-    let disconnected = orchestrator.build_wire_tools().await.0;
+    let disconnected = orchestrator.build_wire_tools().await.unwrap().0;
     assert!(wire_tool(&disconnected, "speech").is_none());
     assert!(search_view.entries().is_empty());
     let disconnected_cache = orchestrator

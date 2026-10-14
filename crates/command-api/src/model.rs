@@ -661,6 +661,11 @@ pub enum CommandSource {
 /// Possible outcomes from invoking a slash command.
 #[derive(Debug)]
 pub enum CommandResult {
+    /// A source-preserving settings/context failure.
+    Failed {
+        /// The exact failure variant and its projection payload.
+        source: lingxi_core::settings::SettingsError,
+    },
     /// Synchronous completion with an optional inline display string.
     Done {
         /// Optional exact source text to show or serialize.

@@ -48,7 +48,8 @@ impl RetryPolicy {
             | LlmError::FileUploadOutcomeUnknown { .. }
             | LlmError::UnsupportedCapability { .. }
             | LlmError::MediaDelegationUnavailable { .. }
-            | LlmError::MediaDelegationPartial { .. } => RetryDecision::DoNotRetry,
+            | LlmError::MediaDelegationPartial { .. }
+            | LlmError::SettingsSource { .. } => RetryDecision::DoNotRetry,
             LlmError::ProxyTunnelResponse { .. } => RetryDecision::DoNotRetry,
             LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
                 unreachable!("classification_source removes carrier wrappers")

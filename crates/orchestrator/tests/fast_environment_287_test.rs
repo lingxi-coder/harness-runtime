@@ -79,9 +79,11 @@ async fn main_fast_toggle_reaches_sdk_using_the_explicit_profile() {
             Some(0),
             None,
         )
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
         .with_thinking(ThinkingConfig::Disabled),
     );
@@ -150,7 +152,7 @@ async fn main_fast_toggle_reaches_sdk_using_the_explicit_profile() {
     let guarded = Arc::new(
         Arc::try_unwrap(service)
             .unwrap_or_else(|_| panic!("all request adapters were dropped"))
-            .with_fast_policy_source(Arc::new(move || live_policy.lock().unwrap().clone())),
+            .with_fast_policy_source(Arc::new(move || Ok(live_policy.lock().unwrap().clone()))),
     );
     let adapter = Arc::new(ProviderApiAdapter::new(guarded));
     let orch = orchestrator::ConversationOrchestrator::new(

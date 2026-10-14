@@ -320,8 +320,11 @@ struct StaticSkills;
 impl orchestrator::prompt::skill_listing::SkillListingProvider for StaticSkills {
     async fn skill_listing_snapshot(
         &self,
-    ) -> orchestrator::prompt::skill_listing::SkillListingSnapshot {
-        orchestrator::prompt::skill_listing::SkillListingSnapshot {
+    ) -> Result<
+        orchestrator::prompt::skill_listing::SkillListingSnapshot,
+        lingxi_core::settings::SettingsError,
+    > {
+        Ok(orchestrator::prompt::skill_listing::SkillListingSnapshot {
             entries: vec![orchestrator::prompt::skill_listing::SkillListingEntry {
                 name: "debug".into(),
                 display_name: "debug".into(),
@@ -339,7 +342,7 @@ impl orchestrator::prompt::skill_listing::SkillListingProvider for StaticSkills 
                 priority: 0.0,
             }],
             budget_settings: Default::default(),
-        }
+        })
     }
 }
 

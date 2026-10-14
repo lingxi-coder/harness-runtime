@@ -769,6 +769,7 @@ mod tests {
     async fn forced_orchestrator(threshold: u64) -> CompactionOrchestrator {
         let slot = Arc::new(CacheSafeParamsSlot::new());
         slot.save(CacheSafeParams {
+            model_source: None,
             system_prompt: Arc::new("test system".into()),
             system_prompt_input: None,
             user_context: HashMap::new(),

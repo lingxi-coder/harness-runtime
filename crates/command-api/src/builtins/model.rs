@@ -12,7 +12,7 @@
 //! Task 4.
 
 use crate::builtin_support::names::core_description;
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{trim_source_text, BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_core::host::{ModelListing, OrchestratorHandle};
@@ -100,12 +100,8 @@ impl ModelHandler {
 impl BuiltinCommandHandler for ModelHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         telemetry::emit_command_started(cmd_evt::MODEL_STARTED);
-        let Some(raw_args) = args.raw_args_utf8() else {
-            return CommandResult::Done {
-                display: Some("Model argument must be valid Unicode text.".into()),
-            };
-        };
-        let trimmed = raw_args.trim();
+        let model_selection = trim_source_text(&args.raw_args);
+        let trimmed = model_selection.string_at("").unwrap_or_default();
         if trimmed.is_empty() {
             // List mode. Curate to the "latest few" per provider (the shared
             // `lingxi_core::host::curated_model_refs`, same whitelist as the TUI picker +
@@ -126,16 +122,23 @@ impl BuiltinCommandHandler for ModelHandler {
             // The helper keeps the active model first and can infer its unique
             // provider when an older status snapshot omits `model_profile`.
             // Reuse that exact ref so Current and the selectable row agree.
-            let current = if snap.model.is_empty() {
-                String::new()
-            } else {
-                models.first().cloned().unwrap_or_else(|| {
-                    lingxi_core::host::qualified_model_ref(
-                        &snap.model,
-                        snap.model_profile.as_deref(),
-                    )
-                })
-            };
+            let current = snap
+                .model_source
+                .as_ref()
+                .and_then(|source| source.string_units(""))
+                .map(|units| String::from_utf16_lossy(&units))
+                .unwrap_or_else(|| {
+                    if snap.model.is_empty() {
+                        String::new()
+                    } else {
+                        models.first().cloned().unwrap_or_else(|| {
+                            lingxi_core::host::qualified_model_ref(
+                                &snap.model,
+                                snap.model_profile.as_deref(),
+                            )
+                        })
+                    }
+                });
             let available = render_grouped_model_refs(&models, &listings);
             let available = if listings.is_empty() {
                 format!("Available: {available}")
@@ -153,13 +156,37 @@ impl BuiltinCommandHandler for ModelHandler {
         let (model, profile) = lingxi_core::host::parse_model_ref(trimmed, &listings);
         match self
             .handle
-            .switch_model_with_source(&model, profile.as_deref(), "command")
+            .select_model(lingxi_core::host::ModelSelectionRequest::Select {
+                source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(model.clone()),
+                route_hint: profile
+                    .as_deref()
+                    .map(|profile| lingxi_core::host::ModelRouteAnchor {
+                        model: model.clone(),
+                        profile: Some(profile.to_owned()),
+                    }),
+                origin: lingxi_core::host::ModelSelectionOrigin::Command,
+                validation: lingxi_core::host::ModelValidationMode::SlashOuterRaceDetached,
+            })
             .await
         {
             Ok(()) => {
                 telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "switch");
+                let status = self.handle.get_status_snapshot().await;
+                let selected = status
+                    .model_source
+                    .as_ref()
+                    .and_then(|source| source.string_units(""))
+                    .map(|units| String::from_utf16_lossy(&units))
+                    .filter(|source| !source.is_empty())
+                    .unwrap_or_else(|| {
+                        if status.model.is_empty() {
+                            model.clone()
+                        } else {
+                            status.model
+                        }
+                    });
                 CommandResult::Done {
-                    display: Some((format!("Switched to model: {model}")).into()),
+                    display: Some((format!("Switched to model: {selected}")).into()),
                 }
             }
             Err(e) => {
@@ -200,6 +227,7 @@ mod tests {
         mock.set_available_models(vec!["claude-opus-4-7".into(), "claude-sonnet-4-6".into()]);
         let snap = lingxi_core::host::StatusSnapshot {
             model: "claude-opus-4-7".into(),
+            model_source: None,
             ..lingxi_core::host::StatusSnapshot::default()
         };
         mock.set_status_snapshot(snap);
@@ -213,6 +241,36 @@ mod tests {
         } else {
             panic!();
         }
+    }
+
+    #[tokio::test]
+    async fn list_mode_displays_logical_model_source_over_its_route_anchor() {
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        mock.set_available_models(vec!["claude-known".into()]);
+        let source_units = "claude-custom-"
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        mock.set_status_snapshot(lingxi_core::host::StatusSnapshot {
+            model: "claude-known".into(),
+            model_source: Some(
+                Utf16JsonProjection::root_string(
+                    String::from_utf16_lossy(&source_units),
+                    source_units,
+                )
+                .expect("exact source projection"),
+            ),
+            ..lingxi_core::host::StatusSnapshot::default()
+        });
+
+        let handler = ModelHandler::new(mock);
+        let CommandResult::Done {
+            display: Some(display),
+        } = handler.handle(&args("")).await
+        else {
+            panic!();
+        };
+        assert!(display.starts_with("Current model: claude-custom-�\n"));
     }
 
     #[tokio::test]
@@ -243,6 +301,7 @@ mod tests {
         ]);
         mock.set_status_snapshot(lingxi_core::host::StatusSnapshot {
             model: "gpt-5.6-sol".into(),
+            model_source: None,
             model_profile: Some("github-copilot".into()),
             ..lingxi_core::host::StatusSnapshot::default()
         });
@@ -285,6 +344,7 @@ mod tests {
         }]);
         mock.set_status_snapshot(lingxi_core::host::StatusSnapshot {
             model: "deepseek-flash".into(),
+            model_source: None,
             model_profile: None,
             ..lingxi_core::host::StatusSnapshot::default()
         });
@@ -320,6 +380,30 @@ mod tests {
         } else {
             panic!();
         }
+    }
+
+    #[tokio::test]
+    async fn switch_mode_forwards_exact_utf16_source_even_when_route_text_is_unpaired() {
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        let handler = ModelHandler::new(mock.clone());
+        let units = "/model ".encode_utf16().chain([0xD800]).collect::<Vec<_>>();
+        let raw = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("slash input source projection");
+        let parsed = crate::parse_slash_command(&raw).expect("model command parse");
+        let selection = parsed
+            .raw_args
+            .string_units("")
+            .expect("model command argument is a source string");
+
+        let result = handler.handle(&parsed).await;
+
+        assert!(matches!(result, CommandResult::Done { .. }));
+        assert_eq!(
+            mock.last_switch_model_selection()
+                .and_then(|source| source.string_units("")),
+            Some(selection),
+            "route display replacement must not replace the Native selection source"
+        );
     }
 
     #[tokio::test]

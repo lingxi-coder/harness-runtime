@@ -711,7 +711,12 @@ pub struct PreModelSwitchPayload {
     pub effort: Option<EffortLevel>,
     pub from_model: String,
     pub to_model: String,
-    pub requested_model: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub requested_model: Option<Utf16JsonProjection>,
     pub source: String,
     pub context_tokens: u64,
     pub prompt_cache_warm: bool,
@@ -742,7 +747,12 @@ pub struct PostModelSwitchPayload {
     pub effort: Option<EffortLevel>,
     pub from_model: String,
     pub to_model: String,
-    pub requested_model: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub requested_model: Option<Utf16JsonProjection>,
     pub source: String,
     pub context_tokens: u64,
     pub prompt_cache_warm: bool,

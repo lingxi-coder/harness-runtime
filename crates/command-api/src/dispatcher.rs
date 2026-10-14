@@ -23,7 +23,7 @@ use hooks::events::{HookEvent, PromptExpansionType};
 use hooks::registry::HookContext;
 use hooks::HookExecutorImpl;
 use lingxi_core::host::permission_gate::PermissionGate;
-use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_core::host::{CancellationToken, SlashCommandDispatcher, SlashDispatchResult};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use std::path::PathBuf;
@@ -223,6 +223,7 @@ pub trait ModCommandRunInterceptor: Send + Sync {
         command: &Utf16JsonProjection,
         args: &Utf16JsonProjection,
         context: ModCommandRunContext,
+        cancellation: CancellationToken,
     ) -> SlashDispatchResult;
 }
 
@@ -261,6 +262,8 @@ impl ShellRunner for UnavailableShellRunner {
         &self,
         _command: &Utf16JsonProjection,
         _shell: Option<crate::FrontmatterShell>,
+
+        _cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<ShellOut, ShellRunError> {
         Err(ShellRunError {
             stdout: String::new(),
@@ -717,6 +720,7 @@ impl RegistrySlashDispatcher {
     pub async fn dispatch_without_mod_hooks(
         &self,
         raw: &Utf16JsonProjection,
+        cancellation: CancellationToken,
     ) -> SlashDispatchResult {
         // The top-level Native consumer checks `startsWith("/")` before it
         // calls `Iv`, even though `Iv` itself trims the full line. Preserve
@@ -852,6 +856,7 @@ impl RegistrySlashDispatcher {
                                     &shell_ctx,
                                     &command.name,
                                     frontmatter.shell,
+                                    cancellation.clone(),
                                 )
                                 .await
                                 {
@@ -1063,6 +1068,7 @@ impl RegistrySlashDispatcher {
             let expand_ctx = ExpandCtx {
                 session_id: "",
                 shell: &shell_ctx,
+                cancellation: cancellation.clone(),
             };
             let prompt_expansion = if let Some(aggregate) = native_prompt_expansion {
                 Some(aggregate)
@@ -1236,6 +1242,7 @@ impl RegistrySlashDispatcher {
                         &shell_ctx,
                         &command.name,
                         None,
+                        cancellation.clone(),
                     )
                     .await
                     {
@@ -1269,6 +1276,7 @@ impl RegistrySlashDispatcher {
                                 &shell_ctx,
                                 &command.name,
                                 None,
+                                cancellation.clone(),
                             )
                             .await
                             {
@@ -1305,6 +1313,9 @@ impl RegistrySlashDispatcher {
                     self.injected_message_result(content)
                 }
             }
+            CommandResult::Failed { source } => SlashDispatchResult::Failed {
+                diagnostic: source.diagnostic_projection(),
+            },
             CommandResult::RequestConfirmation { prompt, .. } => SlashDispatchResult::Handled {
                 display: prompt.into(),
             },
@@ -1314,7 +1325,11 @@ impl RegistrySlashDispatcher {
 
 #[async_trait]
 impl SlashCommandDispatcher for RegistrySlashDispatcher {
-    async fn dispatch(&self, raw: Utf16JsonProjection) -> SlashDispatchResult {
+    async fn dispatch(
+        &self,
+        raw: Utf16JsonProjection,
+        cancellation: CancellationToken,
+    ) -> SlashDispatchResult {
         // Clear or replace this input's command-scoped tool restrictions even
         // when a Mod answers without calling the core command.
         if let Some(gate) = self.permission_gate.as_ref() {
@@ -1342,11 +1357,12 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                         &command,
                         &args,
                         crate::mod_catalog::current_command_context(),
+                        cancellation.clone(),
                     )
                     .await;
             }
         }
-        self.dispatch_without_mod_hooks(&raw).await
+        self.dispatch_without_mod_hooks(&raw, cancellation).await
     }
 }
 
@@ -1722,7 +1738,9 @@ mod tests {
         for text in ["/", "/  \t", "/\u{2003}", "/ (MCP)"] {
             let raw = Ujp::from(text);
             assert_eq!(
-                dispatcher.dispatch(raw.clone()).await,
+                dispatcher
+                    .dispatch(raw.clone(), lingxi_core::host::CancellationToken::new())
+                    .await,
                 SlashDispatchResult::ParseFailure { input: raw },
                 "input must remain intact for the host's mode-specific fallback"
             );
@@ -1734,7 +1752,12 @@ mod tests {
         let dispatcher =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
         assert_eq!(
-            dispatcher.dispatch(Ujp::from(" /not-a-command")).await,
+            dispatcher
+                .dispatch(
+                    Ujp::from(" /not-a-command"),
+                    lingxi_core::host::CancellationToken::new()
+                )
+                .await,
             SlashDispatchResult::NotASlashCommand
         );
     }
@@ -1746,7 +1769,9 @@ mod tests {
         let units = vec![b'/' as u16, 0xd800, b' ' as u16, b'x' as u16];
         let raw = Ujp::root_string(String::from_utf16_lossy(&units), units).unwrap();
         assert_eq!(
-            dispatcher.dispatch(raw.clone()).await,
+            dispatcher
+                .dispatch(raw.clone(), lingxi_core::host::CancellationToken::new())
+                .await,
             SlashDispatchResult::RunAsTurn { prompt: raw }
         );
     }
@@ -1756,7 +1781,12 @@ mod tests {
         let dispatcher =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
         assert_eq!(
-            dispatcher.dispatch(Ujp::from("/missing-command")).await,
+            dispatcher
+                .dispatch(
+                    Ujp::from("/missing-command"),
+                    lingxi_core::host::CancellationToken::new()
+                )
+                .await,
             SlashDispatchResult::Unknown {
                 name: Ujp::from("missing-command"),
                 display: "Unknown command: /missing-command".into(),
@@ -1804,7 +1834,9 @@ mod tests {
             command,
             body,
             hook_messages,
-        } = dispatcher.dispatch_without_mod_hooks(&raw).await
+        } = dispatcher
+            .dispatch_without_mod_hooks(&raw, lingxi_core::host::CancellationToken::new())
+            .await
         else {
             panic!("exact source command should resolve and expand")
         };
@@ -1855,7 +1887,9 @@ mod tests {
         let prefixed =
             Ujp::root_string(String::from_utf16_lossy(&prefixed_units), prefixed_units).unwrap();
         assert!(matches!(
-            dispatcher.dispatch_without_mod_hooks(&prefixed).await,
+            dispatcher
+                .dispatch_without_mod_hooks(&prefixed, lingxi_core::host::CancellationToken::new())
+                .await,
             SlashDispatchResult::NotASlashCommand
         ));
         let raw = Ujp::root_string(String::from_utf16_lossy(&raw_units), raw_units).unwrap();
@@ -1863,7 +1897,9 @@ mod tests {
             command,
             body,
             hook_messages,
-        } = dispatcher.dispatch_without_mod_hooks(&raw).await
+        } = dispatcher
+            .dispatch_without_mod_hooks(&raw, lingxi_core::host::CancellationToken::new())
+            .await
         else {
             panic!("Native namespace fallback should resolve the exact command source")
         };
@@ -1950,11 +1986,13 @@ mod tests {
                 Box::pin(async { Err("model route is unavailable".into()) })
             }));
         assert!(
-            matches!(dispatcher.dispatch("/dataviz revenue".into()).await,
+            matches!(dispatcher.dispatch("/dataviz revenue".into(), lingxi_core::host::CancellationToken::new()).await,
             SlashDispatchResult::RunSkillAsTurn { body, .. } if prompt_text(&body).contains("revenue"))
         );
-        assert!(matches!(dispatcher.dispatch("/loop check".into()).await,
-            SlashDispatchResult::Handled { display } if display_text(&display) == "loop expansion failed: model route is unavailable"));
+        assert!(
+            matches!(dispatcher.dispatch("/loop check".into(), lingxi_core::host::CancellationToken::new()).await,
+            SlashDispatchResult::Handled { display } if display_text(&display) == "loop expansion failed: model route is unavailable")
+        );
     }
 
     #[cfg(feature = "builtin-handlers")]
@@ -1976,14 +2014,24 @@ mod tests {
             SlashDispatchResult::RunSkillAsTurn { body, .. } => body,
             other => panic!("expected model turn, got {other:?}"),
         };
-        let first = get_prompt(dispatcher.dispatch("/loop check the deploy".into()).await);
+        let first = get_prompt(
+            dispatcher
+                .dispatch(
+                    "/loop check the deploy".into(),
+                    lingxi_core::host::CancellationToken::new(),
+                )
+                .await,
+        );
         assert!(prompt_text(&first).contains("3. **Briefly confirm**"));
         assert!(prompt_text(&first).contains("immediately BEFORE calling ScheduleWakeup"));
         *model.write().await = "claude-sonnet-5-5".into();
         let second = get_prompt(
             dispatcher
                 .clone_shared()
-                .dispatch("/loop check the deploy".into())
+                .dispatch(
+                    "/loop check the deploy".into(),
+                    lingxi_core::host::CancellationToken::new(),
+                )
                 .await,
         );
         assert!(prompt_text(&second).contains("3. **Decide whether the loop continues.**"));
@@ -1993,7 +2041,12 @@ mod tests {
     #[tokio::test]
     async fn dispatches_known_command_to_locked_stub() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("/teleport".into()).await;
+        let result = d
+            .dispatch(
+                "/teleport".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
         match result {
             SlashDispatchResult::Handled { display } => {
                 assert_eq!(
@@ -2008,7 +2061,12 @@ mod tests {
     #[tokio::test]
     async fn dispatches_known_command_with_args_to_locked_stub() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("/clear --force".into()).await;
+        let result = d
+            .dispatch(
+                "/clear --force".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
         match result {
             SlashDispatchResult::Handled { display } => {
                 assert_eq!(
@@ -2037,7 +2095,13 @@ mod tests {
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
         // Markdown prompt commands run AS a turn (claude-code `type: "prompt"`).
-        match d.dispatch("/demo this".into()).await {
+        match d
+            .dispatch(
+                "/demo this".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn {
                 command,
                 body,
@@ -2095,7 +2159,13 @@ mod tests {
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
         // Native prompt commands preserve a separate command header and meta
         // body in the model turn.
-        match d.dispatch("/loop 5m /babysit-prs".into()).await {
+        match d
+            .dispatch(
+                "/loop 5m /babysit-prs".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn {
                 command,
                 body,
@@ -2111,7 +2181,10 @@ mod tests {
             other => panic!("expected bundled skill to run-as-turn, got {other:?}"),
         }
         // Empty args still produce the same prompt turn, never Unknown.
-        match d.dispatch("/loop".into()).await {
+        match d
+            .dispatch("/loop".into(), lingxi_core::host::CancellationToken::new())
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn {
                 command,
                 body,
@@ -2172,7 +2245,11 @@ mod tests {
             }));
 
         assert_eq!(
-            d.dispatch("/code-review high --fix src".into()).await,
+            d.dispatch(
+                "/code-review high --fix src".into(),
+                lingxi_core::host::CancellationToken::new()
+            )
+            .await,
             SlashDispatchResult::Handled {
                 display: "started review agent".into()
             }
@@ -2209,7 +2286,13 @@ mod tests {
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
-        match d.dispatch("/code-review".into()).await {
+        match d
+            .dispatch(
+                "/code-review".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert!(display_text(&display).contains("no background launcher is wired"));
             }
@@ -2237,7 +2320,13 @@ mod tests {
             ..SlashCommand::default()
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
-        match d.dispatch("/commit now".into()).await {
+        match d
+            .dispatch(
+                "/commit now".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn {
                 command,
                 body,
@@ -2261,7 +2350,12 @@ mod tests {
     #[tokio::test]
     async fn dispatches_continue_alias_to_resume() {
         let d = seeded_dispatcher_with_resume_alias();
-        let result = d.dispatch("/continue".into()).await;
+        let result = d
+            .dispatch(
+                "/continue".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
         match result {
             SlashDispatchResult::Handled { display } => {
                 // Seeded with the stub handler under "resume", so the alias
@@ -2278,7 +2372,12 @@ mod tests {
     #[tokio::test]
     async fn unknown_command_returns_locked_literal() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("/notacommand".into()).await;
+        let result = d
+            .dispatch(
+                "/notacommand".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
         match result {
             SlashDispatchResult::Unknown { name, display } => {
                 assert_eq!(name.string_at(""), Some("notacommand"));
@@ -2313,12 +2412,20 @@ mod tests {
 
         // Default: /doctor resolves to the native bundled prompt.
         std::env::remove_var(var);
-        assert!(matches!(d.dispatch("/doctor".into()).await,
-            SlashDispatchResult::RunSkillAsTurn { body, .. } if prompt_text(&body) == "Native doctor prompt"));
+        assert!(
+            matches!(d.dispatch("/doctor".into(), lingxi_core::host::CancellationToken::new()).await,
+            SlashDispatchResult::RunSkillAsTurn { body, .. } if prompt_text(&body) == "Native doctor prompt")
+        );
 
         // The gate applies after alias resolution to the canonical factory.
         std::env::set_var(var, "1");
-        match d.dispatch("/checkup".into()).await {
+        match d
+            .dispatch(
+                "/checkup".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Unknown { name, display } => {
                 assert_eq!(name.string_at(""), Some("checkup"));
                 assert_eq!(display_text(&display), "Unknown command: /checkup");
@@ -2331,14 +2438,21 @@ mod tests {
     #[tokio::test]
     async fn non_slash_input_is_not_a_slash_command() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("hello world".into()).await;
+        let result = d
+            .dispatch(
+                "hello world".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
         assert!(matches!(result, SlashDispatchResult::NotASlashCommand));
     }
 
     #[tokio::test]
     async fn empty_input_is_not_a_slash_command() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("".into()).await;
+        let result = d
+            .dispatch("".into(), lingxi_core::host::CancellationToken::new())
+            .await;
         assert!(matches!(result, SlashDispatchResult::NotASlashCommand));
     }
 
@@ -2347,7 +2461,8 @@ mod tests {
         let d = seeded_dispatcher();
         let raw = Ujp::from("/");
         assert_eq!(
-            d.dispatch(raw.clone()).await,
+            d.dispatch(raw.clone(), lingxi_core::host::CancellationToken::new())
+                .await,
             SlashDispatchResult::ParseFailure { input: raw }
         );
     }
@@ -2357,7 +2472,9 @@ mod tests {
         let d = seeded_dispatcher();
         // Per Task 0 step 4 L3 expansion: the parser does NOT case-fold; the
         // registry only holds lowercase keys.
-        let result = d.dispatch("/CLEAR".into()).await;
+        let result = d
+            .dispatch("/CLEAR".into(), lingxi_core::host::CancellationToken::new())
+            .await;
         match result {
             SlashDispatchResult::Unknown { name, display } => {
                 assert_eq!(name.string_at(""), Some("CLEAR"));
@@ -2687,11 +2804,21 @@ mod tests {
         .with_skill_usage_session(crate::skill_usage::SkillUsageSession::new(root.clone()));
 
         assert!(matches!(
-            dispatcher.dispatch("/demo one".into()).await,
+            dispatcher
+                .dispatch(
+                    "/demo one".into(),
+                    lingxi_core::host::CancellationToken::new()
+                )
+                .await,
             SlashDispatchResult::RunSkillAsTurn { .. }
         ));
         assert!(matches!(
-            dispatcher.dispatch("/demo two".into()).await,
+            dispatcher
+                .dispatch(
+                    "/demo two".into(),
+                    lingxi_core::host::CancellationToken::new()
+                )
+                .await,
             SlashDispatchResult::RunSkillAsTurn { .. }
         ));
         let usage = crate::skill_usage::read_skill_usage(&root).unwrap();
@@ -2703,7 +2830,12 @@ mod tests {
         ))
         .with_skill_usage_session(crate::skill_usage::SkillUsageSession::new(root.clone()));
         assert!(matches!(
-            next_session.dispatch("/demo three".into()).await,
+            next_session
+                .dispatch(
+                    "/demo three".into(),
+                    lingxi_core::host::CancellationToken::new()
+                )
+                .await,
             SlashDispatchResult::RunSkillAsTurn { .. }
         ));
         let usage = crate::skill_usage::read_skill_usage(&root).unwrap();
@@ -2731,7 +2863,13 @@ mod tests {
         .with_expansion_hooks(exec, provider);
 
         // Expansion still produces the body, AND the hook fires.
-        match d.dispatch("/demo this and that".into()).await {
+        match d
+            .dispatch(
+                "/demo this and that".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn {
                 command,
                 body,
@@ -2773,7 +2911,12 @@ mod tests {
         let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Mcp))
             .with_expansion_hooks(exec, provider);
 
-        let _ = d.dispatch("/demo arg".into()).await;
+        let _ = d
+            .dispatch(
+                "/demo arg".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
 
         let seen = log.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "exactly one expansion: {seen:?}");
@@ -2834,7 +2977,10 @@ mod tests {
             .with_expansion_hooks(expansion_executor, expansion_context);
 
         match dispatcher
-            .dispatch("/github review lingxi \"unsafe code\" ignored".into())
+            .dispatch(
+                "/github review lingxi \"unsafe code\" ignored".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
             .await
         {
             SlashDispatchResult::RunSkillAsTurn {
@@ -2865,7 +3011,10 @@ mod tests {
 
         assert!(matches!(
             dispatcher
-                .dispatch("/github:review (MCP) lingxi focus ignored".into())
+                .dispatch(
+                    "/github:review (MCP) lingxi focus ignored".into(),
+                    lingxi_core::host::CancellationToken::new()
+                )
                 .await,
             SlashDispatchResult::RunSkillAsTurn { .. }
         ));
@@ -2912,7 +3061,13 @@ mod tests {
             .with_mcp_prompt_resolver(resolver)
             .with_expansion_hooks(Arc::new(executor), context);
 
-        match dispatcher.dispatch("/github:review".into()).await {
+        match dispatcher
+            .dispatch(
+                "/github:review".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert!(display_text(&display).contains("blocked before prompt generation"));
             }
@@ -2933,7 +3088,9 @@ mod tests {
         )))
         .with_expansion_hooks(exec, provider);
 
-        let _ = d.dispatch("/demo".into()).await;
+        let _ = d
+            .dispatch("/demo".into(), lingxi_core::host::CancellationToken::new())
+            .await;
 
         let seen = log.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "exactly one expansion: {seen:?}");
@@ -2960,7 +3117,13 @@ mod tests {
             lingxi_core::types::SettingsScope::Project,
         )));
 
-        match d.dispatch("/demo x".into()).await {
+        match d
+            .dispatch(
+                "/demo x".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn { body, .. } => {
                 assert_eq!(prompt_text(&body), "Use x")
             }
@@ -2989,7 +3152,9 @@ mod tests {
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_expansion_hooks(exec, provider);
 
-        let _ = d.dispatch("/clear".into()).await;
+        let _ = d
+            .dispatch("/clear".into(), lingxi_core::host::CancellationToken::new())
+            .await;
 
         assert!(
             log.lock().unwrap().is_empty(),
@@ -3067,7 +3232,13 @@ mod tests {
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(commands)))
             .with_expansion_hooks(Arc::new(executor), context);
 
-        match dispatcher.dispatch("/prompt-producer arg".into()).await {
+        match dispatcher
+            .dispatch(
+                "/prompt-producer arg".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => assert!(
                 display_text(&display).contains("blocked before prompt generation"),
                 "hook block must be surfaced before the producer runs"
@@ -3100,7 +3271,13 @@ mod tests {
             .with_skill_prompt_transformer(transformer);
 
         for dispatcher in [dispatcher.clone_shared(), dispatcher] {
-            match dispatcher.dispatch("/prompt-producer arg".into()).await {
+            match dispatcher
+                .dispatch(
+                    "/prompt-producer arg".into(),
+                    lingxi_core::host::CancellationToken::new(),
+                )
+                .await
+            {
                 SlashDispatchResult::RunSkillAsTurn {
                     command,
                     body,
@@ -3130,7 +3307,13 @@ mod tests {
                 Box::pin(async { Err(Utf16JsonProjection::from("skill.prompt failed")) })
             }));
 
-        match dispatcher.dispatch("/prompt-producer arg".into()).await {
+        match dispatcher
+            .dispatch(
+                "/prompt-producer arg".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert_eq!(display_text(&display), "skill.prompt failed");
             }
@@ -3175,7 +3358,13 @@ mod tests {
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
             .with_expansion_hooks(Arc::new(executor), context);
 
-        match dispatcher.dispatch("/prompt-builder arg".into()).await {
+        match dispatcher
+            .dispatch(
+                "/prompt-builder arg".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert!(display_text(&display).contains("blocked before prompt generation"))
             }
@@ -3203,6 +3392,8 @@ mod tests {
             &self,
             command: &Utf16JsonProjection,
             _shell: Option<crate::FrontmatterShell>,
+
+            _cancellation: lingxi_core::host::CancellationToken,
         ) -> Result<ShellOut, ShellRunError> {
             self.commands
                 .lock()
@@ -3349,7 +3540,7 @@ mod tests {
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(security_review_registry())))
                 .with_shell_expansion(provider.clone());
 
-        match dispatcher.dispatch("/security-review".into()).await {
+        match dispatcher.dispatch("/security-review".into(), lingxi_core::host::CancellationToken::new()).await {
             SlashDispatchResult::RunSkillAsTurn { body, .. } => assert_eq!(
                 prompt_text(&body),
                 "Tell the user: /security-review needs to run inside a git repository, but the current working directory (`/tmp/security-review-outside`) is not one.\n\nIf the repository is in a subdirectory, `cd` into it first and then re-run /security-review.\n\nIf this is a self-hosted runner session created without a `git_repository` source, either add one at session creation so the runner clones it and sets the working directory, or `cd` into the cloned repo before running the review."
@@ -3375,7 +3566,13 @@ mod tests {
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(security_review_registry())))
                 .with_shell_expansion(provider.clone());
 
-        match dispatcher.dispatch("/security-review".into()).await {
+        match dispatcher
+            .dispatch(
+                "/security-review".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn { body, .. } => {
                 let text = prompt_text(&body);
                 for expected in [
@@ -3425,7 +3622,13 @@ mod tests {
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(security_review_registry())))
                 .with_shell_expansion(provider.clone());
 
-        match dispatcher.dispatch("/security-review".into()).await {
+        match dispatcher
+            .dispatch(
+                "/security-review".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 let display = display_text(&display);
                 assert!(display.starts_with("security-review expansion failed: "));
@@ -3448,7 +3651,13 @@ mod tests {
         let dispatcher =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(security_review_registry())));
 
-        match dispatcher.dispatch("/security-review".into()).await {
+        match dispatcher
+            .dispatch(
+                "/security-review".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => assert_eq!(
                 display_text(&display),
                 "security-review: Git worktree and shell preparation are unavailable in this host"
@@ -3476,7 +3685,13 @@ mod tests {
                 .with_shell_expansion(provider.clone())
                 .with_expansion_hooks(Arc::new(executor), context);
 
-        match dispatcher.dispatch("/security-review".into()).await {
+        match dispatcher
+            .dispatch(
+                "/security-review".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert!(display_text(&display).contains("blocked before prompt generation"))
             }
@@ -3500,7 +3715,13 @@ mod tests {
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
             .with_shell_expansion(provider.clone());
 
-        match dispatcher.dispatch("/insights".into()).await {
+        match dispatcher
+            .dispatch(
+                "/insights".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn { body, .. } => assert_eq!(
                 prompt_text(&body),
                 "Final report mentions !`git status` as text."
@@ -3550,7 +3771,13 @@ mod tests {
             .with_shell_expansion(provider.clone())
             .with_expansion_hooks(Arc::new(executor), context);
 
-        match dispatcher.dispatch("/prompt-shell".into()).await {
+        match dispatcher
+            .dispatch(
+                "/prompt-shell".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert!(display_text(&display).contains("blocked before prompt generation"))
             }
@@ -3635,7 +3862,10 @@ mod tests {
         let provider = Arc::new(FakeProvider::new(false));
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
-        match d.dispatch("/demo".into()).await {
+        match d
+            .dispatch("/demo".into(), lingxi_core::host::CancellationToken::new())
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn {
                 command,
                 body,
@@ -3679,7 +3909,13 @@ mod tests {
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
             .with_shell_expansion(provider.clone());
 
-        match dispatcher.dispatch("/prompt-shell".into()).await {
+        match dispatcher
+            .dispatch(
+                "/prompt-shell".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn {
                 command,
                 body,
@@ -3713,7 +3949,7 @@ mod tests {
         let provider = Arc::new(FakeProvider::new(true));
         let d =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg))).with_shell_expansion(provider);
-        match d.dispatch("/demo".into()).await {
+        match d.dispatch("/demo".into(), lingxi_core::host::CancellationToken::new()).await {
             SlashDispatchResult::Handled { display } => assert_eq!(
                 display_text(&display),
                 "demo expansion failed: Shell command permission check failed for pattern \"!`echo hi`\": not allowed"
@@ -3731,7 +3967,13 @@ mod tests {
         let provider = Arc::new(FakeProvider::new(false));
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
-        match d.dispatch("/commit".into()).await {
+        match d
+            .dispatch(
+                "/commit".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert_eq!(display_text(&display), "commit: OUT[git status] now");
             }
@@ -3761,11 +4003,20 @@ mod tests {
         let dispatcher =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg))).with_shell_expansion(provider);
 
-        match dispatcher.dispatch("/commit".into()).await {
+        match dispatcher
+            .dispatch(
+                "/commit".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
-                let mut expected = "commit: expansion failed: "
-                    .encode_utf16()
-                    .collect::<Vec<_>>();
+                let mut expected = concat!(
+                    "commit expansion failed: ",
+                    "Shell command permission check failed for pattern \"!`git status`\": "
+                )
+                .encode_utf16()
+                .collect::<Vec<_>>();
                 expected.extend(reason_units);
                 assert_eq!(display.string_units(""), Some(expected));
             }
@@ -3780,7 +4031,13 @@ mod tests {
         let mut reg = CommandRegistry::new();
         reg.register_builtin_handler(Arc::new(EmbeddedInjectHandler));
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
-        match d.dispatch("/commit".into()).await {
+        match d
+            .dispatch(
+                "/commit".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert_eq!(display_text(&display), "commit: !`git status` now");
             }
@@ -3795,7 +4052,13 @@ mod tests {
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_injected_messages_as_turns();
 
-        match dispatcher.dispatch("/commit".into()).await {
+        match dispatcher
+            .dispatch(
+                "/commit".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunAsTurn { prompt } => {
                 assert_eq!(prompt_text(&prompt), "commit: !`git status` now");
             }
@@ -3812,7 +4075,10 @@ mod tests {
         let provider = Arc::new(FakeProvider::new(false));
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
-        match d.dispatch("/demo".into()).await {
+        match d
+            .dispatch("/demo".into(), lingxi_core::host::CancellationToken::new())
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert!(
                     display_text(&display).contains("expansion failed"),
@@ -3867,7 +4133,7 @@ mod tests {
                 (PathBuf::from("/project"), PathBuf::from("/project/subdir"))
             }));
         assert!(
-            matches!(dispatcher.dispatch("/checked-loop task".into()).await,
+            matches!(dispatcher.dispatch("/checked-loop task".into(), lingxi_core::host::CancellationToken::new()).await,
             SlashDispatchResult::Handled { display } if display_text(&display) == "checked-loop expansion failed: loop.md denied")
         );
     }
@@ -3940,7 +4206,9 @@ mod tests {
     #[tokio::test]
     async fn an_inline_skills_disallowed_tools_reaches_the_gate() {
         let (d, gate) = dispatcher_with_recording_gate();
-        let _ = d.dispatch("/tight".into()).await;
+        let _ = d
+            .dispatch("/tight".into(), lingxi_core::host::CancellationToken::new())
+            .await;
         let calls = gate.calls.lock().unwrap().clone();
         assert_eq!(
             calls,
@@ -3956,11 +4224,27 @@ mod tests {
         // an unknown name, a builtin and a command declaring nothing all publish
         // an empty list.
         let (d, gate) = dispatcher_with_recording_gate();
-        let _ = d.dispatch("/tight".into()).await;
-        let _ = d.dispatch("just a normal prompt".into()).await;
-        let _ = d.dispatch("/open".into()).await;
-        let _ = d.dispatch("/no-such-command".into()).await;
-        let _ = d.dispatch("/".into()).await;
+        let _ = d
+            .dispatch("/tight".into(), lingxi_core::host::CancellationToken::new())
+            .await;
+        let _ = d
+            .dispatch(
+                "just a normal prompt".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
+        let _ = d
+            .dispatch("/open".into(), lingxi_core::host::CancellationToken::new())
+            .await;
+        let _ = d
+            .dispatch(
+                "/no-such-command".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
+        let _ = d
+            .dispatch("/".into(), lingxi_core::host::CancellationToken::new())
+            .await;
         let calls = gate.calls.lock().unwrap().clone();
         let calls = calls
             .iter()
@@ -4007,7 +4291,10 @@ mod tests {
             ..SlashCommand::default()
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
-        match d.dispatch("/tight".into()).await {
+        match d
+            .dispatch("/tight".into(), lingxi_core::host::CancellationToken::new())
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn {
                 command,
                 body,
@@ -4030,7 +4317,9 @@ mod tests {
         // standing for every input routed through it.
         let (d, gate) = dispatcher_with_recording_gate();
         let shared = d.clone_shared();
-        let _ = shared.dispatch("/tight".into()).await;
+        let _ = shared
+            .dispatch("/tight".into(), lingxi_core::host::CancellationToken::new())
+            .await;
         assert_eq!(
             gate.calls.lock().unwrap().len(),
             1,

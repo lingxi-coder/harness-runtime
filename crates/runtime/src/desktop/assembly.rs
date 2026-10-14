@@ -50,10 +50,11 @@ use super::{
     managed_mod_seats_from_raw_tiers, managed_only_sandbox_overrides, mcp_on_authorization_url,
     mcp_servers_inventory_payload, merge_agent_frontmatter_mcp_servers, merge_cli_flag_agents,
     new_desktop_mcp_transport, new_live_sandbox_runner_with_permission_gate, pane_teammate,
-    platform_in_enabled_list, plugin_dir_watch_enabled,
+    platform_in_enabled_list, plugin_dir_watch_enabled, policy_helpers,
     register_desktop_tools_with_fusion_recorder, registry_skill_listing_provider_for_desktop,
     resolve_bash_edit_diff, resolve_llm_stack_with_credentials, resolve_memory_feature_gates,
-    resolve_workflow_session_enabled, resolve_workflow_size_guideline, ripgrep_override,
+    resolve_workflow_session_enabled_from_effective,
+    resolve_workflow_size_guideline_from_effective, ripgrep_override,
     sandbox_auto_allow_from_settings_tiers, sandbox_runtime_config_from_settings_tiers,
     sec_default_order_from_raw_tiers, session_agents, session_kind_for_job_tmp,
     session_read_allowances_for_boot, session_state, session_task_output_dir, settings_watch,
@@ -124,7 +125,8 @@ pub(super) async fn reconcile_mcp_prompt_catalog(
 
 struct DesktopNativeSettingsRefresher {
     orchestrator: Arc<ConversationOrchestrator>,
-    proxy_auth_helper: Arc<platform_common::proxy_auth_helper::NativeProxyAuthHelper>,
+    proxy_auth_helper: Option<Arc<platform_common::proxy_auth_helper::NativeProxyAuthHelper>>,
+    policy_helper: Arc<policy_helpers::NativePolicyHelperController>,
     home_dir: std::path::PathBuf,
     project_dir: std::path::PathBuf,
     interactive: bool,
@@ -153,7 +155,10 @@ impl settings_watch::NativeSettingsRefresher for DesktopNativeSettingsRefresher 
     ) {
         use lingxi_core::settings::tracer::Source;
 
-        self.proxy_auth_helper.update_config(
+        let Some(proxy_auth_helper) = self.proxy_auth_helper.as_ref() else {
+            return;
+        };
+        proxy_auth_helper.update_config(
             command_utf16.unwrap_or_default(),
             platform_common::proxy_auth_helper::ProxyAuthHelperConfig {
                 home_dir: Some(self.home_dir.clone()),
@@ -164,6 +169,13 @@ impl settings_watch::NativeSettingsRefresher for DesktopNativeSettingsRefresher 
                 workspace_trusted: self.workspace_trusted,
             },
         );
+    }
+
+    async fn refresh_native_policy_helper_on_source_change(
+        &self,
+        snapshot: settings_watch::ManagedSettingsSnapshot,
+    ) {
+        self.policy_helper.on_admin_source_change(snapshot);
     }
 }
 
@@ -178,6 +190,32 @@ fn source_array_items(source: &Utf16JsonProjection, pointer: &str) -> Vec<Utf16J
         .filter_map(|index| source.subprojection(&format!("{pointer}/{index}")).ok())
         .filter(|value| value.string_units("").is_some())
         .collect()
+}
+
+fn native_append_system_prompt(
+    cli: Option<&Utf16JsonProjection>,
+    policy_helper: Option<Utf16JsonProjection>,
+) -> Option<Utf16JsonProjection> {
+    let cli = cli
+        .and_then(|source| source.string_units(""))
+        .filter(|units| !units.is_empty());
+    let policy_helper = policy_helper
+        .and_then(|source| source.string_units(""))
+        .filter(|units| !units.is_empty());
+    let units = match (cli, policy_helper) {
+        (Some(mut cli), Some(policy_helper)) => {
+            cli.extend("\n\n".encode_utf16());
+            cli.extend(policy_helper);
+            cli
+        }
+        (Some(cli), None) | (None, Some(cli)) => cli,
+        (None, None) => return None,
+    };
+    let display = String::from_utf16_lossy(&units);
+    Some(
+        Utf16JsonProjection::root_string(display, units)
+            .expect("combined Native append prompt is a source string"),
+    )
 }
 
 fn normalize_prompt_path(path: &str, cwd: &std::path::Path) -> String {
@@ -356,6 +394,34 @@ mod sandbox_prompt_policy_tests {
     use super::*;
     use lingxi_core::settings::tracer::Source;
 
+    #[test]
+    fn native_append_system_prompt_keeps_cli_then_helper_utf16_source() {
+        let cli = Utf16JsonProjection::root_string(
+            "cli append".to_owned(),
+            "cli append".encode_utf16().collect(),
+        )
+        .unwrap();
+        let helper = Utf16JsonProjection::root_string(
+            "helper �".to_owned(),
+            ["helper ".encode_utf16().collect::<Vec<_>>(), vec![0xd800]].concat(),
+        )
+        .unwrap();
+
+        let combined = native_append_system_prompt(Some(&cli), Some(helper)).unwrap();
+        let mut expected = "cli append\n\nhelper ".encode_utf16().collect::<Vec<_>>();
+        expected.push(0xd800);
+        assert_eq!(combined.string_units(""), Some(expected));
+
+        let empty_cli = Utf16JsonProjection::root_string(String::new(), Vec::new()).unwrap();
+        assert_eq!(
+            native_append_system_prompt(Some(&empty_cli), Some("helper".into()))
+                .unwrap()
+                .string_at(""),
+            Some("helper")
+        );
+        assert!(native_append_system_prompt(None, None).is_none());
+    }
+
     fn layer(source: Source, json: &str) -> lingxi_core::settings::SettingsRawLayer {
         lingxi_core::settings::SettingsRawLayer {
             source,
@@ -371,7 +437,7 @@ mod sandbox_prompt_policy_tests {
             r#"{"sandbox":{"filesystem":{"disabled":true}}}"#,
         );
         assert!(native_filesystem_policy_relaxed(
-            &[user_relaxed.clone()],
+            std::slice::from_ref(&user_relaxed),
             Some("macos"),
             false,
         ));
@@ -407,7 +473,7 @@ mod sandbox_prompt_policy_tests {
         ));
 
         assert!(!native_filesystem_policy_relaxed(
-            &[user_relaxed.clone()],
+            std::slice::from_ref(&user_relaxed),
             Some("windows"),
             false,
         ));
@@ -810,11 +876,30 @@ pub async fn build_with_credential_stack(
     let managed_snapshot =
         crate::desktop::settings_watch::managed_settings_snapshot_for_config(&cfg).await;
     let managed_policy_snapshot_cache = cfg.managed_policy_snapshot_cache.clone();
+    let native_policy_helper = Arc::new(policy_helpers::NativePolicyHelperController::new(
+        managed_policy_snapshot_cache.clone(),
+        Arc::new(policy_helpers::DirectProcessRunner),
+        cfg.native_policy_warning_logger.clone(),
+    ));
+    native_policy_helper
+        .run_initial_local_helper(&managed_snapshot.selection)
+        .await
+        .map_err(|error| match error {
+            policy_helpers::InitialPolicyHelperError::Native(error) => {
+                BuildError::PolicyHelperStartup(error)
+            }
+            policy_helpers::InitialPolicyHelperError::SemanticWorker(error) => {
+                BuildError::NativePolicySemanticWorker(error)
+            }
+        })?;
+    let managed_snapshot = managed_policy_snapshot_cache
+        .snapshot()
+        .unwrap_or(managed_snapshot);
     let managed_policy_layer = managed_snapshot
         .effective_json()
         .into_iter()
         .collect::<Vec<_>>();
-    let effective_settings = load_effective_settings_for_config(&cfg, &managed_policy_layer);
+    let effective_settings = load_effective_settings_for_config(&cfg, Some(&managed_snapshot))?;
     // Resolve the boot additional-working-directory union for permission
     // enforcement and file/MCP access. Native's extension additional-directory
     // callback is populated from the host's `--add-dir` input separately; the
@@ -888,16 +973,16 @@ pub async fn build_with_credential_stack(
     // settings load used by assembly. The command projection preserves UTF-16
     // units, including lone surrogates, without a second raw-stack resolution.
     let proxy_auth_command = if proxy_auth_helper_enabled {
-        effective_settings.as_ref().and_then(|settings| {
-            let typed_command = settings
-                .settings
-                .proxy_auth_helper
-                .as_ref()?
-                .string_units("")?;
+        let command = effective_settings
+            .settings
+            .proxy_auth_helper
+            .as_ref()
+            .and_then(|command| command.string_units(""));
+        command.and_then(|typed_command| {
             if typed_command.is_empty() {
                 return None;
             }
-            let source = settings
+            let source = effective_settings
                 .effective_for("proxyAuthHelper")?
                 .contributors
                 .last()
@@ -940,11 +1025,11 @@ pub async fn build_with_credential_stack(
         .map(|helper| -> Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper> { helper.clone() });
     let vision_delegation_enabled = if cfg.restricted {
         effective_settings
-            .as_ref()
-            .and_then(|settings| settings.settings.vision_delegation_enabled)
+            .settings
+            .vision_delegation_enabled
             .unwrap_or(true)
     } else {
-        load_merged_vision_delegation_enabled(&cwd)
+        load_merged_vision_delegation_enabled(&cwd)?
     };
 
     // On-disk data-retention sweep (claude-code `fWu`). DELETES stale
@@ -1051,6 +1136,7 @@ pub async fn build_with_credential_stack(
         model_provenance,
         session_model_restriction,
         main_model_setting,
+        main_model_source,
         main_model_setting_provenance,
         model_setting_for_spawns,
         model_resolution_context_provider,
@@ -1166,14 +1252,14 @@ pub async fn build_with_credential_stack(
         let fast_cfg = cfg.clone();
         Arc::new(move || {
             let Ok(managed) = super::settings_watch::managed_policy_layers_sync(&fast_cfg) else {
-                return llm_runtime::model::fast_admission::Policy {
+                return Ok(llm_runtime::model::fast_admission::Policy {
                     policy_fast: Some(false),
                     allowed_models: Some(
                         lingxi_core::types::utf16_json::Utf16JsonProjection::parse("[]")
                             .expect("empty allowlist is valid JSON"),
                     ),
                     ..Default::default()
-                };
+                });
             };
             let managed: Vec<lingxi_core::settings::SettingsJson> = managed
                 .iter()
@@ -1184,6 +1270,7 @@ pub async fn build_with_credential_stack(
                 fast_cfg.flag_settings.as_ref(),
                 &managed,
             )
+            .map_err(Into::into)
         })
     })
     .with_subscription(subscription.clone())
@@ -1198,14 +1285,14 @@ pub async fn build_with_credential_stack(
     .with_effort_settings_source({
         let effort_cfg = cfg.clone();
         Arc::new(move || {
-            let Ok(managed) = super::settings_watch::managed_policy_layers_sync(&effort_cfg) else {
-                return Default::default();
-            };
-            load_effective_settings_for_config(&effort_cfg, &managed)
+            let snapshot = super::settings_watch::managed_settings_snapshot_sync(&effort_cfg)
+                .ok_or(lingxi_core::settings::SettingsError::SourceUnavailable(
+                    "managed policy snapshot",
+                ))?;
+            load_effective_settings_for_config(&effort_cfg, Some(&snapshot))
                 .map(|settings| settings.effort_layers)
-                .unwrap_or_default()
         })
-    })
+    })?
     .with_prompt_cache_ttl_settings_source({
         let cache_cfg = cfg.clone();
         Arc::new(move || super::prompt_cache_ttl_settings_for_config(&cache_cfg))
@@ -1271,7 +1358,7 @@ pub async fn build_with_credential_stack(
             },
         );
     }
-    let service_built = match aws_auth_refresher(&cfg, &cwd, analytics_bus.clone()) {
+    let service_built = match aws_auth_refresher(&cfg, &cwd, analytics_bus.clone())? {
         Some(refresher) => service_built.with_aws_auth(refresher),
         None => service_built,
     };
@@ -1331,21 +1418,17 @@ pub async fn build_with_credential_stack(
     orch_cfg.bare = cfg.customization_gates.bare;
     orch_cfg.model_catalog_restriction =
         llm_runtime::model::allowlist::catalog_restriction_from_settings(
-            !managed_snapshot.read_failed() && effective_settings.is_some(),
-            effective_settings
-                .as_ref()
-                .and_then(|settings| settings.settings.available_models.clone()),
+            !managed_snapshot.read_failed(),
+            effective_settings.settings.available_models.clone(),
         );
     apply_server_fallback_model_policy(
         &mut orch_cfg,
-        &if managed_snapshot.read_failed() || effective_settings.is_none() {
+        &if managed_snapshot.read_failed() {
             llm_runtime::model::allowlist::PolicySource::Failed
         } else {
             super::managed_model_policy_source(&managed_snapshot)
         },
-        effective_settings
-            .as_ref()
-            .map(|settings| &settings.settings),
+        Some(&effective_settings.settings),
         &default_model_id,
     );
     orch_cfg.interactive_session = interactive_session;
@@ -1356,11 +1439,9 @@ pub async fn build_with_credential_stack(
     // Resolve output style before query identity: Claude Code includes builtin
     // output-style names in `repl_main_thread:outputStyle:*`.
     let output_style = if cfg.restricted {
-        effective_settings
-            .as_ref()
-            .and_then(|settings| settings.settings.output_style.clone())
+        effective_settings.settings.output_style.clone()
     } else {
-        load_merged_output_style(&cfg.cwd)
+        load_merged_output_style(&cfg.cwd)?
     };
     // Claude Code 2.1.245: CLI is `repl_main_thread`, SDK/bridge transport is
     // `sdk`, and print is the explicit headless print mode only.
@@ -1376,9 +1457,7 @@ pub async fn build_with_credential_stack(
     orch_cfg.classifier_model_explicit = Some(
         cfg.default_model_explicit
             || cfg.default_model_env_pinned
-            || effective_settings
-                .as_ref()
-                .is_some_and(|settings| settings.settings.model.is_some()),
+            || effective_settings.settings.model.is_some(),
     );
     // Opus-fallback hop: thread the (already print-mode-gated) fallback model
     // into `OrchestratorConfig.fallback_model`. `None` keeps the turn_loop's
@@ -1393,11 +1472,11 @@ pub async fn build_with_credential_stack(
     orch_cfg.effort.clone_from(&cfg.initial_effort);
     orch_cfg.workflow_keyword_trigger_enabled = if cfg.restricted {
         effective_settings
-            .as_ref()
-            .and_then(|settings| settings.settings.workflow_keyword_trigger_enabled)
+            .settings
+            .workflow_keyword_trigger_enabled
             .unwrap_or(false)
     } else {
-        load_merged_workflow_keyword_trigger_enabled(&cfg.cwd)
+        load_merged_workflow_keyword_trigger_enabled(&cfg.cwd)?
     };
     // CLI `--max-turns` / `--max-budget` caps. Unset leaves the OrchestratorConfig
     // defaults (unbounded turns / no cost cap). USD → nano-USD for the cost cap.
@@ -1432,43 +1511,37 @@ pub async fn build_with_credential_stack(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = output_style;
-    orch_cfg.language = effective_settings
-        .as_ref()
-        .and_then(|settings| settings.settings.language.clone());
+    orch_cfg.language = effective_settings.settings.language.clone();
     lingxi_core::host::session_flags::set_show_thinking_summaries(if cfg.restricted {
         effective_settings
-            .as_ref()
-            .and_then(|settings| settings.settings.show_thinking_summaries)
+            .settings
+            .show_thinking_summaries
             .unwrap_or(false)
     } else {
-        load_merged_show_thinking_summaries(&cfg.cwd)
+        load_merged_show_thinking_summaries(&cfg.cwd)?
     });
     lingxi_core::host::session_flags::set_agent_push_notif_enabled(if cfg.restricted {
         effective_settings
-            .as_ref()
-            .and_then(|settings| settings.settings.agent_push_notif_enabled)
+            .settings
+            .agent_push_notif_enabled
             .unwrap_or(false)
     } else {
-        load_merged_agent_push_notif_enabled(&cfg.cwd)
+        load_merged_agent_push_notif_enabled(&cfg.cwd)?
     });
     // `settings.taskOutputMaxChars` — the soft cap `TaskOutput` truncates a
     // task's model-facing output to, and the base its result budget is derived
     // from. Published RAW; `tool_task` applies the oracle's `see()` clamp.
     lingxi_core::host::session_flags::set_task_output_max_chars(if cfg.restricted {
-        effective_settings
-            .as_ref()
-            .and_then(|settings| settings.settings.task_output_max_chars)
+        effective_settings.settings.task_output_max_chars
     } else {
-        load_merged_task_output_max_chars(&cfg.cwd)
+        load_merged_task_output_max_chars(&cfg.cwd)?
     });
     // `settings.bashOutputMaxChars` (2.1.261) — the same shape for Bash output.
     // Published RAW; `tool_shell` applies the `see()` clamp.
     lingxi_core::host::session_flags::set_bash_output_max_chars(if cfg.restricted {
-        effective_settings
-            .as_ref()
-            .and_then(|settings| settings.settings.bash_output_max_chars)
+        effective_settings.settings.bash_output_max_chars
     } else {
-        load_merged_bash_output_max_chars(&cfg.cwd)
+        load_merged_bash_output_max_chars(&cfg.cwd)?
     });
     // `settings.attribution` / `settings.includeCoAuthoredBy` — the git
     // attribution trailers. Published at boot, not only from `/config`:
@@ -1479,27 +1552,23 @@ pub async fn build_with_credential_stack(
         Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         Option<bool>,
     ) = if cfg.restricted {
-        let attribution = effective_settings
-            .as_ref()
-            .and_then(|settings| settings.settings.attribution.clone());
+        let attribution = effective_settings.settings.attribution.clone();
         (
             attribution.as_ref().and_then(|a| a.commit.clone()),
             attribution.and_then(|a| a.pr),
-            effective_settings
-                .as_ref()
-                .and_then(|settings| settings.settings.include_co_authored_by),
+            effective_settings.settings.include_co_authored_by,
         )
     } else {
-        load_merged_attribution(&cfg.cwd)
+        load_merged_attribution(&cfg.cwd)?
     };
     lingxi_core::host::session_flags::set_attribution(attribution_commit, attribution_pr);
     lingxi_core::host::session_flags::set_include_co_authored_by(include_co_authored_by);
     lingxi_core::host::session_flags::set_include_git_instructions(if cfg.restricted {
-        effective_settings
-            .as_ref()
-            .and_then(|settings| settings.settings.include_git_instructions)
+        effective_settings.settings.include_git_instructions
     } else {
-        load_merged_settings(&cfg.cwd).and_then(|eff| eff.settings.include_git_instructions)
+        load_merged_settings(&cfg.cwd)?
+            .settings
+            .include_git_instructions
     });
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
     // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a
@@ -1516,6 +1585,10 @@ pub async fn build_with_credential_stack(
     if let Some(override_prompt) = cfg.system_prompt_override.clone() {
         orch_cfg.system_prompt_override = Some(override_prompt);
     }
+    orch_cfg.append_system_prompt = native_append_system_prompt(
+        cfg.append_system_prompt.as_ref(),
+        native_policy_helper.initial_append_system_prompt(),
+    );
     // CLI `--plan-mode-instructions` (print-gated in init.rs): custom plan-mode
     // workflow body. `None` keeps the default 5-phase plan reminder.
     orch_cfg
@@ -1564,36 +1637,6 @@ pub async fn build_with_credential_stack(
     // resolves the alias → wire id and applies it. An explicit `--model` sets this
     // `false`, so it is never overridden by agent frontmatter.
     orch_cfg.apply_resumed_agent_model = !cfg.default_model_explicit;
-    // CLI `--append-system-prompt` / `--append-system-prompt-file`: text to
-    // append after the assembled system prompt (or after `system_prompt_override`
-    // when both are set). Appended with a newline separator.
-    if let Some(append) = cfg.append_system_prompt.clone() {
-        let mut units = orch_cfg
-            .system_prompt_override
-            .as_ref()
-            .map(|source| {
-                source
-                    .string_units("")
-                    .expect("system prompt override is a root string projection")
-            })
-            .unwrap_or_default();
-        if !units.is_empty() {
-            units.push(u16::from(b'\n'));
-        }
-        units.extend(
-            append
-                .string_units("")
-                .expect("appended system prompt is a root string projection"),
-        );
-        orch_cfg.system_prompt_override = Some(
-            lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
-                String::from_utf16_lossy(&units),
-                units,
-            )
-            .expect("system prompt display is derived from exact UTF-16 units"),
-        );
-    }
-
     // Phase 2a T7: one pricing catalog backs both ordinary cost and Fusion.
     let pricing = Arc::new(pricing);
 
@@ -1818,6 +1861,11 @@ pub async fn build_with_credential_stack(
         .memory_provider
         .clone()
         .unwrap_or_else(|| Arc::new(StaticMemoryProvider::empty()));
+    let helper_cache_for_memory = managed_policy_snapshot_cache.clone();
+    let memory = orchestrator::prompt::memory_block::with_native_managed_instruction_source(
+        memory,
+        Arc::new(move || helper_cache_for_memory.native_helper_instruction_files()),
+    );
     // AGENTS.md plugin options are trusted only from user, flag and managed
     // settings; project/local pluginConfigs cannot select instruction policy.
     let mut instruction_tiers = Vec::<serde_json::Value>::new();
@@ -3013,17 +3061,15 @@ pub async fn build_with_credential_stack(
     // so the HTTP hook executor gates outbound URLs + intersects the per-hook
     // env-var allowlist. `(None, None)` = no restriction (behavior-neutral).
     let (http_hook_urls, http_hook_env_vars) = if cfg.restricted {
-        effective_settings
-            .as_ref()
-            .map(|settings| {
-                (
-                    settings.settings.allowed_http_hook_urls.clone(),
-                    settings.settings.http_hook_allowed_env_vars.clone(),
-                )
-            })
-            .unwrap_or((None, None))
+        (
+            effective_settings.settings.allowed_http_hook_urls.clone(),
+            effective_settings
+                .settings
+                .http_hook_allowed_env_vars
+                .clone(),
+        )
     } else {
-        load_merged_http_hook_policy(&cwd)
+        load_merged_http_hook_policy(&cwd)?
     };
     // Transcript sink for the per-hook-run `attachment` records claude-code
     // persists (one `hook_success` / `hook_non_blocking_error` /
@@ -3048,11 +3094,11 @@ pub async fn build_with_credential_stack(
         )
         .with_policy_disable_all_hooks(if cfg.restricted {
             effective_settings
-                .as_ref()
-                .and_then(|settings| settings.settings.disable_all_hooks)
+                .settings
+                .disable_all_hooks
                 .unwrap_or(false)
         } else {
-            load_merged_disable_all_hooks(&cwd)
+            load_merged_disable_all_hooks(&cwd)?
         })
         .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
@@ -4311,7 +4357,11 @@ pub async fn build_with_credential_stack(
     // tool's `readFileState.set` feeds the orchestrator's post-compact restore
     // (and the staleness / `/files` consumers).
     let read_state_map = tool_api::read_file_state::new_read_file_state_map();
-    let ask_user_question_timeout = load_ask_user_question_timeout(&cfg).await;
+    let ask_user_question_settings = load_ask_user_question_timeout(&cfg).await?;
+    let ask_user_question_timeout = ask_user_question_settings
+        .settings
+        .ask_user_question_timeout
+        .clone();
     // The device-audio capability, read ONCE here so the tool context below and
     // the `DesktopRuntime` returned at the end carry the very same `Arc`s (the
     // bridge's one `AudioBridge`), not two independent reads of `cfg` that a
@@ -4348,11 +4398,11 @@ pub async fn build_with_credential_stack(
         // merged settings via the same `Settings::load` seam as outputStyle.
         skip_web_fetch_preflight: if cfg.restricted {
             effective_settings
-                .as_ref()
-                .and_then(|settings| settings.settings.skip_web_fetch_preflight)
+                .settings
+                .skip_web_fetch_preflight
                 .unwrap_or(false)
         } else {
-            load_merged_skip_web_fetch_preflight(&cwd)
+            load_merged_skip_web_fetch_preflight(&cwd)?
         },
         // (M-15) `settings.askUserQuestionTimeout` → the AskUserQuestion resolver's
         // idle window. Read from the merged settings via the same `Settings::load`
@@ -4455,10 +4505,10 @@ pub async fn build_with_credential_stack(
         // defaults false, upstream included).
         bash_edit_diff: resolve_bash_edit_diff(
             &cfg,
-            effective_settings.as_ref(),
-            &managed_policy_layer,
+            &effective_settings,
+            Some(&managed_snapshot),
             &main_session_uuid,
-        ),
+        )?,
         // Agent execution, name routing and Mod listing share one ordered store.
         agent_name_registry: Some(subagent_spawner_arc.agent_name_registry()),
         mcp_registry: Some(mcp_registry.clone()),
@@ -4922,13 +4972,18 @@ pub async fn build_with_credential_stack(
         // composition: default → user → project → local → flag → managed.
         // `workflowSizeGuideline` has no environment mapping, so managed is the
         // effective highest source. The default is medium.
-        let managed_workflow_layers: Vec<lingxi_core::settings::SettingsJson> = managed_snapshot
-            .effective_json()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .into_iter()
-            .collect();
+        let workflow_defaults = lingxi_core::settings::SettingsJson {
+            workflow_size_guideline: Some("medium".to_owned()),
+            enable_workflows: Some(true),
+            ..Default::default()
+        };
+        let workflow_settings = super::load_effective_settings_for_config_with_defaults(
+            &cfg,
+            Some(&managed_snapshot),
+            workflow_defaults,
+        )?;
         let (workflow_size_guideline, managed_workflow, default_workflow) =
-            resolve_workflow_size_guideline(&cfg, &cwd, &managed_workflow_layers);
+            resolve_workflow_size_guideline_from_effective(&workflow_settings);
         workflow_size_guideline_state =
             lingxi_core::host::session_flags::WorkflowSizeGuidelineState::new(
                 workflow_size_guideline.as_wire(),
@@ -4937,20 +4992,15 @@ pub async fn build_with_credential_stack(
             )
             .expect("desktop workflowSizeGuideline must be valid");
         let (workflow_session_enabled, workflow_session_managed) =
-            resolve_workflow_session_enabled(&cfg, &cwd, &managed_workflow_layers);
+            resolve_workflow_session_enabled_from_effective(&workflow_settings);
         // `disableWorkflows` is an ORG policy, so it is read from MANAGED
         // settings only — a project or user file must not be able to turn the
         // tool off on the org's behalf, nor to turn it back on.
-        let managed_disable_workflows = std::fs::read_to_string(
-            crate::desktop::settings_watch::managed_settings_dir().join("managed-settings.json"),
-        )
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|v| {
-            v.get("disableWorkflows")
-                .and_then(serde_json::Value::as_bool)
-        })
-        .unwrap_or(false);
+        let managed_disable_workflows = managed_snapshot
+            .effective_projection()
+            .and_then(|projection| projection.subprojection("/disableWorkflows").ok())
+            .and_then(|projection| projection.at_pointer("").and_then(|value| value.as_bool()))
+            .unwrap_or(false);
         let workflow_policy_enabled = tool_workflow::workflows_enabled(managed_disable_workflows);
         dynamic_workflows_gate = lingxi_core::host::session_flags::DynamicWorkflowsGate::new(
             workflow_policy_enabled && workflow_session_enabled,
@@ -5405,28 +5455,31 @@ pub async fn build_with_credential_stack(
     let main_agent_setting_writer = main_jsonl_writer.clone();
     let goal_hooks_restricted = if cfg.restricted {
         effective_settings
-            .as_ref()
-            .map(|settings| {
-                settings.settings.disable_all_hooks.unwrap_or(false)
-                    || settings.settings.allow_managed_hooks_only.unwrap_or(false)
-            })
+            .settings
+            .disable_all_hooks
             .unwrap_or(false)
+            || effective_settings
+                .settings
+                .allow_managed_hooks_only
+                .unwrap_or(false)
     } else {
-        load_merged_hooks_restricted(&cwd)
+        load_merged_hooks_restricted(&cwd)?
     };
     let (mod_disable_all_hooks, mod_managed_only) = if cfg.restricted {
-        effective_settings
-            .as_ref()
-            .map_or((false, false), |settings| {
-                (
-                    settings.settings.disable_all_hooks.unwrap_or(false),
-                    settings.settings.allow_managed_hooks_only.unwrap_or(false),
-                )
-            })
+        (
+            effective_settings
+                .settings
+                .disable_all_hooks
+                .unwrap_or(false),
+            effective_settings
+                .settings
+                .allow_managed_hooks_only
+                .unwrap_or(false),
+        )
     } else {
         (
-            load_merged_disable_all_hooks(&cwd),
-            load_merged_allow_managed_hooks_only(&cwd),
+            load_merged_disable_all_hooks(&cwd)?,
+            load_merged_allow_managed_hooks_only(&cwd)?,
         )
     };
     // Keep a clone for the settings watcher before `perms` is moved into the
@@ -5456,14 +5509,15 @@ pub async fn build_with_credential_stack(
         memory,
         cwd.clone(),
     )
+    .with_model_resolution_context_provider(model_resolution_context_provider.clone())
     .with_main_model_selection(
         Some(main_model_setting.clone()),
+        main_model_source,
         main_model_setting_provenance,
         session_model_restriction.clone(),
     )
     .await
     .with_dynamic_workflows_gate(dynamic_workflows_gate)
-    .with_model_resolution_context_provider(model_resolution_context_provider.clone())
     .with_instruction_user_email_provider(instruction_identity.clone())
     .with_mod_surface_roster(mod_surface_roster.clone())
     .with_native_sandbox_host_facts_provider(sandbox_host_facts_provider)
@@ -5568,7 +5622,7 @@ pub async fn build_with_credential_stack(
             tools.set_bash_precommit_skills_provider(move || {
                 let provider = child_provider.clone();
                 async move {
-                    let snapshot = provider.skill_listing_snapshot().await;
+                    let snapshot = provider.skill_listing_snapshot().await?;
                     provider.bash_precommit_skills(&snapshot.entries).await
                 }
             });
@@ -5635,9 +5689,7 @@ pub async fn build_with_credential_stack(
     let (memory_prefetch_on, session_memory_on) = resolve_memory_feature_gates(
         memory::auto_memory_enabled(
             &memory::AutoMemoryEnv::from_process_env(),
-            effective_settings
-                .as_ref()
-                .and_then(|s| s.settings.auto_memory_enabled),
+            effective_settings.settings.auto_memory_enabled,
         ),
         is_env_truthy("LINGXI_SESSION_MEMORY"),
     );
@@ -6026,7 +6078,7 @@ pub async fn build_with_credential_stack(
         cfg.managed_policy_snapshot_cache.clone(),
         shared_command_registry.clone(),
     )
-    .await;
+    .await?;
     let insights_availability = command_api::builtins::InsightsCommandAvailability {
         workspace_available: Some(cfg.cwd.is_dir() && workspace_trusted),
         allow_insights: native_insights_policy_gate,
@@ -6040,6 +6092,7 @@ pub async fn build_with_credential_stack(
                         session: session.clone(),
                         api: api_service.clone(),
                         model_resolution: model_resolution_context_provider.clone(),
+                        main_model_source: orch.configured_model_source_handle(),
                     });
                 let native_prompt_context: Arc<
                     dyn crate::insights::InsightsNativeSideQueryContextProvider,
@@ -6062,7 +6115,9 @@ pub async fn build_with_credential_stack(
                     crate::insights::RuntimeInsightsNativeCommandNameFactsProvider {
                         api: api_service.clone(),
                         session: orch.session(),
-                        disable_agent_view_setting: super::load_merged_disable_agent_view(&cfg.cwd),
+                        disable_agent_view_setting: super::load_merged_disable_agent_view(
+                            &cfg.cwd,
+                        )?,
                     },
                 );
                 let source: Arc<dyn crate::insights::InsightsSourceExecutor> = Arc::new(source);
@@ -6832,19 +6887,40 @@ pub async fn build_with_credential_stack(
     let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
     let model_selection_refresher: Arc<dyn settings_watch::MainModelSelectionRefresher> =
         orch.clone();
+    let helper_refresh_orchestrator = Arc::downgrade(&orch);
+    let helper_refusal_orchestrator = Arc::downgrade(&orch);
+    let helper_refusal_controller = Arc::downgrade(&native_policy_helper);
+    native_policy_helper.set_on_apply(Arc::new(move || {
+        let refusal = helper_refusal_controller
+            .upgrade()
+            .and_then(|controller| controller.latest_failure())
+            .is_some_and(|failure| {
+                failure.on_failure
+                    == Some(lingxi_core::settings::NativePolicyHelperOnFailure::Refuse)
+            });
+        if refusal {
+            if let Some(orchestrator) = helper_refusal_orchestrator.upgrade() {
+                tokio::spawn(async move {
+                    lingxi_core::host::OrchestratorHandle::request_exit(orchestrator.as_ref())
+                        .await;
+                });
+            }
+        } else if let Some(orchestrator) = helper_refresh_orchestrator.upgrade() {
+            orchestrator.refresh_instruction_context(
+                lingxi_core::host::instructions::InstructionRefreshReason::PolicyRefresh,
+            );
+        }
+    }));
     let native_settings_refresher: Arc<dyn settings_watch::NativeSettingsRefresher> =
-        if let Some(helper) = proxy_auth_helper.as_ref() {
-            Arc::new(DesktopNativeSettingsRefresher {
-                orchestrator: orch.clone(),
-                proxy_auth_helper: helper.clone(),
-                home_dir: proxy_auth_home_dir,
-                project_dir: cwd.clone(),
-                interactive: proxy_auth_interactive,
-                workspace_trusted,
-            })
-        } else {
-            orch.clone()
-        };
+        Arc::new(DesktopNativeSettingsRefresher {
+            orchestrator: orch.clone(),
+            proxy_auth_helper: proxy_auth_helper.clone(),
+            policy_helper: native_policy_helper.clone(),
+            home_dir: proxy_auth_home_dir,
+            project_dir: cwd.clone(),
+            interactive: proxy_auth_interactive,
+            workspace_trusted,
+        });
     let model_selection_refresh =
         settings_watch::MainModelSelectionRefresh::from_config(&cfg, &default_listings);
     let settings_watcher =
@@ -7020,6 +7096,8 @@ pub async fn build_with_credential_stack(
         fusion_recorder,
         fusion_recorder_factory: fusion_recorder_factory_impl,
         session_lifecycle,
+        policy_helper_refusal: native_policy_helper.refusal_probe(),
+        policy_helper_semantic_worker_failure: native_policy_helper.semantic_worker_failure_probe(),
         analytics_bus,
         shared_command_registry,
         mod_command_catalog,

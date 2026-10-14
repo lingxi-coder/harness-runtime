@@ -131,6 +131,7 @@ fn model_list_and_changed_round_trip() {
             "claude-sonnet-4-6".to_string(),
         ],
         current: "claude-opus-4-7".to_string(),
+        current_model_source: None,
         details: Vec::new(),
     };
     let json = serde_json::to_value(&list).expect("serialize ModelList");
@@ -142,6 +143,7 @@ fn model_list_and_changed_round_trip() {
 
     let changed = ClientEvent::ModelChanged {
         model: "claude-sonnet-4-6".to_string(),
+        model_source: None,
     };
     let json = serde_json::to_value(&changed).expect("serialize ModelChanged");
     assert_eq!(json["type"], "model_changed");
@@ -204,6 +206,7 @@ fn rich_model_details_round_trip_and_legacy_event_default() {
     let event = ClientEvent::ModelList {
         models: vec![detail.reference.clone()],
         current: detail.reference.clone(),
+        current_model_source: None,
         details: vec![detail],
     };
     let value = serde_json::to_value(&event).unwrap();
@@ -513,6 +516,7 @@ fn status_snapshot_round_trips() {
         snapshot: StatusSnapshotDto {
             session_id: "sess-1".to_string(),
             model: "claude-opus-4-7".to_string(),
+            model_source: None,
             n_messages: 12,
             total_cost_usd: 0.0345,
             input_tokens: 4096,
@@ -543,6 +547,7 @@ fn status_snapshot_optional_fields_skip_when_none() {
     let mut snap = StatusSnapshotDto {
         session_id: "s".to_string(),
         model: "m".to_string(),
+        model_source: None,
         n_messages: 0,
         total_cost_usd: 0.0,
         input_tokens: 0,
@@ -583,6 +588,7 @@ fn status_snapshot_carries_active_workers_roundtrip() {
     let mut snap = StatusSnapshotDto {
         session_id: "s".to_string(),
         model: "m".to_string(),
+        model_source: None,
         n_messages: 0,
         total_cost_usd: 0.0,
         input_tokens: 0,

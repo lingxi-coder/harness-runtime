@@ -29,6 +29,7 @@ use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -55,6 +56,7 @@ const SHELL_MAX_TIMEOUT_MS: u64 = 600_000;
 /// Bash 2-minute default so an unspecified-timeout command is always bounded
 /// by the runner watchdog, never left to run to the runner's own ceiling.
 const SHELL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+static NEXT_SHELL_PROCESS_OWNER: AtomicU64 = AtomicU64::new(1);
 
 /// `ShellMobileTool` — run a deny-net shell command through the P2 runner.
 #[derive(Clone)]
@@ -367,7 +369,7 @@ impl Tool for ShellMobileTool {
     async fn call(
         &self,
         input: Utf16JsonProjection,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         // 1. Extract + validate the command.
@@ -460,13 +462,66 @@ impl Tool for ShellMobileTool {
             .prepare(pcmd, &policy)
             .map_err(|e| map_sandbox_err(&e))?;
 
-        // 6. run() — map each ProcessError variant to a named tool error.
-        let out = self
+        // Give this command a unique child owner under its agent. The runner
+        // can then reap exactly this process on turn cancellation while
+        // agent-level cleanup can still match the stable prefix.
+        let agent_owner = ctx
+            .agent_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "main".to_string());
+        let process_owner = format!(
+            "{agent_owner}/mobile-shell-{}",
+            NEXT_SHELL_PROCESS_OWNER.fetch_add(1, Ordering::Relaxed)
+        );
+        let sandboxed = sandboxed.with_process_owner(Some(process_owner.clone()));
+
+        // 6. Keep the process future alive until the runtime confirms that its
+        // raw stdio session is closed and the guest process tree is reaped.
+        // Dropping this future would abandon the runtime-owned session.
+        let output_limit_bytes = Some(self.max_result_size_chars().saturating_mul(4));
+        let run = self
             .ctx
             .process
-            .run(&sandboxed)
-            .await
-            .map_err(|e| map_process_err(&e, effective_timeout))?;
+            .run_foreground_with_output_limit(&sandboxed, output_limit_bytes);
+        tokio::pin!(run);
+        let foreground = if let Some(cancel) = ctx.cancel.as_ref() {
+            if cancel.is_cancelled() {
+                return Err(ToolError::Aborted);
+            }
+            // Poll once so the runner registers the owner before cancellation
+            // can race with raw-session opening. If it completes immediately,
+            // preserve that completed result.
+            let first_poll =
+                std::future::poll_fn(|cx| match std::future::Future::poll(run.as_mut(), cx) {
+                    std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
+                    std::task::Poll::Pending => std::task::Poll::Ready(None),
+                })
+                .await;
+            if let Some(result) = first_poll {
+                result
+            } else {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        self.ctx.process.kill_owner_processes(&process_owner).await;
+                        let _ = run.await;
+                        return Err(ToolError::Aborted);
+                    }
+                    result = &mut run => result,
+                }
+            }
+        } else {
+            run.await
+        }
+        .map_err(|e| map_process_err(&e, effective_timeout))?;
+        let out = match foreground.outcome {
+            lingxi_core::host::ForegroundOutcome::Completed(output) => output,
+            lingxi_core::host::ForegroundOutcome::MovedToBackground(_) => {
+                return Err(ToolError::Internal(
+                    "mobile shell runner unexpectedly detached a foreground command".into(),
+                ));
+            }
+        };
 
         // 7. Build the result. Honor `timed_out` -> timeout error.
         if out.timed_out {
@@ -535,8 +590,10 @@ mod tests {
     use mobile_linux_api::ProcessOutput;
     use mobile_linux_api::SandboxBackend;
     use serde_json::Value;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use tool_api::AndroidShellToolCtx;
 
@@ -607,6 +664,56 @@ mod tests {
         async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
             Ok(())
         }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    struct CancellationRunner {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        joined: Arc<AtomicBool>,
+        killed_owner: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for CancellationRunner {
+        async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            unreachable!("ShellMobileTool uses its owned foreground seam")
+        }
+
+        async fn run_foreground_with_output_limit(
+            &self,
+            command: &SandboxedCommand,
+            _: Option<usize>,
+        ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+            assert!(command.process_owner().is_some());
+            self.started.notify_one();
+            self.release.notified().await;
+            self.joined.store(true, Ordering::Release);
+            Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::Completed(ok_output("finished")),
+                output_file: None,
+            })
+        }
+
+        async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+            *self.killed_owner.lock().expect("killed owner mutex") = Some(owner.to_string());
+            self.release.notify_one();
+            Vec::new()
+        }
+
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            unreachable!()
+        }
+
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+
         fn is_available(&self) -> bool {
             true
         }
@@ -708,6 +815,51 @@ mod tests {
                 .and_then(|value| value.as_bool()),
             Some(false)
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_kills_and_joins_the_same_foreground_run() {
+        let (mut ctx, _, _) = mobile_linux_ctx(ok_output(""));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let joined = Arc::new(AtomicBool::new(false));
+        let killed_owner = Arc::new(Mutex::new(None));
+        ctx.process = Arc::new(CancellationRunner {
+            started: started.clone(),
+            release: release.clone(),
+            joined: joined.clone(),
+            killed_owner: killed_owner.clone(),
+        });
+        let cancel = CancellationToken::new();
+        let mut tool_ctx = fresh_ctx();
+        tool_ctx.cancel = Some(cancel.clone());
+        let tool = ShellMobileTool::new(ctx);
+        let task = tokio::spawn(async move {
+            tool.call(
+                source_input(&json!({"command": "printf safe"})),
+                tool_ctx,
+                fresh_tx(),
+            )
+            .await
+        });
+
+        started.notified().await;
+        cancel.cancel();
+        let error = task
+            .await
+            .expect("shell call task")
+            .expect_err("abort result");
+        assert!(matches!(error, ToolError::Aborted));
+        assert!(
+            joined.load(Ordering::Acquire),
+            "run future must be joined before return"
+        );
+        let owner = killed_owner
+            .lock()
+            .expect("killed owner mutex")
+            .clone()
+            .expect("foreground owner was killed");
+        assert!(owner.starts_with("main/mobile-shell-"));
     }
 
     #[tokio::test]

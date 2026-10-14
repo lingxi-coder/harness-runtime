@@ -363,7 +363,7 @@ impl BunInsightsWorker {
                 "insights worker response id did not match request",
             ));
         }
-        if envelope.string_at("/kind").as_deref() == Some("worker_error") {
+        if envelope.string_at("/kind") == Some("worker_error") {
             return Err(source_field(&envelope, "/detail")
                 .filter(source_is_string)
                 .unwrap_or_else(|| error_source("insights worker action failed")));
@@ -418,10 +418,9 @@ fn terminate_child_sync(child: &mut Child) -> bool {
 }
 
 fn validate_worker_reply(reply: &Source) -> Result<(), Source> {
-    if reply.string_at("/runtime").as_deref() != Some("bun")
-        || reply.string_at("/metadataModule").as_deref()
-            != Some("metadata-source/insights-native-actions.mjs")
-        || reply.string_at("/sourceModule").as_deref() != Some("insights_source_actions.mjs")
+    if reply.string_at("/runtime") != Some("bun")
+        || reply.string_at("/metadataModule") != Some("metadata-source/insights-native-actions.mjs")
+        || reply.string_at("/sourceModule") != Some("insights_source_actions.mjs")
     {
         return Err(error_source("insights Bun worker source preflight failed"));
     }
@@ -438,9 +437,8 @@ fn validate_worker_reply(reply: &Source) -> Result<(), Source> {
         .array_len("/actions")
         .ok_or_else(|| error_source("insights Bun worker omitted its action list"))?;
     for required in REQUIRED_WORKER_ACTIONS {
-        let found = (0..actions).any(|index| {
-            reply.string_at(&format!("/actions/{index}")).as_deref() == Some(*required)
-        });
+        let found = (0..actions)
+            .any(|index| reply.string_at(&format!("/actions/{index}")) == Some(*required));
         if !found {
             return Err(error_source(format!(
                 "insights Bun worker is missing source action {required}"
@@ -1266,7 +1264,7 @@ mod rust_to_bun_wire_tests {
             };
             let rows = executor.metadata_for_transcript(transcript).await?;
             if rows.len() != 1
-                || rows[0].metadata.string_at("/session_id").as_deref()
+                || rows[0].metadata.string_at("/session_id")
                     != Some("ed32091e-d448-41c9-b7bd-e99bbd50a833")
             {
                 return Err(error_source(
@@ -1470,7 +1468,7 @@ for await (const line of lines) {
                 .call("echo", payload(action))
                 .await
                 .expect("a protocol error must restart before the next action");
-            assert_eq!(echoed.string_at("/tag").as_deref(), Some(action));
+            assert_eq!(echoed.string_at("/tag"), Some(action));
         }
 
         let pending = {
@@ -1488,7 +1486,7 @@ for await (const line of lines) {
             .call("echo", payload("after-cancel"))
             .await
             .expect("cancellation after write must poison and restart the worker");
-        assert_eq!(echoed.string_at("/tag").as_deref(), Some("after-cancel"));
+        assert_eq!(echoed.string_at("/tag"), Some("after-cancel"));
 
         let records = events(&event_path);
         assert_eq!(startup_count(&records), 6);
@@ -1508,8 +1506,8 @@ for await (const line of lines) {
             worker.call("echo", payload("slow")),
             worker.call("echo", payload("fast")),
         );
-        assert_eq!(slow.unwrap().string_at("/tag").as_deref(), Some("slow"));
-        assert_eq!(fast.unwrap().string_at("/tag").as_deref(), Some("fast"));
+        assert_eq!(slow.unwrap().string_at("/tag"), Some("slow"));
+        assert_eq!(fast.unwrap().string_at("/tag"), Some("fast"));
 
         let records = events(&event_path);
         assert_eq!(startup_count(&records), 1);

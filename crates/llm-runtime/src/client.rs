@@ -297,6 +297,40 @@ impl ModelRuntime {
         provider.refresh(scope, rejected).await
     }
 
+    /// Refresh one captured first-party Anthropic OAuth credential after the
+    /// Native model-validation request receives an HTTP 401. This deliberately
+    /// does not refresh API keys or credentials for other Anthropic-family
+    /// providers.
+    pub(crate) async fn refresh_rejected_anthropic_oauth(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        rejected: &Credential,
+    ) -> Result<Option<Credential>, LlmError> {
+        if !matches!(rejected, Credential::AnthropicOAuth { .. }) {
+            return Ok(None);
+        }
+        let route = self.registry.resolve_in(model, profile)?;
+        if route.provider_id != ProviderId::AnthropicFirstParty {
+            return Ok(None);
+        }
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        if entry.protocol != ProtocolFamily::AnthropicMessages {
+            return Ok(None);
+        }
+        let Some(provider) = &self.credentials else {
+            return Ok(None);
+        };
+        let scope = credential_scope(entry, &route.profile_name);
+        Ok(provider
+            .refresh(&scope, rejected)
+            .await?
+            .filter(|credential| matches!(credential, Credential::AnthropicOAuth { .. })))
+    }
+
     /// Resolve current Fast admission without authentication or transport.
     pub(crate) fn fast_model_allowed(
         &self,

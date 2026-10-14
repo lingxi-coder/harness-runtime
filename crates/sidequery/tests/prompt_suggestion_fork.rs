@@ -59,6 +59,7 @@ fn request() -> ForkedAgentRequest {
             "predict my next prompt".into(),
         )],
         cache_safe_params: CacheSafeParams {
+            model_source: None,
             system_prompt: Arc::new(Utf16JsonProjection::from("parent system")),
             system_prompt_input: None,
             user_context: HashMap::new(),

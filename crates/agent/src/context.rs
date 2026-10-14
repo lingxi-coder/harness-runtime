@@ -18,6 +18,119 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tool_api::content_replacement::ContentReplacementState;
 
+/// Atomic ownership handshake between preload startup and pool deallocation.
+///
+/// `CancelLoading` keeps the slot join-required after the owner cancels even
+/// if the loader settles before the runner begins its terminal drain.
+#[derive(Debug, Default)]
+pub struct AgentPreloadLifecycle(std::sync::atomic::AtomicU8);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPreloadPhase {
+    Fresh = 0,
+    Loading = 1,
+    Settled = 2,
+    CancelBeforeStart = 3,
+    CancelLoading = 4,
+    Cancelled = 5,
+    Skipped = 6,
+}
+
+impl AgentPreloadLifecycle {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn begin(&self) -> bool {
+        self.0
+            .compare_exchange(
+                AgentPreloadPhase::Fresh as u8,
+                AgentPreloadPhase::Loading as u8,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn settle(&self) -> AgentPreloadPhase {
+        use std::sync::atomic::Ordering;
+        loop {
+            let current = self.0.load(Ordering::Acquire);
+            let next = match current {
+                x if x == AgentPreloadPhase::Loading as u8 => AgentPreloadPhase::Settled,
+                x if x == AgentPreloadPhase::CancelLoading as u8 => AgentPreloadPhase::Cancelled,
+                x if x == AgentPreloadPhase::CancelBeforeStart as u8 => {
+                    return AgentPreloadPhase::CancelBeforeStart;
+                }
+                x if x == AgentPreloadPhase::Cancelled as u8 => {
+                    return AgentPreloadPhase::Cancelled;
+                }
+                x if x == AgentPreloadPhase::Skipped as u8 => return AgentPreloadPhase::Skipped,
+                x if x == AgentPreloadPhase::Settled as u8 => return AgentPreloadPhase::Settled,
+                _ => return AgentPreloadPhase::Fresh,
+            };
+            if self
+                .0
+                .compare_exchange(current, next as u8, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return next;
+            }
+        }
+    }
+
+    /// Record terminal control before its bounded channel send can suspend.
+    pub(crate) fn request_terminal(&self) {
+        self.request_cancel(false);
+    }
+
+    /// Skip a preload that has not started; return true when canceled preload
+    /// cleanup/terminal handling must finish before the runtime abort is called.
+    pub(crate) fn request_deallocate(&self) -> bool {
+        self.request_cancel(true)
+    }
+
+    fn request_cancel(&self, deallocate: bool) -> bool {
+        use std::sync::atomic::Ordering;
+        loop {
+            let current = self.0.load(Ordering::Acquire);
+            let next = match current {
+                x if x == AgentPreloadPhase::Fresh as u8 => {
+                    if deallocate {
+                        AgentPreloadPhase::Skipped
+                    } else {
+                        AgentPreloadPhase::CancelBeforeStart
+                    }
+                }
+                x if x == AgentPreloadPhase::Loading as u8 => AgentPreloadPhase::CancelLoading,
+                x if x == AgentPreloadPhase::CancelBeforeStart as u8 => {
+                    if deallocate {
+                        AgentPreloadPhase::Skipped
+                    } else {
+                        return false;
+                    }
+                }
+                x if x == AgentPreloadPhase::CancelLoading as u8 => return true,
+                x if x == AgentPreloadPhase::Cancelled as u8 => return true,
+                x if x == AgentPreloadPhase::Settled as u8 => return false,
+                x if x == AgentPreloadPhase::Skipped as u8 => return false,
+                _ => return false,
+            };
+            if self
+                .0
+                .compare_exchange(current, next as u8, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return matches!(
+                    next,
+                    AgentPreloadPhase::CancelBeforeStart | AgentPreloadPhase::CancelLoading
+                );
+            }
+        }
+    }
+}
+
 /// All the state required to drive one subagent run.
 ///
 /// Cloning is cheap: heavy state (replacement, memory snapshot) is wrapped
@@ -31,6 +144,11 @@ pub struct SubagentContext {
     pub native_query_depth: u32,
     /// Stable identifier for this spawn — every event carries this id.
     pub agent_id: AgentId,
+    /// Cancellation owner shared with the pool slot that delivers terminal
+    /// UserInterrupt/UserExit events. A new context gets a fresh token.
+    pub cancellation_token: lingxi_core::host::CancellationToken,
+    /// Coordinates deallocation with frontmatter hook/skill preload ownership.
+    pub preload_lifecycle: Arc<AgentPreloadLifecycle>,
     /// Shared registry used for recipient-scoped notification folding.
     pub task_registry: Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
     /// Parent agent id, when this agent was dispatched by another agent.

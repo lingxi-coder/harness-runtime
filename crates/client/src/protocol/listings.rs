@@ -612,6 +612,10 @@ pub struct StatusSnapshotDto {
     pub session_id: String,
     /// Active model name (e.g. `"claude-opus-4-7"`).
     pub model: String,
+    /// Effective logical model when it differs from the route identity in
+    /// `model`. The exact code units survive JSON and UniFFI lowering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<crate::protocol::text::ClientTextDto>,
     /// Total messages in the session history.
     pub n_messages: u32,
     /// Cumulative cost in USD.

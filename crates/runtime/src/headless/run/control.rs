@@ -273,22 +273,50 @@ pub(super) async fn dispatch_control_request(
             writer.reply_success(request_id, Some(json!({"cancelled":cancelled})));
         }
         "set_model" => {
-            // §2.2 #5: `"default"` (or an absent model) resolves to the session
-            // default intent and clears a prior `set_model` override. Preserve
-            // the sentinel until the orchestrator resolves the concrete route.
-            let (target, source) = match resolve_set_model_target(field("model")) {
-                SetModelTarget::Default => ("default".to_owned(), "sdk"),
-                SetModelTarget::Apply(target) => (target, "sdk"),
+            // Native set_model owns a case-insensitive trimmed `default`
+            // sentinel. Concrete values retain their source projection until
+            // the orchestrator separates a known route from a provider-local
+            // model source.
+            let request = match resolve_set_model_target(field("model")) {
+                SetModelTarget::Default => lingxi_core::host::ModelSelectionRequest::Reset {
+                    origin: lingxi_core::host::ModelSelectionOrigin::Sdk,
+                },
+                SetModelTarget::Apply(target) => {
+                    let raw_source = frame
+                        .subprojection("/model")
+                        .ok()
+                        .unwrap_or_else(|| Utf16JsonProjection::from(target.clone()));
+                    let parsed = raw_source
+                        .string_units("")
+                        .and_then(|units| String::from_utf16(&units).ok());
+                    let (source, route_hint) = if let Some(parsed) = parsed {
+                        let listings = orchestrator.list_model_listings().await;
+                        let (model, profile) =
+                            lingxi_core::host::parse_model_ref(&parsed, &listings);
+                        let source = Utf16JsonProjection::from(model.clone());
+                        let hint = profile.map(|profile| lingxi_core::host::ModelRouteAnchor {
+                            model,
+                            profile: Some(profile),
+                        });
+                        (source, hint)
+                    } else {
+                        (raw_source, None)
+                    };
+                    lingxi_core::host::ModelSelectionRequest::Select {
+                        source,
+                        route_hint,
+                        origin: lingxi_core::host::ModelSelectionOrigin::Sdk,
+                        validation:
+                            lingxi_core::host::ModelValidationMode::GzrAbortAfterFiveSeconds,
+                    }
+                }
                 SetModelTarget::Reject => {
                     // CC 2.1.208: `set_model: model must be a string`.
                     writer.reply_error(request_id, "set_model: model must be a string");
                     return writer.finish();
                 }
             };
-            match orchestrator
-                .switch_model_with_source(&target, None, source)
-                .await
-            {
+            match orchestrator.select_model(request).await {
                 Ok(()) => writer.reply_success(request_id, None),
                 Err(e) => writer.reply_error(request_id, &e.to_string()),
             }
@@ -464,7 +492,10 @@ pub(super) async fn dispatch_control_request(
                         Ok(outcome) => {
                             reply.reply_success_projected(request_id, Some(outcome.response))
                         }
-                        Err(error) => reply.reply_error_projected(request_id, &error.to_string()),
+                        Err(error) => reply.reply_error_projected(
+                            request_id,
+                            Utf16JsonProjection::from(error.to_string()),
+                        ),
                     };
                     let result = match inbound {
                         Some(guard) => guard.reply_if_live(send_reply),
@@ -483,14 +514,7 @@ pub(super) async fn dispatch_control_request(
         }
         "get_context_usage" => {
             // §2.2 #9: token-budget breakdown (shape inferred — not byte-dumped).
-            let (used, total) = orchestrator.context_window_usage().await;
-            writer.reply_success(
-                request_id,
-                Some(json!({
-                    "usedTokens": used,
-                    "maxTokens": total
-                })),
-            );
+            writer.reply_context_usage(orchestrator.context_window_usage().await);
         }
         "get_session_cost" => {
             // §2.2 #10: `{text}` (format inferred — not byte-dumped).
@@ -1520,11 +1544,31 @@ impl RequestReplyWriter<'_> {
         ));
     }
 
-    fn reply_error(&self, _request_id: &str, message: &str) {
+    fn reply_context_usage(
+        &self,
+        result: Result<(u64, u64), lingxi_core::settings::SettingsError>,
+    ) {
+        match result {
+            Ok((used, total)) => self.reply_success(
+                "",
+                Some(json!({
+                    "usedTokens": used,
+                    "maxTokens": total
+                })),
+            ),
+            Err(error) => self.reply_error_projection(error.message_projection()),
+        }
+    }
+
+    fn reply_error_projection(&self, message: Utf16JsonProjection) {
         self.record(
             self.writer
                 .reply_error_projected(self.request_id.clone(), message),
         );
+    }
+
+    fn reply_error(&self, _request_id: &str, message: &str) {
+        self.reply_error_projection(Utf16JsonProjection::from(message));
     }
 }
 
@@ -1564,6 +1608,43 @@ mod tests {
         assert_eq!(
             line,
             "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"\\ud800\",\"error\":\"unsupported\"}}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_usage_preserves_success_and_settings_error_wire_responses() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writer = ControlPlaneWriter::new(Arc::new(tx));
+        let reply = RequestReplyWriter {
+            writer: &writer,
+            request_id: Utf16JsonProjection::parse(r#""\ud800""#).unwrap(),
+            delivery_error: std::sync::Mutex::new(None),
+        };
+        let error = lingxi_core::settings::SettingsError::source_failure(
+            "context_usage",
+            Utf16JsonProjection::parse(r#""\udfff""#).unwrap(),
+            Utf16JsonProjection::parse("{}").unwrap(),
+            None,
+        );
+
+        reply.reply_context_usage(Err(error));
+        reply.finish().unwrap();
+        let Some(crate::headless::stream_json::OutboundMsg::Line(line)) = rx.recv().await else {
+            panic!("expected request error response");
+        };
+        assert_eq!(
+            line,
+            "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"\\ud800\",\"error\":\"\\udfff\"}}\n"
+        );
+
+        reply.reply_context_usage(Ok((5, 12)));
+        reply.finish().unwrap();
+        let Some(crate::headless::stream_json::OutboundMsg::Line(line)) = rx.recv().await else {
+            panic!("expected context-usage success response");
+        };
+        assert_eq!(
+            line,
+            "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"\\ud800\",\"response\":{\"usedTokens\":5,\"maxTokens\":12}}}\n"
         );
     }
 

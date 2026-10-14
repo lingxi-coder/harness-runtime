@@ -126,8 +126,67 @@ fn service(
     .with_thinking(llm_runtime::model::thinking::ThinkingConfig::Disabled)
     .with_fast_policy_source(Arc::new(move || {
         let settings: SettingsJson = serde_json::from_value(json!({"fastMode":flag})).unwrap();
-        policy(&home, Some(&settings), &[])
+        policy(&home, Some(&settings), &[]).map_err(Into::into)
     }))
+}
+
+#[tokio::test]
+async fn policy_merge_source_failure_stops_before_physical_dispatch() {
+    let home = tempfile::tempdir().unwrap();
+    let layers = vec![
+        serde_json::from_str::<SettingsJson>(r#"{"policyHelpers":{"x":[]}}"#).unwrap(),
+        serde_json::from_str::<SettingsJson>(r#"{"policyHelpers":{"x":{"foo":[]}}}"#).unwrap(),
+        serde_json::from_str::<SettingsJson>(r#"{"policyHelpers":{"x":{"foo":{"length":1.5}}}}"#)
+            .unwrap(),
+    ];
+    let home_path = home.path().to_path_buf();
+    let credentials = Arc::new(Credentials::default());
+    let capture = Arc::new(Capture::default());
+    let api = service(home.path(), credentials.clone(), capture.clone(), false)
+        .with_fast_policy_source(Arc::new(move || {
+            policy(&home_path, None, &layers).map_err(Into::into)
+        }));
+    let mut request = llm_runtime::LlmRequest::new("opus").with_user_text("must not dispatch");
+    request.profile = Some("direct".into());
+
+    let error = match api
+        .execute_non_stream_request(
+            request,
+            llm_runtime::NonStreamingRequestClass::Auxiliary,
+            Default::default(),
+        )
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("policy source failure must abort the physical request"),
+    };
+    let llm_runtime::LlmError::SettingsSource {
+        kind,
+        message,
+        diagnostics,
+        effective,
+    } = error
+    else {
+        panic!("expected source-preserving policy failure");
+    };
+    assert_eq!(kind, "settings_error");
+    assert_eq!(
+        message.string_at(""),
+        Some("RangeError: Invalid array length")
+    );
+    assert_eq!(
+        diagnostics
+            .subprojection("/sourceValue")
+            .unwrap()
+            .to_json_string()
+            .unwrap(),
+        "1.5"
+    );
+    assert!(effective.is_none());
+    assert!(
+        capture.0.lock().unwrap().is_empty(),
+        "transport must not run"
+    );
 }
 
 #[tokio::test]
@@ -159,7 +218,7 @@ async fn session_environment_worker() {
         .filter(|row| row["input"]["cached_access_token"].is_null())
     {
         apply(&row["input"]);
-        let actual = policy(home.path(), None, &[]);
+        let actual = policy(home.path(), None, &[]).expect("empty policy layers merge");
         assert_eq!(
             json!({"has_session_token":actual.session_access_token,"no_user_account":actual.no_user_account,"agent_owned_remote":actual.agent_owned_remote}),
             row["expected"],

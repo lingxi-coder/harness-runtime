@@ -57,10 +57,12 @@ use futures_core::Stream;
 use hooks::events::ConfigChangeSource;
 use lingxi_core::host::{FileEvent, FileSystem, PermissionGate};
 use lingxi_core::settings::native_policy::{
-    resolve_native_policy, NativePolicyDocument, NativePolicyInputs, NativePolicyLoadState,
-    NativePolicyManagedFileFacts, NativePolicySelection,
+    apply_native_policy_helper_settings, resolve_native_policy, NativePolicyDocument,
+    NativePolicyHelperApplyStatus, NativePolicyHelperOutput, NativePolicyHelperOutputBehavior,
+    NativePolicyHelperSettingsInput, NativePolicyInputs, NativePolicyLoadState,
+    NativePolicyManagedFileFacts, NativePolicyPlatform, NativePolicySelection, NativePolicySource,
 };
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::{Utf16JsonBuilder, Utf16JsonProjection};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
@@ -94,6 +96,7 @@ pub trait MainModelSelectionRefresher: Send + Sync {
     async fn refresh_main_model_selection(
         &self,
         raw_model_setting: Option<String>,
+        model_source: Option<Utf16JsonProjection>,
         provenance: lingxi_core::host::ModelProvenance,
         restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
     );
@@ -104,12 +107,14 @@ impl MainModelSelectionRefresher for orchestrator::ConversationOrchestrator {
     async fn refresh_main_model_selection(
         &self,
         raw_model_setting: Option<String>,
+        model_source: Option<Utf16JsonProjection>,
         provenance: lingxi_core::host::ModelProvenance,
         restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
     ) {
         orchestrator::ConversationOrchestrator::refresh_main_model_selection(
             self,
             raw_model_setting,
+            model_source,
             provenance,
             restriction,
         )
@@ -120,7 +125,7 @@ impl MainModelSelectionRefresher for orchestrator::ConversationOrchestrator {
 /// Live Native prompt-settings refresh seam. It stays separate from model
 /// selection because output style and response language are prompt inputs.
 #[async_trait]
-pub trait NativeSettingsRefresher: Send + Sync {
+pub(super) trait NativeSettingsRefresher: Send + Sync {
     /// Replace the source-preserving effective output-style and language values.
     async fn refresh_native_settings(
         &self,
@@ -136,6 +141,15 @@ pub trait NativeSettingsRefresher: Send + Sync {
         &self,
         _command_utf16: Option<Vec<u16>>,
         _source: Option<lingxi_core::settings::tracer::Source>,
+    ) {
+    }
+
+    /// Run a local admin policy helper only after the already-settled admin
+    /// source identity changes during the live settings watcher lifecycle.
+    /// The initial policy snapshot never arms helper execution.
+    async fn refresh_native_policy_helper_on_source_change(
+        &self,
+        _snapshot: ManagedSettingsSnapshot,
     ) {
     }
 }
@@ -211,42 +225,41 @@ impl MainModelSelectionRefresh {
         model_refresher: Option<&dyn MainModelSelectionRefresher>,
         native_settings_refresher: Option<&dyn NativeSettingsRefresher>,
     ) {
-        let managed_layers = managed_snapshot
-            .effective_json()
-            .into_iter()
-            .collect::<Vec<_>>();
         let config = self.settings_config();
-        let effective = super::load_effective_settings_for_config(&config, &managed_layers);
+        let effective =
+            match super::load_effective_settings_for_config(&config, Some(managed_snapshot)) {
+                Ok(effective) => effective,
+                Err(error) => {
+                    tracing::error!(
+                        target: "harness_runtime::desktop::settings_watch",
+                        error = %error,
+                        "managed policy settings failed during model selection refresh"
+                    );
+                    return;
+                }
+            };
         if let Some(refresher) = native_settings_refresher {
             refresher
                 .refresh_native_settings(
-                    effective
-                        .as_ref()
-                        .and_then(|settings| settings.settings.output_style.clone()),
-                    effective
-                        .as_ref()
-                        .and_then(|settings| settings.settings.language.clone()),
+                    effective.settings.output_style.clone(),
+                    effective.settings.language.clone(),
                 )
                 .await;
-            let command_utf16 = effective.as_ref().and_then(|settings| {
-                settings
-                    .settings
-                    .proxy_auth_helper
-                    .as_ref()
-                    .and_then(|command| command.string_units(""))
-            });
-            let source = effective.as_ref().and_then(|settings| {
-                settings
-                    .effective_for("proxyAuthHelper")
-                    .and_then(|provenance| provenance.contributors.last().copied())
-            });
+            let command_utf16 = effective
+                .settings
+                .proxy_auth_helper
+                .as_ref()
+                .and_then(|command| command.string_units(""));
+            let source = effective
+                .effective_for("proxyAuthHelper")
+                .and_then(|provenance| provenance.contributors.last().copied());
             refresher
                 .refresh_proxy_auth_helper(command_utf16, source)
                 .await;
         }
         if let Some(refresher) = model_refresher {
             let provenance =
-                super::permission_config::model_provenance_for_config(&config, effective.as_ref());
+                super::permission_config::model_provenance_for_config(&config, Some(&effective));
 
             let raw_model_setting =
                 if config.default_model_explicit || config.default_model_env_pinned {
@@ -254,11 +267,15 @@ impl MainModelSelectionRefresh {
                 } else {
                     super::permission_config::managed_model_setting_for_config(
                         &config,
-                        effective.as_ref(),
+                        Some(&effective),
                     )
-                    .or_else(|| non_default_model_setting(effective.as_ref()))
+                    .or_else(|| non_default_model_setting(Some(&effective)))
                     .unwrap_or_else(|| config.default_model.clone())
                 };
+            let model_source = super::permission_config::effective_model_source_for_config(
+                &config,
+                Some(&effective),
+            );
 
             let policy_source =
                 super::permission_config::managed_model_policy_source(&managed_snapshot);
@@ -277,7 +294,12 @@ impl MainModelSelectionRefresh {
             };
 
             refresher
-                .refresh_main_model_selection(Some(raw_model_setting), provenance, restriction)
+                .refresh_main_model_selection(
+                    Some(raw_model_setting),
+                    model_source,
+                    provenance,
+                    restriction,
+                )
                 .await;
         }
     }
@@ -370,6 +392,10 @@ pub(super) struct ManagedSettingsSnapshot {
 pub(super) struct ManagedPolicySnapshotCache {
     state: Arc<std::sync::RwLock<ManagedPolicySnapshotState>>,
     initializer: Arc<tokio::sync::Mutex<()>>,
+    helper_output: Arc<std::sync::RwLock<Option<AppliedNativePolicyHelperOutput>>>,
+    helper_failure: Arc<std::sync::RwLock<Option<NativePolicyHelperFailure>>>,
+    semantic_worker_failure:
+        Arc<std::sync::RwLock<Option<super::policy_helpers::NativePolicySemanticWorkerFailure>>>,
 }
 
 impl Default for ManagedPolicySnapshotCache {
@@ -379,8 +405,36 @@ impl Default for ManagedPolicySnapshotCache {
                 ManagedPolicySnapshotState::Uninitialized,
             )),
             initializer: Arc::new(tokio::sync::Mutex::new(())),
+            helper_output: Arc::new(std::sync::RwLock::new(None)),
+            helper_failure: Arc::new(std::sync::RwLock::new(None)),
+            semantic_worker_failure: Arc::new(std::sync::RwLock::new(None)),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct AppliedNativePolicyHelperOutput {
+    source: NativePolicySource,
+    input: NativePolicyHelperSettingsInput,
+    output: Option<NativePolicyHelperOutput>,
+}
+
+/// Source-preserving status for an asynchronous local policy-helper refusal.
+/// It remains separate from effective settings so a failed helper never
+/// changes policy by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NativePolicyHelperFailure {
+    /// Admin document associated with the Native diagnostic, which may be a
+    /// non-winning source when the parser reports a startup-fatal policy.
+    pub source: NativePolicySource,
+    pub source_paths: Vec<PathBuf>,
+    pub diagnostic: Option<Utf16JsonProjection>,
+    pub field_path: Option<String>,
+    pub code: super::policy_helpers::FailureCode,
+    pub on_failure: Option<lingxi_core::settings::NativePolicyHelperOnFailure>,
+    pub attempts: u8,
+    pub generation: u64,
+    pub(super) selected_admin_at_failure: Option<NativePolicySource>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,11 +470,269 @@ impl ManagedPolicySnapshotCache {
     }
 
     pub fn replace(&self, snapshot: ManagedSettingsSnapshot) {
+        self.clear_helper_failure_for_other_source(snapshot.selection.selected_admin);
+        let snapshot = self.reapply_current_helper(snapshot);
         *self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             ManagedPolicySnapshotState::Loaded(snapshot);
+    }
+
+    /// Replace a watcher snapshot and report the source-origin transition that
+    /// Native `Ki` uses to decide whether a mid-session admin helper pass arms.
+    pub fn replace_from_watch(
+        &self,
+        snapshot: ManagedSettingsSnapshot,
+    ) -> (ManagedSettingsSnapshot, bool) {
+        let previous_snapshot = self.snapshot();
+        let previous_source = previous_snapshot
+            .as_ref()
+            .and_then(|old| old.selection.selected_admin);
+        let next_source = snapshot.selection.selected_admin;
+        let source_changed = previous_snapshot.is_some() && previous_source != next_source;
+        if source_changed {
+            *self
+                .helper_output
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            *self
+                .helper_failure
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            *self
+                .semantic_worker_failure
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+        let snapshot = self.reapply_current_helper(snapshot);
+        *self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            ManagedPolicySnapshotState::Loaded(snapshot.clone());
+        (snapshot, source_changed)
+    }
+
+    pub fn record_semantic_worker_failure(
+        &self,
+        failure: super::policy_helpers::NativePolicySemanticWorkerFailure,
+    ) -> bool {
+        if self
+            .snapshot()
+            .is_none_or(|snapshot| snapshot.selection.selected_admin != Some(failure.source()))
+        {
+            return false;
+        }
+        *self
+            .semantic_worker_failure
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(failure);
+        true
+    }
+
+    pub fn clear_semantic_worker_failure_after_success(
+        &self,
+        source: NativePolicySource,
+        validated_generation: u64,
+    ) -> bool {
+        let mut current = self
+            .semantic_worker_failure
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(failure) = current.as_ref() else {
+            return false;
+        };
+        if failure.source() != source || failure.generation() > validated_generation {
+            return false;
+        }
+        *current = None;
+        true
+    }
+
+    pub fn clear_semantic_worker_failure_on_source_change(&self) {
+        *self
+            .semantic_worker_failure
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    #[must_use]
+    pub fn semantic_worker_failure(
+        &self,
+    ) -> Option<super::policy_helpers::NativePolicySemanticWorkerFailure> {
+        self.semantic_worker_failure
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Apply and retain a successfully parsed helper envelope against the
+    /// current immutable policy base. Failed validation leaves the previous
+    /// effective snapshot and helper output intact.
+    pub fn apply_helper_output(
+        &self,
+        source: NativePolicySource,
+        behavior: NativePolicyHelperOutputBehavior,
+        output: NativePolicyHelperOutput,
+        semantic_evidence: lingxi_core::settings::native_policy::NativePolicySemanticEvidence,
+    ) -> Result<ManagedSettingsSnapshot, NativePolicyHelperApplyStatus> {
+        let input = NativePolicyHelperSettingsInput::Dynamic {
+            settings: output.managed_settings.clone(),
+            behavior,
+            semantic_evidence,
+        };
+        self.apply_helper_settings(source, input, Some(output))
+    }
+
+    /// Apply a typed Native helper/static input and retain that exact source
+    /// mode so future watcher snapshots recompose without interpreting raw
+    /// static settings as dynamic helper output.
+    pub fn apply_helper_settings(
+        &self,
+        source: NativePolicySource,
+        input: NativePolicyHelperSettingsInput,
+        output: Option<NativePolicyHelperOutput>,
+    ) -> Result<ManagedSettingsSnapshot, NativePolicyHelperApplyStatus> {
+        let mut snapshot = self
+            .snapshot()
+            .ok_or(NativePolicyHelperApplyStatus::SourceMismatch)?;
+        let applied = apply_native_policy_helper_settings(&snapshot.selection, source, &input);
+        match applied.status {
+            NativePolicyHelperApplyStatus::Applied
+            | NativePolicyHelperApplyStatus::NoManagedSettings => {
+                snapshot.selection = applied.selection;
+                *self
+                    .helper_failure
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *self
+                    .helper_output
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(AppliedNativePolicyHelperOutput {
+                        source,
+                        input,
+                        output,
+                    });
+                self.replace(snapshot.clone());
+                Ok(snapshot)
+            }
+            status => Err(status),
+        }
+    }
+
+    /// Current helper-generated Native instruction rows, without creating a
+    /// filesystem MemoryFile or exposing synthetic paths to file operations.
+    pub fn native_helper_instruction_files(
+        &self,
+    ) -> Vec<lingxi_core::host::instructions::InstructionFile> {
+        let selected_source = self
+            .snapshot()
+            .and_then(|snapshot| snapshot.selection.selected_admin);
+        let helper = self
+            .helper_output
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(claude_md) = helper
+            .filter(|helper| selected_source == Some(helper.source))
+            .and_then(|helper| helper.output.and_then(|output| output.claude_md))
+        else {
+            return Vec::new();
+        };
+        let Some(units) = claude_md.string_units("") else {
+            return Vec::new();
+        };
+        if units.is_empty() {
+            return Vec::new();
+        }
+        vec![lingxi_core::host::instructions::InstructionFile::new(
+            Utf16JsonProjection::parse(r#""<policyHelper>""#)
+                .expect("Native synthetic helper path is a string"),
+            lingxi_core::host::instructions::InstructionFileType::Managed,
+            claude_md,
+        )]
+    }
+
+    /// Native `IRs()` append-system-prompt value from the current local
+    /// helper envelope. It is captured once during initial composition, as
+    /// `phs()` reads it; it is not a live per-query getter.
+    #[must_use]
+    pub fn native_helper_append_system_prompt(&self) -> Option<Utf16JsonProjection> {
+        let selected_source = self
+            .snapshot()
+            .and_then(|snapshot| snapshot.selection.selected_admin);
+        self.helper_output
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .filter(|helper| selected_source == Some(helper.source))
+            .and_then(|helper| helper.output.and_then(|output| output.append_system_prompt))
+    }
+
+    /// Most recent asynchronous helper failure for the still-selected admin
+    /// source. Consumers must handle `Refuse` as a refusal result rather than
+    /// treating this diagnostic as ordinary logging.
+    #[must_use]
+    pub fn native_helper_failure(&self) -> Option<NativePolicyHelperFailure> {
+        self.helper_failure
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn record_native_helper_failure(&self, failure: NativePolicyHelperFailure) -> bool {
+        let Some(snapshot) = self.snapshot() else {
+            return false;
+        };
+        if snapshot.selection.selected_admin != failure.selected_admin_at_failure {
+            return false;
+        }
+        *self
+            .helper_failure
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(failure);
+        true
+    }
+
+    fn clear_helper_failure_for_other_source(&self, selected: Option<NativePolicySource>) {
+        let mut failure = self
+            .helper_failure
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if failure
+            .as_ref()
+            .is_some_and(|failure| failure.selected_admin_at_failure != selected)
+        {
+            *failure = None;
+        }
+    }
+
+    fn reapply_current_helper(
+        &self,
+        mut snapshot: ManagedSettingsSnapshot,
+    ) -> ManagedSettingsSnapshot {
+        let helper = self
+            .helper_output
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(helper) =
+            helper.filter(|helper| snapshot.selection.selected_admin == Some(helper.source))
+        else {
+            return snapshot;
+        };
+        let applied =
+            apply_native_policy_helper_settings(&snapshot.selection, helper.source, &helper.input);
+        if matches!(
+            applied.status,
+            NativePolicyHelperApplyStatus::Applied
+                | NativePolicyHelperApplyStatus::NoManagedSettings
+        ) {
+            snapshot.selection = applied.selection;
+        }
+        snapshot
     }
 }
 
@@ -464,10 +776,17 @@ pub(super) async fn managed_settings_snapshot_for_cache(
 pub(super) async fn refresh_managed_settings_snapshot_cache(
     cache: &ManagedPolicySnapshotCache,
 ) -> ManagedSettingsSnapshot {
+    refresh_managed_settings_snapshot_cache_with_transition(cache)
+        .await
+        .0
+}
+
+async fn refresh_managed_settings_snapshot_cache_with_transition(
+    cache: &ManagedPolicySnapshotCache,
+) -> (ManagedSettingsSnapshot, bool) {
     let _initialize = cache.initializer.lock().await;
     let snapshot = managed_settings_snapshot().await;
-    cache.replace(snapshot.clone());
-    snapshot
+    cache.replace_from_watch(snapshot)
 }
 
 /// Synchronous consumers must never initiate I/O or block on an async reader.
@@ -529,6 +848,303 @@ impl ManagedSettingsSnapshot {
             || self.drop_in_directory_state == NativePolicyLoadState::DidNotLoad
             || !self.read_diagnostics.is_empty()
     }
+
+    /// Return the composed managed tier without turning an incomplete read
+    /// into absence. The structured error retains both the healthy effective
+    /// projection and the source diagnostics that explain the incomplete tier.
+    pub(super) fn managed_overlay(
+        &self,
+    ) -> Result<Option<Utf16JsonProjection>, lingxi_core::settings::SettingsError> {
+        if self.read_failed() {
+            return Err(self.source_failure());
+        }
+        Ok(self.effective_projection().cloned())
+    }
+
+    pub(super) fn source_failure(&self) -> lingxi_core::settings::SettingsError {
+        let (diagnostics, first_message) = self.source_failure_diagnostics();
+        lingxi_core::settings::SettingsError::SourceFailure {
+            kind: "incomplete_managed_selection".to_owned(),
+            message: first_message,
+            diagnostics,
+            effective: self.effective_projection().cloned(),
+        }
+    }
+
+    fn source_failure_diagnostics(&self) -> (Utf16JsonProjection, Utf16JsonProjection) {
+        let mut builder = Utf16JsonBuilder::new();
+        let mut rows = Vec::new();
+        let mut first_message = None;
+
+        // Keep actual reader errors separate from the Native parser rows
+        // below, and preserve the local reader's file/directory/entry order.
+        // These messages come from the source reader; they are not synthesized
+        // Native wording.
+        if let Some(main_file) = self.file_reads.first() {
+            if let Some(message) = main_file.diagnostic.as_deref() {
+                let projected = Utf16JsonProjection::from(message);
+                first_message.get_or_insert_with(|| projected.clone());
+                rows.push(push_source_failure_row(
+                    &mut builder,
+                    "managed_file_read",
+                    Some(NativePolicySource::ManagedFile),
+                    Some(path_utf16_units(&main_file.path)),
+                    Some(&projected),
+                    None,
+                ));
+            }
+        }
+        for diagnostic in &self.read_diagnostics {
+            let projected = Utf16JsonProjection::from(diagnostic.message.as_str());
+            first_message.get_or_insert_with(|| projected.clone());
+            rows.push(push_source_failure_row(
+                &mut builder,
+                "managed_directory_read",
+                Some(NativePolicySource::ManagedFile),
+                Some(path_utf16_units(&diagnostic.path)),
+                Some(&projected),
+                None,
+            ));
+        }
+        for file in self.file_reads.iter().skip(1) {
+            if let Some(message) = file.diagnostic.as_deref() {
+                let projected = Utf16JsonProjection::from(message);
+                first_message.get_or_insert_with(|| projected.clone());
+                rows.push(push_source_failure_row(
+                    &mut builder,
+                    "managed_file_read",
+                    Some(NativePolicySource::ManagedFile),
+                    Some(path_utf16_units(&file.path)),
+                    Some(&projected),
+                    None,
+                ));
+            }
+        }
+        for candidate in &self.plist.candidates {
+            let message = candidate
+                .unread_reason
+                .as_deref()
+                .or(candidate.unread_errno.as_deref());
+            if let Some(message) = message {
+                let projected = Utf16JsonProjection::from(message);
+                first_message.get_or_insert_with(|| projected.clone());
+                rows.push(push_source_failure_row(
+                    &mut builder,
+                    "managed_plist_read",
+                    Some(NativePolicySource::Plist),
+                    Some(path_utf16_units(&candidate.path)),
+                    Some(&projected),
+                    None,
+                ));
+            }
+        }
+
+        for document in &self.selection.documents {
+            let source = document.source();
+            for diagnostic in document.helper_diagnostics() {
+                rows.push(push_source_failure_row(
+                    &mut builder,
+                    "native_policy_helper",
+                    Some(source),
+                    Some(diagnostic.path.encode_utf16().collect()),
+                    Some(&diagnostic.message),
+                    Some(diagnostic.status_only),
+                ));
+            }
+            for diagnostic in document.parse_diagnostics() {
+                rows.push(push_native_parse_source_row(
+                    &mut builder,
+                    source,
+                    diagnostic,
+                ));
+            }
+            for diagnostic in document.startup_fatal_diagnostics() {
+                let message = diagnostic.message.as_ref();
+                if first_message.is_none() {
+                    first_message = message.cloned();
+                }
+                rows.push(push_source_failure_row(
+                    &mut builder,
+                    "native_policy_startup_fatal",
+                    Some(source),
+                    Some(diagnostic.path.encode_utf16().collect()),
+                    message,
+                    None,
+                ));
+            }
+        }
+        for unresolved in &self.selection.unresolved {
+            let projected = Utf16JsonProjection::from(unresolved.reason.as_str());
+            first_message.get_or_insert_with(|| projected.clone());
+            rows.push(push_source_failure_row(
+                &mut builder,
+                "native_policy_selection",
+                Some(unresolved.source),
+                None,
+                Some(&projected),
+                None,
+            ));
+        }
+
+        let first_message = match first_message {
+            Some(message) => message,
+            None => {
+                // Keep a structurally incomplete selection observable even if
+                // the source reader supplied no textual diagnostic. This row
+                // is explicitly an internal invariant report, not Native text.
+                let message = Utf16JsonProjection::from(
+                    "managed policy source is incomplete without a source diagnostic",
+                );
+                rows.push(push_source_failure_row(
+                    &mut builder,
+                    "internal_diagnostic_missing",
+                    None,
+                    None,
+                    Some(&message),
+                    None,
+                ));
+                message
+            }
+        };
+        let root = builder
+            .push_array(rows)
+            .expect("source failure diagnostics reference valid JSON nodes");
+        let diagnostics = builder
+            .finish(root)
+            .expect("source failure diagnostics form valid JSON");
+        (diagnostics, first_message)
+    }
+}
+
+fn push_source_failure_row(
+    builder: &mut Utf16JsonBuilder,
+    kind: &str,
+    source: Option<NativePolicySource>,
+    path: Option<Vec<u16>>,
+    message: Option<&Utf16JsonProjection>,
+    status_only: Option<bool>,
+) -> usize {
+    let mut fields = vec![("kind".encode_utf16().collect(), builder.push_string(kind))];
+    if let Some(source) = source {
+        fields.push((
+            "source".encode_utf16().collect(),
+            builder.push_string(native_policy_source_name(source)),
+        ));
+    }
+    if let Some(path) = path {
+        fields.push((
+            "path".encode_utf16().collect(),
+            builder.push_string_units(path),
+        ));
+    }
+    if let Some(message) = message {
+        let message = builder
+            .import_projection(message)
+            .expect("source diagnostic projections are valid");
+        fields.push(("message".encode_utf16().collect(), message));
+    }
+    if let Some(status_only) = status_only {
+        fields.push((
+            "statusOnly".encode_utf16().collect(),
+            builder.push_bool(status_only),
+        ));
+    }
+    builder
+        .push_object_units(fields)
+        .expect("source failure row fields are unique")
+}
+
+fn push_native_parse_source_row(
+    builder: &mut Utf16JsonBuilder,
+    source: NativePolicySource,
+    diagnostic: &lingxi_core::settings::NativePolicyParseDiagnostic,
+) -> usize {
+    let fields = vec![
+        (
+            "kind".encode_utf16().collect(),
+            builder.push_string("native_policy_parse"),
+        ),
+        (
+            "source".encode_utf16().collect(),
+            builder.push_string(native_policy_source_name(source)),
+        ),
+        (
+            "path".encode_utf16().collect(),
+            builder.push_string(&diagnostic.path),
+        ),
+        (
+            "nativeKind".encode_utf16().collect(),
+            builder.push_string(native_policy_diagnostic_kind_name(diagnostic.kind)),
+        ),
+        (
+            "statusOnly".encode_utf16().collect(),
+            builder.push_bool(diagnostic.status_only),
+        ),
+        (
+            "substituted".encode_utf16().collect(),
+            builder.push_bool(diagnostic.substituted),
+        ),
+        (
+            "synthesized".encode_utf16().collect(),
+            builder.push_bool(diagnostic.synthesized),
+        ),
+        (
+            "onlySubstitutes".encode_utf16().collect(),
+            builder.push_bool(diagnostic.only_substitutes),
+        ),
+    ];
+    builder
+        .push_object_units(fields)
+        .expect("Native parse diagnostic row fields are unique")
+}
+
+fn native_policy_diagnostic_kind_name(
+    kind: lingxi_core::settings::NativePolicyDiagnosticKind,
+) -> &'static str {
+    use lingxi_core::settings::NativePolicyDiagnosticKind as Kind;
+    match kind {
+        Kind::Coerced => "coerced",
+        Kind::InvalidEntryIgnored => "invalid_entry_ignored",
+        Kind::UnenforceableEntryKept => "unenforceable_entry_kept",
+        Kind::NoEnforceableBlockedEntries => "no_enforceable_blocked_entries",
+        Kind::FallbackEmpty => "fallback_empty",
+        Kind::FallbackValue => "fallback_value",
+        Kind::Ignored => "ignored",
+        Kind::Substituted => "substituted",
+        Kind::OnlySubstitutes => "only_substitutes",
+        Kind::Synthesized => "synthesized",
+        Kind::Removed => "removed",
+        Kind::Unresolved => "unresolved",
+    }
+}
+
+fn native_policy_source_name(source: NativePolicySource) -> &'static str {
+    match source {
+        NativePolicySource::Remote => "remote",
+        NativePolicySource::Plist => "plist",
+        NativePolicySource::ManagedFile => "managed_file",
+        NativePolicySource::Parent => "parent",
+        NativePolicySource::Host => "host",
+    }
+}
+
+fn path_utf16_units(path: &Path) -> Vec<u16> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        String::from_utf8_lossy(path.as_os_str().as_bytes())
+            .encode_utf16()
+            .collect()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().collect()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        path.to_string_lossy().encode_utf16().collect()
+    }
 }
 
 /// Read local managed files plus the platform's native managed source and run
@@ -577,6 +1193,7 @@ fn select_managed_policy(
         })
         .collect();
     let selection = resolve_native_policy(NativePolicyInputs {
+        platform: native_policy_platform(),
         plist_candidates: plist.native_policy_documents(),
         managed_file_documents,
         parent: None,
@@ -632,6 +1249,29 @@ fn select_managed_policy(
         drop_in_directory_state,
         read_diagnostics,
         plist,
+    }
+}
+
+fn native_policy_platform() -> NativePolicyPlatform {
+    #[cfg(target_os = "macos")]
+    {
+        NativePolicyPlatform::MacOS
+    }
+    #[cfg(target_os = "windows")]
+    {
+        NativePolicyPlatform::Windows
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match platform_posix::wsl_detect::detect() {
+            platform_posix::wsl_detect::WslKind::WslOne
+            | platform_posix::wsl_detect::WslKind::WslTwo => NativePolicyPlatform::Wsl,
+            platform_posix::wsl_detect::WslKind::NotWsl => NativePolicyPlatform::Linux,
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        NativePolicyPlatform::Unknown
     }
 }
 
@@ -1059,7 +1699,7 @@ impl SettingsWatcher {
     /// Refresh Native prompt settings such as output style and response language
     /// after live user/project/local/policy settings changes.
     #[must_use]
-    pub fn with_native_settings_refresher(
+    pub(super) fn with_native_settings_refresher(
         mut self,
         refresher: Arc<dyn NativeSettingsRefresher>,
     ) -> Self {
@@ -1279,9 +1919,9 @@ async fn handle_event_with_settings_refresh(
             .fire_config_change(source, Some(event.path.clone()))
             .await;
     }
-    let managed_snapshot = match managed_policy_snapshot_cache {
-        Some(cache) => refresh_managed_settings_snapshot_cache(cache).await,
-        None => managed_settings_snapshot().await,
+    let (managed_snapshot, native_admin_source_changed) = match managed_policy_snapshot_cache {
+        Some(cache) => refresh_managed_settings_snapshot_cache_with_transition(cache).await,
+        None => (managed_settings_snapshot().await, false),
     };
     if !internal_write {
         if source == ConfigChangeSource::PolicySettings {
@@ -1325,6 +1965,13 @@ async fn handle_event_with_settings_refresh(
                 )
                 .await;
         }
+        if native_admin_source_changed {
+            if let Some(refresher) = native_settings_refresher {
+                refresher
+                    .refresh_native_policy_helper_on_source_change(managed_snapshot.clone())
+                    .await;
+            }
+        }
     }
 }
 
@@ -1365,6 +2012,90 @@ mod tests {
                 .and_then(|projection| projection.string_at("/disableAutoMode")),
             Some("disable")
         );
+    }
+
+    #[tokio::test]
+    async fn managed_overlay_distinguishes_complete_absence_from_partial_source_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let absent = read_managed_settings_snapshot(root.path()).await;
+        assert!(matches!(absent.managed_overlay(), Ok(None)));
+
+        std::fs::write(
+            root.path().join("managed-settings.json"),
+            r#"{"disableAutoMode":"disable""#,
+        )
+        .unwrap();
+        let drop_in = root.path().join("managed-settings.d");
+        std::fs::create_dir_all(&drop_in).unwrap();
+        std::fs::write(drop_in.join("10-org.json"), r#"{"disableAllHooks":true}"#).unwrap();
+        let partial = read_managed_settings_snapshot(root.path()).await;
+        assert!(partial.read_failed());
+        let error = partial.managed_overlay().unwrap_err();
+        let lingxi_core::settings::SettingsError::SourceFailure {
+            kind,
+            diagnostics,
+            effective,
+            ..
+        } = error
+        else {
+            panic!("incomplete source must keep its typed partial result")
+        };
+        assert_eq!(kind, "incomplete_managed_selection");
+        assert!(diagnostics.array_len("").unwrap_or_default() > 0);
+        let effective = effective.expect("healthy drop-in tier remains available");
+        assert_eq!(
+            effective
+                .at_pointer("/disableAllHooks")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_helper_failure_probe_retains_utf16_and_only_records_current_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = ManagedPolicySnapshotCache::default();
+        let mut snapshot = read_managed_settings_snapshot(root.path()).await;
+        snapshot.selection.selected_admin = None;
+        cache.replace(snapshot);
+        let diagnostic_units =
+            ["failed ".encode_utf16().collect::<Vec<_>>(), vec![0xd800]].concat();
+        let failure = NativePolicyHelperFailure {
+            source: NativePolicySource::ManagedFile,
+            source_paths: vec![root.path().join("managed-settings.json")],
+            diagnostic: Some(
+                Utf16JsonProjection::root_string(
+                    String::from_utf16_lossy(&diagnostic_units),
+                    diagnostic_units.clone(),
+                )
+                .unwrap(),
+            ),
+            field_path: None,
+            code: super::super::policy_helpers::FailureCode::ExitNonzero,
+            on_failure: Some(lingxi_core::settings::NativePolicyHelperOnFailure::Refuse),
+            attempts: 2,
+            generation: 7,
+            selected_admin_at_failure: None,
+        };
+
+        assert!(cache.record_native_helper_failure(failure.clone()));
+        let recorded = cache.native_helper_failure().unwrap();
+        assert_eq!(
+            recorded.diagnostic.unwrap().string_units(""),
+            Some(diagnostic_units)
+        );
+        assert_eq!(recorded.attempts, 2);
+        assert_eq!(recorded.generation, 7);
+        assert_eq!(
+            recorded.on_failure,
+            Some(lingxi_core::settings::NativePolicyHelperOnFailure::Refuse)
+        );
+
+        let stale = NativePolicyHelperFailure {
+            selected_admin_at_failure: Some(NativePolicySource::ManagedFile),
+            ..failure
+        };
+        assert!(!cache.record_native_helper_failure(stale));
     }
 
     #[derive(Default)]
@@ -1574,6 +2305,7 @@ mod tests {
         Mutex<
             Vec<(
                 Option<String>,
+                Option<Utf16JsonProjection>,
                 lingxi_core::host::ModelProvenance,
                 Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
             )>,
@@ -1585,13 +2317,14 @@ mod tests {
         async fn refresh_main_model_selection(
             &self,
             raw_model_setting: Option<String>,
+            model_source: Option<Utf16JsonProjection>,
             provenance: lingxi_core::host::ModelProvenance,
             restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
         ) {
             self.0
                 .lock()
                 .unwrap()
-                .push((raw_model_setting, provenance, restriction));
+                .push((raw_model_setting, model_source, provenance, restriction));
         }
     }
 
@@ -1900,8 +2633,13 @@ mod tests {
         {
             let selections = refresher.0.lock().unwrap();
             assert_eq!(selections.len(), 1);
-            let (raw_model, provenance, restriction) = &selections[0];
+            let (raw_model, model_source, provenance, restriction) = &selections[0];
             assert_eq!(raw_model.as_deref(), Some("opusplan"));
+            assert_eq!(
+                model_source.as_ref().and_then(|source| source.string_at("")),
+                Some("opusplan"),
+                "the winning project model remains available as exact source",
+            );
             assert_eq!(*provenance, lingxi_core::host::ModelProvenance::UserOrEnv);
             let (enforcement, catalog) =
                 restriction.as_ref().expect("managed restriction is active");
@@ -1940,12 +2678,69 @@ mod tests {
             1,
             "internal settings changes still suppress the config hook"
         );
+        {
+            let selections = refresher.0.lock().unwrap();
+            assert_eq!(selections.len(), 2);
+            assert_eq!(
+                selections[1].0.as_deref(),
+                Some("project-next"),
+                "internal model changes still refresh the live model selection"
+            );
+            assert_eq!(
+                selections[1].1.as_ref().and_then(|source| source.string_at("")),
+                Some("project-next"),
+                "the refreshed project model source replaces the previous source",
+            );
+        }
+
+        std::fs::write(&policy_settings, r#"{"model":"managed-first"}"#).unwrap();
+        permission::mark_internal_write(&policy_settings);
+        handle_event_with_settings_refresh(
+            &ev(policy_settings.to_str().unwrap()),
+            &paths,
+            &firer,
+            None,
+            None,
+            Some(&refresh),
+            Some(&refresher),
+            None,
+            None,
+        )
+        .await;
+
+        std::fs::write(&policy_settings, r#"{"model":"managed-second"}"#).unwrap();
+        permission::mark_internal_write(&policy_settings);
+        handle_event_with_settings_refresh(
+            &ev(policy_settings.to_str().unwrap()),
+            &paths,
+            &firer,
+            None,
+            None,
+            Some(&refresh),
+            Some(&refresher),
+            None,
+            None,
+        )
+        .await;
+
         let selections = refresher.0.lock().unwrap();
-        assert_eq!(selections.len(), 2);
+        assert_eq!(selections.len(), 4);
+        assert_eq!(selections[2].0.as_deref(), Some("managed-first"));
         assert_eq!(
-            selections[1].0.as_deref(),
-            Some("project-next"),
-            "internal model changes still refresh the live model selection"
+            selections[2]
+                .1
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("managed-first")
+        );
+        assert_eq!(selections[3].0.as_deref(), Some("managed-second"));
+        assert_eq!(
+            selections[3]
+                .1
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("managed-second"),
+            "refresh replaces the configured source even when its route is unchanged"
         );
     }
 
@@ -2158,8 +2953,7 @@ mod tests {
         assert!(!enabled.read_failed());
         assert!(enabled
             .effective_projection()
-            .map_or(true, |projection| !projection
-                .contains_property("disableAutoMode")));
+            .is_none_or(|projection| !projection.contains_property("disableAutoMode")));
         assert!(!auto_mode_disabled_from_policy(&enabled));
 
         std::fs::write(&base, "not-json").unwrap();

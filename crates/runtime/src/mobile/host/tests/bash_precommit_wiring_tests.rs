@@ -85,28 +85,37 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
     let listing = runtime
         .wired_skill_listing_provider
         .skill_listing_snapshot()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         runtime
             .wired_skill_listing_provider
             .bash_precommit_skills(&listing.entries)
-            .await,
+            .await
+            .unwrap(),
         custom
     );
     assert_eq!(
-        runtime.mcp_tool_registry.bash_precommit_skills().await,
+        runtime
+            .mcp_tool_registry
+            .bash_precommit_skills()
+            .await
+            .unwrap(),
         custom
     );
     let expected = suggestion("verify_and_simplify");
     assert!(source_contains(
-        &description_from_projections(runtime.orchestrator.mcp_tool_definitions().await),
+        &description_from_projections(runtime.orchestrator.mcp_tool_definitions().await.unwrap()),
         &expected
     ));
 
     assert!(matches!(
         runtime
             .dispatcher
-            .dispatch(Utf16JsonProjection::from("/reload-skills"))
+            .dispatch(
+                Utf16JsonProjection::from("/reload-skills"),
+                tokio_util::sync::CancellationToken::new()
+            )
             .await,
         SlashDispatchResult::Handled { .. }
     ));
@@ -115,11 +124,13 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
             let listing = runtime
                 .wired_skill_listing_provider
                 .skill_listing_snapshot()
-                .await;
+                .await
+                .unwrap();
             runtime
                 .wired_skill_listing_provider
                 .bash_precommit_skills(&listing.entries)
                 .await
+                .unwrap()
         },
         custom
     );
@@ -174,7 +185,7 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
 
     std::fs::write(&settings_path, r#"{"includeCodeReviewSuggestion":true}"#).unwrap();
     assert!(source_contains(
-        &description_from_projections(runtime.orchestrator.mcp_tool_definitions().await),
+        &description_from_projections(runtime.orchestrator.mcp_tool_definitions().await.unwrap()),
         &suggestion("all_three")
     ));
 
@@ -184,7 +195,7 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
         .await
         .set_session_skill_allowlist(Some(vec![]));
     assert!(!source_contains(
-        &description_from_projections(runtime.orchestrator.mcp_tool_definitions().await),
+        &description_from_projections(runtime.orchestrator.mcp_tool_definitions().await.unwrap()),
         "right before the `commit`"
     ));
 }
@@ -207,6 +218,6 @@ fn mobile_code_review_setting_uses_host_root_and_strict_tolerant_bool() {
             format!("{{\"includeCodeReviewSuggestion\":{value}}}"),
         )
         .unwrap();
-        assert_eq!(provider(), expected, "{value}");
+        assert_eq!(provider().unwrap(), expected, "{value}");
     }
 }

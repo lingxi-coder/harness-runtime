@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
 
-use crate::settings_bridge::{apply_patch_source, build_snapshot, SettingsContext};
+use crate::settings_bridge::{apply_patch_source, settings_error_message, SettingsContext};
 use client::protocol::commands::WritableScopeDto;
 
 pub struct HookRuntimeCandidate {
@@ -29,11 +29,9 @@ struct HookAdminPayload {
 
 pub fn document_json(context: &SettingsContext, scope: Option<&str>) -> Result<String, String> {
     let scope = scope.unwrap_or("local");
-    let snapshot = build_snapshot(
-        &context.paths,
-        context.active_snapshot(),
-        context.managed.clone(),
-    );
+    let snapshot = context
+        .snapshot()
+        .map_err(|error| settings_error_message(&error))?;
     let own = snapshot
         .layers
         .get(scope)
@@ -250,8 +248,9 @@ mod tests {
                     lingxi_home: home,
                     project_dir: project,
                 },
-                active: Arc::new(RwLock::new(BTreeMap::new())),
-                managed: BTreeMap::new(),
+                active: Arc::new(RwLock::new(crate::settings_bridge::empty_settings_source())),
+                managed: crate::settings_bridge::empty_settings_source(),
+                managed_diagnostics: None,
             },
             root,
         )
@@ -376,11 +375,7 @@ mod tests {
         );
         let serialized = std::fs::read_to_string(path).expect("saved settings text");
         assert!(serialized.contains(r#""path": "\ud800""#));
-        let snapshot = build_snapshot(
-            &context.paths,
-            context.active_snapshot(),
-            context.managed.clone(),
-        );
+        let snapshot = context.snapshot().unwrap();
         assert!(snapshot.files[0].parse_error.is_none());
         let document: Value = serde_json::from_str(
             &document_json(&context, Some("user")).expect("cold-read document"),

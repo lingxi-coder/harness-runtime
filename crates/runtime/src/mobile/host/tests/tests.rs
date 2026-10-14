@@ -27,18 +27,238 @@ use tool_skill::skill::SkillCommandType;
 
 use super::{
     build_mobile, builtin_provider_catalog, classify_provider_connection_response,
-    collect_session_agent_transcript_paths, find_session_agent_transcript_path,
-    lower_session_agent_snapshot, mobile_cron_schedule_error, mobile_mcp_config_unchanged,
-    mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight, mobile_mcp_record_reload_intent,
-    mobile_mcp_reload_requires_replacement, mobile_mcp_run_reload_job,
-    mobile_mcp_state_is_transitional, session_agent_conversation_is_visible,
-    session_agent_transcript_event, session_agent_transcript_revision, McpRegistry,
-    McpServerConfig, MobileConfig, MobileCronStoreHandle, MobileMcpReloadJob,
-    MobileSessionAgentObserver,
+    collect_session_agent_transcript_paths, enqueue_mobile_prompt_dispatch,
+    find_session_agent_transcript_path, lower_session_agent_snapshot, mobile_cron_schedule_error,
+    mobile_mcp_config_unchanged, mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight,
+    mobile_mcp_record_reload_intent, mobile_mcp_reload_requires_replacement,
+    mobile_mcp_run_reload_job, mobile_mcp_state_is_transitional,
+    session_agent_conversation_is_visible, session_agent_transcript_event,
+    session_agent_transcript_revision, McpRegistry, McpServerConfig, MobileConfig,
+    MobileCronStoreHandle, MobileMcpReloadJob, MobileMsgQueueInput, MobileSessionAgentObserver,
 };
 
 fn source_text(text: &str) -> Utf16JsonProjection {
     Utf16JsonProjection::from(text)
+}
+
+#[tokio::test]
+async fn mobile_midturn_source_acks_last_identity_and_ordered_members() {
+    use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::mobile::turn_durability::DurableTurnStore::new(
+        temp.path().join("turns"),
+    ));
+    let first = store
+        .admit_queued_prompt(
+            "session",
+            None,
+            None,
+            source_text("first"),
+            None,
+            vec![client::protocol::commands::ImageRefDto {
+                media_type: "image/png".into(),
+                base64: "Zmlyc3Q=".into(),
+            }],
+        )
+        .expect("first durable member");
+    let last = store
+        .admit_queued_prompt(
+            "session",
+            None,
+            None,
+            source_text("last"),
+            None,
+            vec![client::protocol::commands::ImageRefDto {
+                media_type: "image/jpeg".into(),
+                base64: "bGFzdA==".into(),
+            }],
+        )
+        .expect("last durable member");
+    let first_identity = first.prompt_identity.clone().unwrap();
+    let last_identity = last.prompt_identity.clone().unwrap();
+    assert_ne!(first_identity.message_id, last_identity.message_id);
+
+    let queue = Arc::new(msgqueue::MessageQueueManager::new());
+    enqueue_mobile_prompt_dispatch(&queue, "session", &first).await;
+    enqueue_mobile_prompt_dispatch(&queue, "session", &last).await;
+    let source = MobileMsgQueueInput {
+        queue: queue.clone(),
+        loop_state: Arc::new(tool_cron::LoopRuntime::default()),
+        durable_turns: store.clone(),
+        active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+    };
+
+    let inputs = source
+        .take_mid_turn_batch()
+        .await
+        .unwrap()
+        .expect("admit both mobile source members");
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0].text.string_at(""), Some("first"));
+    assert_eq!(inputs[1].text.string_at(""), Some("last"));
+    assert!(matches!(
+        &inputs[0].images[0],
+        lingxi_core::types::ImageSource::Base64 { media_type, data }
+            if media_type == "image/png" && data == "Zmlyc3Q="
+    ));
+    assert!(matches!(
+        &inputs[1].images[0],
+        lingxi_core::types::ImageSource::Base64 { media_type, data }
+            if media_type == "image/jpeg" && data == "bGFzdA=="
+    ));
+    let identity = inputs[0].pending_prompt_identity.as_ref().unwrap();
+    assert_eq!(identity.owner_turn_id, first.turn_id);
+    assert_eq!(identity.message_id, last_identity.message_id);
+    assert_eq!(identity.prompt_id, last_identity.prompt_id);
+    assert_eq!(identity.member_turn_ids, [first.turn_id, last.turn_id]);
+
+    source.input_consumed(&inputs).await.unwrap();
+    let owner = store
+        .load("session", first.turn_id)
+        .expect("read acknowledged owner envelope");
+    assert_eq!(
+        owner.queue_delivery,
+        crate::mobile::turn_durability::QueueDeliveryState::Delivered
+    );
+    let persisted = owner.coalesced_batch.unwrap();
+    assert_eq!(persisted.owner_turn_id, first.turn_id);
+    assert_eq!(persisted.aggregate_identity, last_identity);
+    assert_eq!(
+        persisted
+            .member_identities
+            .iter()
+            .map(|member| member.prompt_identity.clone())
+            .collect::<Vec<_>>(),
+        [first_identity, last_identity]
+    );
+    assert!(queue.snapshot().await.is_empty());
+}
+
+#[tokio::test]
+async fn mobile_midturn_batches_stop_at_bash_and_never_join_commands() {
+    use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::mobile::turn_durability::DurableTurnStore::new(
+        temp.path().join("turns"),
+    ));
+    let normal_a = store
+        .admit_queued_prompt(
+            "session",
+            None,
+            None,
+            source_text("normal-a"),
+            Some(client::protocol::commands::PromptModeDto::Normal),
+            Vec::new(),
+        )
+        .expect("first normal prompt");
+    let normal_b = store
+        .admit_queued_prompt(
+            "session",
+            None,
+            None,
+            source_text("normal-b"),
+            None,
+            Vec::new(),
+        )
+        .expect("second normal prompt");
+    let bash_a = store
+        .admit_queued_prompt(
+            "session",
+            None,
+            None,
+            source_text("echo a"),
+            Some(client::protocol::commands::PromptModeDto::Bash),
+            Vec::new(),
+        )
+        .expect("first Bash command");
+    let bash_b = store
+        .admit_queued_prompt(
+            "session",
+            None,
+            None,
+            source_text("echo b"),
+            Some(client::protocol::commands::PromptModeDto::Bash),
+            Vec::new(),
+        )
+        .expect("second Bash command");
+    let normal_c = store
+        .admit_queued_prompt(
+            "session",
+            None,
+            None,
+            source_text("normal-c"),
+            Some(client::protocol::commands::PromptModeDto::Normal),
+            Vec::new(),
+        )
+        .expect("normal prompt after Bash commands");
+
+    let queue = Arc::new(msgqueue::MessageQueueManager::new());
+    for checkpoint in [&normal_a, &normal_b, &bash_a, &bash_b, &normal_c] {
+        enqueue_mobile_prompt_dispatch(&queue, "session", checkpoint).await;
+    }
+    let source = MobileMsgQueueInput {
+        queue: queue.clone(),
+        loop_state: Arc::new(tool_cron::LoopRuntime::default()),
+        durable_turns: store.clone(),
+        active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+    };
+
+    let normal_batch = source
+        .take_mid_turn_batch()
+        .await
+        .unwrap()
+        .expect("contiguous normal prefix");
+    assert_eq!(
+        normal_batch
+            .iter()
+            .map(|input| input.text.string_at("").unwrap())
+            .collect::<Vec<_>>(),
+        ["normal-a", "normal-b"]
+    );
+    assert_eq!(
+        normal_batch[0]
+            .pending_prompt_identity
+            .as_ref()
+            .unwrap()
+            .member_turn_ids,
+        [normal_a.turn_id, normal_b.turn_id]
+    );
+    source.input_consumed(&normal_batch).await.unwrap();
+
+    assert!(
+        source.take_mid_turn_batch().await.unwrap().is_none(),
+        "the mid-turn normal-input path must leave Bash for its direct owner"
+    );
+    assert_eq!(
+        queue
+            .snapshot()
+            .await
+            .iter()
+            .map(|command| command.uuid.clone())
+            .collect::<Vec<_>>(),
+        [
+            format!("mobile-prompt:session:{}", bash_a.turn_id),
+            format!("mobile-prompt:session:{}", bash_b.turn_id),
+            format!("mobile-prompt:session:{}", normal_c.turn_id),
+        ],
+        "Bash and later work remain queued in source order"
+    );
+    let pending = store.scan_pending("session").expect("scan remaining work");
+    assert_eq!(
+        pending
+            .iter()
+            .map(|entry| entry.turn_id)
+            .collect::<Vec<_>>(),
+        [bash_a.turn_id, bash_b.turn_id, normal_c.turn_id]
+    );
+    assert!(pending.iter().all(|entry| entry.coalesced_batch.is_none()));
+    assert!(matches!(
+        store.prepare_mid_turn_batch("session", &[bash_a.turn_id, bash_b.turn_id]),
+        Err(crate::mobile::turn_durability::DurableTurnStoreError::Storage(message))
+            if message.contains("Bash execution boundary")
+    ));
 }
 
 fn source_value(value: &serde_json::Value) -> Utf16JsonProjection {
@@ -64,6 +284,73 @@ fn source_string_starts_with(value: &Utf16JsonProjection, prefix: &str) -> bool 
     };
     let prefix = prefix.encode_utf16().collect::<Vec<_>>();
     units.starts_with(&prefix)
+}
+
+#[tokio::test]
+async fn cancel_before_midturn_admission_keeps_uncancelled_mobile_dispatch_members() {
+    use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::mobile::turn_durability::DurableTurnStore::new(
+        temp.path().join("turns"),
+    ));
+    let first = store
+        .admit_queued_prompt(
+            "session",
+            None,
+            None,
+            source_text("first"),
+            None,
+            Vec::new(),
+        )
+        .expect("first durable member");
+    let second = store
+        .admit_queued_prompt(
+            "session",
+            None,
+            None,
+            source_text("second"),
+            None,
+            Vec::new(),
+        )
+        .expect("second durable member");
+    let queue = Arc::new(msgqueue::MessageQueueManager::new());
+    enqueue_mobile_prompt_dispatch(&queue, "session", &first).await;
+    enqueue_mobile_prompt_dispatch(&queue, "session", &second).await;
+    assert_eq!(
+        store
+            .cancel_pending("session", second.turn_id)
+            .expect("cancel only the selected unclaimed member"),
+        Some(vec![second.turn_id])
+    );
+
+    let source = MobileMsgQueueInput {
+        queue: queue.clone(),
+        loop_state: Arc::new(tool_cron::LoopRuntime::default()),
+        durable_turns: store,
+        active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+    };
+    assert!(source.take_mid_turn_batch().await.unwrap().is_none());
+    assert_eq!(
+        queue
+            .snapshot()
+            .await
+            .iter()
+            .map(|command| command.uuid.clone())
+            .collect::<Vec<_>>(),
+        [format!("mobile-prompt:session:{}", first.turn_id)]
+    );
+
+    let surviving = source
+        .take_mid_turn_batch()
+        .await
+        .unwrap()
+        .expect("the uncancelled checkpoint is still dispatchable");
+    assert_eq!(surviving.len(), 1);
+    assert_eq!(surviving[0].text.string_at(""), Some("first"));
+    let identity = surviving[0].pending_prompt_identity.as_ref().unwrap();
+    assert_eq!(identity.owner_turn_id, first.turn_id);
+    assert_eq!(identity.member_turn_ids, [first.turn_id]);
 }
 
 fn client_text_contains(value: &ClientTextDto, needle: &str) -> bool {
@@ -1281,7 +1568,14 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
     assert!(listed_loop.is_bundled_prompt, "loop must list as bundled");
 
     write_skill(tmp.path(), "foo", "Foo skill", "FOO BODY v2");
-    match rt.dispatcher.dispatch(source_text("/reload-skills")).await {
+    match rt
+        .dispatcher
+        .dispatch(
+            source_text("/reload-skills"),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    {
         SlashDispatchResult::Handled { .. } => {}
         other => panic!("reload-skills must be handled locally, got {other:?}"),
     }
@@ -1308,7 +1602,14 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
 
     std::fs::remove_dir_all(tmp.path().join(".lingxi").join("skills").join("foo"))
         .expect("remove foo skill");
-    match rt.dispatcher.dispatch(source_text("/reload-skills")).await {
+    match rt
+        .dispatcher
+        .dispatch(
+            source_text("/reload-skills"),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    {
         SlashDispatchResult::Handled { .. } => {}
         other => panic!("reload-skills must be handled locally, got {other:?}"),
     }
@@ -3952,7 +4253,7 @@ fn submit_attach_turn_preserves_terminal_state_when_replay_history_is_truncated(
                     .load(&session_id, turn_id)
                     .expect("reload terminal turn")
                     .state,
-                state,
+                Some(state),
                 "attach must not mutate a terminal checkpoint into waiting_for_user"
             );
         }
@@ -4959,7 +5260,7 @@ fn submit_model_events_use_provider_qualified_ids() {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                Ev::ModelChanged { model } if model == "github-copilot/gpt-5.6-sol"
+                Ev::ModelChanged { model, .. } if model == "github-copilot/gpt-5.6-sol"
             )),
             "ModelChanged must preserve the selected provider profile: {events:?}"
         );
@@ -5079,27 +5380,709 @@ impl orchestrator::StreamingApiClient for PendingPromptStreamClient {
     }
 }
 
+#[derive(Default)]
+struct MobileBashProcess {
+    commands: StdMutex<Vec<String>>,
+}
+
+impl MobileBashProcess {
+    fn commands(&self) -> Vec<String> {
+        self.commands.lock().unwrap().clone()
+    }
+}
+
+#[derive(Default)]
+struct InterruptibleMobileBashProcess {
+    commands: StdMutex<Vec<String>>,
+    started: Notify,
+    release: Notify,
+    joined: AtomicBool,
+    killed_owner: StdMutex<Option<String>>,
+}
+
+impl InterruptibleMobileBashProcess {
+    fn commands(&self) -> Vec<String> {
+        self.commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl lingxi_core::host::ProcessRunner for InterruptibleMobileBashProcess {
+    async fn run(
+        &self,
+        command: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        let command = command.inner().args.last().cloned().unwrap_or_default();
+        self.commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(command.clone());
+        if command == "printf interrupted-mobile-bash" {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.joined.store(true, Ordering::Release);
+        }
+        Ok(mobile_linux_api::ProcessOutput {
+            stdout: "partial stdout".into(),
+            stderr: "partial stderr".into(),
+            exit_code: 130,
+            timed_out: false,
+        })
+    }
+
+    async fn spawn_background(
+        &self,
+        _command: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+        Err(mobile_linux_api::ProcessError::Unsupported)
+    }
+
+    async fn kill(
+        &self,
+        _handle: &lingxi_core::host::ProcessHandle,
+    ) -> Result<(), mobile_linux_api::ProcessError> {
+        Ok(())
+    }
+
+    async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+        *self
+            .killed_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(owner.to_string());
+        self.release.notify_one();
+        vec![42]
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+fn install_mobile_bash_probe_hooks(root: &std::path::Path, respond_to_bash: bool) {
+    let settings_dir = root.join(".lingxi");
+    std::fs::create_dir_all(&settings_dir).expect("create mobile Bash hook settings directory");
+    let settings = serde_json::json!({
+        "respondToBashCommands": respond_to_bash,
+        "hooks": {
+            "UserPromptSubmit": [{
+                "hooks": [{ "type": "command", "command": "probe-user-prompt-submit" }]
+            }],
+            "PreToolUse": [{
+                "hooks": [{ "type": "command", "command": "probe-pre-tool-use" }]
+            }],
+            "PostToolUse": [{
+                "hooks": [{ "type": "command", "command": "probe-post-tool-use" }]
+            }]
+        }
+    });
+    std::fs::write(
+        settings_dir.join("settings.json"),
+        serde_json::to_vec(&settings).expect("serialize Bash hook settings"),
+    )
+    .expect("write mobile Bash hook settings");
+}
+
+#[async_trait]
+impl lingxi_core::host::ProcessRunner for MobileBashProcess {
+    async fn run(
+        &self,
+        command: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        let inner = command.inner();
+        self.commands
+            .lock()
+            .unwrap()
+            .push(inner.args.last().cloned().unwrap_or_default());
+        Ok(mobile_linux_api::ProcessOutput {
+            stdout: "mobile stdout".into(),
+            stderr: "mobile stderr".into(),
+            exit_code: 7,
+            timed_out: false,
+        })
+    }
+
+    async fn spawn_background(
+        &self,
+        _command: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+        Err(mobile_linux_api::ProcessError::Unsupported)
+    }
+
+    async fn kill(
+        &self,
+        _handle: &lingxi_core::host::ProcessHandle,
+    ) -> Result<(), mobile_linux_api::ProcessError> {
+        Ok(())
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn mobile_bash_prompt_runs_shell_once_then_sends_native_rows_and_images_to_model() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    install_mobile_bash_probe_hooks(tmp.path(), true);
+    let process = Arc::new(MobileBashProcess::default());
+    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
+        HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+    );
+    let listener = Arc::new(FakeListener::default());
+    let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
+    let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let handle = new_engine_with_streaming(
+        config,
+        platform,
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(pending.clone()),
+    )
+    .expect("build Mobile Shell host");
+
+    handle.runtime().block_on(async {
+        let prompt_images = vec![
+            client::protocol::commands::ImageRefDto {
+                media_type: "image/png".into(),
+                base64: "cG5nLWZpcnN0".into(),
+            },
+            client::protocol::commands::ImageRefDto {
+                media_type: "image/jpeg".into(),
+                base64: "anBlZy1zZWNvbmQ=".into(),
+            },
+        ];
+        handle
+            .submit(ClientCommand::SendPrompt {
+                text: "printf mobile-bash".into(),
+                prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
+                images: prompt_images,
+                turn_id: Some(806),
+                visualization_context: None,
+            })
+            .await
+            .expect("accept Bash prompt");
+
+        for _ in 0..5_000 {
+            if !process.commands().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert_eq!(process.commands(), ["printf mobile-bash"]);
+        assert_eq!(handle.permission_gate().pending_count().await, 0);
+        let registered_hooks = handle.inner().orchestrator.list_hooks().await;
+        assert!(registered_hooks.iter().any(|hook| hook.event == "UserPromptSubmit"));
+        assert!(registered_hooks.iter().any(|hook| hook.event == "PreToolUse"));
+        assert!(registered_hooks.iter().any(|hook| hook.event == "PostToolUse"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .expect("Bash result reaches the provider request")
+            .expect("provider request signal");
+
+        let calls = pending.captured_calls();
+        assert_eq!(calls.len(), 1);
+        let user_messages = calls[0]
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                ConversationMessage::User { content, .. } => Some(content),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let bash_input_index = user_messages
+            .iter()
+            .position(|content| {
+                content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                        if utf16_code_units == &"<bash-input>printf mobile-bash</bash-input>"
+                            .encode_utf16().collect::<Vec<_>>()
+                ))
+            })
+            .expect("Native bash input row reaches the model context");
+        let result = &user_messages[bash_input_index + 1];
+        assert!(result.iter().any(|block| matches!(
+            block,
+            ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                if utf16_code_units == &"<bash-stdout>mobile stdout</bash-stdout><bash-stderr>mobile stderr</bash-stderr>"
+                    .encode_utf16().collect::<Vec<_>>()
+        )));
+        let bash_input = &user_messages[bash_input_index];
+        let images = bash_input
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Image { source } => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 2);
+        assert!(matches!(
+            images[0],
+            lingxi_core::types::ImageSource::Base64 { media_type, data }
+                if media_type == "image/png" && data == "cG5nLWZpcnN0"
+        ));
+        assert!(matches!(
+            images[1],
+            lingxi_core::types::ImageSource::Base64 { media_type, data }
+                if media_type == "image/jpeg" && data == "anBlZy1zZWNvbmQ="
+        ));
+
+        handle
+            .submit(ClientCommand::Cancel { turn_id: Some(806) })
+            .await
+            .expect("join the pending follow-up before leaving the test");
+    });
+}
+
+#[test]
+fn mobile_bash_interrupt_persists_native_rows_and_ends_once_without_query() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    install_mobile_bash_probe_hooks(tmp.path(), true);
+    let process = Arc::new(InterruptibleMobileBashProcess::default());
+    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
+        HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+    );
+    let listener = Arc::new(FakeListener::default());
+    let (entered_tx, _entered_rx) = tokio::sync::oneshot::channel();
+    let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let handle = new_engine_with_streaming(
+        config,
+        platform,
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(pending.clone()),
+    )
+    .expect("build interruptible Mobile Shell host");
+
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::SendPrompt {
+                text: "printf interrupted-mobile-bash".into(),
+                prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
+                images: Vec::new(),
+                turn_id: Some(812),
+                visualization_context: None,
+            })
+            .await
+            .expect("accept Bash prompt");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            process.started.notified(),
+        )
+        .await
+        .expect("Shell process starts before cancellation");
+        assert_eq!(process.commands(), ["printf interrupted-mobile-bash"]);
+
+        handle
+            .submit(ClientCommand::Cancel { turn_id: Some(812) })
+            .await
+            .expect("interrupt and join the owned Shell process");
+
+        assert!(process.joined.load(Ordering::Acquire));
+        assert!(process
+            .killed_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            .is_some_and(|owner| !owner.is_empty()));
+        assert_eq!(process.commands(), ["printf interrupted-mobile-bash"]);
+        assert!(pending.captured_calls().is_empty(), "interruption suppresses follow-up");
+
+        let session_id = handle.active_session_id();
+        let checkpoint = handle
+            .inner()
+            .durable_turns
+            .load(&session_id, 812)
+            .expect("cancelled Bash checkpoint");
+        assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Cancelled));
+        assert!(checkpoint.bash_result.as_ref().is_some_and(|result| result.interrupted));
+        assert_eq!(checkpoint.bash_should_query, Some(false));
+
+        let terminal_events = listener
+            .received
+            .lock()
+            .await
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(terminal_events.len(), 1, "one terminal event: {terminal_events:?}");
+        assert!(matches!(
+            terminal_events.first(),
+            Some(ClientEvent::TurnEnded {
+                outcome: client::protocol::events::TurnOutcomeDto::Cancelled,
+                ..
+            })
+        ));
+
+        let history = handle.inner().orchestrator.snapshot_history().await;
+        let rows = history
+            .iter()
+            .filter_map(|message| match message {
+                ConversationMessage::User {
+                    content, is_meta, ..
+                } => Some((*is_meta, content)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let row_contains = |content: &[ContentBlock], expected: &str| {
+            let expected_units = expected.encode_utf16().collect::<Vec<_>>();
+            content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => text.as_str() == expected,
+                ContentBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                } => utf16_code_units == &expected_units,
+                _ => false,
+            })
+        };
+        let notice_index = rows
+            .iter()
+            .position(|(is_meta, content)| {
+                *is_meta
+                    && row_contains(
+                        content,
+                        "<system-reminder>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</system-reminder>",
+                    )
+            })
+            .expect("Native direct-Bash notice survives interruption");
+        let input_index = rows
+            .iter()
+            .position(|(_, content)| {
+                row_contains(content, "<bash-input>printf interrupted-mobile-bash</bash-input>")
+            })
+            .expect("Native Bash input survives interruption");
+        let interrupted_index = rows
+            .iter()
+            .position(|(_, content)| row_contains(content, "[Request interrupted by user]"))
+            .expect("Native interruption marker is persisted");
+        assert!(notice_index < input_index && input_index < interrupted_index);
+    });
+}
+
+#[test]
+fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_query() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    install_mobile_bash_probe_hooks(tmp.path(), false);
+    let process = Arc::new(MobileBashProcess::default());
+    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
+        HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+    );
+    let listener = Arc::new(FakeListener::default());
+    let (entered_tx, _entered_rx) = tokio::sync::oneshot::channel();
+    let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let handle = new_engine_with_streaming(
+        config,
+        platform,
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(pending.clone()),
+    )
+    .expect("build Mobile Shell host");
+
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::SendPrompt {
+                text: "printf no-response".into(),
+                prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
+                images: Vec::new(),
+                turn_id: Some(807),
+                visualization_context: None,
+            })
+            .await
+            .expect("accept Bash prompt");
+
+        let session_id = handle.active_session_id();
+        for _ in 0..5_000 {
+            let completed = handle
+                .inner()
+                .durable_turns
+                .load(&session_id, 807)
+                .ok()
+                .is_some_and(|checkpoint| {
+                    checkpoint.state == Some(TurnRecoveryStateDto::Completed)
+                });
+            if completed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+
+        let checkpoint = handle
+            .inner()
+            .durable_turns
+            .load(&session_id, 807)
+            .expect("completed Bash checkpoint");
+        assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Completed));
+        assert_eq!(process.commands(), ["printf no-response"]);
+        assert!(pending.captured_calls().is_empty(), "false suppresses model follow-up");
+        let terminal_events = listener
+            .received
+            .lock()
+            .await
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(terminal_events.len(), 1, "one terminal event: {terminal_events:?}");
+        assert!(matches!(
+            terminal_events.first(),
+            Some(ClientEvent::TurnEnded {
+                outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
+                ..
+            })
+        ));
+
+        let history = handle.inner().orchestrator.snapshot_history().await;
+        let rows = history
+            .iter()
+            .filter_map(|message| match message {
+                ConversationMessage::User {
+                    content, is_meta, ..
+                } => Some((*is_meta, content)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let row_contains = |content: &[ContentBlock], expected: &str| {
+            let expected_units = expected.encode_utf16().collect::<Vec<_>>();
+            content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => text.as_str() == expected,
+                ContentBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                } => utf16_code_units == &expected_units,
+                _ => false,
+            })
+        };
+        let notice_index = rows
+            .iter()
+            .position(|(is_meta, content)| {
+                *is_meta
+                    && row_contains(
+                        content,
+                        "<system-reminder>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</system-reminder>",
+                    )
+            })
+            .expect("Native no-response notice row");
+        let input_index = rows
+            .iter()
+            .position(|(_, content)| row_contains(content, "<bash-input>printf no-response</bash-input>"))
+            .expect("Native Bash input row");
+        let result_index = rows
+            .iter()
+            .position(|(_, content)| {
+                row_contains(
+                    content,
+                    "<bash-stdout>mobile stdout</bash-stdout><bash-stderr>mobile stderr</bash-stderr>",
+                )
+            })
+            .expect("Native Bash output row");
+        assert!(notice_index < input_index && input_index < result_index);
+        assert!(rows.iter().all(|(_, content)| content.iter().all(|block| {
+            !matches!(
+                block,
+                ContentBlock::Text { text, .. } if text.contains("<bash-exit-code>")
+            ) && !matches!(
+                block,
+                ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                    if String::from_utf16_lossy(utf16_code_units).contains("<bash-exit-code>")
+            )
+        })));
+    });
+}
+
+#[test]
+fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_again() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    install_mobile_bash_probe_hooks(tmp.path(), false);
+    let process = Arc::new(MobileBashProcess::default());
+    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
+        HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+    );
+    let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
+    let first_pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let first = new_engine_with_streaming(
+        config,
+        platform,
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(first_pending.clone()),
+    )
+    .expect("build initial Mobile Shell host");
+
+    let session_id = first.runtime().block_on(async {
+        let session_id = first.active_session_id();
+        first
+            .inner()
+            .session_writer
+            .append_mobile_empty_session(&session_id, "cold Bash no-response")
+            .await
+            .expect("anchor the session before restart");
+        first
+            .inner()
+            .session_writer
+            .append_session_mode(first.inner().session_mode.as_str())
+            .await
+            .expect("persist session mode");
+        first
+            .submit(ClientCommand::SendPrompt {
+                text: "printf cold-no-response".into(),
+                prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
+                images: Vec::new(),
+                turn_id: Some(808),
+                visualization_context: None,
+            })
+            .await
+            .expect("accept no-response Bash prompt");
+
+        for _ in 0..5_000 {
+            let completed = first
+                .inner()
+                .durable_turns
+                .load(&session_id, 808)
+                .ok()
+                .is_some_and(|checkpoint| {
+                    checkpoint.state == Some(TurnRecoveryStateDto::Completed)
+                });
+            if completed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert_eq!(
+            first
+                .inner()
+                .durable_turns
+                .load(&session_id, 808)
+                .expect("completed first Bash turn")
+                .state,
+            Some(TurnRecoveryStateDto::Completed)
+        );
+        assert_eq!(process.commands(), ["printf cold-no-response"]);
+        assert!(first_pending.captured_calls().is_empty());
+        assert!(entered_rx.try_recv().is_err());
+        session_id
+    });
+    drop(first);
+
+    let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
+    let resumed_pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let resumed = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+        ),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(resumed_pending.clone()),
+    )
+    .expect("rebuild Mobile Shell host after restart");
+    resumed.runtime().block_on(async {
+        resumed
+            .submit(ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            })
+            .await
+            .expect("restore completed session");
+        resumed
+            .submit(ClientCommand::ResumeTurn { turn_id: 808 })
+            .await
+            .expect("completed no-response Bash stays terminal");
+        assert!(resumed_pending.captured_calls().is_empty());
+        assert!(entered_rx.try_recv().is_err());
+        assert_eq!(process.commands(), ["printf cold-no-response"]);
+        assert_eq!(
+            resumed
+                .inner()
+                .durable_turns
+                .load(&session_id, 808)
+                .expect("restored Bash checkpoint")
+                .state,
+            Some(TurnRecoveryStateDto::Completed)
+        );
+    });
+}
+
 #[test]
 fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
     use crate::mobile::test_support::{new_engine_with_streaming, test_config};
-    use lingxi_core::types::{ContentBlock, ConversationMessage};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, ImageSource};
     use orchestrator::test_support_stream::{
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
         message_stop, text_delta, MockStreamingApiClient,
     };
+
+    fn image_sources(messages: &[ConversationMessage]) -> Vec<ImageSource> {
+        messages
+            .iter()
+            .flat_map(|message| match message {
+                ConversationMessage::User { content, .. } => content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { source } => Some(source.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let text = "mobile cold-replay 🚀 prompt".to_owned();
     let mut prompt_units = text.encode_utf16().collect::<Vec<_>>();
     let isolated_surrogate_index = "mobile cold-replay 🚀".encode_utf16().count();
     prompt_units.insert(isolated_surrogate_index, 0xd800);
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let prompt_image_refs = vec![
+        client::protocol::commands::ImageRefDto {
+            media_type: "image/png".into(),
+            base64: "aGVsbG8=".into(),
+        },
+        client::protocol::commands::ImageRefDto {
+            media_type: "image/jpeg".into(),
+            base64: "d29ybGQ=".into(),
+        },
+    ];
+    let expected_image_refs = prompt_image_refs.clone();
+    let expected_image_sources = vec![
+        ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        },
+        ImageSource::Base64 {
+            media_type: "image/jpeg".into(),
+            data: "d29ybGQ=".into(),
+        },
+    ];
+    let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
     let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
     let first_listener = Arc::new(FakeListener::default());
     let first = new_engine_with_streaming(
         test_config(tmp.path()),
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        first_listener,
+        first_listener.clone(),
         Arc::new(RecordingPermissionSink::default()),
         Some(pending.clone()),
     )
@@ -5108,91 +6091,144 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
     let first_runtime = first.runtime();
     let first_for_work = first.clone();
     let initial_prompt_units = prompt_units.clone();
-    let session_id = first_runtime.block_on(async move {
-        let first = first_for_work;
-        let session_id = first
-            .inner
-            .orchestrator
-            .current_session_id()
-            .await
-            .as_uuid()
-            .to_string();
-        first
-            .inner
-            .session_writer
-            .append_mobile_empty_session(&session_id, "cold prompt replay")
-            .await
-            .expect("anchor the session before restart");
-        first
-            .inner
-            .session_writer
-            .append_session_mode(first.inner.session_mode.as_str())
-            .await
-            .expect("persist the session mode");
+    let first_image_refs = prompt_image_refs.clone();
+    let expected_image_refs_for_first = expected_image_refs.clone();
+    let expected_image_sources_for_first = expected_image_sources.clone();
+    let session_id =
+        first_runtime.block_on(async move {
+            let first = first_for_work;
+            let session_id = first
+                .inner
+                .orchestrator
+                .current_session_id()
+                .await
+                .as_uuid()
+                .to_string();
+            first
+                .inner
+                .session_writer
+                .append_mobile_empty_session(&session_id, "cold prompt replay")
+                .await
+                .expect("anchor the session before restart");
+            first
+                .inner
+                .session_writer
+                .append_session_mode(first.inner.session_mode.as_str())
+                .await
+                .expect("persist the session mode");
 
-        first
-            .submit(client::protocol::commands::ClientCommand::SendPrompt {
-                text: ClientTextDto::from_code_units(initial_prompt_units.clone()),
-                prompt_mode: None,
-                images: Vec::new(),
-                turn_id: Some(246),
-                visualization_context: None,
-            })
-            .await
-            .expect("submit user prompt");
-        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
-            .await
-            .expect("model call opened before simulated restart")
-            .expect("stream client signal");
+            first
+                .submit(client::protocol::commands::ClientCommand::SendPrompt {
+                    text: ClientTextDto::from_code_units(initial_prompt_units.clone()),
+                    prompt_mode: None,
+                    images: first_image_refs.clone(),
+                    turn_id: Some(246),
+                    visualization_context: None,
+                })
+                .await
+                .expect("submit user prompt");
+            let wait_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let stream_entry_closed = match entered_rx.try_recv() {
+                            Ok(()) => return Ok(()),
+                            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => true,
+                            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => false,
+                        };
+                        if let Some(message) = first_listener.received.lock().await.iter().find_map(
+                            |event| match event {
+                                ClientEvent::Error { message, .. } => Some(message.display()),
+                                _ => None,
+                            },
+                        ) {
+                            return Err(message);
+                        }
+                        if stream_entry_closed {
+                            return Err("stream entry signal closed".to_string());
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+            match wait_result {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => {
+                    panic!("initial prompt failed before model call: {message}");
+                }
+                Err(_) => {
+                    let errors = first_listener
+                        .received
+                        .lock()
+                        .await
+                        .iter()
+                        .filter_map(|event| match event {
+                            ClientEvent::Error { message, .. } => Some(message.display()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    panic!(
+                        "model call opened before simulated restart; listener errors: {errors:?}"
+                    );
+                }
+            }
 
-        let first_calls = pending.captured_calls();
-        assert_eq!(first_calls.len(), 1);
-        assert!(
-            first_calls[0].messages.iter().any(|message| matches!(
-                message,
-                ConversationMessage::User { content, .. }
-                    if content.iter().any(|block| matches!(
-                        block,
-                        ContentBlock::TextJsUtf16 { utf16_code_units, .. }
-                            if utf16_code_units == &initial_prompt_units
-                    ))
-            )),
-            "the first model request must preserve the exact prompt source units"
-        );
+            let first_calls = pending.captured_calls();
+            assert_eq!(first_calls.len(), 1);
+            assert!(
+                first_calls[0].messages.iter().any(|message| matches!(
+                    message,
+                    ConversationMessage::User { content, .. }
+                        if content.iter().any(|block| matches!(
+                            block,
+                            ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                                if utf16_code_units == &initial_prompt_units
+                        ))
+                )),
+                "the first model request must preserve the exact prompt source units"
+            );
+            assert_eq!(
+                image_sources(&first_calls[0].messages),
+                expected_image_sources_for_first,
+                "the initial model request preserves image bytes, MIME types, and source order"
+            );
 
-        let checkpoint = first
-            .durable_turns
-            .load(&session_id, 246)
-            .expect("load the durable turn checkpoint");
-        assert_eq!(
-            checkpoint.prompt.string_units(""),
-            Some(initial_prompt_units.clone())
-        );
-        let metadata_path = first
-            .lingxi_home
-            .join("mobile-turns")
-            .join(&session_id)
-            .join("246.json");
-        let metadata = std::fs::read_to_string(metadata_path).expect("read persisted prompt");
-        let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&metadata)
-            .expect("metadata remains valid raw JSON");
-        assert_eq!(
-            source.string_units("/prompt"),
-            Some(initial_prompt_units.clone())
-        );
+            let checkpoint = first
+                .durable_turns
+                .load(&session_id, 246)
+                .expect("load the durable turn checkpoint");
+            assert_eq!(
+                checkpoint.prompt.string_units(""),
+                Some(initial_prompt_units.clone())
+            );
+            assert_eq!(
+                checkpoint.images, expected_image_refs_for_first,
+                "the durable checkpoint preserves the original ordered image payload"
+            );
+            let metadata_path = first
+                .lingxi_home
+                .join("mobile-turns")
+                .join(&session_id)
+                .join("246.json");
+            let metadata = std::fs::read_to_string(metadata_path).expect("read persisted prompt");
+            let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&metadata)
+                .expect("metadata remains valid raw JSON");
+            assert_eq!(
+                source.string_units("/prompt"),
+                Some(initial_prompt_units.clone())
+            );
 
-        first
-            .durable_turns
-            .transition(
-                &session_id,
-                246,
-                TurnRecoveryStateDto::PausedRecoverable,
-                true,
-                Some("simulated_process_restart".into()),
-            )
-            .expect("mark the in-flight request recoverable before restart");
-        session_id
-    });
+            first
+                .durable_turns
+                .transition(
+                    &session_id,
+                    246,
+                    TurnRecoveryStateDto::PausedRecoverable,
+                    true,
+                    Some("simulated_process_restart".into()),
+                )
+                .expect("mark the in-flight request recoverable before restart");
+            session_id
+        });
     drop(first);
 
     let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
@@ -5207,7 +6243,7 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
     let resumed = new_engine_with_streaming(
         test_config(tmp.path()),
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        resumed_listener,
+        resumed_listener.clone(),
         Arc::new(RecordingPermissionSink::default()),
         Some(resumed_stream.clone()),
     )
@@ -5225,16 +6261,41 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
             .submit(client::protocol::commands::ClientCommand::ResumeTurn { turn_id: 246 })
             .await
             .expect("resume from the exact stored prompt");
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if !resumed_stream.captured_calls().await.is_empty() {
-                    break;
+        let wait_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if !resumed_stream.captured_calls().await.is_empty() {
+                        return None;
+                    }
+                    if let Some(message) = resumed_listener.received.lock().await.iter().find_map(
+                        |event| match event {
+                            ClientEvent::Error { message, .. } => Some(message.display()),
+                            _ => None,
+                        },
+                    ) {
+                        return Some(message);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            })
+            .await;
+        match wait_result {
+            Ok(Some(message)) => panic!("cold resume failed before model call: {message}"),
+            Ok(None) => {}
+            Err(_) => {
+                let errors = resumed_listener
+                    .received
+                    .lock()
+                    .await
+                    .iter()
+                    .filter_map(|event| match event {
+                        ClientEvent::Error { message, .. } => Some(message.display()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                panic!("cold resume reaches the model request; listener errors: {errors:?}");
             }
-        })
-        .await
-        .expect("cold resume reaches the model request");
+        }
 
         let calls = resumed_stream.captured_calls().await;
         assert_eq!(calls.len(), 1);
@@ -5251,6 +6312,11 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
             "the resumed model request must preserve the exact prompt source units"
         );
         assert_eq!(
+            image_sources(&calls[0].messages),
+            expected_image_sources,
+            "cold resume preserves image bytes, MIME types, and source order"
+        );
+        assert_eq!(
             resumed
                 .durable_turns
                 .load(&session_id, 246)
@@ -5259,9 +6325,251 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
                 .string_units(""),
             Some(prompt_units.clone())
         );
+        assert_eq!(
+            resumed
+                .durable_turns
+                .load(&session_id, 246)
+                .expect("read resumed checkpoint images")
+                .images,
+            expected_image_refs,
+            "cold recovery retains the source image payload in checkpoint order"
+        );
     });
 }
 
+#[test]
+fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, ImageSource};
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prompt = "image prompt without durable turn id";
+    let prompt_units = prompt.encode_utf16().collect::<Vec<_>>();
+    let image_refs = vec![
+        client::protocol::commands::ImageRefDto {
+            media_type: "image/png".into(),
+            base64: "aGVsbG8=".into(),
+        },
+        client::protocol::commands::ImageRefDto {
+            media_type: "image/jpeg".into(),
+            base64: "d29ybGQ=".into(),
+        },
+    ];
+    let expected_images = vec![
+        ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        },
+        ImageSource::Base64 {
+            media_type: "image/jpeg".into(),
+            data: "d29ybGQ=".into(),
+        },
+    ];
+    let initial_prompt_units = prompt_units.clone();
+    let initial_expected_images = expected_images.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let first_listener = Arc::new(FakeListener::default());
+    let engine = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        first_listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(pending.clone()),
+    )
+    .expect("build mobile engine");
+
+    let runtime = engine.runtime();
+    let engine_for_work = engine.clone();
+    let (session_id, turn_id) = runtime.block_on(async move {
+        let session_id = engine_for_work
+            .inner
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        engine_for_work
+            .inner
+            .session_writer
+            .append_mobile_empty_session(&session_id, "uncorrelated image prompt")
+            .await
+            .expect("anchor the session transcript");
+        engine_for_work
+            .inner
+            .session_writer
+            .append_session_mode(engine_for_work.inner.session_mode.as_str())
+            .await
+            .expect("persist the session mode");
+
+        engine_for_work
+            .submit(client::protocol::commands::ClientCommand::SendPrompt {
+                text: ClientTextDto::from_code_units(initial_prompt_units.clone()),
+                prompt_mode: None,
+                images: image_refs.clone(),
+                turn_id: None,
+                visualization_context: None,
+            })
+            .await
+            .expect("submit the prompt without a client turn id");
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .expect("the prompt should reach the provider")
+            .expect("provider entry channel should remain open");
+
+        let calls = pending.captured_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].messages.iter().any(|message| matches!(
+                message,
+                ConversationMessage::User { content, .. }
+                    if content.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                            if utf16_code_units == &initial_prompt_units
+                    ))
+            )),
+            "the direct provider request retains the original user text"
+        );
+        let actual_images = calls[0]
+            .messages
+            .iter()
+            .flat_map(|message| match message {
+                ConversationMessage::User { content, .. } => content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { source } => Some(source.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_images, initial_expected_images,
+            "a no-client-ID prompt preserves image bytes, MIME types, and order"
+        );
+        let turn_id = first_listener
+            .received
+            .lock()
+            .await
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::TurnStarted { turn_id } => *turn_id,
+                _ => None,
+            })
+            .expect("the host reports its internally assigned durable turn ID");
+        let checkpoint = engine_for_work
+            .durable_turns
+            .load(&session_id, turn_id)
+            .expect("direct no-ID input has a durable checkpoint");
+        assert_eq!(checkpoint.original_client_turn_id, None);
+        assert_eq!(
+            checkpoint.prompt.string_units(""),
+            Some(prompt_units.clone())
+        );
+        assert_eq!(checkpoint.images, image_refs);
+        assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Running));
+        assert_eq!(checkpoint.queue_delivery, QueueDeliveryState::Claimed);
+        engine_for_work
+            .durable_turns
+            .transition(
+                &session_id,
+                turn_id,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("simulated_process_restart".into()),
+            )
+            .expect("mark the active request resumable before restart");
+        (session_id, turn_id)
+    });
+    drop(runtime);
+    drop(engine);
+
+    let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+        message_start("no-id-cold-replay", "test"),
+        content_block_start_text(0),
+        text_delta(0, "resumed"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]]));
+    let resumed_listener = Arc::new(FakeListener::default());
+    let resumed = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        resumed_listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(resumed_stream.clone()),
+    )
+    .expect("rebuild mobile engine after restart");
+
+    resumed.runtime().block_on(async {
+        resumed
+            .submit(client::protocol::commands::ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            })
+            .await
+            .expect("restore the session containing the no-ID prompt");
+        resumed
+            .submit(client::protocol::commands::ClientCommand::ResumeTurn { turn_id })
+            .await
+            .expect("resume the internally assigned turn ID");
+        let wait_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if !resumed_stream.captured_calls().await.is_empty() {
+                        return Ok(());
+                    }
+                    if let Some(message) = resumed_listener.received.lock().await.iter().find_map(
+                        |event| match event {
+                            ClientEvent::Error { message, .. } => Some(message.display()),
+                            _ => None,
+                        },
+                    ) {
+                        return Err(message);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+        match wait_result {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => panic!("cold resume failed before the provider call: {message}"),
+            Err(_) => panic!("cold resume did not reach the provider within five seconds"),
+        }
+        let calls = resumed_stream.captured_calls().await;
+        let actual_images = calls[0]
+            .messages
+            .iter()
+            .flat_map(|message| match message {
+                ConversationMessage::User { content, .. } => content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { source } => Some(source.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_images, expected_images);
+        assert!(calls[0].messages.iter().any(|message| matches!(
+            message,
+            ConversationMessage::User { content, .. }
+                if content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                        if utf16_code_units == &prompt_units
+                ))
+        )));
+    });
+}
 #[test]
 fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
     use crate::mobile::test_support::{new_engine_with_streaming, test_config};
@@ -5271,49 +6579,612 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         message_stop, text_delta, MockStreamingApiClient,
     };
 
-    fn assert_skill_batch(messages: &[ConversationMessage], command_units: &[u16]) {
-        let user_rows = messages
+    struct SourceUserRow {
+        id: lingxi_core::types::MessageId,
+        text_utf16: Option<Vec<u16>>,
+        is_meta: bool,
+        turn_companion: Option<Option<bool>>,
+    }
+
+    fn source_user_rows(messages: &[ConversationMessage]) -> Vec<SourceUserRow> {
+        messages
             .iter()
             .filter_map(|message| match message {
                 ConversationMessage::User {
+                    id,
                     content,
                     is_meta,
                     turn_companion,
                     ..
-                } => content.iter().find_map(|block| match block {
-                    ContentBlock::TextJsUtf16 {
-                        utf16_code_units, ..
-                    } => Some((utf16_code_units.clone(), *is_meta, *turn_companion)),
-                    _ => None,
+                } => Some(SourceUserRow {
+                    id: *id,
+                    text_utf16: content.iter().find_map(|block| match block {
+                        ContentBlock::Text { text, .. } => {
+                            Some(text.encode_utf16().collect::<Vec<_>>())
+                        }
+                        ContentBlock::TextJsUtf16 {
+                            utf16_code_units, ..
+                        } => Some(utf16_code_units.clone()),
+                        _ => None,
+                    }),
+                    is_meta: *is_meta,
+                    turn_companion: *turn_companion,
                 }),
                 _ => None,
             })
+            .collect()
+    }
+
+    fn bounded_utf16_diagnostic(units: &[u16]) -> String {
+        use sha2::{Digest, Sha256};
+
+        const PREFIX_UNITS: usize = 64;
+        const SUFFIX_UNITS: usize = 16;
+        let mut digest = Sha256::new();
+        for unit in units {
+            digest.update(unit.to_be_bytes());
+        }
+        let digest = digest.finalize();
+        let digest_hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let escape = |slice: &[u16]| {
+            slice
+                .iter()
+                .map(|unit| format!("\\u{unit:04x}"))
+                .collect::<String>()
+        };
+        let escaped = if units.len() <= PREFIX_UNITS + SUFFIX_UNITS {
+            escape(units)
+        } else {
+            format!(
+                "{}...<{} UTF-16 units elided>...{}",
+                escape(&units[..PREFIX_UNITS]),
+                units.len() - PREFIX_UNITS - SUFFIX_UNITS,
+                escape(&units[units.len() - SUFFIX_UNITS..]),
+            )
+        };
+        format!(
+            "units={}, sha256_utf16be={}, escaped={escaped:?}",
+            units.len(),
+            digest_hex,
+        )
+    }
+
+    fn request_block_diagnostic(block: &ContentBlock) -> String {
+        match block {
+            ContentBlock::Text { text, .. } => format!(
+                "text({})",
+                bounded_utf16_diagnostic(&text.encode_utf16().collect::<Vec<_>>())
+            ),
+            ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } => format!(
+                "text_js_utf16({})",
+                bounded_utf16_diagnostic(utf16_code_units)
+            ),
+            ContentBlock::Thinking { thinking, .. } => format!(
+                "thinking({})",
+                bounded_utf16_diagnostic(&thinking.encode_utf16().collect::<Vec<_>>())
+            ),
+            ContentBlock::ConnectorText { connector_text, .. } => format!(
+                "connector_text({})",
+                bounded_utf16_diagnostic(&connector_text.encode_utf16().collect::<Vec<_>>())
+            ),
+            ContentBlock::ProviderContent { protocol, .. } => {
+                format!("provider_content(protocol={protocol:?}, payload=omitted)")
+            }
+            ContentBlock::ToolUse { name, .. } => {
+                format!("tool_use(name={name:?}, payload=omitted)")
+            }
+            ContentBlock::ToolResult { .. } => "tool_result(payload=omitted)".to_string(),
+            ContentBlock::Image { .. } => "image(payload=omitted)".to_string(),
+            ContentBlock::Document { .. } => "document(payload=omitted)".to_string(),
+            ContentBlock::RedactedThinking { .. } => {
+                "redacted_thinking(payload=omitted)".to_string()
+            }
+            ContentBlock::ServerToolUse { name, .. } => {
+                format!("server_tool_use(name={name:?}, payload=omitted)")
+            }
+            ContentBlock::AdvisorToolResult { .. } => {
+                "advisor_tool_result(payload=omitted)".to_string()
+            }
+            ContentBlock::MediaAnalysis { .. } => "media_analysis(payload=omitted)".to_string(),
+        }
+    }
+
+    fn bounded_request_rows_diagnostic(messages: &[ConversationMessage]) -> String {
+        const MAX_MESSAGES: usize = 24;
+        const MAX_BLOCKS_PER_USER: usize = 8;
+        let rows = messages
+            .iter()
+            .take(MAX_MESSAGES)
+            .enumerate()
+            .map(|(message_index, message)| match message {
+                ConversationMessage::User {
+                    id,
+                    content,
+                    is_meta,
+                    is_compact_summary,
+                    is_visible_in_transcript_only,
+                    turn_companion,
+                    ..
+                } => {
+                    let blocks = content
+                        .iter()
+                        .take(MAX_BLOCKS_PER_USER)
+                        .map(request_block_diagnostic)
+                        .collect::<Vec<_>>();
+                    format!(
+                        "message[{message_index}] kind=user id={} is_meta={} is_compact_summary={} is_visible_in_transcript_only={} turn_companion={turn_companion:?} blocks={blocks:?} omitted_blocks={}",
+                        id.as_uuid(),
+                        is_meta,
+                        is_compact_summary,
+                        is_visible_in_transcript_only,
+                        content.len().saturating_sub(MAX_BLOCKS_PER_USER),
+                    )
+                }
+                ConversationMessage::Assistant { id, content, .. } => format!(
+                    "message[{message_index}] kind=assistant id={} content_blocks={} payload=omitted",
+                    id.as_uuid(),
+                    content.len(),
+                ),
+                ConversationMessage::System { id, subtype, .. } => format!(
+                    "message[{message_index}] kind=system id={} subtype={subtype:?} payload=omitted",
+                    id.as_uuid(),
+                ),
+            })
             .collect::<Vec<_>>();
-        assert_eq!(user_rows.len(), 2, "skill dispatch remains two user rows");
+        format!(
+            "first_prepared_request message_count={} rows=[{}] omitted_messages={}",
+            messages.len(),
+            rows.join("; "),
+            messages.len().saturating_sub(MAX_MESSAGES),
+        )
+    }
+
+    fn assert_skill_pair(user_rows: &[SourceUserRow], command_header_units: &[u16]) {
         assert_eq!(
-            user_rows[0].0.as_slice(),
-            command_units,
-            "slash command stays the user row"
+            user_rows.len(),
+            2,
+            "each skill batch contains two source rows"
         );
-        assert!(!user_rows[0].1, "the command row is not synthetic metadata");
-        assert_eq!(user_rows[0].2, None, "the command row is not a companion");
+        assert_eq!(
+            user_rows[0]
+                .text_utf16
+                .as_deref()
+                .expect("slash command keeps its exact UTF-16 projection"),
+            command_header_units,
+            "API request uses Native's serialized XML command header"
+        );
+        assert!(
+            !user_rows[0].is_meta,
+            "the command row is not synthetic metadata"
+        );
+        assert_eq!(
+            user_rows[0].turn_companion, None,
+            "the command row is not a companion"
+        );
         let expected_body = "MOBILE SKILL BODY".encode_utf16().collect::<Vec<_>>();
         assert!(
             user_rows[1]
-                .0
+                .text_utf16
+                .as_deref()
+                .expect("expanded body keeps its exact UTF-16 projection")
                 .windows(expected_body.len())
                 .any(|window| window == expected_body.as_slice()),
             "expanded skill body remains a separate source row"
         );
-        assert!(user_rows[1].1, "expanded body is meta");
+        assert!(user_rows[1].is_meta, "expanded body is meta");
         assert_eq!(
-            user_rows[1].2,
+            user_rows[1].turn_companion,
             Some(Some(true)),
             "expanded body carries Native turn-companion history metadata"
         );
     }
 
+    fn contains_utf16(units: &[u16], text: &str) -> bool {
+        let needle = text.encode_utf16().collect::<Vec<_>>();
+        units
+            .windows(needle.len())
+            .any(|window| window == needle.as_slice())
+    }
+
+    fn skill_listing_attachment_rows(transcript: &str) -> Vec<(String, Vec<u16>)> {
+        session::jsonl::reader::route_lines(transcript)
+            .messages_in_order
+            .into_iter()
+            .filter_map(|row| {
+                if row.message_type != "attachment" {
+                    return None;
+                }
+                let payload = row.attachment_projection?;
+                if payload.string_at("/type") != Some("skill_listing") {
+                    return None;
+                }
+                Some((row.uuid, payload.string_units("/names/0")?))
+            })
+            .collect()
+    }
+
+    fn transcript_typed_attachment_rows(transcript: &str) -> Vec<(String, String)> {
+        session::jsonl::reader::route_lines(transcript)
+            .messages_in_order
+            .into_iter()
+            .filter(|row| row.message_type == "attachment")
+            .map(|row| {
+                let kind = row
+                    .attachment_projection
+                    .as_ref()
+                    .and_then(|payload| payload.string_at("/type"))
+                    .unwrap_or("<missing attachment type>")
+                    .to_owned();
+                (row.uuid, kind)
+            })
+            .collect()
+    }
+
+    fn assert_transcript_attachments_are_packed_once_before_skill(
+        transcript: &str,
+        user_rows: &[SourceUserRow],
+        command_index: usize,
+    ) -> Vec<String> {
+        let mut request_ids = std::collections::HashSet::new();
+        for row in user_rows {
+            assert!(
+                request_ids.insert(row.id.as_uuid().to_string()),
+                "one source user row must not be duplicated in the request"
+            );
+        }
+
+        let transcript_users = session::jsonl::reader::route_lines(transcript)
+            .messages_in_order
+            .into_iter()
+            .filter(|row| row.message_type == "user")
+            .collect::<Vec<_>>();
+        let mut transcript_user_ids = std::collections::HashSet::new();
+        let mut previous_request_user_index = None;
+        for source_row in transcript_users {
+            assert!(
+                transcript_user_ids.insert(source_row.uuid.clone()),
+                "a raw JSONL user-row UUID is unique: {}",
+                source_row.uuid
+            );
+            let matching_request_rows = user_rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.id.as_uuid().to_string() == source_row.uuid)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching_request_rows.len(),
+                1,
+                "every raw JSONL user-row identity reaches the request once: {}",
+                source_row.uuid
+            );
+            let (request_user_index, matching_request_row) = matching_request_rows[0];
+            if let Some(previous_index) = previous_request_user_index {
+                assert!(
+                    previous_index < request_user_index,
+                    "Native packing preserves the JSONL user-row sequence: {}",
+                    source_row.uuid
+                );
+            }
+            previous_request_user_index = Some(request_user_index);
+            let source_text_units = source_row
+                .message
+                .string_units("/content/0/text")
+                .expect("every source user row in this Skill batch keeps exact JSONL text units");
+            assert_eq!(
+                matching_request_row.text_utf16.as_deref(),
+                Some(source_text_units.as_slice()),
+                "the API row preserves every JSONL user's exact UTF-16 text: {}",
+                source_row.uuid
+            );
+        }
+
+        let attachments = transcript_typed_attachment_rows(transcript);
+        let mut attachment_ids = std::collections::HashSet::new();
+        let mut type_by_id = HashMap::new();
+        let mut request_attachments = Vec::new();
+        for (uuid, kind) in &attachments {
+            assert!(
+                attachment_ids.insert(uuid.clone()),
+                "a typed JSONL attachment UUID is unique: {uuid}"
+            );
+            let matches = user_rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.id.as_uuid().to_string() == *uuid)
+                .collect::<Vec<_>>();
+            if kind == "prompt_snapshot" {
+                assert!(
+                    matches.is_empty(),
+                    "the durable prompt_snapshot sidecar is not a model request row"
+                );
+                assert_eq!(
+                    transcript_uuid_count(transcript, uuid),
+                    1,
+                    "the non-request prompt_snapshot sidecar remains unique in JSONL"
+                );
+                continue;
+            }
+            request_attachments.push((uuid.clone(), kind.clone()));
+            type_by_id.insert(uuid.clone(), kind.clone());
+            assert_eq!(
+                matches.len(),
+                1,
+                "every model-input JSONL attachment reaches the request once: {kind} {uuid}"
+            );
+            let (index, row) = matches[0];
+            assert!(
+                index < command_index,
+                "Native zjr packs typed attachment {kind} before the skill command"
+            );
+            assert!(row.is_meta, "typed attachment {kind} is a meta user row");
+            assert_eq!(
+                row.turn_companion, None,
+                "typed attachment {kind} is not the Skill body companion"
+            );
+        }
+
+        let request_type_order = user_rows[..command_index]
+            .iter()
+            .filter_map(|row| type_by_id.get(&row.id.as_uuid().to_string()).cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            request_type_order.len(),
+            request_attachments.len(),
+            "every request-eligible transcript attachment is classified; only the explicit prompt_snapshot sidecar is outside the model request"
+        );
+        let native_expected_type_order = request_attachments
+            .iter()
+            .filter(|(_, kind)| kind.as_str() != "hook_additional_context")
+            .chain(
+                request_attachments
+                    .iter()
+                    .filter(|(_, kind)| kind.as_str() == "hook_additional_context"),
+            )
+            .map(|(_, kind)| kind.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            request_type_order, native_expected_type_order,
+            "the complete request type sequence follows source NAr order then Qe's UPE rows; no type is filtered from this check"
+        );
+        let upe_positions = request_type_order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| (kind == "hook_additional_context").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            upe_positions.len(),
+            1,
+            "the skill batch has one typed UserPromptExpansion attachment"
+        );
+        assert_eq!(
+            upe_positions[0],
+            request_type_order.len() - 1,
+            "Native packs Qe's UPE attachment after the NAr attachments"
+        );
+        request_type_order
+    }
+
+    fn assert_known_native_skill_attachment_order(types: &[String]) {
+        let expected = vec![
+            "deferred_tools_delta".to_owned(),
+            "environment".to_owned(),
+            "model".to_owned(),
+            "skill_listing".to_owned(),
+            "hook_additional_context".to_owned(),
+        ];
+        assert_eq!(
+            types,
+            expected.as_slice(),
+            "the complete typed attachment sequence is NAr order followed by Qe's UPE row; no unclassified attachment is allowed"
+        );
+    }
+
+    fn user_prompt_expansion_context_rows(transcript: &str) -> Vec<(String, Vec<u16>)> {
+        session::jsonl::reader::route_lines(transcript)
+            .messages_in_order
+            .into_iter()
+            .filter_map(|row| {
+                if row.message_type != "attachment" {
+                    return None;
+                }
+                let payload = row.attachment_projection?;
+                if payload.string_at("/type") != Some("hook_additional_context")
+                    || payload.string_at("/hookEvent") != Some("UserPromptExpansion")
+                {
+                    return None;
+                }
+                Some((row.uuid, payload.string_units("/content/0")?))
+            })
+            .collect()
+    }
+
+    fn transcript_user_text_units(transcript: &str, uuid: &str) -> Option<Vec<u16>> {
+        session::jsonl::reader::route_lines(transcript)
+            .messages_in_order
+            .into_iter()
+            .find(|row| row.message_type == "user" && row.uuid == uuid)
+            .and_then(|row| row.message.string_units("/content/0/text"))
+    }
+
+    fn transcript_uuid_count(transcript: &str, uuid: &str) -> usize {
+        transcript
+            .lines()
+            .filter_map(|line| {
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line).ok()
+            })
+            .filter(|row| row.string_at("/uuid") == Some(uuid))
+            .count()
+    }
+
+    fn install_user_prompt_expansion_hook(root: &std::path::Path) {
+        let hooks_dir = root.join(".lingxi");
+        std::fs::create_dir_all(&hooks_dir).expect("create mobile hook settings directory");
+        let settings = serde_json::json!({
+            "hooks": {
+                "UserPromptExpansion": [{
+                    "hooks": [{ "type": "command", "command": "capture-upe-hook" }]
+                }]
+            }
+        });
+        std::fs::write(
+            hooks_dir.join("settings.json"),
+            serde_json::to_vec(&settings).expect("serialize mobile hook settings"),
+        )
+        .expect("write UserPromptExpansion hook settings");
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedHookProcessCommand {
+        command: String,
+        args: Vec<String>,
+        cwd: Option<std::path::PathBuf>,
+        env: HashMap<String, String>,
+        timeout: Option<std::time::Duration>,
+        stdin: Option<String>,
+    }
+
+    #[derive(Default)]
+    struct CapturingUserPromptExpansionProcess {
+        commands: StdMutex<Vec<CapturedHookProcessCommand>>,
+    }
+
+    impl CapturingUserPromptExpansionProcess {
+        fn captured_commands(&self) -> Vec<CapturedHookProcessCommand> {
+            self.commands
+                .lock()
+                .expect("lock captured hook calls")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl lingxi_core::host::ProcessRunner for CapturingUserPromptExpansionProcess {
+        async fn run(
+            &self,
+            command: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+            let command = command.inner();
+            self.commands
+                .lock()
+                .expect("lock captured hook calls")
+                .push(CapturedHookProcessCommand {
+                    command: command.command.clone(),
+                    args: command.args.clone(),
+                    cwd: command.cwd.clone(),
+                    env: command.env.clone(),
+                    timeout: command.timeout,
+                    stdin: command.stdin.clone(),
+                });
+            Ok(mobile_linux_api::ProcessOutput {
+                stdout: r#"{"hookSpecificOutput":{"hookEventName":"UserPromptExpansion","additionalContext":"UPE \ud800"}}"#.into(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+        }
+
+        async fn spawn_background(
+            &self,
+            _command: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+            Err(mobile_linux_api::ProcessError::Unsupported)
+        }
+
+        async fn kill(
+            &self,
+            _handle: &lingxi_core::host::ProcessHandle,
+        ) -> Result<(), mobile_linux_api::ProcessError> {
+            Ok(())
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    fn assert_user_prompt_expansion_wire_input(
+        command: &CapturedHookProcessCommand,
+        cwd: &Path,
+        session_id: &str,
+        transcript_path: &Path,
+        permission_mode: &str,
+        command_units: &[u16],
+    ) {
+        assert_eq!(command.command, "/bin/sh");
+        assert_eq!(
+            command.args.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["-c", "capture-upe-hook"]
+        );
+        assert_eq!(command.cwd.as_deref(), Some(cwd));
+        assert_eq!(
+            command.timeout,
+            Some(std::time::Duration::from_millis(
+                hooks::HOOK_COMMAND_TIMEOUT_MS
+            ))
+        );
+        assert_eq!(command.env.get("LINGXI").map(String::as_str), Some("1"));
+        assert_eq!(
+            command.env.get("LINGXI_CHILD_SESSION").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            command.env.get("LINGXI_SESSION_ID").map(String::as_str),
+            Some(session_id)
+        );
+        assert_eq!(
+            command.env.get("LINGXI_PROJECT_DIR").map(String::as_str),
+            Some(cwd.to_string_lossy().as_ref())
+        );
+
+        let stdin = command.stdin.as_deref().expect("hook receives JSON stdin");
+        let body = stdin
+            .strip_suffix('\n')
+            .expect("Native command hook input is terminated by LF");
+        assert!(
+            body.contains(r#"\ud800"#),
+            "wire JSON keeps the escaped lone surrogate"
+        );
+        let payload = Utf16JsonProjection::parse(body).expect("hook input is valid JSON");
+        assert_eq!(
+            payload.string_at("/hook_event_name"),
+            Some("UserPromptExpansion")
+        );
+        assert_eq!(payload.string_at("/expansion_type"), Some("slash_command"));
+        assert_eq!(payload.string_at("/command_source"), Some("user"));
+        assert_eq!(payload.string_at("/session_id"), Some(session_id));
+        assert_eq!(
+            payload.string_at("/transcript_path"),
+            Some(transcript_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            payload.string_at("/cwd"),
+            Some(cwd.to_string_lossy().as_ref())
+        );
+        assert_eq!(payload.string_at("/permission_mode"), Some(permission_mode));
+        let expected_name = "mobile-review".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            payload.string_units("/command_name").as_deref(),
+            Some(expected_name.as_slice())
+        );
+        assert_eq!(
+            payload.string_units("/command_args").as_deref(),
+            Some(&[0xd800][..]),
+            "the argument projection reaches command stdin without lossy String conversion"
+        );
+        assert_eq!(
+            payload.string_units("/prompt").as_deref(),
+            Some(command_units),
+            "the complete slash prompt preserves the original UTF-16 code units"
+        );
+    }
+
     let tmp = tempfile::tempdir().expect("tempdir");
+    install_user_prompt_expansion_hook(tmp.path());
     write_skill(
         tmp.path(),
         "mobile-review",
@@ -5324,13 +7195,41 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         .encode_utf16()
         .chain([0xd800])
         .collect::<Vec<_>>();
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let command_header_units = "<command-message>mobile-review</command-message>\n<command-name>/mobile-review</command-name>\n<command-args>"
+        .encode_utf16()
+        .chain([0xd800])
+        .chain("</command-args>".encode_utf16())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        command_header_units.len(),
+        123,
+        "the native API command header includes its XML wrapper and lone surrogate"
+    );
+    assert_ne!(
+        command_header_units, command_units,
+        "hook input remains the raw slash command while API history carries the XML header"
+    );
+    assert_ne!(
+        orchestrator::prompt::total_tokens::resolve_mode(None),
+        orchestrator::prompt::total_tokens::TotalTokensMode::Off,
+        "the regression requires the token reminder feature to be enabled by the process environment or default"
+    );
+    assert!(
+        orchestrator::prompt::total_tokens::after_user_turn(None),
+        "the regression requires the after-user token flag to be enabled"
+    );
+    let expected_upe_context = "UPE ".encode_utf16().chain([0xd800]).collect::<Vec<_>>();
+    let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
     let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let hook_process = Arc::new(CapturingUserPromptExpansionProcess::default());
     let first_listener = Arc::new(FakeListener::default());
     let first = new_engine_with_streaming(
         test_config(tmp.path()),
-        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        first_listener,
+        Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_process_runner(hook_process.clone()),
+        ),
+        first_listener.clone(),
         Arc::new(RecordingPermissionSink::default()),
         Some(pending.clone()),
     )
@@ -5338,94 +7237,362 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
 
     let first_for_work = first.clone();
     let first_command_units = command_units.clone();
-    let session_id = first.runtime().block_on(async move {
-        let first = first_for_work;
-        let session_id = first
-            .inner()
-            .orchestrator
-            .current_session_id()
-            .await
-            .as_uuid()
-            .to_string();
-        first
-            .inner()
-            .session_writer
-            .append_mobile_empty_session(&session_id, "skill cold replay")
-            .await
-            .expect("anchor the session before restart");
-        first
-            .inner()
-            .session_writer
-            .append_session_mode(first.inner().session_mode.as_str())
-            .await
-            .expect("persist session mode");
+    let first_command_header_units = command_header_units.clone();
+    let first_expected_upe_context = expected_upe_context.clone();
+    let first_hook_process = hook_process.clone();
+    let first_session =
+        first.runtime().block_on(async move {
+            let first = first_for_work;
+            let session_id = first
+                .inner()
+                .orchestrator
+                .current_session_id()
+                .await
+                .as_uuid()
+                .to_string();
+            first
+                .inner()
+                .session_writer
+                .append_mobile_empty_session(&session_id, "skill cold replay")
+                .await
+                .expect("anchor the session before restart");
+            first
+                .inner()
+                .session_writer
+                .append_session_mode(first.inner().session_mode.as_str())
+                .await
+                .expect("persist session mode");
 
-        first
-            .submit(ClientCommand::RunSlashCommand {
-                raw: ClientTextDto::from_code_units(first_command_units.clone()),
-                turn_id: Some(247),
-            })
-            .await
-            .expect("dispatch mobile skill as a turn batch");
-        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
-            .await
-            .expect("skill batch reaches the streaming client")
-            .expect("stream entry signal");
+            first
+                .submit(ClientCommand::RunSlashCommand {
+                    raw: ClientTextDto::from_code_units(first_command_units.clone()),
+                    turn_id: Some(247),
+                })
+                .await
+                .expect("dispatch mobile skill as a turn batch");
+            let wait_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let stream_entry_closed = match entered_rx.try_recv() {
+                            Ok(()) => return Ok(()),
+                            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => true,
+                            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => false,
+                        };
+                        if let Some(message) = first_listener.received.lock().await.iter().find_map(
+                            |event| match event {
+                                ClientEvent::Error { message, .. } => Some(message.display()),
+                                _ => None,
+                            },
+                        ) {
+                            return Err(message);
+                        }
+                        if stream_entry_closed {
+                            return Err("stream entry signal closed".to_string());
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+            match wait_result {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => {
+                    panic!("initial skill prompt failed before model call: {message}");
+                }
+                Err(_) => {
+                    let errors = first_listener
+                        .received
+                        .lock()
+                        .await
+                        .iter()
+                        .filter_map(|event| match event {
+                            ClientEvent::Error { message, .. } => Some(message.display()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    panic!("skill batch reaches the streaming client; listener errors: {errors:?}");
+                }
+            }
 
-        let first_calls = pending.captured_calls();
-        assert_eq!(first_calls.len(), 1);
-        assert_skill_batch(&first_calls[0].messages, &first_command_units);
-        let transcript_path =
-            session::jsonl::session_path(&first.lingxi_home, &first.session_cwd, &session_id);
-        let transcript =
-            std::fs::read_to_string(transcript_path).expect("read durable skill transcript rows");
-        let command_row = transcript
-            .find(r#"/mobile-review \ud800"#)
-            .expect("exact command source reached JSONL");
-        let body_row = transcript
-            .find("MOBILE SKILL BODY")
-            .expect("expanded body reached JSONL as its own row");
-        assert!(command_row < body_row, "batch source order reaches JSONL");
-        assert!(transcript[body_row..].contains("\"turnCompanion\":true"));
+            let first_calls = pending.captured_calls();
+            assert_eq!(first_calls.len(), 1);
+            let hook_commands = first_hook_process.captured_commands();
+            assert_eq!(
+                hook_commands.len(),
+                1,
+                "the UPE command reaches ProcessRunner"
+            );
+            let first_user_rows = source_user_rows(&first_calls[0].messages);
+            assert_eq!(
+                first_user_rows.len(),
+                8,
+                "warm Skill request has six ordered prefix rows followed by command/body; bounded rows:\n{}",
+                bounded_request_rows_diagnostic(&first_calls[0].messages),
+            );
+            let command_row_index = first_user_rows
+                .iter()
+                .position(|row| row.text_utf16.as_deref() == Some(first_command_header_units.as_slice()))
+                .expect("Native API projection retains the exact slash command");
+            assert_eq!(command_row_index, 6, "Native Qe attachment rows precede the command");
+            let body_row_index = command_row_index + 1;
+            assert_eq!(body_row_index + 1, first_user_rows.len());
+            assert_skill_pair(
+                &first_user_rows[command_row_index..],
+                &first_command_header_units,
+            );
 
-        let checkpoint = first
-            .durable_turns
-            .load(&session_id, 247)
-            .expect("load skill turn checkpoint");
-        let source = checkpoint
-            .skill_prompt
-            .as_ref()
-            .expect("checkpoint retains source inputs for the complete batch");
-        assert_eq!(source.command.string_units(""), Some(first_command_units));
-        assert!(source_string_contains(&source.body, "MOBILE SKILL BODY"));
-        assert!(source.hook_messages.is_empty());
+            let expected_prefix_markers = [
+                "The following deferred tools",
+                "# Environment",
+                "You are powered by the model",
+                "The following skills are available for use with the Skill tool:",
+                "Today's date is ",
+                "UserPromptExpansion hook additional context: UPE ",
+            ];
+            for (index, marker) in expected_prefix_markers.iter().enumerate() {
+                let row = &first_user_rows[index];
+                assert!(row.is_meta, "context prefix row {index} is metadata");
+                assert_eq!(
+                    row.turn_companion, None,
+                    "context prefix row {index} is not the Skill body companion"
+                );
+                assert!(
+                    contains_utf16(
+                        row.text_utf16.as_deref().expect("prefix row keeps UTF-16 text"),
+                        marker
+                    ),
+                    "prefix row {index} contains {marker:?}: {}",
+                    bounded_request_rows_diagnostic(&first_calls[0].messages)
+                );
+            }
+            assert!(
+                !first_user_rows.iter().any(|row| {
+                    row.text_utf16
+                        .as_deref()
+                        .is_some_and(|units| contains_utf16(units, "<total_tokens>"))
+                }),
+                "LocalSkill does not stage total_tokens even with after-user enabled"
+            );
+            let system_markers = first_calls[0]
+                .messages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| match message {
+                    ConversationMessage::System { subtype, .. }
+                        if subtype.as_deref() == Some("model_reminder_attachment") =>
+                    {
+                        Some(index)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                system_markers.len(),
+                1,
+                "the request keeps its model-reminder marker"
+            );
+            let date_message_index = first_calls[0]
+                .messages
+                .iter()
+                .position(|message| message.id() == first_user_rows[4].id)
+                .expect("date metadata remains in the outgoing request");
+            assert_eq!(
+                system_markers[0] + 1,
+                date_message_index,
+                "the model-reminder marker stays immediately before the date context"
+            );
 
-        first
-            .durable_turns
-            .transition(
+            let upe_row_index = 5;
+            let listing_row_index = 3;
+            let upe_message_id = first_user_rows[upe_row_index].id;
+            let upe_text_units = first_user_rows[upe_row_index]
+                .text_utf16
+                .as_ref()
+                .expect("UPE context keeps its UTF-16 text projection")
+                .clone();
+            let skill_listing_uuid =
+                first_user_rows[listing_row_index].id.as_uuid().to_string();
+            let command_message_id = first_user_rows[command_row_index].id;
+            let body_message_id = first_user_rows[body_row_index].id;
+            let skill_listing_text_units = first_user_rows[listing_row_index]
+                .text_utf16
+                .as_ref()
+                .expect("skill listing keeps its UTF-16 text projection")
+                .clone();
+            assert!(
+                first_user_rows[upe_row_index]
+                    .text_utf16
+                    .as_deref()
+                    .expect("UPE context keeps its UTF-16 text projection")
+                    .windows(first_expected_upe_context.len())
+                    .any(|window| window == first_expected_upe_context.as_slice()),
+                "the warm request preserves the UPE source code units"
+            );
+            assert!(contains_utf16(
+                first_user_rows[listing_row_index]
+                    .text_utf16
+                    .as_deref()
+                    .expect("skill listing keeps its UTF-16 text projection"),
+                "mobile-review"
+            ));
+            let transcript_path =
+                session::jsonl::session_path(&first.lingxi_home, &first.session_cwd, &session_id);
+            assert_user_prompt_expansion_wire_input(
+                &hook_commands[0],
+                std::path::Path::new(&first.session_cwd),
                 &session_id,
-                247,
-                TurnRecoveryStateDto::PausedRecoverable,
-                true,
-                Some("simulated_process_restart".into()),
+                &transcript_path,
+                &first
+                    .inner()
+                    .orchestrator
+                    .permission_mode()
+                    .unwrap_or_else(|| "default".to_string()),
+                &first_command_units,
+            );
+            let transcript = std::fs::read_to_string(transcript_path)
+                .expect("read durable skill transcript rows");
+            let warm_attachment_types = assert_transcript_attachments_are_packed_once_before_skill(
+                &transcript,
+                &first_user_rows,
+                command_row_index,
+            );
+            assert_known_native_skill_attachment_order(&warm_attachment_types);
+            let command_row = transcript
+                .find("<command-message>mobile-review</command-message>")
+                .expect("Native XML command header reached JSONL");
+            assert_eq!(
+                transcript_user_text_units(&transcript, &command_message_id.as_uuid().to_string())
+                    .as_deref(),
+                Some(first_command_header_units.as_slice()),
+                "the JSONL command row preserves Native's exact 123 UTF-16 header units"
+            );
+            let body_row = transcript
+                .find("MOBILE SKILL BODY")
+                .expect("expanded body reached JSONL as its own row");
+            let upe_uuid = upe_message_id.as_uuid().to_string();
+            let upe_row = transcript
+                .find(&upe_uuid)
+                .expect("raw UserPromptExpansion row reached JSONL");
+            let listing_row = transcript
+                .find(&skill_listing_uuid)
+                .expect("skill listing attachment reached JSONL");
+            assert!(
+                command_row < body_row && body_row < upe_row && upe_row < listing_row,
+                "command, body, deferred UPE, and listing retain source order in JSONL"
+            );
+            assert!(transcript[body_row..].contains("\"turnCompanion\":true"));
+            assert_eq!(
+                skill_listing_attachment_rows(&transcript),
+                vec![(
+                    skill_listing_uuid.clone(),
+                    "mobile-review".encode_utf16().collect(),
+                )],
+                "the fourth request row is backed by one typed skill_listing JSONL attachment"
+            );
+            assert_eq!(
+                user_prompt_expansion_context_rows(&transcript),
+                vec![(upe_uuid.clone(), first_expected_upe_context.clone())],
+                "the deferred raw UPE attachment retains exact UTF-16 source units"
+            );
+            assert_eq!(
+                transcript_uuid_count(&transcript, &upe_uuid),
+                1,
+                "the UPE attachment UUID is durable exactly once"
+            );
+
+            let checkpoint = first
+                .durable_turns
+                .load(&session_id, 247)
+                .expect("load skill turn checkpoint");
+            let source = checkpoint
+                .skill_prompt
+                .as_ref()
+                .expect("checkpoint retains source inputs for the complete batch");
+            assert_eq!(source.command.string_units(""), Some(first_command_header_units));
+            assert!(source_string_contains(&source.body, "MOBILE SKILL BODY"));
+            let source_body_units = source
+                .body
+                .string_units("")
+                .expect("checkpoint retains exact skill body source units");
+            assert_eq!(
+                first_user_rows[body_row_index].text_utf16.as_deref(),
+                Some(source_body_units.as_slice()),
+                "the outgoing body row matches the durable skill source projection exactly"
+            );
+            assert_eq!(source.hook_messages.len(), 1);
+            assert_eq!(source.hook_message_ids, vec![upe_message_id]);
+            assert_eq!(
+                source.hook_messages[0].string_at("/type"),
+                Some("hook_additional_context")
+            );
+            assert_eq!(
+                source.hook_messages[0].string_at("/hookEvent"),
+                Some("UserPromptExpansion")
+            );
+            assert_eq!(
+                source.hook_messages[0]
+                    .string_units("/content/0")
+                    .as_deref(),
+                Some(first_expected_upe_context.as_slice()),
+                "checkpoint retains the hook's exact source projection"
+            );
+
+            first
+                .durable_turns
+                .transition(
+                    &session_id,
+                    247,
+                    TurnRecoveryStateDto::PausedRecoverable,
+                    true,
+                    Some("simulated_process_restart".into()),
+                )
+                .expect("mark the still-pending skill batch recoverable");
+            (
+                session_id,
+                skill_listing_uuid,
+                skill_listing_text_units,
+                command_message_id,
+                body_message_id,
+                upe_message_id,
+                upe_text_units,
             )
-            .expect("mark the still-pending skill batch recoverable");
-        session_id
-    });
+        });
+    let (
+        session_id,
+        skill_listing_uuid,
+        skill_listing_text_units,
+        command_message_id,
+        body_message_id,
+        upe_message_id,
+        upe_text_units,
+    ) = first_session;
     drop(first);
 
-    let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
-        message_start("mobile-skill-replay", "test"),
-        content_block_start_text(0),
-        text_delta(0, "resumed"),
-        content_block_stop(0),
-        message_delta_stop("end_turn"),
-        message_stop(),
-    ]]));
+    let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![
+        vec![
+            message_start("mobile-skill-replay", "test"),
+            content_block_start_text(0),
+            text_delta(0, "resumed"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ],
+        vec![
+            message_start("mobile-skill-new-send", "test"),
+            content_block_start_text(0),
+            text_delta(0, "second send"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ],
+    ]));
+    let resumed_listener = Arc::new(FakeListener::default());
     let resumed = new_engine_with_streaming(
         test_config(tmp.path()),
-        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        Arc::new(FakeListener::default()),
+        Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_process_runner(hook_process.clone()),
+        ),
+        resumed_listener.clone(),
         Arc::new(RecordingPermissionSink::default()),
         Some(resumed_stream.clone()),
     )
@@ -5443,20 +7610,155 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             .submit(ClientCommand::ResumeTurn { turn_id: 247 })
             .await
             .expect("resume the whole stored skill batch");
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if !resumed_stream.captured_calls().await.is_empty() {
-                    break;
+        let wait_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if !resumed_stream.captured_calls().await.is_empty() {
+                        return None;
+                    }
+                    if let Some(message) = resumed_listener.received.lock().await.iter().find_map(
+                        |event| match event {
+                            ClientEvent::Error { message, .. } => Some(message.display()),
+                            _ => None,
+                        },
+                    ) {
+                        return Some(message);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            })
+            .await;
+        match wait_result {
+            Ok(Some(message)) => panic!("cold resume failed before model call: {message}"),
+            Ok(None) => {}
+            Err(_) => {
+                let errors = resumed_listener
+                    .received
+                    .lock()
+                    .await
+                    .iter()
+                    .filter_map(|event| match event {
+                        ClientEvent::Error { message, .. } => Some(message.display()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                panic!("cold resume reaches the model request; listener errors: {errors:?}");
             }
-        })
-        .await
-        .expect("cold resume reaches the model request");
+        }
 
         let calls = resumed_stream.captured_calls().await;
         assert_eq!(calls.len(), 1);
-        assert_skill_batch(&calls[0].messages, &command_units);
+        let hook_commands = hook_process.captured_commands();
+        assert_eq!(hook_commands.len(), 1, "ResumeTurn must not rerun UPE");
+        let resumed_user_rows = source_user_rows(&calls[0].messages);
+        let resumed_command_index = resumed_user_rows
+            .iter()
+            .position(|row| row.id == command_message_id)
+            .expect("cold request contains the original command identity");
+        let resumed_body_index = resumed_command_index + 1;
+        assert_eq!(
+            resumed_body_index + 1,
+            resumed_user_rows.len(),
+            "cold Native packing leaves the original command/body pair at the request tail"
+        );
+        for (index, row) in resumed_user_rows[..resumed_command_index]
+            .iter()
+            .enumerate()
+        {
+            assert!(row.is_meta, "cold prefix row {index} is metadata");
+            assert_eq!(
+                row.turn_companion, None,
+                "cold prefix row {index} is not a Skill body companion"
+            );
+        }
+        assert_skill_pair(
+            &resumed_user_rows[resumed_command_index..],
+            &command_header_units,
+        );
+        assert_eq!(resumed_user_rows[resumed_body_index].id, body_message_id);
+        let resumed_upe_index = resumed_user_rows
+            .iter()
+            .position(|row| row.id == upe_message_id)
+            .expect("cold request contains the original UPE identity");
+        assert!(resumed_upe_index < resumed_command_index);
+        assert!(resumed_user_rows[resumed_upe_index].is_meta);
+        assert_eq!(resumed_user_rows[resumed_upe_index].turn_companion, None);
+        assert_eq!(
+            resumed_user_rows[resumed_upe_index].text_utf16.as_deref(),
+            Some(upe_text_units.as_slice()),
+            "cold resume restores the exact UTF-16 rendered hook context"
+        );
+        let resumed_listing_index = resumed_user_rows
+            .iter()
+            .position(|row| row.id.as_uuid().to_string() == skill_listing_uuid)
+            .expect("cold request contains the inherited listing identity");
+        assert!(resumed_listing_index < resumed_command_index);
+        assert!(resumed_user_rows[resumed_listing_index].is_meta);
+        assert_eq!(
+            resumed_user_rows[resumed_listing_index].turn_companion,
+            None
+        );
+        assert_eq!(
+            resumed_user_rows[resumed_listing_index]
+                .text_utf16
+                .as_deref(),
+            Some(skill_listing_text_units.as_slice()),
+            "cold restore preserves the original listing text source units"
+        );
+        assert!(
+            !resumed_user_rows.iter().any(|row| {
+                row.text_utf16
+                    .as_deref()
+                    .is_some_and(|units| contains_utf16(units, "<total_tokens>"))
+            }),
+            "cold LocalSkill resume also suppresses total_tokens"
+        );
+        let resumed_transcript_path =
+            session::jsonl::session_path(&resumed.lingxi_home, &resumed.session_cwd, &session_id);
+        let resumed_transcript = std::fs::read_to_string(resumed_transcript_path)
+            .expect("read resumed skill transcript rows");
+        assert_eq!(
+            transcript_user_text_units(
+                &resumed_transcript,
+                &command_message_id.as_uuid().to_string()
+            )
+            .as_deref(),
+            Some(command_header_units.as_slice()),
+            "cold resume preserves the exact Native API command-header projection"
+        );
+        let _ = assert_transcript_attachments_are_packed_once_before_skill(
+            &resumed_transcript,
+            &resumed_user_rows,
+            resumed_command_index,
+        );
+        assert_eq!(
+            skill_listing_attachment_rows(&resumed_transcript),
+            vec![(skill_listing_uuid, "mobile-review".encode_utf16().collect(),)],
+            "restoring the typed sent-skill set prevents a duplicate skill_listing attachment"
+        );
+        assert_eq!(
+            user_prompt_expansion_context_rows(&resumed_transcript),
+            vec![(
+                upe_message_id.as_uuid().to_string(),
+                expected_upe_context.clone()
+            )],
+            "cold retry leaves one raw UPE attachment with its original source identity"
+        );
+        assert_eq!(
+            transcript_uuid_count(&resumed_transcript, &upe_message_id.as_uuid().to_string()),
+            1
+        );
+        assert_eq!(
+            transcript_uuid_count(
+                &resumed_transcript,
+                &command_message_id.as_uuid().to_string()
+            ),
+            1
+        );
+        assert_eq!(
+            transcript_uuid_count(&resumed_transcript, &body_message_id.as_uuid().to_string()),
+            1
+        );
         let checkpoint = resumed
             .durable_turns
             .load(&session_id, 247)
@@ -5468,7 +7770,167 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 .expect("skill envelope remains attached to the turn")
                 .command
                 .string_units(""),
-            Some(command_units.clone())
+            Some(command_header_units.clone())
+        );
+        let source_body_units = checkpoint
+            .skill_prompt
+            .as_ref()
+            .expect("skill envelope remains attached to the turn")
+            .body
+            .string_units("")
+            .expect("resumed checkpoint keeps exact skill body source units");
+        assert_eq!(
+            resumed_user_rows[resumed_body_index].text_utf16.as_deref(),
+            Some(source_body_units.as_slice()),
+            "the reused body row matches the durable skill source projection exactly"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if resumed.active_cancel.lock().await.is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cold resumed turn releases its slot before a new send");
+        resumed
+            .submit(ClientCommand::RunSlashCommand {
+                raw: ClientTextDto::from_code_units(command_units.clone()),
+                turn_id: Some(248),
+            })
+            .await
+            .expect("submit the same skill source as a new turn");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if resumed_stream.captured_calls().await.len() >= 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("new same-text skill turn reaches the streaming client");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if resumed.active_cancel.lock().await.is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("new same-text skill turn completes its durable writes");
+        let calls = resumed_stream.captured_calls().await;
+        assert_eq!(calls.len(), 2);
+        let hook_commands = hook_process.captured_commands();
+        assert_eq!(hook_commands.len(), 2, "a new turn fires UPE once");
+        let transcript_path =
+            session::jsonl::session_path(&resumed.lingxi_home, &resumed.session_cwd, &session_id);
+        assert_user_prompt_expansion_wire_input(
+            &hook_commands[1],
+            std::path::Path::new(&resumed.session_cwd),
+            &session_id,
+            &transcript_path,
+            &resumed
+                .inner()
+                .orchestrator
+                .permission_mode()
+                .unwrap_or_else(|| "default".to_string()),
+            &command_units,
+        );
+        let second_user_rows = source_user_rows(&calls[1].messages);
+        let command_rows = second_user_rows
+            .iter()
+            .filter(|row| row.text_utf16.as_deref() == Some(command_header_units.as_slice()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            command_rows.len(),
+            2,
+            "same text is a new turn, not a replay"
+        );
+        assert_ne!(command_rows[0].id, command_rows[1].id);
+        assert_ne!(command_rows[1].id, command_message_id);
+        let resumed_transcript = std::fs::read_to_string(&transcript_path)
+            .expect("read transcript after the new same-text turn");
+        for row in &command_rows {
+            assert_eq!(
+                transcript_user_text_units(&resumed_transcript, &row.id.as_uuid().to_string())
+                    .as_deref(),
+                Some(command_header_units.as_slice()),
+                "each same-text send keeps the Native XML command header in JSONL"
+            );
+        }
+        let expected_body = "MOBILE SKILL BODY".encode_utf16().collect::<Vec<_>>();
+        let body_rows = second_user_rows
+            .iter()
+            .filter(|row| {
+                row.text_utf16.as_deref().is_some_and(|units| {
+                    units
+                        .windows(expected_body.len())
+                        .any(|window| window == expected_body.as_slice())
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(body_rows.len(), 2);
+        assert_ne!(body_rows[0].id, body_rows[1].id);
+        assert_ne!(body_rows[1].id, body_message_id);
+        let second_old_upe_row = second_user_rows
+            .iter()
+            .find(|row| row.id == upe_message_id)
+            .expect("the replayed UPE row remains in the next request by identity");
+        assert_eq!(
+            second_old_upe_row.text_utf16.as_deref(),
+            Some(upe_text_units.as_slice())
+        );
+        let second_upe_rows = second_user_rows
+            .iter()
+            .filter(|row| {
+                row.text_utf16.as_deref().is_some_and(|units| {
+                    units
+                        .windows(expected_upe_context.len())
+                        .any(|window| window == expected_upe_context.as_slice())
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            second_upe_rows.len(),
+            2,
+            "the next request carries the old and new same-text UPE rows"
+        );
+        let second_upe_row = second_upe_rows
+            .iter()
+            .find(|row| row.id != upe_message_id)
+            .copied()
+            .expect("new same-text send runs the configured UPE hook");
+        assert_eq!(
+            second_upe_row.text_utf16.as_deref(),
+            Some(upe_text_units.as_slice())
+        );
+        assert_ne!(second_upe_row.id, upe_message_id);
+        assert_eq!(
+            transcript_uuid_count(
+                &resumed_transcript,
+                &command_rows[1].id.as_uuid().to_string()
+            ),
+            1,
+            "new source turn gets one distinct durable UUID instead of text deduplication"
+        );
+        assert_eq!(
+            user_prompt_expansion_context_rows(&resumed_transcript)
+                .into_iter()
+                .map(|(uuid, _)| uuid)
+                .collect::<Vec<_>>(),
+            vec![
+                upe_message_id.as_uuid().to_string(),
+                second_upe_row.id.as_uuid().to_string(),
+            ],
+            "a new same-text send appends a fresh UPE row instead of deduplicating by text"
+        );
+        assert_eq!(
+            transcript_uuid_count(&resumed_transcript, &body_rows[1].id.as_uuid().to_string()),
+            1
         );
     });
 }
@@ -5640,7 +8102,10 @@ fn submit_pause_waits_for_owner_and_publishes_paused_without_cancelled() {
             .durable_turns
             .load(&session_id, 16)
             .expect("load paused checkpoint");
-        assert_eq!(checkpoint.state, TurnRecoveryStateDto::PausedRecoverable);
+        assert_eq!(
+            checkpoint.state,
+            Some(TurnRecoveryStateDto::PausedRecoverable)
+        );
         assert_eq!(
             checkpoint.reason.as_deref(),
             Some("background_time_expired")
@@ -5754,7 +8219,7 @@ fn submit_cancel_terminalizes_inactive_paused_and_waiting_turns() {
                 .durable_turns
                 .load(&session_id, turn_id)
                 .expect("load cancelled checkpoint");
-            assert_eq!(checkpoint.state, TurnRecoveryStateDto::Cancelled);
+            assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Cancelled));
             assert_eq!(checkpoint.reason.as_deref(), Some("explicit_cancel"));
         }
         let events = listener.received.lock().await;
@@ -5841,7 +8306,7 @@ fn submit_cancel_inactive_stale_terminal_and_other_session_are_noops() {
                 .load(&session_id, 93)
                 .expect("load stale fixture")
                 .state,
-            TurnRecoveryStateDto::PausedRecoverable
+            Some(TurnRecoveryStateDto::PausedRecoverable)
         );
         assert_eq!(
             handle
@@ -5858,7 +8323,7 @@ fn submit_cancel_inactive_stale_terminal_and_other_session_are_noops() {
                 .load("other-session", 95)
                 .expect("load foreign fixture")
                 .state,
-            TurnRecoveryStateDto::Running
+            Some(TurnRecoveryStateDto::Running)
         );
         assert!(listener.received.lock().await.is_empty());
     });
@@ -5963,7 +8428,7 @@ fn submit_pause_cancels_only_owned_ask_user_question() {
                 .load(&session_id, 96)
                 .expect("load paused turn")
                 .state,
-            TurnRecoveryStateDto::PausedRecoverable
+            Some(TurnRecoveryStateDto::PausedRecoverable)
         );
     });
 }
@@ -6064,7 +8529,7 @@ fn submit_cancel_cancels_only_owned_ask_user_question() {
                 .load(&session_id, 97)
                 .expect("load cancelled turn")
                 .state,
-            TurnRecoveryStateDto::Cancelled
+            Some(TurnRecoveryStateDto::Cancelled)
         );
     });
 }
@@ -6308,7 +8773,10 @@ async fn late_connection_question_does_not_undo_a_paused_checkpoint() {
             })
             .await;
         let checkpoint = store.load("session-a", 12).unwrap();
-        assert_eq!(checkpoint.state, TurnRecoveryStateDto::PausedRecoverable);
+        assert_eq!(
+            checkpoint.state,
+            Some(TurnRecoveryStateDto::PausedRecoverable)
+        );
         assert_eq!(
             checkpoint.reason.as_deref(),
             Some("background_time_expired")
@@ -6621,7 +9089,7 @@ async fn lifecycle_listener_restores_running_when_a_question_resolves() {
         .await;
     assert_eq!(
         store.load("session-a", 24).expect("load parked").state,
-        TurnRecoveryStateDto::WaitingForUser
+        Some(TurnRecoveryStateDto::WaitingForUser)
     );
 
     listener
@@ -6631,7 +9099,7 @@ async fn lifecycle_listener_restores_running_when_a_question_resolves() {
     let checkpoint = store.load("session-a", 24).expect("load resolved");
     assert_eq!(
         checkpoint.state,
-        TurnRecoveryStateDto::Running,
+        Some(TurnRecoveryStateDto::Running),
         "AskUserQuestionResolved must restore Running"
     );
     assert!(
@@ -6749,10 +9217,26 @@ fn submit_send_prompt_queues_overlapping_turn() {
             result.is_ok(),
             "overlapping SendPrompt must queue: {result:?}"
         );
-        let queued = handle.message_queue.take_mid_turn_prompt().await;
+        let session_id = handle.active_session_id();
+        let pending = handle
+            .durable_turns
+            .scan_pending(&session_id)
+            .expect("busy prompt is durably admitted before acceptance");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].turn_id, 99);
+        assert_eq!(pending[0].original_client_turn_id, Some(99));
+        assert_eq!(pending[0].prompt.string_at(""), Some("pending guidance"));
+        assert_eq!(pending[0].state, None);
         assert_eq!(
-            queued.as_ref().and_then(|prompt| prompt.string_at("")),
-            Some("pending guidance")
+            handle
+                .message_queue
+                .snapshot()
+                .await
+                .iter()
+                .filter(|command| command.uuid == format!("mobile-prompt:{session_id}:99"))
+                .count(),
+            1,
+            "the volatile queue contains one dispatch cache entry"
         );
     });
 }
@@ -8558,6 +11042,64 @@ fn new_session_rejects_a_foreign_cwd() {
             .await
             .expect("the source's own cwd is honored");
     });
+}
+
+#[cfg(unix)]
+#[test]
+fn mobile_prompt_rejects_foreign_transcript_symlink_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("mobile transcript root");
+    let foreign_root = tempfile::tempdir().expect("foreign transcript root");
+    let (handle, _listener) = build_submit_handle(tmp.path());
+    let transcript_path = handle.inner.session_writer.active_path();
+    std::fs::create_dir_all(
+        transcript_path
+            .parent()
+            .expect("mobile transcript has a parent"),
+    )
+    .expect("create mobile transcript directory");
+    let foreign_path = foreign_root.path().join("foreign-session.jsonl");
+    let foreign_bytes = b"foreign transcript must remain byte-for-byte unchanged\n";
+    std::fs::write(&foreign_path, foreign_bytes).expect("write foreign transcript fixture");
+    symlink(&foreign_path, &transcript_path).expect("link active transcript to foreign file");
+
+    let error = handle
+        .runtime()
+        .block_on(handle.submit(ClientCommand::SendPrompt {
+            text: ClientTextDto::from_code_units("must not append".encode_utf16().collect()),
+            prompt_mode: None,
+            images: Vec::new(),
+            turn_id: Some(248),
+            visualization_context: None,
+        }))
+        .expect_err("Host must reject a symlinked Native transcript before turn execution");
+    assert!(
+        matches!(&error, ClientError::Internal { message }
+            if message.contains("transcript is not a regular file")),
+        "unexpected transcript rejection: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&foreign_path).expect("read foreign transcript after rejection"),
+        foreign_bytes,
+        "a rejected foreign transcript is never rewritten"
+    );
+    let mut sidecar_name = transcript_path
+        .file_name()
+        .expect("mobile transcript has a filename")
+        .to_os_string();
+    sidecar_name.push(branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX);
+    assert!(
+        !transcript_path.with_file_name(sidecar_name).exists(),
+        "rejection must not create an identity sidecar beside the foreign path"
+    );
+    let reservation_released = handle
+        .runtime()
+        .block_on(async { handle.active_cancel.lock().await.is_none() });
+    assert!(
+        reservation_released,
+        "identity import rejection must release the reserved turn"
+    );
 }
 
 /// Index of the first event matching `pred`, or a panic naming what was

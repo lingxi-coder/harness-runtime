@@ -987,6 +987,18 @@ mod tests {
         ) -> Result<(), lingxi_core::host::HandleError> {
             self.inner.switch_model(model, profile).await
         }
+        async fn validate_model_selection(
+            &self,
+            request: &lingxi_core::host::ModelSelectionRequest,
+        ) -> Result<(), lingxi_core::host::HandleError> {
+            self.inner.validate_model_selection(request).await
+        }
+        async fn select_model(
+            &self,
+            request: lingxi_core::host::ModelSelectionRequest,
+        ) -> Result<(), lingxi_core::host::HandleError> {
+            self.inner.select_model(request).await
+        }
         async fn request_exit(&self) {
             self.inner.request_exit().await;
         }

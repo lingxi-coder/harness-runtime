@@ -381,7 +381,8 @@ async fn freeze_unsent_rule(
     // replace its body, deletion status, or globs on a later model step.
     let first = orchestrator
         .collect_turn_reminders(true, false, None, &[])
-        .await;
+        .await
+        .expect("conditional-rule fixture settings must build reminders");
     assert!(rule_reminder_texts(&first.model_reminders, &fixture.rule).is_empty());
     assert!(
         !orchestrator
@@ -418,7 +419,8 @@ async fn unsent_rule_body_changes_are_fresh_across_all_rule_tiers() {
         push_touched(&orchestrator, &fixture.trigger("src/next.rs"));
         let next = orchestrator
             .collect_turn_reminders(true, false, None, &[])
-            .await;
+            .await
+            .expect("conditional-rule fixture settings must build reminders");
         assert_eq!(
             rule_reminder_texts(&next.model_reminders, &fixture.rule),
             vec![format!(
@@ -438,7 +440,8 @@ async fn unsent_rule_body_changes_are_fresh_across_all_rule_tiers() {
         push_touched(&orchestrator, &fixture.trigger("src/another.rs"));
         let repeated = orchestrator
             .collect_turn_reminders(true, false, None, &[])
-            .await;
+            .await
+            .expect("conditional-rule fixture settings must build reminders");
         assert!(
             rule_reminder_texts(&repeated.model_reminders, &fixture.rule).is_empty(),
             "editing an already-sent path must preserve session dedup for {tier:?}"
@@ -456,7 +459,8 @@ async fn deleted_unsent_rule_is_not_claimed_from_the_eager_snapshot() {
     push_touched(&orchestrator, &fixture.trigger("src/next.rs"));
     let next = orchestrator
         .collect_turn_reminders(true, false, None, &[])
-        .await;
+        .await
+        .expect("conditional-rule fixture settings must build reminders");
     assert!(rule_reminder_texts(&next.model_reminders, &fixture.rule).is_empty());
     assert!(
         !orchestrator
@@ -480,7 +484,8 @@ async fn changed_unsent_rule_globs_stop_a_previous_match() {
     push_touched(&orchestrator, &fixture.trigger("src/next.rs"));
     let next = orchestrator
         .collect_turn_reminders(true, false, None, &[])
-        .await;
+        .await
+        .expect("conditional-rule fixture settings must build reminders");
     assert!(rule_reminder_texts(&next.model_reminders, &fixture.rule).is_empty());
     assert!(
         !orchestrator
@@ -504,7 +509,8 @@ async fn changed_unsent_rule_globs_activate_a_new_match_with_fresh_body() {
     push_touched(&orchestrator, &fixture.trigger("src/next.rs"));
     let next = orchestrator
         .collect_turn_reminders(true, false, None, &[])
-        .await;
+        .await
+        .expect("conditional-rule fixture settings must build reminders");
     let oracle: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/nested_memory_2_1_287.json"
     ))

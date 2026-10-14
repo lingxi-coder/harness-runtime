@@ -2,29 +2,70 @@
 
 use super::*;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use memory::lingxi_md::LingxiMdTier;
 
-fn mod_instruction_files(files: &[crate::prompt::MemoryFile]) -> Vec<serde_json::Value> {
-    files
-        .iter()
-        .filter(|file| crate::prompt::memory_block::is_rendered_into_context(file))
-        .map(|file| {
-            let kind = match file.tier {
-                memory::lingxi_md::LingxiMdTier::Managed => "managed",
-                memory::lingxi_md::LingxiMdTier::User => "user",
-                memory::lingxi_md::LingxiMdTier::Project => "project",
-                memory::lingxi_md::LingxiMdTier::Local => "local",
-            };
-            let mut entry = serde_json::json!({
-                "path": file.path.to_string_lossy(),
-                "kind": kind,
-                "content": file.source_content.as_deref().unwrap_or(&file.body),
-            });
-            if let Some(parent) = &file.parent {
-                entry["parent"] = serde_json::Value::String(parent.to_string_lossy().into_owned());
-            }
-            entry
-        })
-        .collect()
+fn mod_instruction_files(
+    files: &[crate::prompt::MemoryFile],
+    native_managed: &[lingxi_core::host::instructions::InstructionFile],
+) -> Vec<Utf16JsonProjection> {
+    use lingxi_core::host::instructions::InstructionFileType;
+
+    let insertion_index = crate::prompt::memory_block::native_managed_insertion_index(files);
+    let mut entries = Vec::new();
+    let mut inserted_native = false;
+    for (index, file) in files.iter().enumerate() {
+        if !inserted_native && index >= insertion_index {
+            entries.extend(native_managed.iter().filter_map(|row| {
+                (row.kind == InstructionFileType::Managed).then(|| {
+                    projection_object(vec![
+                        ("path".into(), row.path.clone()),
+                        ("kind".into(), "managed".into()),
+                        ("content".into(), row.content.clone()),
+                    ])
+                })
+            }));
+            inserted_native = true;
+        }
+        if !crate::prompt::memory_block::is_rendered_into_context(file) {
+            continue;
+        }
+        let kind = match file.tier {
+            LingxiMdTier::Managed => "managed",
+            LingxiMdTier::User => "user",
+            LingxiMdTier::Project => "project",
+            LingxiMdTier::Local => "local",
+        };
+        let mut fields = vec![
+            (
+                "path".into(),
+                crate::prompt::memory_block::path_projection(&file.path),
+            ),
+            ("kind".into(), kind.into()),
+            (
+                "content".into(),
+                file.source_content.as_deref().unwrap_or(&file.body).into(),
+            ),
+        ];
+        if let Some(parent) = &file.parent {
+            fields.push((
+                "parent".into(),
+                crate::prompt::memory_block::path_projection(parent),
+            ));
+        }
+        entries.push(projection_object(fields));
+    }
+    if !inserted_native {
+        entries.extend(native_managed.iter().filter_map(|row| {
+            (row.kind == InstructionFileType::Managed).then(|| {
+                projection_object(vec![
+                    ("path".into(), row.path.clone()),
+                    ("kind".into(), "managed".into()),
+                    ("content".into(), row.content.clone()),
+                ])
+            })
+        }));
+    }
+    entries
 }
 
 fn generated_projection(value: &serde_json::Value) -> Utf16JsonProjection {
@@ -76,6 +117,41 @@ fn prompt_text_projection(
         text.utf16_code_units().to_vec(),
     )
     .expect("PromptText carries a valid exact UTF-16 projection")
+}
+
+fn append_source_system_prompt(
+    prompt: &mut crate::prompt::RenderedPromptSections,
+    source: &Utf16JsonProjection,
+) {
+    let Some(units) = source.string_units("").filter(|units| !units.is_empty()) else {
+        return;
+    };
+    let display = String::from_utf16_lossy(&units);
+    if !prompt.text.is_empty() {
+        prompt
+            .text
+            .push_str(crate::prompt::locked_templates::SECTION_SEP);
+    }
+    prompt.text.push_str(&display);
+    if !prompt.static_text.is_empty() {
+        prompt
+            .static_text
+            .push_str(crate::prompt::locked_templates::SECTION_SEP);
+    }
+    prompt.static_text.push_str(&display);
+    if let Some(snapshot) = prompt.snapshot_system_prompt.as_mut() {
+        snapshot.push(
+            lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(units),
+        );
+    } else {
+        prompt.source_sections.push(crate::prompt::PromptSection {
+            id: "append_system_prompt".to_owned(),
+            text: display,
+            scope: crate::prompt::PromptSectionScope::Session,
+            id_utf16_code_units: None,
+            text_utf16_code_units: Some(units),
+        });
+    }
 }
 
 fn public_prompt_name(
@@ -359,7 +435,9 @@ impl ConversationOrchestrator {
     /// (e.g. a controlled `StaticMemoryProvider`, or the production
     /// `real_provider()`) actually reaches the system prompt, without a live
     /// model round-trip.
-    pub async fn assemble_system_prompt_preview(&self) -> String {
+    pub async fn assemble_system_prompt_preview(
+        &self,
+    ) -> Result<String, lingxi_core::settings::SettingsError> {
         self.effective_system_prompt().await
     }
 
@@ -372,8 +450,13 @@ impl ConversationOrchestrator {
     /// memory/tool assembly into the task-handler leaf.
     pub async fn assemble_default_system_prompt_preview(
         &self,
-    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
-        prompt_parts_source_text(&self.build_system_prompt_parts().await)
+    ) -> Result<
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::settings::SettingsError,
+    > {
+        Ok(prompt_parts_source_text(
+            &self.build_system_prompt_parts().await?,
+        ))
     }
 
     /// Adopt a `--agent`-resolved definition for the MAIN conversation loop
@@ -638,18 +721,25 @@ impl ConversationOrchestrator {
     /// precedence: `overrideSystemPrompt` (`--system-prompt`) wins; else the
     /// adopted main-thread agent's prompt (`mainThreadAgentDefinition`
     /// `.getSystemPrompt()`); else the freshly assembled default.
-    pub(crate) async fn effective_system_prompt(&self) -> String {
+    pub(crate) async fn effective_system_prompt(
+        &self,
+    ) -> Result<String, lingxi_core::settings::SettingsError> {
         self.effective_system_prompt_source()
-            .await
+            .await?
             .string_at("")
-            .unwrap_or_default()
-            .to_owned()
+            .map(str::to_owned)
+            .ok_or(lingxi_core::types::utf16_json::Utf16JsonProjectionError::InvalidPointer.into())
     }
 
     pub(crate) async fn effective_system_prompt_source(
         &self,
-    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
-        Self::system_prompt_source_text(&self.provider_system_prompt().await)
+    ) -> Result<
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::settings::SettingsError,
+    > {
+        Ok(Self::system_prompt_source_text(
+            &self.provider_system_prompt().await?,
+        ))
     }
 
     /// Preserve the source vector through SDK selection and provider egress.
@@ -657,22 +747,36 @@ impl ConversationOrchestrator {
     /// current query's dynamic system context.
     pub(crate) async fn provider_system_prompt(
         &self,
-    ) -> lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput {
+    ) -> Result<
+        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        lingxi_core::settings::SettingsError,
+    > {
         if let Some(custom) = &self.config.system_prompt_override {
             *self
                 .prompt_runtime
                 .pending_prompt_source_vector
                 .lock()
                 .await = None;
-            return lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
-                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
-                    custom
-                        .string_units("")
-                        .expect("system prompt override must be a JSON string"),
-                ),
-            );
+            let mut units = custom
+                .string_units("")
+                .expect("system prompt override must be a JSON string");
+            if let Some(append) = self
+                .config
+                .append_system_prompt
+                .as_ref()
+                .and_then(|source| source.string_units(""))
+                .filter(|units| !units.is_empty())
+            {
+                if !units.is_empty() {
+                    units.extend("\n\n".encode_utf16());
+                }
+                units.extend(append);
+            }
+            return Ok(lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(units),
+            ));
         }
-        let prompt = self.effective_system_prompt_parts().await;
+        let prompt = self.effective_system_prompt_parts().await?;
         let system_prompt = match prompt.snapshot_system_prompt.clone() {
             Some(snapshot) => snapshot,
             None if !prompt.source_sections.is_empty() => {
@@ -718,7 +822,7 @@ impl ConversationOrchestrator {
             .pending_prompt_source_vector
             .lock()
             .await = pending;
-        input
+        Ok(input)
     }
 
     pub(super) async fn current_prompt_route(&self) -> (String, Option<String>) {
@@ -732,20 +836,22 @@ impl ConversationOrchestrator {
         (session.model.clone(), session.model_profile.clone())
     }
 
-    async fn effective_system_prompt_parts(&self) -> crate::prompt::RenderedPromptSections {
+    async fn effective_system_prompt_parts(
+        &self,
+    ) -> Result<crate::prompt::RenderedPromptSections, lingxi_core::settings::SettingsError> {
         use crate::prompt::RenderedPromptSections;
         if let Some(custom) = &self.config.system_prompt_override {
             let display = custom
                 .string_at("")
                 .expect("system prompt override must be a JSON string")
                 .to_owned();
-            return RenderedPromptSections {
+            return Ok(RenderedPromptSections {
                 text: display.clone(),
                 static_text: display,
                 source_sections: Vec::new(),
                 snapshot_system_prompt: None,
                 dynamic_system_context: None,
-            };
+            });
         }
         if self.prompt_snapshot_eligible() {
             // Context routing also reads this slot. Drop the guard before
@@ -788,16 +894,16 @@ impl ConversationOrchestrator {
                         .map(|section| section.display_text())
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    let mut prompt = static_text.clone();
-                    let dynamic_system_context =
-                        self.append_dynamic_system_context(&mut prompt).await;
-                    return RenderedPromptSections {
-                        text: prompt,
+                    let mut prompt = RenderedPromptSections {
+                        text: static_text.clone(),
                         static_text,
                         source_sections: Vec::new(),
                         snapshot_system_prompt: Some(snapshot_system_prompt),
-                        dynamic_system_context,
+                        dynamic_system_context: None,
                     };
+                    prompt.dynamic_system_context =
+                        self.append_dynamic_system_context(&mut prompt.text).await;
+                    return Ok(prompt);
                 }
             }
         }
@@ -832,7 +938,7 @@ impl ConversationOrchestrator {
                     dynamic_system_context: None,
                 }
             }
-            None => self.build_static_system_prompt_parts().await,
+            None => self.build_static_system_prompt_parts().await?,
         };
         if let Ok(profile) = self.prompt_runtime.app_agent_prompt_profile.read() {
             if let Some(profile) = profile.as_ref() {
@@ -855,11 +961,22 @@ impl ConversationOrchestrator {
                 }
             }
         }
+        self.append_native_append_system_prompt(&mut prompt);
         if is_default_prompt {
             prompt.dynamic_system_context =
                 self.append_dynamic_system_context(&mut prompt.text).await;
         }
-        prompt
+        Ok(prompt)
+    }
+
+    fn append_native_append_system_prompt(
+        &self,
+        prompt: &mut crate::prompt::RenderedPromptSections,
+    ) {
+        let Some(source) = self.config.append_system_prompt.as_ref() else {
+            return;
+        };
+        append_source_system_prompt(prompt, source);
     }
 
     /// Oracle `lje(e)` (`src_169588164.js`) — whether the static-system-prompt
@@ -1118,19 +1235,23 @@ impl ConversationOrchestrator {
     /// [`Self::assemble_system_prompt_preview`] — lets a host/composition-root
     /// test prove an injected memory provider reaches the additional-context
     /// message without a live model round-trip.
-    pub async fn additional_context_preview(&self) -> Option<String> {
-        self.additional_context_message()
-            .await
-            .and_then(|m| match m {
-                ConversationMessage::User { content, .. } => {
-                    content.into_iter().find_map(|b| match b {
-                        lingxi_core::types::ContentBlock::Text { text, .. }
-                        | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => Some(text),
-                        _ => None,
-                    })
-                }
-                _ => None,
-            })
+    pub async fn additional_context_preview(
+        &self,
+    ) -> Result<Option<String>, lingxi_core::settings::SettingsError> {
+        let Some(message) = self.additional_context_message().await? else {
+            return Ok(None);
+        };
+        let preview = match message {
+            ConversationMessage::User { content, .. } => {
+                content.into_iter().find_map(|block| match block {
+                    lingxi_core::types::ContentBlock::Text { text, .. }
+                    | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => Some(text),
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        Ok(preview)
     }
 
     /// Prepend the fixed runtime context and, for inline routing, userContext.
@@ -1226,6 +1347,19 @@ impl ConversationOrchestrator {
             .keys()
             .copied()
             .collect::<std::collections::HashSet<_>>();
+        // Hook attachments retain their raw JSONL row separately from model
+        // reminders. Their registered identities still participate in zjr;
+        // otherwise a live UPE row stays after its command while cold restore
+        // correctly places the same attachment before it.
+        let persisted_attachment_types = self
+            .prompt_runtime
+            .mod_persisted_attachments
+            .lock()
+            .await
+            .iter()
+            .map(|(id, (kind, _))| (*id, kind.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        typed_ids.extend(persisted_attachment_types.keys().copied());
         typed_ids.extend(
             turn_reminders
                 .iter()
@@ -1246,7 +1380,7 @@ impl ConversationOrchestrator {
                 session.native_request_history.synthetic_closing_ids.clone(),
             )
         };
-        let raw_attachment_types = attachments
+        let mut raw_attachment_types = attachments
             .iter()
             .filter_map(|(id, payload)| {
                 payload
@@ -1254,6 +1388,9 @@ impl ConversationOrchestrator {
                     .map(|attachment_type| (*id, attachment_type.to_owned()))
             })
             .collect::<std::collections::HashMap<_, _>>();
+        for (id, kind) in persisted_attachment_types {
+            raw_attachment_types.entry(id).or_insert(kind);
+        }
         let eligible_marked_ids = marked_ids
             .into_iter()
             .filter(|id| {
@@ -1431,19 +1568,22 @@ impl ConversationOrchestrator {
     /// [`Self::additional_context_message`] — the latter re-emits the env block
     /// in the first user message when `--exclude-dynamic-system-prompt-sections`
     /// is set, so the construction (and its env-field probes) lives in ONE place.
-    async fn build_prompt_context(&self) -> crate::prompt::SystemPromptContext {
-        let memory_files = self.main_instruction_files().await.unwrap_or_else(|error| {
-            tracing::warn!(%error, "instruction context load failed while building prompt context");
-            Arc::new(Vec::new())
-        });
-        self.build_prompt_context_from_files(memory_files.as_ref().clone())
+    async fn build_prompt_context(
+        &self,
+    ) -> Result<crate::prompt::SystemPromptContext, lingxi_core::settings::SettingsError> {
+        let memory_files = self
+            .main_instruction_files()
             .await
+            .map_err(|error| Self::source_settings_failure("instruction_context", error))?;
+        Ok(self
+            .build_prompt_context_from_files(memory_files.as_ref().clone())
+            .await?)
     }
 
     async fn build_prompt_context_from_files(
         &self,
         memory_files: Vec<crate::prompt::MemoryFile>,
-    ) -> crate::prompt::SystemPromptContext {
+    ) -> Result<crate::prompt::SystemPromptContext, lingxi_core::settings::SettingsError> {
         use crate::prompt::{FileTree, SystemPromptContext};
 
         // Task 5 (worktree 206 session-cwd plumbing): read the LIVE
@@ -1494,7 +1634,7 @@ impl ConversationOrchestrator {
         // is moved into the context struct below.
         let in_worktree = probe_cwd.join(".git").is_file();
 
-        SystemPromptContext {
+        Ok(SystemPromptContext {
             cwd,
             // `Platform: ${je.platform}` — claude-code emits the node
             // `process.platform` value (`darwin`/`linux`/`win32`), NOT Rust's
@@ -1537,7 +1677,7 @@ impl ConversationOrchestrator {
             // exists. Sourced from the attached skill-listing provider (same
             // source as the per-turn skill reminder); `None` provider ⇒ false.
             skills_available: match &self.prompt_runtime.skill_listing {
-                Some(provider) => !provider.skill_listing_snapshot().await.entries.is_empty(),
+                Some(provider) => !provider.skill_listing_snapshot().await?.entries.is_empty(),
                 None => false,
             },
             // A scheduled mobile runtime shares a process with the foreground
@@ -1561,7 +1701,7 @@ impl ConversationOrchestrator {
             // OMITS the env block from the system prompt (it is re-emitted in the
             // first-user-message context reminder via `env_reminder_section`).
             exclude_dynamic_sections: self.config.exclude_dynamic_system_prompt_sections,
-        }
+        })
     }
 
     /// The output style in force for THIS turn: a `/output-style` switch made
@@ -1630,25 +1770,31 @@ impl ConversationOrchestrator {
     /// plus the current dynamic `systemContext` block.
     /// Bypassed when `OrchestratorConfig::system_prompt_override` is `Some(_)`.
     #[cfg(test)]
-    pub(super) async fn build_system_prompt(&self) -> String {
-        self.build_system_prompt_parts().await.text
+    pub(super) async fn build_system_prompt(
+        &self,
+    ) -> Result<String, lingxi_core::settings::SettingsError> {
+        Ok(self.build_system_prompt_parts().await?.text)
     }
 
-    async fn build_system_prompt_parts(&self) -> crate::prompt::RenderedPromptSections {
-        let mut prompt = self.build_static_system_prompt_parts().await;
+    async fn build_system_prompt_parts(
+        &self,
+    ) -> Result<crate::prompt::RenderedPromptSections, lingxi_core::settings::SettingsError> {
+        let mut prompt = self.build_static_system_prompt_parts().await?;
         prompt.dynamic_system_context = self.append_dynamic_system_context(&mut prompt.text).await;
-        prompt
+        Ok(prompt)
     }
 
     /// Build only the cacheable `getSystemPrompt` members. The git-status
     /// suffix is kept out so a carved-slate snapshot can reuse this prefix
     /// while still receiving live dynamic system context on every request.
-    async fn build_static_system_prompt_parts(&self) -> crate::prompt::RenderedPromptSections {
+    async fn build_static_system_prompt_parts(
+        &self,
+    ) -> Result<crate::prompt::RenderedPromptSections, lingxi_core::settings::SettingsError> {
         use crate::prompt::{
             named_prompt_sections_with_style, prompt_section_slots, render_prompt_sections_scoped,
             ActiveOutputStyle, PromptSectionScope,
         };
-        let ctx = self.build_prompt_context().await;
+        let ctx = self.build_prompt_context().await?;
         // OUTSTYLE.2/.3: when a non-default output style is active — a builtin
         // OR a custom disk style discovered under `output_style_dirs` — inject
         // its `# Output Style: <name>` section (TS getOutputStyleSection). A
@@ -1724,7 +1870,7 @@ impl ConversationOrchestrator {
         } else {
             resolved_sections
         };
-        render_prompt_sections_scoped(&composed)
+        Ok(render_prompt_sections_scoped(&composed))
     }
 
     async fn dispatch_mod_prompt_section(
@@ -1961,7 +2107,14 @@ impl ConversationOrchestrator {
         let override_object = overrides.object_entries().ok_or_else(|| {
             hooks::mods::ModError::Hook("prompt.compose takes the facts to compose for".into())
         })?;
-        let ctx = self.build_prompt_context().await;
+        let ctx = self.build_prompt_context().await.map_err(|error| {
+            hooks::mods::ModError::Protocol(
+                error
+                    .diagnostic_projection()
+                    .to_json_string()
+                    .unwrap_or_else(|_| "settings operation failed".to_owned()),
+            )
+        })?;
         let resolved = self.resolve_active_output_style().await;
         let style = resolved
             .as_ref()
@@ -2013,7 +2166,14 @@ impl ConversationOrchestrator {
             .ok_or_else(|| hooks::mods::ModError::Hook("prompt.compose needs a model".into()))?;
         let requested_tools = facts.array_len("/tools").unwrap_or_default();
         let traits = facts.array_len("/traits").unwrap_or_default();
-        let mut ctx = self.build_prompt_context().await;
+        let mut ctx = self.build_prompt_context().await.map_err(|error| {
+            hooks::mods::ModError::Protocol(
+                error
+                    .diagnostic_projection()
+                    .to_json_string()
+                    .unwrap_or_else(|_| "settings operation failed".to_owned()),
+            )
+        })?;
         if ctx.model != model {
             ctx.model = model.clone();
             ctx.model_marketing_name = crate::prompt::env_meta::marketing_name_for_model(&model)
@@ -2258,20 +2418,16 @@ impl ConversationOrchestrator {
         };
         let memory_files = load.memory_files().await;
         let blocks = cached
-            .user_context_order
-            .iter()
-            .filter_map(|name| {
-                cached.user_context.get(name).map(|text| {
-                    projection_object(vec![
-                        ("name".into(), name.as_str().into()),
-                        ("text".into(), text.as_str().into()),
-                    ])
-                })
+            .user_context_entries()
+            .into_iter()
+            .map(|(name, text)| {
+                let name = exact_string_projection(&String::from_utf16_lossy(&name), &name);
+                projection_object(vec![("name".into(), name), ("text".into(), text)])
             })
             .collect::<Vec<_>>();
-        let instruction_files = generated_projection(&serde_json::Value::Array(
-            mod_instruction_files(&memory_files),
-        ));
+        let native_managed = self.memory.native_managed_instruction_files();
+        let instruction_files =
+            projection_array(mod_instruction_files(&memory_files, &native_managed));
         let initial = projection_object(vec![
             ("blocks".into(), projection_array(blocks)),
             ("instructionFiles".into(), instruction_files),
@@ -2323,15 +2479,25 @@ impl ConversationOrchestrator {
         resolved
     }
 
-    pub(crate) async fn additional_context_message(&self) -> Option<ConversationMessage> {
+    pub(crate) fn source_settings_failure(
+        kind: &str,
+        error: String,
+    ) -> lingxi_core::settings::SettingsError {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+        let message = Source::from(error.as_str());
+        let diagnostics = Source::object(vec![
+            ("kind".into(), Source::from(kind)),
+            ("message".into(), message.clone()),
+        ])
+        .expect("source failure diagnostic is a valid object");
+        lingxi_core::settings::SettingsError::source_failure(kind, message, diagnostics, None)
+    }
+
+    pub(crate) async fn additional_context_message(
+        &self,
+    ) -> Result<Option<ConversationMessage>, lingxi_core::settings::SettingsError> {
         let (key, load) = self.main_instruction_load().await;
-        match self.additional_context_message_from_load(key, &load).await {
-            Ok(message) => message,
-            Err(error) => {
-                tracing::warn!(%error, "instruction user context load failed");
-                None
-            }
-        }
+        self.additional_context_message_from_load(key, &load).await
     }
 
     /// Query preparation retains its original Gv handle across host refreshes.
@@ -2342,7 +2508,7 @@ impl ConversationOrchestrator {
         load: &lingxi_core::host::instruction_context_cache::InstructionContextLoad<
             crate::prompt::MemoryFile,
         >,
-    ) -> Result<Option<ConversationMessage>, String> {
+    ) -> Result<Option<ConversationMessage>, lingxi_core::settings::SettingsError> {
         if self.config.bare {
             return Ok(None);
         }
@@ -2380,7 +2546,10 @@ impl ConversationOrchestrator {
         //
         // Gv and every projection retain one original asynchronous build.
         // Dynamic Environment remains the ordinary query-level producer.
-        let cached = load.get().await?;
+        let cached = load
+            .get()
+            .await
+            .map_err(|error| Self::source_settings_failure("instruction_context", error))?;
         self.capture_cached_instruction_context(key, &cached).await;
         let resolved = self
             .resolved_mod_instruction_context(key, load, &cached)
@@ -2391,7 +2560,7 @@ impl ConversationOrchestrator {
             let files = load.memory_files().await;
             let ctx = self
                 .build_prompt_context_from_files(files.as_ref().clone())
-                .await;
+                .await?;
             let env = crate::prompt::env_block::format(&ctx);
             let body = env.strip_prefix("# Environment\n").unwrap_or(&env).trim();
             if !body.is_empty() {
@@ -2444,19 +2613,16 @@ impl ConversationOrchestrator {
                 .as_ref()
                 .is_some_and(|origin| Arc::ptr_eq(origin, &cached));
         if let Some(context) = stored.as_mut().filter(|_| accepted) {
-            context.user_context.clear();
-            context.user_context_order.clear();
+            context.user_context = projection_object(Vec::new());
             for index in 0..resolved.array_len("/blocks").unwrap_or_default() {
                 if let (Some(name), Some(text)) = (
                     resolved.string_units(&format!("/blocks/{index}/name")),
                     resolved.string_units(&format!("/blocks/{index}/text")),
                 ) {
-                    let name = String::from_utf16_lossy(&name);
-                    let text = String::from_utf16_lossy(&text);
-                    if !context.user_context.contains_key(&name) {
-                        context.user_context_order.push(name.clone());
-                    }
-                    context.user_context.insert(name, text);
+                    let value = exact_string_projection(&String::from_utf16_lossy(&text), &text);
+                    context
+                        .set_user_context_value(&name, value)
+                        .expect("resolved Mod userContext remains an ordered object");
                 }
             }
             context.eager_instructions = resolved
@@ -2468,7 +2634,7 @@ impl ConversationOrchestrator {
                         .filter_map(|index| {
                             let pointer = format!("/instructionFiles/{index}");
                             let file = resolved.at_pointer(&pointer)?;
-                            let path = file.get_property("path")?.as_str()?;
+                            let path = resolved.subprojection(&format!("{pointer}/path")).ok()?;
                             let kind = match file.get_property("kind")?.as_str()? {
                                 "managed" => InstructionFileType::Managed,
                                 "user" => InstructionFileType::User,
@@ -2477,15 +2643,22 @@ impl ConversationOrchestrator {
                                 "memory" => InstructionFileType::AutoMem,
                                 _ => return None,
                             };
-                            let content = file.get_property("content")?.as_str()?;
-                            Some(InstructionFile {
-                                path: path.to_owned(),
+                            let content =
+                                resolved.subprojection(&format!("{pointer}/content")).ok()?;
+                            Some(InstructionFile::new(
+                                path,
                                 kind,
-                                content: lingxi_core::host::instruction_announcements::js_trim(
-                                    content,
-                                )
-                                .to_owned(),
-                            })
+                                exact_string_projection(
+                                    &String::from_utf16_lossy(
+                                        &crate::prompt::memory_block::trim_instruction_content(
+                                            &content.string_units("")?,
+                                        ),
+                                    ),
+                                    &crate::prompt::memory_block::trim_instruction_content(
+                                        &content.string_units("")?,
+                                    ),
+                                ),
+                            ))
                         })
                         .collect()
                 });
@@ -2779,6 +2952,62 @@ mod typed_attachment_snapshot_tests {
     use super::*;
 
     #[test]
+    fn appended_native_system_prompt_keeps_projection_in_snapshot_and_sections() {
+        let units = ["policy ".encode_utf16().collect::<Vec<_>>(), vec![0xd800]].concat();
+        let source =
+            Utf16JsonProjection::root_string("policy �".to_owned(), units.clone()).unwrap();
+        let mut prompt = crate::prompt::RenderedPromptSections {
+            text: "base".to_owned(),
+            static_text: "base".to_owned(),
+            source_sections: Vec::new(),
+            snapshot_system_prompt: Some(vec![
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                    "base",
+                ),
+            ]),
+            dynamic_system_context: None,
+        };
+
+        append_source_system_prompt(&mut prompt, &source);
+
+        assert_eq!(prompt.text, "base\n\npolicy �");
+        assert_eq!(
+            prompt
+                .snapshot_system_prompt
+                .as_ref()
+                .unwrap()
+                .last()
+                .unwrap()
+                .utf16_code_units(),
+            units.as_slice()
+        );
+
+        let mut prompt = crate::prompt::RenderedPromptSections {
+            text: "base".to_owned(),
+            static_text: "base".to_owned(),
+            source_sections: vec![crate::prompt::PromptSection {
+                id: "base".to_owned(),
+                text: "base".to_owned(),
+                scope: crate::prompt::PromptSectionScope::Shared,
+                id_utf16_code_units: None,
+                text_utf16_code_units: None,
+            }],
+            snapshot_system_prompt: None,
+            dynamic_system_context: None,
+        };
+        append_source_system_prompt(&mut prompt, &source);
+        assert_eq!(
+            prompt
+                .source_sections
+                .last()
+                .unwrap()
+                .text_utf16_code_units
+                .as_deref(),
+            Some(units.as_slice())
+        );
+    }
+
+    #[test]
     fn explicit_typed_identity_includes_meta_user_and_excludes_other_rows() {
         let typed_meta = ConversationMessage::user_meta(
             lingxi_core::types::MessageId::new(),
@@ -2797,6 +3026,95 @@ mod typed_attachment_snapshot_tests {
         assert_eq!(
             typed_attachment_ids_in_snapshot(&typed_ids, &messages),
             typed_ids
+        );
+    }
+
+    #[tokio::test]
+    async fn live_registered_hook_attachment_reorders_before_skill_without_rewriting_history() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            std::sync::Arc::new(MockApiClient::new(Vec::new())),
+            std::sync::Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            std::sync::Arc::new(NoOpPermissionGate),
+            std::sync::Arc::new(MockOutputStream::new()),
+            std::sync::Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let header = ConversationMessage::user(MessageId::new(), "command header".into());
+        let body = ConversationMessage::user_meta(MessageId::new(), "skill body".into());
+        let generic = ConversationMessage::user_meta(MessageId::new(), "ordinary meta".into());
+        let payload = Utf16JsonProjection::parse(
+            r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","content":["UPE \ud800"]}"#,
+        )
+        .unwrap();
+        let hook = ConversationOrchestrator::native_hook_additional_context_message_for_api(
+            MessageId::new(),
+            &payload,
+        )
+        .unwrap();
+        let hook_id = hook.id();
+        let expected_units = match &hook {
+            ConversationMessage::User { content, .. } => match &content[0] {
+                lingxi_core::types::ContentBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                } => utf16_code_units.clone(),
+                other => panic!("source-preserving hook text expected: {other:?}"),
+            },
+            other => panic!("user hook rendering expected: {other:?}"),
+        };
+        let history = vec![header.clone(), body.clone(), hook.clone(), generic.clone()];
+        orch.session.lock().await.history = history.clone();
+        orch.register_mod_persisted_attachment(
+            &hook,
+            "hook_additional_context",
+            serde_json::json!({"kind":"hook","event":"UserPromptExpansion"}),
+        )
+        .await;
+        assert!(orch
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap()
+            .is_empty());
+
+        let mut request = history.clone();
+        orch.project_typed_attachment_order(&mut request, &[], &[], false)
+            .await;
+        assert_eq!(
+            request
+                .iter()
+                .map(ConversationMessage::id)
+                .collect::<Vec<_>>(),
+            vec![hook_id, header.id(), body.id(), generic.id()]
+        );
+        assert_eq!(orch.session.lock().await.history, history);
+        assert_eq!(
+            orch.typed_attachment_ids_for_snapshot(&request),
+            std::collections::HashSet::from([hook_id])
+        );
+        let ConversationMessage::User { content, .. } = &request[0] else {
+            panic!("hook attachment remains a user message");
+        };
+        let lingxi_core::types::ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } = &content[0]
+        else {
+            panic!("hook source units remain exact");
+        };
+        assert_eq!(utf16_code_units, &expected_units);
+
+        let first_projection = request.clone();
+        orch.project_typed_attachment_order(&mut request, &[], &[], false)
+            .await;
+        assert_eq!(
+            request, first_projection,
+            "retry retains attachment identity and order"
         );
     }
 }

@@ -74,6 +74,11 @@ pub struct SideQueryRequest {
     pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     /// Model id (e.g. `claude-haiku-4-5`).
     pub model: String,
+    /// Host-local exact Native model source used only when the parent route
+    /// could not represent its configured model id. It never enters side-query
+    /// JSON; the provider adapter applies it to the SDK request body.
+    #[serde(skip)]
+    pub model_source: Option<Utf16JsonProjection>,
     /// Optional provider profile that owns `model`.
     ///
     /// Compaction inherits this from the live session so a model id shared by
@@ -361,6 +366,7 @@ mod source_system_prompt_tests {
             model_attempt: None,
             native_prompt_context: None,
             model: "model".into(),
+            model_source: None,
             profile: None,
             system_prompt,
             typed_attachment_ids: HashSet::new(),

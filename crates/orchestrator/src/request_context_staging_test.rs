@@ -1,10 +1,12 @@
 use super::*;
 use crate::conversation::ModelCallPath;
+use crate::prompt::skill_listing::{SkillListingEntry, SkillListingProvider, SkillListingSnapshot};
 use crate::prompt::MemoryFile;
 use crate::test_support::{
     mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
+use async_trait::async_trait;
 use lingxi_core::host::instructions::InstructionRendering;
 use lingxi_core::host::FileSystem;
 use memory::lingxi_md::LingxiMdTier;
@@ -12,7 +14,13 @@ use platform_posix::fs::PosixFileSystem;
 use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
 use std::path::Path;
 use std::sync::Arc;
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
 use tool_api::registry::ToolRegistry;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
 
 fn orchestrator(
     cwd: &Path,
@@ -147,6 +155,274 @@ fn mod_registry(host: Arc<hooks::mods::ModHost>) -> Arc<tokio::sync::RwLock<hook
     Arc::new(tokio::sync::RwLock::new(registry))
 }
 
+fn request_prompt_context(prompt_id: MessageId) -> PromptContext {
+    PromptContext {
+        prompt_id: std::sync::Mutex::new(prompt_id),
+        rows: context_rows(Vec::new(), None),
+        turn_projection: std::sync::Mutex::new(None),
+        transcript_attachment: std::sync::Mutex::new(None),
+        staged_ingress_attachments: std::sync::Mutex::new(None),
+        ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
+        next_model_step_ingress_kind: std::sync::Mutex::new(None),
+    }
+}
+
+struct SkillListingFixture;
+
+#[async_trait]
+impl SkillListingProvider for SkillListingFixture {
+    async fn skill_listing_snapshot(
+        &self,
+    ) -> Result<SkillListingSnapshot, lingxi_core::settings::SettingsError> {
+        Ok(SkillListingSnapshot {
+            entries: vec![SkillListingEntry {
+                name: "typed-fixture".into(),
+                display_name: "typed-fixture".into(),
+                user_facing_name: None,
+                unqualified_name: None,
+                is_synced_skill: false,
+                bare_name_reserved: false,
+                aliases: Vec::new(),
+                source: None,
+                plugin_name: None,
+                description: "fixture skill".into(),
+                when_to_use: None,
+                is_bundled_prompt: false,
+                is_name_only: false,
+                priority: 0.0,
+            }],
+            budget_settings: Default::default(),
+        })
+    }
+}
+
+struct SkillListingGateTool;
+
+#[async_trait]
+impl Tool for SkillListingGateTool {
+    fn name(&self) -> &str {
+        "Skill"
+    }
+
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &serde_json::json!({ "type": "object", "properties": {} }),
+                )
+            });
+        &SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
+    fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+        true
+    }
+
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
+        true
+    }
+
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
+        true
+    }
+
+    async fn validate_input(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        Ok(())
+    }
+
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test fixture".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
+        String::new()
+    }
+
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+        String::new().into()
+    }
+
+    async fn call(
+        &self,
+        _input: Utf16JsonProjection,
+        _ctx: ToolUseContext,
+        _tx: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        Ok(ToolCallResult {
+            data: tool_api::tool_trait::generated_builtin_result(&serde_json::json!({})),
+            model_content: None,
+            new_messages: Vec::new(),
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: None,
+            subagent_hooks_fired: false,
+        })
+    }
+}
+
+fn orchestrator_with_skill_listing(
+    cwd: &Path,
+    transcript: &Path,
+    filesystem: Arc<dyn FileSystem>,
+) -> ConversationOrchestrator {
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(SkillListingGateTool));
+    ConversationOrchestrator::new(
+        crate::OrchestratorConfig {
+            context_rendering: InstructionRendering::Announced,
+            ..Default::default()
+        },
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(tools),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        cwd.to_owned(),
+    )
+    .with_jsonl_writer(Arc::new(JsonlWriter::new(
+        transcript.to_owned(),
+        filesystem,
+    )))
+    .with_skill_listing(Arc::new(SkillListingFixture))
+}
+
+async fn append_typed_skill_history(orch: &ConversationOrchestrator) -> [MessageId; 3] {
+    let header = ConversationMessage::user(MessageId::new(), "/review".to_owned());
+    let mut body = ConversationMessage::user_meta(MessageId::new(), "expanded review body".into());
+    if let ConversationMessage::User { turn_companion, .. } = &mut body {
+        *turn_companion = Some(Some(true));
+    }
+    let upe = ConversationMessage::user_meta(
+        MessageId::new(),
+        "UserPromptExpansion hook additional context".into(),
+    );
+    let ids = [header.id(), body.id(), upe.id()];
+    for message in [header, body, upe] {
+        orch.session.lock().await.history.push(message.clone());
+        orch.persist_message_to_jsonl(&message).await;
+    }
+    ids
+}
+
+async fn prepare_local_skill_ingress(
+    orch: &ConversationOrchestrator,
+    prompt_id: MessageId,
+    expected_ids: [MessageId; 3],
+) -> Vec<ConversationMessage> {
+    REQUEST_CONTEXT
+        .scope(request_prompt_context(prompt_id), async {
+            persist_prompt_ingress_after_user(orch, prompt_id, PromptIngressKind::LocalSkill)
+                .await
+                .unwrap();
+            assert!(
+                !orch.regular_user_prompt_for_model_step().await,
+                "the trusted companion body is explicitly non-regular"
+            );
+            let mut prepared = orch
+                .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
+                .await
+                .unwrap();
+            for id in expected_ids {
+                assert_eq!(
+                    prepared
+                        .snapshot
+                        .iter()
+                        .filter(|row| row.id() == id)
+                        .count(),
+                    1,
+                    "typed body and UPE history rows remain once in the prepared request"
+                );
+            }
+            assert!(prepared
+                .snapshot
+                .iter()
+                .any(|row| row.text_content().contains("Environment")));
+            assert!(prepared.snapshot.iter().any(|row| {
+                let text = row.text_content();
+                text.contains("typed-fixture") && text.contains("following skills")
+            }));
+            assert!(!prepared
+                .snapshot
+                .iter()
+                .any(|row| row.text_content().contains("<total_tokens>")));
+            orch.persist_prepared_turn_attachments(&mut prepared).await;
+            prepared.snapshot
+        })
+        .await
+}
+
+static TOTAL_TOKEN_TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct TotalTokenTestEnv {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    mode: Option<std::ffi::OsString>,
+    after_user: Option<std::ffi::OsString>,
+}
+
+impl TotalTokenTestEnv {
+    fn enabled() -> Self {
+        let lock = TOTAL_TOKEN_TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mode = std::env::var_os("CLAUDE_CODE_TOTAL_TOKENS_REMINDER");
+        let after_user = std::env::var_os("CLAUDE_CODE_TOTAL_TOKENS_REMINDER_AFTER_USER_TURN");
+        std::env::set_var("CLAUDE_CODE_TOTAL_TOKENS_REMINDER", "padded-countdown");
+        std::env::set_var("CLAUDE_CODE_TOTAL_TOKENS_REMINDER_AFTER_USER_TURN", "true");
+        Self {
+            _lock: lock,
+            mode,
+            after_user,
+        }
+    }
+}
+
+impl Drop for TotalTokenTestEnv {
+    fn drop(&mut self) {
+        match self.mode.take() {
+            Some(value) => std::env::set_var("CLAUDE_CODE_TOTAL_TOKENS_REMINDER", value),
+            None => std::env::remove_var("CLAUDE_CODE_TOTAL_TOKENS_REMINDER"),
+        }
+        match self.after_user.take() {
+            Some(value) => {
+                std::env::set_var("CLAUDE_CODE_TOTAL_TOKENS_REMINDER_AFTER_USER_TURN", value)
+            }
+            None => std::env::remove_var("CLAUDE_CODE_TOTAL_TOKENS_REMINDER_AFTER_USER_TURN"),
+        }
+    }
+}
+
 #[test]
 fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
     run_with_large_stack(|| async {
@@ -179,11 +455,18 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
                     transcript_attachment: std::sync::Mutex::new(Some(fallback)),
                     staged_ingress_attachments: std::sync::Mutex::new(None),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
+                    next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
                 async {
-                    persist_prompt_ingress_after_user(&orch, first_prompt_id, true).await;
+                    persist_prompt_ingress_after_user(
+                        &orch,
+                        first_prompt_id,
+                        PromptIngressKind::Other,
+                    )
+                    .await
+                    .expect("prompt ingress should persist before preparing the model step");
                     let prepared = orch
-                        .prepare_turn_step(ModelCallPath::Batched, None, true, true, None)
+                        .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
                         .await
                         .unwrap();
                     let hot_fallback_rows = prepared
@@ -223,13 +506,8 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
         let dropped_type_refs = dropped_types.iter().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(
             dropped_type_refs,
-            [
-                "environment",
-                "model",
-                "total_tokens_reminder",
-                "unknown_command_fallback"
-            ],
-            "prompt ingress rows persist before the typed fallback sidecar"
+            ["environment", "model", "unknown_command_fallback"],
+            "the fallback collector persists its common rows without claiming a regular-user token row"
         );
         assert_eq!(
             dropped_types
@@ -264,7 +542,8 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
                 .attachment_projection
                 .as_ref()
                 .and_then(|payload| payload.string_at("/type")),
-            Some("total_tokens_reminder")
+            Some("model"),
+            "without a regular-user token row, the fallback sidecar follows the last common producer"
         );
         let fallback_uuid = fallback_id.as_uuid().to_string();
         assert_eq!(
@@ -581,6 +860,7 @@ fn complete_ingress_batch_is_selected_once_before_first_append_and_retried_by_id
                         budget.clone(),
                     ])),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
+                    next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
                 async {
                     orch.stage_prompt_ingress_reminder(&environment).await;
@@ -983,6 +1263,7 @@ fn multiple_staged_environment_rows_keep_their_source_order_in_the_request() {
                         finalized: true,
                         ..PromptIngressBatch::default()
                     }),
+                    next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
                 async {
                     let prepared = orch
@@ -1044,6 +1325,7 @@ fn cancelled_fallback_append_finishes_before_catching_up_the_transcript_tip() {
                     transcript_attachment: std::sync::Mutex::new(Some(fallback)),
                     staged_ingress_attachments: std::sync::Mutex::new(Some(Vec::new())),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
+                    next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
                 async {
                     let cancel = lingxi_core::host::CancellationToken::new();
@@ -1359,5 +1641,177 @@ fn prompt_ingress_mods_screen_request_copies_and_re_resolve_after_cold_resume() 
         assert!(!cold_request[0]
             .iter()
             .any(|message| message.text_content().contains("<total_tokens>")));
+    });
+}
+
+#[test]
+fn typed_and_cold_pending_skill_keep_common_ingress_listing_and_upe_without_tokens() {
+    run_with_large_stack(|| async {
+        let _token_env = TotalTokenTestEnv::enabled();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+
+        let warm_transcript = root.path().join("typed-skill.jsonl");
+        let warm = orchestrator_with_skill_listing(&cwd, &warm_transcript, filesystem.clone());
+        let ids = append_typed_skill_history(&warm).await;
+        let warm_snapshot = prepare_local_skill_ingress(&warm, ids[0], ids).await;
+        assert!(warm_snapshot
+            .iter()
+            .any(|row| row.text_content().contains("Environment")));
+        assert!(warm_snapshot
+            .iter()
+            .any(|row| row.text_content().contains("typed-fixture")));
+        let warm_rows = JsonlReader::new(warm_transcript.clone(), filesystem.clone())
+            .read_all()
+            .await
+            .unwrap();
+        let warm_types = attachment_types(&warm_rows);
+        assert_eq!(
+            warm_types
+                .iter()
+                .take(3)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["environment", "model", "skill_listing"],
+            "LocalSkill stages the complete non-token ingress group before deferred shared context"
+        );
+        assert!(
+            warm_rows.iter().any(|row| {
+                row.message_type == "user" && row.uuid == ids[2].as_uuid().to_string()
+            }),
+            "the UserPromptExpansion history row remains durable under its original ID"
+        );
+        assert!(!attachment_types(&warm_rows)
+            .iter()
+            .any(|kind| kind == "total_tokens_reminder"));
+
+        // A fresh orchestrator reconstructs the pending typed body from JSONL,
+        // then performs the same per-ingress NAr staging before its first API step.
+        let cold_transcript = root.path().join("cold-pending-skill.jsonl");
+        let seed = orchestrator_with_skill_listing(&cwd, &cold_transcript, filesystem.clone());
+        let cold_ids = append_typed_skill_history(&seed).await;
+        let seed_rows = JsonlReader::new(cold_transcript.clone(), filesystem.clone())
+            .read_all()
+            .await
+            .unwrap();
+        let session_id = uuid::Uuid::parse_str(&seed_rows[0].session_id).unwrap();
+        let cold = orchestrator_with_skill_listing(&cwd, &cold_transcript, filesystem.clone());
+        *cold.session.lock().await = crate::resume::state_from_messages(session_id, &seed_rows);
+        cold.restore_resume_runtime_metadata(&seed_rows).await;
+        let cold_snapshot = prepare_local_skill_ingress(&cold, cold_ids[0], cold_ids).await;
+        for id in cold_ids {
+            assert_eq!(
+                cold_snapshot.iter().filter(|row| row.id() == id).count(),
+                1,
+                "cold replay retains each original typed Skill/UPE row once"
+            );
+        }
+        let cold_rows = JsonlReader::new(cold_transcript, filesystem)
+            .read_all()
+            .await
+            .unwrap();
+        let cold_types = attachment_types(&cold_rows);
+        assert!(cold_types.iter().any(|kind| kind == "environment"));
+        assert!(cold_types.iter().any(|kind| kind == "model"));
+        assert!(cold_types.iter().any(|kind| kind == "skill_listing"));
+        assert!(!cold_types
+            .iter()
+            .any(|kind| kind == "total_tokens_reminder"));
+    });
+}
+
+#[test]
+fn regular_ingress_has_token_and_later_tool_continuation_uses_false_token_path() {
+    run_with_large_stack(|| async {
+        let _token_env = TotalTokenTestEnv::enabled();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("regular-tool-continuation.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let orch = orchestrator(&cwd, &transcript, filesystem);
+        let user = ConversationMessage::user(MessageId::new(), "regular user prompt".into());
+        let user_id = user.id();
+        orch.session.lock().await.history.push(user.clone());
+        orch.persist_message_to_jsonl(&user).await;
+
+        REQUEST_CONTEXT
+            .scope(
+                request_prompt_context(user_id),
+                async {
+                    persist_prompt_ingress_after_user(
+                        &orch,
+                        user_id,
+                        PromptIngressKind::RegularUser,
+                    )
+                    .await
+                    .unwrap();
+                    assert!(orch.regular_user_prompt_for_model_step().await);
+                    let mut regular = orch
+                        .prepare_turn_step(ModelCallPath::Batched, None, true, true, None)
+                        .await
+                        .unwrap();
+                    assert!(regular
+                        .turn_reminders
+                        .iter()
+                        .any(|row| row.text_content().contains("<total_tokens>")));
+                    orch.persist_prepared_turn_attachments(&mut regular).await;
+
+                    let tool_use_id = lingxi_core::types::ToolUseId::from("toolu_ingress_continuation");
+                    let assistant = ConversationMessage::Assistant {
+                        per_turn_effort: None,
+                        id: MessageId::new(),
+                        content: vec![ContentBlock::ToolUse {
+                            id: tool_use_id.clone(),
+                            name: "Read".into(),
+                            input: Utf16JsonProjection::parse("{}").unwrap(),
+                            provider_id: None,
+                        }],
+                        stop_reason: Some("tool_use".into()),
+                        resumable: None,
+                    };
+                    let tool_result = ConversationMessage::User {
+                        api_message_override: None,
+                        id: MessageId::new(),
+                        content: vec![ContentBlock::ToolResult {
+                            tool_use_id,
+                            content: "read complete".into(),
+                            is_error: Some(false),
+                            provider_tool_use_id: None,
+                            content_blocks: None,
+                        }],
+                        is_meta: false,
+                        is_compact_summary: false,
+                        is_visible_in_transcript_only: false,
+                        turn_companion: None,
+                        usage_limit_note: None,
+                        origin: None,
+                        turn_origin: None,
+                    };
+                    for row in [assistant, tool_result] {
+                        orch.session.lock().await.history.push(row.clone());
+                        orch.persist_message_to_jsonl(&row).await;
+                    }
+                    assert!(
+                        !orch.regular_user_prompt_for_model_step().await,
+                        "tool_result ends the regular-user classifier window"
+                    );
+                    let continuation = orch
+                        .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
+                        .await
+                        .unwrap();
+                    assert!(continuation
+                        .turn_reminders
+                        .iter()
+                        .any(|row| row.text_content().contains("<total_tokens>")),
+                        "a finalized ingress batch does not stick to the continuation; false/reanchor-false token collection remains active"
+                    );
+                },
+            )
+            .await;
     });
 }

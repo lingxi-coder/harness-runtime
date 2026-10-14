@@ -74,7 +74,10 @@ async fn handled(
     d: &RegistrySlashDispatcher,
     raw: &str,
 ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
-    match d.dispatch(raw.into()).await {
+    match d
+        .dispatch(raw.into(), lingxi_core::host::CancellationToken::new())
+        .await
+    {
         SlashDispatchResult::Handled { display } => display,
         other => panic!("{raw} expected Handled, got {other:?}"),
     }

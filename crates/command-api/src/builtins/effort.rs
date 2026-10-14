@@ -612,6 +612,7 @@ mod tests {
             let mock = Arc::new(MockOrchestratorHandle::new());
             mock.set_status_snapshot(lingxi_core::host::StatusSnapshot {
                 model: input["model"].as_str().unwrap().into(),
+                model_source: None,
                 ..Default::default()
             });
             mock.set_dynamic_workflows_gate(input["workflow"].as_bool().unwrap(), false);

@@ -198,12 +198,14 @@ async fn full_ir_routes_target_history_and_model_match_before_display_repair() {
             Action::Success,
         ]);
         let api = service(capture.clone(), true, false, FAST_MODEL).with_fast_policy_source(
-            std::sync::Arc::new(|| llm_runtime::model::fast_admission::Policy {
-                flag_fast: true,
-                cached_org_enabled: true,
-                remote: true,
-                agent_owned_remote: false,
-                ..Default::default()
+            std::sync::Arc::new(|| {
+                Ok(llm_runtime::model::fast_admission::Policy {
+                    flag_fast: true,
+                    cached_org_enabled: true,
+                    remote: true,
+                    agent_owned_remote: false,
+                    ..Default::default()
+                })
             }),
         );
         let scope = Default::default();

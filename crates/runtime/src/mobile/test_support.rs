@@ -73,6 +73,15 @@ impl HostFakePlatform {
         }
     }
 
+    /// Replace the stub process runner for a test that needs to observe a
+    /// command-hook invocation. The default remains the unsupported minimal
+    /// runner, so unrelated mobile host fixtures still cannot spawn processes.
+    #[must_use]
+    pub fn with_process_runner(mut self, process: Arc<dyn ProcessRunner>) -> Self {
+        self.process = process;
+        self
+    }
+
     /// Inject a fake secure store so the built runtime reports
     /// `oauth_supported = store.is_encrypted()` — used to prove the native
     /// secure-storage injection seam end-to-end off-device.

@@ -173,7 +173,7 @@ async fn frame_pump_invoked_on_inbound_frame() {
     // Send an inbound frame. The pump should fire and echo a frame back.
     let inbound = Frame::Event(ClientEvent::Error {
         kind: ErrorKindDto::Transport,
-        message: "ping".to_string(),
+        message: "ping".into(),
     });
     let inbound_text = serde_json::to_string(&inbound).expect("serialize inbound frame");
     ws.send(Message::Text(inbound_text))

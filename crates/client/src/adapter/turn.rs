@@ -320,7 +320,8 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
             }
         }
         OrchestratorError::MaxTurnsReached { .. } => ErrorKindDto::MaxTurns,
-        OrchestratorError::StreamEndedWithoutStop
+        OrchestratorError::Settings(_)
+        | OrchestratorError::StreamEndedWithoutStop
         | OrchestratorError::Internal(_)
         | OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::Compaction(_)
@@ -341,14 +342,20 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
 
 /// Lower an [`OrchestratorError`] to a [`ClientEvent::Error`].
 ///
-/// The `kind` is the coarse class from [`error_kind_for`]; the `message` is the
-/// error's `Display` string (the byte-locked reasons — e.g.
-/// `"Reached maximum number of turns (30)"` — preserved verbatim for the client).
+/// The `kind` is the coarse class from [`error_kind_for`]. Settings failures use
+/// their exact source message projection; all other variants use their Display text.
 #[must_use]
 pub fn map_orchestrator_error(err: &OrchestratorError) -> ClientEvent {
+    let message = match err {
+        OrchestratorError::Settings(settings) => {
+            ClientTextDto::from_projection(&settings.message_projection())
+                .expect("settings error message is a root-string projection")
+        }
+        other => ClientTextDto::from_utf8(&other.to_string()),
+    };
     ClientEvent::Error {
         kind: error_kind_for(err),
-        message: err.to_string(),
+        message,
     }
 }
 
@@ -620,10 +627,38 @@ mod tests {
             ClientEvent::Error { kind, message } => {
                 assert_eq!(kind, ErrorKindDto::MaxTurns);
                 // The byte-locked Display literal is preserved verbatim.
-                assert_eq!(message, "Reached maximum number of turns (30)");
+                assert_eq!(message.display(), "Reached maximum number of turns (30)");
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn settings_error_message_keeps_exact_source_utf16_units() {
+        let units = vec![b'x' as u16, 0xd800, b'y' as u16];
+        let message =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let settings = lingxi_core::settings::SettingsError::source_failure(
+            "read_failed",
+            message,
+            Utf16JsonProjection::object(Vec::new()).unwrap(),
+            None,
+        );
+        let event = map_orchestrator_error(&OrchestratorError::Settings(settings));
+        let ClientEvent::Error { kind, message } = event else {
+            panic!("expected ClientEvent::Error");
+        };
+        assert_eq!(kind, ErrorKindDto::Internal);
+        assert_eq!(message.code_units, units);
+
+        let encoded = serde_json::to_string(&ClientEvent::Error { kind, message }).unwrap();
+        assert!(encoded.contains(r#""message":"x\ud800y""#), "{encoded}");
+        let decoded: ClientEvent = serde_json::from_str(&encoded).unwrap();
+        let ClientEvent::Error { message, .. } = decoded else {
+            panic!("expected ClientEvent::Error");
+        };
+        assert_eq!(message.code_units, units);
     }
 
     /// The server-emitted-error fold (`streaming_loop.rs:93`) is recovered as the
@@ -953,8 +988,9 @@ mod tests {
             ClientEvent::Error { kind, message } => {
                 assert_eq!(*kind, ErrorKindDto::Transport);
                 assert!(
-                    message.starts_with("streaming transport error: "),
-                    "got: {message}"
+                    message.display().starts_with("streaming transport error: "),
+                    "got: {}",
+                    message.display()
                 );
             }
             other => panic!("expected Error, got {other:?}"),

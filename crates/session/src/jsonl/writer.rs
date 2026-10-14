@@ -1551,6 +1551,71 @@ impl JsonlWriter {
         .await
     }
 
+    /// Persist one transcript row from a durable pending prompt exactly once. The
+    /// stable UUID and all source fields are checked under the transcript
+    /// transaction; only its regenerated timestamp and derived parent are
+    /// ignored on a retry. The returned UUID is the transcript's actual tail
+    /// observed by that same transaction, including when this row was already
+    /// present earlier in the file.
+    pub async fn append_pending_prompt_message_once(
+        &self,
+        message: &JsonlMessage,
+    ) -> Result<(TranscriptAppendOutcome, Option<String>), TranscriptWriterError> {
+        let session_id = SessionId::parse_prefixed(&message.session_id).ok_or_else(|| {
+            TranscriptWriterError::Fs(FsError::Io(
+                "pending prompt row has an invalid session id".into(),
+            ))
+        })?;
+        let _guard = self.lock.lock().await;
+        self.flush_queue_operations_locked()
+            .await
+            .map_err(queue_journal_error)?;
+        let target = self
+            .session_targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| {
+                TranscriptWriterError::Fs(FsError::Io(format!(
+                    "durable transcript target is not bound for session {session_id}"
+                )))
+            })?;
+        let stamped = stamp_session_kind(message);
+        let message = stamped.as_ref().unwrap_or(message);
+        let payload = native_message_projection(message)?;
+        let message_uuid = message.uuid.clone();
+        let identity_store = self.identity_store.clone();
+        tokio::task::spawn_blocking(move || {
+            target.writer.with_transaction(|transaction| {
+                let parent = target.path.parent().ok_or_else(|| {
+                    TranscriptWriterError::Fs(FsError::Io(
+                        "active transcript path has no parent".into(),
+                    ))
+                })?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| TranscriptWriterError::Fs(FsError::Io(error.to_string())))?;
+                let identity = lingxi_core::host::rooted_fs::root_identity(parent)?;
+                let relative = target.path.file_name().map(PathBuf::from).ok_or_else(|| {
+                    TranscriptWriterError::Fs(FsError::Io(
+                        "active transcript path has no file name".into(),
+                    ))
+                })?;
+                transaction.append_pending_prompt_json_once_at_with_tip_identity(
+                    parent,
+                    &identity,
+                    &relative,
+                    &message_uuid,
+                    payload,
+                    &identity_store,
+                    &target.path,
+                )
+            })
+        })
+        .await
+        .map_err(|error| TranscriptWriterError::Fs(FsError::Io(error.to_string())))?
+    }
+
     /// Append once for a run pinned to its originating session. The target is
     /// looked up only after acquiring the ordinary writer mutex, while the
     /// durable transaction then serializes it with `/cd` relocation and other
@@ -2862,6 +2927,32 @@ mod tests {
         .expect("identity test row")
     }
 
+    fn pending_user_row(
+        uuid: &str,
+        parent_uuid: Option<&str>,
+        timestamp: &str,
+        text: &str,
+        turn_companion: Option<bool>,
+    ) -> JsonlMessage {
+        let mut value = json!({
+            "parentUuid": parent_uuid,
+            "isSidechain": false,
+            "type": "user",
+            "message": {"role":"user","content":[{"type":"text","text":text}]},
+            "uuid": uuid,
+            "timestamp": timestamp,
+            "cwd": "/workspace",
+            "sessionId": "11111111-2222-3333-4444-555555555555",
+            "version": "test",
+            "promptId": "stable-prompt",
+            "permissionMode": "default",
+        });
+        if let Some(turn_companion) = turn_companion {
+            value["turnCompanion"] = json!(turn_companion);
+        }
+        read_message(value)
+    }
+
     fn source_value(value: &serde_json::Value) -> Utf16JsonProjection {
         Utf16JsonProjection::from_serde_value(value)
             .expect("generated fixture JSON is representable as a source projection")
@@ -2990,6 +3081,434 @@ mod tests {
             .is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pending_prompt_once_ignores_only_timestamp_and_derived_parent_and_returns_actual_tip()
+    {
+        let (dir, path, mut writer) = temp_writer("pending-prompt-once");
+        let state_root = dir.join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        writer = writer.with_durable_lock(Arc::new(
+            DurableTranscriptWriter::open(&state_root).unwrap(),
+        ));
+        let session_id = SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555").unwrap();
+        writer
+            .activate_session_target(session_id, path.clone(), dir.clone())
+            .unwrap();
+
+        let first = pending_user_row(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            None,
+            "2026-10-12T12:00:00.000Z",
+            "same source",
+            None,
+        );
+        let prior = identity_row("99999999-8888-4777-8666-555555555555", "prior row");
+        let tail = identity_row("bbbbbbbb-cccc-4ddd-8eee-ffffffffffff", "later row");
+        writer.append(&prior).await.unwrap();
+        assert_eq!(
+            writer
+                .append_pending_prompt_message_once(&first)
+                .await
+                .unwrap(),
+            (TranscriptAppendOutcome::Appended, Some(first.uuid.clone()))
+        );
+        writer.append(&tail).await.unwrap();
+
+        let retry = pending_user_row(
+            &first.uuid,
+            None,
+            "2026-10-12T12:05:00.000Z",
+            "same source",
+            None,
+        );
+        assert_eq!(
+            writer
+                .append_pending_prompt_message_once(&retry)
+                .await
+                .unwrap(),
+            (
+                TranscriptAppendOutcome::AlreadyPresent,
+                Some(tail.uuid.clone())
+            ),
+            "a duplicate earlier in the transcript returns the actual current tail"
+        );
+
+        let changed_content = pending_user_row(
+            &first.uuid,
+            None,
+            "2026-10-12T12:05:00.000Z",
+            "different source",
+            None,
+        );
+        assert!(matches!(
+            writer
+                .append_pending_prompt_message_once(&changed_content)
+                .await,
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
+
+        let exact_units_id = "eeeeeeee-ffff-4000-8000-222222222222";
+        let mut exact_units =
+            pending_user_row(exact_units_id, None, "2026-10-12T12:00:00.000Z", "", None);
+        exact_units.message = Utf16JsonProjection::parse(
+            r#"{"role":"user","content":[{"type":"text","text":"\ud800"}]}"#,
+        )
+        .unwrap();
+        writer
+            .append_pending_prompt_message_once(&exact_units)
+            .await
+            .unwrap();
+        let mut replacement_character = exact_units.clone();
+        replacement_character.message =
+            Utf16JsonProjection::parse(r#"{"role":"user","content":[{"type":"text","text":"�"}]}"#)
+                .unwrap();
+        assert!(matches!(
+            writer
+                .append_pending_prompt_message_once(&replacement_character)
+                .await,
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
+
+        let companion_id = "cccccccc-dddd-4eee-8fff-000000000000";
+        let companion = pending_user_row(
+            companion_id,
+            None,
+            "2026-10-12T12:00:00.000Z",
+            "body source",
+            Some(true),
+        );
+        writer
+            .append_pending_prompt_message_once(&companion)
+            .await
+            .unwrap();
+        let changed_companion = pending_user_row(
+            companion_id,
+            None,
+            "2026-10-12T12:05:00.000Z",
+            "body source",
+            Some(false),
+        );
+        assert!(matches!(
+            writer
+                .append_pending_prompt_message_once(&changed_companion)
+                .await,
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
+
+        let hook_id = "dddddddd-eeee-4fff-8000-111111111111";
+        let mut hook = read_message(json!({
+            "parentUuid":null,
+            "isSidechain":false,
+            "attachment":{"type":"hook_success","hookEvent":"UserPromptExpansion","hookName":"before","content":"source"},
+            "type":"attachment",
+            "uuid":hook_id,
+            "timestamp":"2026-10-12T12:00:00.000Z",
+            "cwd":"/workspace",
+            "sessionId":"11111111-2222-3333-4444-555555555555",
+            "version":"test"
+        }));
+        writer
+            .append_pending_prompt_message_once(&hook)
+            .await
+            .unwrap();
+        hook.timestamp = "2026-10-12T12:05:00.000Z".into();
+        assert_eq!(
+            writer
+                .append_pending_prompt_message_once(&hook)
+                .await
+                .unwrap()
+                .0,
+            TranscriptAppendOutcome::AlreadyPresent
+        );
+        hook.attachment_projection
+            .as_mut()
+            .unwrap()
+            .set_field("hookName", Utf16JsonProjection::from("changed"))
+            .unwrap();
+        assert!(matches!(
+            writer.append_pending_prompt_message_once(&hook).await,
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
+
+        let lines = std::fs::read_to_string(&path).unwrap();
+        let count_uuid = |uuid: &str| {
+            lines
+                .lines()
+                .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+                .filter(|row| row.string_at("/uuid") == Some(uuid))
+                .count()
+        };
+        assert_eq!(count_uuid(&first.uuid), 1);
+        assert_eq!(count_uuid(companion_id), 1);
+        assert_eq!(count_uuid(hook_id), 1);
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pending_prompt_duplicate_uses_native_json_stringify_semantics_and_source_order() {
+        let (dir, path, mut writer) = temp_writer("pending-prompt-native-json");
+        let state_root = dir.join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        writer = writer.with_durable_lock(Arc::new(
+            DurableTranscriptWriter::open(&state_root).unwrap(),
+        ));
+        let session_id = SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555").unwrap();
+        writer
+            .activate_session_target(session_id, path.clone(), dir.clone())
+            .unwrap();
+
+        let mut negative_zero = pending_user_row(
+            "11111111-aaaa-4bbb-8ccc-111111111111",
+            None,
+            "2026-10-12T12:00:00.000Z",
+            "number source",
+            None,
+        );
+        negative_zero.extra = Utf16JsonProjection::parse(r#"{"nativeNumber":-0}"#).unwrap();
+        assert_eq!(
+            writer
+                .append_pending_prompt_message_once(&negative_zero)
+                .await
+                .unwrap()
+                .0,
+            TranscriptAppendOutcome::Appended
+        );
+        let negative_zero_line = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .find(|line| line.contains(&negative_zero.uuid))
+            .unwrap()
+            .to_owned();
+        assert!(negative_zero_line.contains(r#""nativeNumber":0"#));
+        assert!(!negative_zero_line.contains(r#""nativeNumber":-0"#));
+
+        let mut positive_zero = negative_zero.clone();
+        positive_zero.timestamp = "2026-10-12T12:05:00.000Z".into();
+        positive_zero.extra = Utf16JsonProjection::parse(r#"{"nativeNumber":0}"#).unwrap();
+        assert_eq!(
+            writer
+                .append_pending_prompt_message_once(&positive_zero)
+                .await
+                .unwrap()
+                .0,
+            TranscriptAppendOutcome::AlreadyPresent,
+            "JSON.stringify makes the persisted -0 source equal to a retry with 0"
+        );
+
+        let mut overflow = pending_user_row(
+            "22222222-bbbb-4ccc-8ddd-222222222222",
+            None,
+            "2026-10-12T12:00:00.000Z",
+            "overflow source",
+            None,
+        );
+        overflow.extra = Utf16JsonProjection::parse(r#"{"nativeNumber":1e309}"#).unwrap();
+        assert_eq!(
+            writer
+                .append_pending_prompt_message_once(&overflow)
+                .await
+                .unwrap()
+                .0,
+            TranscriptAppendOutcome::Appended
+        );
+        let overflow_line = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .find(|line| line.contains(&overflow.uuid))
+            .unwrap()
+            .to_owned();
+        assert!(overflow_line.contains(r#""nativeNumber":null"#));
+
+        let mut null_retry = overflow.clone();
+        null_retry.timestamp = "2026-10-12T12:05:00.000Z".into();
+        null_retry.extra = Utf16JsonProjection::parse(r#"{"nativeNumber":null}"#).unwrap();
+        assert_eq!(
+            writer
+                .append_pending_prompt_message_once(&null_retry)
+                .await
+                .unwrap()
+                .0,
+            TranscriptAppendOutcome::AlreadyPresent,
+            "JSON.stringify persists an overflowing number as null"
+        );
+
+        let mut ordered = pending_user_row(
+            "33333333-cccc-4ddd-8eee-333333333333",
+            None,
+            "2026-10-12T12:00:00.000Z",
+            "ordered source",
+            None,
+        );
+        ordered.extra =
+            Utf16JsonProjection::parse(r#"{"nativeFirst":"a","nativeSecond":"b"}"#).unwrap();
+        assert_eq!(
+            writer
+                .append_pending_prompt_message_once(&ordered)
+                .await
+                .unwrap()
+                .0,
+            TranscriptAppendOutcome::Appended
+        );
+        let mut reordered = ordered.clone();
+        reordered.timestamp = "2026-10-12T12:05:00.000Z".into();
+        reordered.extra =
+            Utf16JsonProjection::parse(r#"{"nativeSecond":"b","nativeFirst":"a"}"#).unwrap();
+        assert!(matches!(
+            writer.append_pending_prompt_message_once(&reordered).await,
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
+
+        let mut lone_surrogate_key = pending_user_row(
+            "44444444-dddd-4eee-8fff-444444444444",
+            None,
+            "2026-10-12T12:00:00.000Z",
+            "UTF-16 key source",
+            None,
+        );
+        lone_surrogate_key.extra = Utf16JsonProjection::parse(r#"{"\ud800":"key value"}"#).unwrap();
+        assert_eq!(
+            writer
+                .append_pending_prompt_message_once(&lone_surrogate_key)
+                .await
+                .unwrap()
+                .0,
+            TranscriptAppendOutcome::Appended
+        );
+        let mut replacement_key = lone_surrogate_key.clone();
+        replacement_key.timestamp = "2026-10-12T12:05:00.000Z".into();
+        replacement_key.extra = Utf16JsonProjection::parse(r#"{"�":"key value"}"#).unwrap();
+        assert!(matches!(
+            writer
+                .append_pending_prompt_message_once(&replacement_key)
+                .await,
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
+
+        let lines = std::fs::read_to_string(&path).unwrap();
+        for uuid in [
+            negative_zero.uuid.as_str(),
+            overflow.uuid.as_str(),
+            ordered.uuid.as_str(),
+            lone_surrogate_key.uuid.as_str(),
+        ] {
+            assert_eq!(
+                lines
+                    .lines()
+                    .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+                    .filter(|row| row.string_at("/uuid") == Some(uuid))
+                    .count(),
+                1,
+                "one durable source row remains for {uuid}"
+            );
+        }
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pending_prompt_cold_retry_repairs_every_durable_row_prefix_by_uuid() {
+        for persisted_prefix_len in 0..=4 {
+            let tag = format!("pending-prefix-{persisted_prefix_len}");
+            let (dir, path, first_writer) = temp_writer(&tag);
+            let state_root = dir.join("state");
+            std::fs::create_dir_all(&state_root).unwrap();
+            let session_id =
+                SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555").unwrap();
+            let first_writer = first_writer.with_durable_lock(Arc::new(
+                DurableTranscriptWriter::open(&state_root).unwrap(),
+            ));
+            first_writer
+                .activate_session_target(session_id, path.clone(), dir.clone())
+                .unwrap();
+
+            let command = pending_user_row(
+                "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                None,
+                "2026-10-12T12:00:00.000Z",
+                "/skill same source",
+                None,
+            );
+            let body = pending_user_row(
+                "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+                None,
+                "2026-10-12T12:00:00.000Z",
+                "expanded body",
+                Some(true),
+            );
+            let hook_one = read_message(json!({
+                "parentUuid":null,"isSidechain":false,
+                "attachment":{"type":"hook_success","hookEvent":"UserPromptExpansion","sequence":1},
+                "type":"attachment","uuid":"cccccccc-dddd-4eee-8fff-000000000000",
+                "timestamp":"2026-10-12T12:00:00.000Z","cwd":"/workspace",
+                "sessionId":"11111111-2222-3333-4444-555555555555","version":"test"
+            }));
+            let hook_two = read_message(json!({
+                "parentUuid":null,"isSidechain":false,
+                "attachment":{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","sequence":2},
+                "type":"attachment","uuid":"dddddddd-eeee-4fff-8000-111111111111",
+                "timestamp":"2026-10-12T12:00:00.000Z","cwd":"/workspace",
+                "sessionId":"11111111-2222-3333-4444-555555555555","version":"test"
+            }));
+            let rows = [command, body, hook_one, hook_two];
+            for row in rows.iter().take(persisted_prefix_len) {
+                first_writer
+                    .append_pending_prompt_message_once(row)
+                    .await
+                    .unwrap();
+            }
+            drop(first_writer);
+
+            let fs: Arc<dyn FileSystem> =
+                Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
+            let restarted = JsonlWriter::new(path.clone(), fs).with_durable_lock(Arc::new(
+                DurableTranscriptWriter::open(&state_root).unwrap(),
+            ));
+            restarted
+                .activate_session_target(session_id, path.clone(), dir.clone())
+                .unwrap();
+            let mut actual_tip = None;
+            for row in &rows {
+                let (outcome, tip) = restarted
+                    .append_pending_prompt_message_once(row)
+                    .await
+                    .unwrap();
+                actual_tip = tip;
+                assert_eq!(
+                    outcome,
+                    if rows
+                        .iter()
+                        .position(|candidate| candidate.uuid == row.uuid)
+                        .unwrap()
+                        < persisted_prefix_len
+                    {
+                        TranscriptAppendOutcome::AlreadyPresent
+                    } else {
+                        TranscriptAppendOutcome::Appended
+                    },
+                    "prefix length {persisted_prefix_len} resumes the expected suffix"
+                );
+            }
+            assert_eq!(
+                actual_tip.as_deref(),
+                rows.last().map(|row| row.uuid.as_str())
+            );
+            let raw = std::fs::read_to_string(&path).unwrap();
+            let actual_uuids = raw
+                .lines()
+                .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+                .filter_map(|row| row.string_at("/uuid").map(str::to_owned))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual_uuids,
+                rows.iter().map(|row| row.uuid.clone()).collect::<Vec<_>>(),
+                "cold retry preserves source order and never duplicates a UUID"
+            );
+            drop(restarted);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]

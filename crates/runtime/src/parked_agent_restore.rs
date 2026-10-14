@@ -1143,7 +1143,11 @@ mod tests {
         seed(dir.path(), id, &["already completed setup"]).await;
         let mut launch = request();
         launch.instruction_context = Some(InstructionContext {
-            user_context: [("claudeMd".into(), "obsolete policy body".into())].into(),
+            user_context: lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![(
+                "claudeMd".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from("obsolete policy body"),
+            )])
+            .unwrap(),
             sent_paths: [std::path::PathBuf::from("/repo/AGENTS.md")].into(),
             managed_instructions_only: true,
             ..Default::default()
@@ -1203,7 +1207,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(restored.announcement_history, expected_announcements);
-        assert!(restored.user_context.is_empty());
+        assert!(restored.user_context_is_empty());
         assert!(restored.sent_paths.is_empty());
         assert!(!restored.managed_instructions_only);
         assert_eq!(seen[0].resumed_history.as_ref().unwrap().len(), 7);

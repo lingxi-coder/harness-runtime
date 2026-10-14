@@ -286,6 +286,10 @@ pub fn lower_status_snapshot(s: &StatusSnapshot) -> StatusSnapshotDto {
     StatusSnapshotDto {
         session_id: s.session_id.clone(),
         model: s.model.clone(),
+        model_source: s
+            .model_source
+            .as_ref()
+            .and_then(|source| crate::protocol::text::ClientTextDto::from_projection(source).ok()),
         n_messages: s.n_messages,
         total_cost_usd: s.total_cost_usd,
         input_tokens: s.input_tokens,

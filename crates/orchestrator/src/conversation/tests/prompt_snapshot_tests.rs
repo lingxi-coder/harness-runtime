@@ -171,6 +171,28 @@ fn assert_recorded_host_branding_role(request: &crate::OrchestratorApiRequest) {
     );
 }
 
+fn assert_appended_source_occurs_once(
+    request: &crate::OrchestratorApiRequest,
+    expected_units: &[u16],
+) {
+    use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
+
+    let crate::OrchestratorApiRequest::Main(request) = request else {
+        panic!("the provider prompt is carried by a main request");
+    };
+    let Some(SystemPromptInput::SourceVector { elements, .. }) = request.system.as_ref() else {
+        panic!("the appended prompt must remain in the provider source vector");
+    };
+    assert_eq!(
+        elements
+            .iter()
+            .filter(|element| element.utf16_code_units() == expected_units)
+            .count(),
+        1,
+        "the persisted prompt vector must carry the append exactly once"
+    );
+}
+
 fn attachment(payload: serde_json::Value) -> JsonlMessage {
     JsonlMessage {
         message_type: "attachment".to_string(),
@@ -317,8 +339,8 @@ async fn snapshot_restores_the_provider_cache_boundary_as_its_own_source_block()
         restored.system_prompt,
         vec!["shared".to_owned(), marker.to_owned(), "session".to_owned()]
     );
-    let raw = orch.effective_system_prompt().await;
-    let provider = orch.provider_system_prompt().await.display_text();
+    let raw = orch.effective_system_prompt().await.unwrap();
+    let provider = orch.provider_system_prompt().await.unwrap().display_text();
     assert!(raw.starts_with(&format!("shared\n\n{marker}\n\nsession")));
     assert!(provider.starts_with(&format!("shared\n\n{marker}\n\nsession")));
 }
@@ -404,7 +426,7 @@ async fn resumed_session_without_snapshot_never_creates_one() {
     orch.prompt_runtime
         .prompt_snapshot_resume
         .store(true, std::sync::atomic::Ordering::Release);
-    let rendered = orch.provider_system_prompt().await;
+    let rendered = orch.provider_system_prompt().await.unwrap();
     orch.record_prompt_snapshot_if_needed(Some(&rendered), &[])
         .await;
     assert!(orch.prompt_runtime.prompt_snapshot.lock().await.is_none());
@@ -464,7 +486,7 @@ async fn a_plain_session_records_its_prompt_without_any_env_opt_in() {
         orch.prompt_snapshot_eligible(),
         "no env, no flag — 2.1.270 records by default"
     );
-    let rendered = orch.provider_system_prompt().await;
+    let rendered = orch.provider_system_prompt().await.unwrap();
     orch.record_prompt_snapshot_if_needed(Some(&rendered), &[])
         .await;
     assert!(
@@ -494,7 +516,7 @@ async fn the_off_flag_stops_recording_a_session_that_would_otherwise_record() {
         std::env::temp_dir(),
     );
     assert!(!orch.prompt_snapshot_eligible());
-    let rendered = orch.provider_system_prompt().await;
+    let rendered = orch.provider_system_prompt().await.unwrap();
     orch.record_prompt_snapshot_if_needed(Some(&rendered), &[])
         .await;
     assert!(
@@ -524,6 +546,10 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
     lingxi_core::host::session_flags::set_system_prompt_snapshot(Some(true));
     telemetry::test_set_flag("tengu_foamy_spring", true);
 
+    let append_units = "managed helper append".encode_utf16().collect::<Vec<_>>();
+    let append_source =
+        Source::root_string("managed helper append".to_owned(), append_units.clone()).unwrap();
+
     let response = || {
         crate::test_support::mock_message_response(
             vec![llm_runtime::ContentBlock::Text {
@@ -548,6 +574,7 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         let warm = ConversationOrchestrator::new(
             OrchestratorConfig {
                 context_rendering: rendering,
+                append_system_prompt: Some(append_source.clone()),
                 ..OrchestratorConfig::default()
             },
             warm_api.clone(),
@@ -567,6 +594,7 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         let warm_requests = warm_api.captured_requests().await;
         assert_eq!(warm_requests.len(), 1);
         assert_recorded_host_branding_role(&warm_requests[0]);
+        assert_appended_source_occurs_once(&warm_requests[0], &append_units);
         // Exercise the same writer a second time through the successful inline
         // tool update path; both persisted versions must retain the hint.
         warm.record_inline_prompt_tools_after_success(&[wire_tool(
@@ -582,6 +610,15 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
             .await
             .clone()
             .unwrap();
+        assert_eq!(
+            expected_snapshot
+                .system_prompt
+                .iter()
+                .filter(|section| section.as_str() == "managed helper append")
+                .count(),
+            1,
+            "the persisted source vector must include the append exactly once"
+        );
         assert_eq!(expected_snapshot.context_rendering, Some(rendering));
         drop(warm);
 
@@ -608,7 +645,10 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         let cold_marker = "policy loaded only after cold resume";
         let cold_api = Arc::new(MockApiClient::new(vec![response()]));
         let cold = ConversationOrchestrator::with_resume(
-            OrchestratorConfig::default(),
+            OrchestratorConfig {
+                append_system_prompt: Some(append_source.clone()),
+                ..OrchestratorConfig::default()
+            },
             session_id.as_uuid(),
             home,
             cwd_string,
@@ -668,6 +708,7 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         let cold_requests = cold_api.captured_requests().await;
         assert_eq!(cold_requests.len(), 1);
         assert_recorded_host_branding_role(&cold_requests[0]);
+        assert_appended_source_occurs_once(&cold_requests[0], &append_units);
         let captured = cold_api.captured_msgs().await;
         assert_eq!(captured.len(), 1);
         let policy_messages = captured[0]
@@ -701,12 +742,13 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
                     .expect("announced policy retains its typed attachment");
                 assert_eq!(raw_attachment.string_at("/type"), Some("instructions"));
 
-                assert_eq!(
+                let expected_units = policy_messages[0].1.encode_utf16().collect::<Vec<_>>();
+                let rendered =
                     lingxi_core::host::instruction_announcements::render_instruction_attachment(
                         &raw_attachment,
-                    ),
-                    Some(policy_messages[0].1.clone())
-                );
+                    )
+                    .expect("the fixture's instruction attachment renders");
+                assert_eq!(rendered.string_units(""), Some(expected_units));
                 assert!(!policy_messages[0]
                     .1
                     .contains("As you answer the user's questions"));
@@ -827,7 +869,7 @@ async fn provider_prompt_keeps_live_git_context_after_app_agent_profile() {
     orch.set_app_agent_prompt_profile(1, "APP_PROFILE_MARKER".to_owned())
         .unwrap();
 
-    let provider_prompt = orch.provider_system_prompt().await.display_text();
+    let provider_prompt = orch.provider_system_prompt().await.unwrap().display_text();
     let profile_at = provider_prompt
         .find("APP_PROFILE_MARKER")
         .expect("app profile remains in the provider prompt");
@@ -945,7 +987,7 @@ async fn prompt_snapshot_keeps_raw_utf16_on_disk_but_cold_domain_uses_native_dis
     );
 
     *orch.prompt_runtime.prompt_snapshot.lock().await = Some(cold);
-    let (next_wire, _) = orch.build_wire_tools().await;
+    let (next_wire, _) = orch.build_wire_tools().await.unwrap();
     let declarations = llm_runtime::convert::to_tool_declarations(next_wire).unwrap();
     assert_eq!(
         declarations[0]

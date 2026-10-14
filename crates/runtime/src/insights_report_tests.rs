@@ -39,6 +39,7 @@ impl InsightsModelSelector for FixedModelSelector {
     async fn selected_model(&self) -> Result<InsightsSelectedModel, Utf16JsonProjection> {
         Ok(InsightsSelectedModel {
             model: "claude-haiku-4-5".into(),
+            model_source: None,
             profile: Some("insights-report-test".into()),
         })
     }
@@ -323,7 +324,7 @@ async fn local_provider_gates_queries_and_writes_source_worker_report() {
         .expect("handler must receive the locally generated report");
     assert_eq!(report.auto_mode_recommendation, None);
     assert_eq!(
-        report.insights_json.string_at("").as_deref(),
+        report.insights_json.string_at(""),
         Some("{}"),
         "malformed section and at-a-glance responses must be omitted by the real Bun parser"
     );
@@ -336,7 +337,7 @@ async fn local_provider_gates_queries_and_writes_source_worker_report() {
         .is_some_and(|name| name.starts_with("report-") && name.ends_with(".html")));
     let expected_url = format!("file://{}", timestamped.to_string_lossy());
     assert_eq!(
-        report.report_url.string_at("").as_deref(),
+        report.report_url.string_at(""),
         Some(expected_url.as_str()),
         "the report URL is a literal file:// URL for the timestamped report"
     );

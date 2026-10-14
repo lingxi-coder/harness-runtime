@@ -40,7 +40,9 @@ use crate::headless::io::Output;
 use async_trait::async_trait;
 use lingxi_core::host::orchestrator::ResponseTimingEvent;
 use lingxi_core::host::{CostSnapshot, OutputStream};
-use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonProjectionError};
+use lingxi_core::types::utf16_json::{
+    JsonValueView, Utf16JsonProjection, Utf16JsonProjectionError,
+};
 use llm_runtime::model::context_window::{context_window_for_model, max_output_tokens_for_model};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -242,6 +244,8 @@ pub enum OutboundMsg {
     RefreshHeldResultTotals(Value),
     /// Publish terminal output and stop the sole writer after earlier commands.
     Shutdown(oneshot::Sender<std::io::Result<()>>),
+    /// Stop before runtime admission without publishing a final print value.
+    ShutdownBeforeRuntime(oneshot::Sender<std::io::Result<()>>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -552,6 +556,13 @@ fn spawn_drain_task(
                     let _ = done.send(frames.publish(&stdout, mode).await);
                     break;
                 }
+                OutboundMsg::ShutdownBeforeRuntime(done) => {
+                    // Native policy-helper startup refusal precedes print
+                    // admission, so even verbose JSON has no final array.
+                    frames.published = true;
+                    let _ = done.send(stdout.flush().await);
+                    break;
+                }
                 OutboundMsg::Flush(done) => {
                     let _ = done.send(stdout.flush().await);
                 }
@@ -716,6 +727,11 @@ pub struct StreamJsonInitParams {
     pub mcp_servers: Vec<Value>,
     /// Resolved model identifier for the current session.
     pub model: String,
+    /// Exact effective Native model identity when `model` is only the known
+    /// routing anchor. The projected value replaces `/model` in the init
+    /// frame without passing through `serde_json::Value`'s Unicode string
+    /// conversion.
+    pub model_source: Option<Utf16JsonProjection>,
     /// Resolved permission mode reported to the client.
     pub permission_mode: String,
     /// Slash-command names available to the current session.
@@ -1005,6 +1021,8 @@ pub struct StreamJsonStream {
     /// `Mutex` pattern as `session_id`), because the run path owns the
     /// orchestrator and the builders only see `self`.
     permission_denials: std::sync::OnceLock<Arc<Mutex<Vec<lingxi_core::host::PermissionDenial>>>>,
+    /// Prevent a late print result from being enqueued after a terminal policy refusal.
+    policy_helper_refusal: std::sync::OnceLock<crate::desktop::PolicyHelperRefusalProbe>,
 }
 
 impl StreamJsonStream {
@@ -1054,12 +1072,28 @@ impl StreamJsonStream {
             response_timing: StdMutex::new(QueryResponseTiming::default()),
             request_markers: StdMutex::new(RequestMarkers::default()),
             permission_denials: std::sync::OnceLock::new(),
+            policy_helper_refusal: std::sync::OnceLock::new(),
             include_partial_messages: AtomicBool::new(false),
             include_hook_events: AtomicBool::new(false),
             forward_subagent_text: AtomicBool::new(false),
             omit_thinking: AtomicBool::new(false),
             heartbeat_lines: Arc::new(CoalescedHeartbeatLines::default()),
             pending_stream_events: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Attach the run's terminal refusal state before any runtime output can be published.
+    pub(crate) fn set_policy_helper_refusal_probe(
+        &self,
+        probe: crate::desktop::PolicyHelperRefusalProbe,
+    ) {
+        let _ = self.policy_helper_refusal.set(probe);
+    }
+
+    fn with_result_publication<R>(&self, operation: impl FnOnce() -> R) -> Option<R> {
+        match self.policy_helper_refusal.get() {
+            Some(probe) => probe.with_not_refused(operation),
+            None => Some(operation()),
         }
     }
 
@@ -1126,14 +1160,22 @@ impl StreamJsonStream {
         }
         self.ensure_drain_started().await;
         let (done_tx, done_rx) = oneshot::channel();
-        if self.out_tx.send(OutboundMsg::PublishJson(done_tx)).is_err() {
-            self.output.record_error(&std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "headless output drain closed before JSON publication",
-            ));
-            return Err(self.output.delivery_error());
+        let sent =
+            self.with_result_publication(|| self.out_tx.send(OutboundMsg::PublishJson(done_tx)));
+        match sent {
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "terminal policy-helper refusal prevents JSON publication",
+            )),
+            Some(Err(_)) => {
+                self.output.record_error(&std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "headless output drain closed before JSON publication",
+                ));
+                Err(self.output.delivery_error())
+            }
+            Some(Ok(())) => self.wait_for_drain_ack(done_rx).await,
         }
-        self.wait_for_drain_ack(done_rx).await
     }
 
     /// Refresh only measured cumulative fields on held print results. Per-query
@@ -1199,9 +1241,23 @@ impl StreamJsonStream {
     /// Finish the sole writer after native terminal frames have been queued.
     /// Sender clones need not be dropped before this bounded join.
     pub async fn finish(&self) -> std::io::Result<()> {
+        self.finish_writer(true).await
+    }
+
+    /// Join an unadmitted print writer after Native's early policy refusal.
+    pub(super) async fn finish_before_runtime(&self) -> std::io::Result<()> {
+        self.finish_writer(false).await
+    }
+
+    async fn finish_writer(&self, publish_print_value: bool) -> std::io::Result<()> {
         self.ensure_drain_started().await;
         let (done_tx, done_rx) = oneshot::channel();
-        let result = if self.out_tx.send(OutboundMsg::Shutdown(done_tx)).is_ok() {
+        let message = if publish_print_value {
+            OutboundMsg::Shutdown(done_tx)
+        } else {
+            OutboundMsg::ShutdownBeforeRuntime(done_tx)
+        };
+        let result = if self.out_tx.send(message).is_ok() {
             self.wait_for_drain_ack(done_rx).await
         } else {
             self.output.flush().await
@@ -1472,8 +1528,13 @@ impl StreamJsonStream {
             .expect("set_init_params must be called before emit_init");
         let session_id = self.session_id.lock().await.clone();
         let frame = build_init_frame(&session_id, &uuid, p);
+        let model_source = p.model_source.clone();
         drop(params_guard);
-        self.enqueue(&frame);
+        if let Some(model_source) = model_source {
+            self.enqueue_with_projection(&frame, "/model", &model_source, "Native model source");
+        } else {
+            self.enqueue(&frame);
+        }
     }
 
     fn build_prompt_suggestion_frame(session_id: &str, suggestion: &str, uuid: &str) -> Value {
@@ -1516,36 +1577,50 @@ impl StreamJsonStream {
     }
 
     pub(crate) fn release_sdk_results(&self, stopping: bool) {
-        let mut held = self
-            .sdk_held_results
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.hold = false;
-        for mut frame in held.frames.drain(..) {
-            if stopping
-                && frame
-                    .value
-                    .get("queued_turn_count")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|count| count > 0)
-            {
-                if let Err(error) =
-                    frame.set_pointer("/queued_turn_count", Utf16JsonProjection::plain(json!(0)))
+        let released = self.with_result_publication(|| {
+            let frames = {
+                let mut held = self
+                    .sdk_held_results
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                held.hold = false;
+                std::mem::take(&mut held.frames)
+            };
+            for mut frame in frames {
+                if stopping
+                    && frame
+                        .get_property("queued_turn_count")
+                        .and_then(JsonValueView::as_number)
+                        .is_some_and(|count| {
+                            count.is_finite() && count > 0.0 && count.fract() == 0.0
+                        })
                 {
-                    self.abort_delivery(format!("invalid held SDK result position: {error}"));
-                    continue;
+                    if let Err(error) = frame
+                        .set_pointer("/queued_turn_count", Utf16JsonProjection::plain(json!(0)))
+                    {
+                        self.abort_delivery(format!("invalid held SDK result position: {error}"));
+                        continue;
+                    }
+                }
+                match serialize_projected_ndjson_line(&frame) {
+                    Ok(line) => self.enqueue_line(line, false),
+                    Err(error) => self.abort_delivery(format!("invalid held SDK result: {error}")),
                 }
             }
-            match serialize_projected_ndjson_line(&frame) {
-                Ok(line) => self.enqueue_line(line, false),
-                Err(error) => self.abort_delivery(format!("invalid held SDK result: {error}")),
-            }
+        });
+        if released.is_none() {
+            let mut held = self
+                .sdk_held_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held.hold = false;
+            held.frames.clear();
         }
     }
 
     pub(crate) fn emit_prompt_suggestion_frame(&self, frame: &Value) {
         if !self.suppress_frames {
-            self.enqueue(frame);
+            let _ = self.with_result_publication(|| self.enqueue(frame));
         }
     }
 
@@ -2110,21 +2185,23 @@ impl StreamJsonStream {
             }
         }
         drop(markers);
-        let held_frames = {
-            let mut held = self
-                .sdk_held_results
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if held.hold {
-                held.frames.push(projection);
-                return;
+        let _ = self.with_result_publication(|| {
+            let held_frames = {
+                let mut held = self
+                    .sdk_held_results
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if held.hold {
+                    held.frames.push(projection.clone());
+                    return;
+                }
+                std::mem::take(&mut held.frames)
+            };
+            for previous in held_frames {
+                self.enqueue_projected(&previous);
             }
-            std::mem::take(&mut held.frames)
-        };
-        for previous in held_frames {
-            self.enqueue_projected(&previous);
-        }
-        self.enqueue_projected(&projection);
+            self.enqueue_projected(&projection);
+        });
     }
 
     /// Replace the metadata snapshot used when constructing result frames.
@@ -3753,6 +3830,7 @@ pub fn build_init_params(
         mcp_servers: mcp_servers_json,
         mcp_server_errors: host.mcp_server_errors,
         model: model.to_string(),
+        model_source: None,
         permission_mode: permission_mode.to_string(),
         slash_commands,
         terminal_slash_commands,
@@ -4666,6 +4744,34 @@ mod tests {
             assert_eq!(frame["apiKeySource"], expected);
             assert_eq!(frame["model"], "gemini-model");
         }
+    }
+
+    #[tokio::test]
+    async fn init_frame_projects_exact_selected_model_source_without_unicode_loss() {
+        let mut params = make_params("model-source-init");
+        let units = "claude-custom-"
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .expect("exact source projection");
+        params.model_source = Some(source);
+
+        let stream = StreamJsonStream::new(params, Output::new(tokio::io::sink()));
+        let mut receiver = stream
+            .drain_rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("init frame receiver");
+        stream.emit_init().await;
+
+        let OutboundMsg::Line(line) = receiver.try_recv().expect("init frame") else {
+            panic!("expected init frame line");
+        };
+        let wire = Utf16JsonProjection::parse(line.trim_end()).expect("projected init JSON");
+        assert_eq!(wire.string_units("/model"), Some(units));
     }
 
     #[tokio::test]
@@ -5750,6 +5856,7 @@ mod tests {
             OutboundMsg::StreamEvent(l) => l,
             OutboundMsg::Heartbeats(_) => panic!("expected a Line frame"),
             OutboundMsg::Shutdown(_)
+            | OutboundMsg::ShutdownBeforeRuntime(_)
             | OutboundMsg::Flush(_)
             | OutboundMsg::PublishJson(_)
             | OutboundMsg::RefreshHeldResultTotals(_) => {
@@ -6900,6 +7007,180 @@ mod delivery_cancellation_tests {
         );
         assert!(stream.drain_task.lock().await.is_none());
         assert!(stream.outbound_tx().is_closed());
+    }
+}
+
+#[cfg(test)]
+mod refusal_publication_tests {
+    use super::*;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Mutex as StdMutex;
+    use std::task::{Context, Poll};
+
+    struct CapturedWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl tokio::io::AsyncWrite for CapturedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn refusal_during_result_build_prevents_ndjson_result_enqueue() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream = Arc::new(StreamJsonStream::new_json_mode_placeholder(Output::new(
+            CapturedWriter(bytes.clone()),
+        )));
+        let probe = crate::desktop::PolicyHelperRefusalProbe::test_probe();
+        stream.set_policy_helper_refusal_probe(probe.clone());
+        let denials = Arc::new(Mutex::new(Vec::new()));
+        stream.share_permission_denials(denials.clone());
+        let held_denials = denials.lock().await;
+        let result_stream = stream.clone();
+        let emit = tokio::spawn(async move {
+            result_stream
+                .emit_result_success(
+                    &Utf16JsonProjection::from("should not publish"),
+                    "end_turn",
+                    &CostSnapshot::default(),
+                    "model",
+                    "off",
+                    None,
+                    &[],
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        probe.trigger_refusal_for_test();
+        drop(held_denials);
+        let returned = emit.await.unwrap();
+        assert_eq!(returned["type"], "result");
+        assert_eq!(stream.drain_started.load(Ordering::Acquire), 0);
+        assert!(bytes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refusal_before_held_result_release_drops_without_enqueue() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream =
+            StreamJsonStream::new_json_mode_placeholder(Output::new(CapturedWriter(bytes.clone())));
+        let probe = crate::desktop::PolicyHelperRefusalProbe::test_probe();
+        stream.set_policy_helper_refusal_probe(probe.clone());
+        stream.hold_sdk_results(true);
+        stream
+            .emit_result_success(
+                &Utf16JsonProjection::from("held result"),
+                "end_turn",
+                &CostSnapshot::default(),
+                "model",
+                "off",
+                None,
+                &[],
+            )
+            .await;
+        {
+            let held = stream
+                .sdk_held_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(held.hold);
+            assert_eq!(held.frames.len(), 1);
+        }
+
+        probe.trigger_refusal_for_test();
+        stream.release_sdk_results(false);
+        let held = stream
+            .sdk_held_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!held.hold);
+        assert!(held.frames.is_empty());
+        assert_eq!(stream.drain_started.load(Ordering::Acquire), 0);
+        assert!(bytes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stopping_release_updates_queue_count_and_preserves_result_source() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream =
+            StreamJsonStream::new_json_mode_placeholder(Output::new(CapturedWriter(bytes.clone())));
+        stream.hold_sdk_results(true);
+        stream
+            .sdk_held_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .frames
+            .push(
+                Utf16JsonProjection::parse(
+                    r#"{"type":"result","queued_turn_count":2,"result":"\ud800"}"#,
+                )
+                .unwrap(),
+            );
+
+        stream.release_sdk_results(true);
+        stream.flush().await.unwrap();
+        assert!(
+            bytes.lock().unwrap().is_empty(),
+            "print JSON remains buffered until its publication boundary"
+        );
+        stream.publish_json().await.unwrap();
+
+        assert_eq!(
+            String::from_utf8(bytes.lock().unwrap().clone()).unwrap(),
+            "{\"type\":\"result\",\"queued_turn_count\":0,\"result\":\"\\ud800\"}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_blocks_prompt_suggestion_frame_enqueue() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream =
+            StreamJsonStream::new_json_mode_placeholder(Output::new(CapturedWriter(bytes.clone())));
+        let probe = crate::desktop::PolicyHelperRefusalProbe::test_probe();
+        stream.set_policy_helper_refusal_probe(probe.clone());
+        probe.trigger_refusal_for_test();
+
+        stream.emit_prompt_suggestion_frame(&json!({
+            "type": "prompt_suggestion",
+            "suggestion": "should not publish",
+        }));
+        stream.flush().await.unwrap();
+        stream.finish_before_runtime().await.unwrap();
+        assert!(bytes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refusal_after_frame_buffering_prevents_verbose_json_publish_command() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream = StreamJsonStream::new_verbose_json_mode_placeholder(Output::new(
+            CapturedWriter(bytes.clone()),
+        ));
+        let probe = crate::desktop::PolicyHelperRefusalProbe::test_probe();
+        stream.set_policy_helper_refusal_probe(probe.clone());
+        stream.enqueue(&json!({"type":"assistant","message":{"content":[]}}));
+        stream.ensure_drain_started().await;
+        probe.trigger_refusal_for_test();
+        let published = stream.publish_json().await;
+        assert_eq!(
+            published.unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        stream.finish_before_runtime().await.unwrap();
+        assert!(bytes.lock().unwrap().is_empty());
     }
 }
 

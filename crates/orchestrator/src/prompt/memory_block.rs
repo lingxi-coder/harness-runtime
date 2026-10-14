@@ -44,6 +44,16 @@ pub trait MemoryHierarchyProvider: Send + Sync {
     /// `loader::report_skipped_memory_file` with the 4 MiB stat guard intact.
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile>;
 
+    /// Source-preserving virtual Managed instruction rows supplied by the
+    /// active host policy-helper state. These rows are not filesystem entries
+    /// and must never participate in discovery, Read, imports, or path-cache
+    /// identity.
+    fn native_managed_instruction_files(
+        &self,
+    ) -> Vec<lingxi_core::host::instructions::InstructionFile> {
+        Vec::new()
+    }
+
     /// Custom providers retain control of their data; only the filesystem
     /// provider adds AGENTS discovery. Managed-only never renders user files.
     async fn load_with_mode(&self, cwd: &Path, mode: InstructionFilesMode) -> Vec<MemoryFile> {
@@ -86,6 +96,70 @@ pub trait MemoryHierarchyProvider: Send + Sync {
     /// Static and custom providers default to no exclusions.
     fn excluder(&self) -> Option<memory::lingxi_md::LingxiMdExcluder> {
         None
+    }
+}
+
+/// Attach host-owned virtual Managed instruction rows without changing the
+/// underlying filesystem provider or its discovery behavior.
+pub fn with_native_managed_instruction_source(
+    provider: Arc<dyn MemoryHierarchyProvider>,
+    source: Arc<dyn Fn() -> Vec<lingxi_core::host::instructions::InstructionFile> + Send + Sync>,
+) -> Arc<dyn MemoryHierarchyProvider> {
+    Arc::new(NativeManagedInstructionOverlay { provider, source })
+}
+
+struct NativeManagedInstructionOverlay {
+    provider: Arc<dyn MemoryHierarchyProvider>,
+    source: Arc<dyn Fn() -> Vec<lingxi_core::host::instructions::InstructionFile> + Send + Sync>,
+}
+
+#[async_trait]
+impl MemoryHierarchyProvider for NativeManagedInstructionOverlay {
+    async fn load(&self, cwd: &Path) -> Vec<MemoryFile> {
+        self.provider.load(cwd).await
+    }
+
+    async fn load_with_mode(&self, cwd: &Path, mode: InstructionFilesMode) -> Vec<MemoryFile> {
+        self.provider.load_with_mode(cwd, mode).await
+    }
+
+    async fn load_managed(&self, cwd: &Path) -> Result<Vec<MemoryFile>, String> {
+        self.provider.load_managed(cwd).await
+    }
+
+    async fn load_conditional_rules(
+        &self,
+        cwd: &Path,
+        trigger: &Path,
+        mode: InstructionFilesMode,
+    ) -> Vec<MemoryFile> {
+        self.provider
+            .load_conditional_rules(cwd, trigger, mode)
+            .await
+    }
+
+    fn native_managed_instruction_files(
+        &self,
+    ) -> Vec<lingxi_core::host::instructions::InstructionFile> {
+        let mut rows = self.provider.native_managed_instruction_files();
+        rows.extend((self.source)());
+        rows
+    }
+
+    fn instruction_files_mode(&self) -> InstructionFilesMode {
+        self.provider.instruction_files_mode()
+    }
+
+    fn filesystem_discovery(&self) -> bool {
+        self.provider.filesystem_discovery()
+    }
+
+    fn hierarchy_roots(&self) -> Option<(std::path::PathBuf, Option<std::path::PathBuf>)> {
+        self.provider.hierarchy_roots()
+    }
+
+    fn excluder(&self) -> Option<memory::lingxi_md::LingxiMdExcluder> {
+        self.provider.excluder()
     }
 }
 
@@ -480,6 +554,11 @@ impl MemoryHierarchyProvider for InstructionModeProvider {
             .load_conditional_rules(cwd, trigger, mode)
             .await
     }
+    fn native_managed_instruction_files(
+        &self,
+    ) -> Vec<lingxi_core::host::instructions::InstructionFile> {
+        self.provider.native_managed_instruction_files()
+    }
     fn instruction_files_mode(&self) -> InstructionFilesMode {
         self.mode
     }
@@ -527,35 +606,109 @@ pub(crate) fn instruction_file_descriptors(
     files
         .iter()
         .filter(|file| is_rendered_into_context(file))
-        .map(|file| InstructionFile {
-            path: file.path.to_string_lossy().into_owned(),
-            kind: match file.tier {
-                LingxiMdTier::Managed => InstructionFileType::Managed,
-                LingxiMdTier::User => InstructionFileType::User,
-                LingxiMdTier::Project => InstructionFileType::Project,
-                LingxiMdTier::Local => InstructionFileType::Local,
-            },
-            content: lingxi_core::host::instruction_announcements::js_trim(&file.body).to_owned(),
+        .map(|file| {
+            InstructionFile::new(
+                path_projection(&file.path),
+                match file.tier {
+                    LingxiMdTier::Managed => InstructionFileType::Managed,
+                    LingxiMdTier::User => InstructionFileType::User,
+                    LingxiMdTier::Project => InstructionFileType::Project,
+                    LingxiMdTier::Local => InstructionFileType::Local,
+                },
+                lingxi_core::host::instruction_announcements::js_trim(&file.body).to_owned(),
+            )
         })
         .collect()
+}
+
+/// Insert virtual Native Managed rows between on-disk Managed files and the
+/// remaining user/project/local hierarchy. A virtual row is source data only;
+/// it never enters `MemoryFile` discovery or filesystem identity.
+pub(crate) fn instruction_file_descriptors_with_native_managed(
+    files: &[MemoryFile],
+    native_managed: &[lingxi_core::host::instructions::InstructionFile],
+) -> Vec<lingxi_core::host::instructions::InstructionFile> {
+    use lingxi_core::host::instructions::InstructionFileType;
+    let insertion_index = native_managed_insertion_index(files);
+    let mut result = Vec::new();
+    let mut inserted_native = false;
+    for (index, file) in files.iter().enumerate() {
+        if !inserted_native && index >= insertion_index {
+            result.extend(
+                native_managed
+                    .iter()
+                    .filter(|row| row.kind == InstructionFileType::Managed)
+                    .cloned(),
+            );
+            inserted_native = true;
+        }
+        if !is_rendered_into_context(file) {
+            continue;
+        }
+        result.extend(instruction_file_descriptors(std::slice::from_ref(file)));
+    }
+    if !inserted_native {
+        result.extend(
+            native_managed
+                .iter()
+                .filter(|row| row.kind == InstructionFileType::Managed)
+                .cloned(),
+        );
+    }
+    result
+}
+
+/// Native loads the managed root file and its imports first, inserts the
+/// policy-helper row, then loads managed rules. The shared filesystem loader
+/// returns both groups in one vector, so recover the root expansion from its
+/// `parent` links instead of placing the virtual row after every Managed file.
+pub(crate) fn native_managed_insertion_index(files: &[MemoryFile]) -> usize {
+    use memory::lingxi_md::LingxiMdTier;
+    let managed_root =
+        memory::lingxi_md::hierarchy::managed_path().join(memory::lingxi_md::hierarchy::FILE_NAME);
+    let mut root_expansion = std::collections::HashSet::from([managed_root.clone()]);
+    loop {
+        let old_len = root_expansion.len();
+        for file in files {
+            if file.tier == LingxiMdTier::Managed
+                && file
+                    .parent
+                    .as_ref()
+                    .is_some_and(|parent| root_expansion.contains(parent))
+            {
+                root_expansion.insert(file.path.clone());
+            }
+        }
+        if root_expansion.len() == old_len {
+            break;
+        }
+    }
+    files
+        .iter()
+        .position(|file| file.tier != LingxiMdTier::Managed || !root_expansion.contains(&file.path))
+        .unwrap_or(files.len())
 }
 
 fn context_from_instruction_files(
     cwd: &Path,
     files: &[MemoryFile],
+    native_managed: &[lingxi_core::host::instructions::InstructionFile],
     managed: bool,
 ) -> lingxi_core::host::instructions::InstructionContext {
     use lingxi_core::host::instructions::InstructionContext;
     let mut context = InstructionContext {
-        eager_instructions: Some(instruction_file_descriptors(files)),
+        eager_instructions: Some(instruction_file_descriptors_with_native_managed(
+            files,
+            native_managed,
+        )),
         managed_instructions_only: managed,
         instructions_root: Some(memory::lingxi_md::agents::identity(cwd)),
         ..InstructionContext::default()
     };
+    let instructions = format_source_with_native_managed(files, native_managed);
     context
-        .user_context
-        .insert("instructions".into(), format(files));
-    context.user_context_order.push("instructions".into());
+        .set_user_context_text("instructions", instructions)
+        .expect("instructions userContext member is a valid source string");
     for file in files.iter().filter(|file| is_rendered_into_context(file)) {
         context
             .sent_paths
@@ -567,6 +720,137 @@ fn context_from_instruction_files(
         }
     }
     context
+}
+
+/// Render the memory reminder as an exact JavaScript string projection when a
+/// virtual Native Managed row is present. Existing filesystem-only callers
+/// retain the established formatter byte-for-byte.
+pub(crate) fn format_source_with_native_managed(
+    files: &[MemoryFile],
+    native_managed: &[lingxi_core::host::instructions::InstructionFile],
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    use lingxi_core::host::instructions::InstructionFileType;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    if native_managed
+        .iter()
+        .all(|row| row.kind != InstructionFileType::Managed || row.content_units().is_empty())
+    {
+        let display = format(files);
+        let units = display.encode_utf16().collect::<Vec<_>>();
+        return Utf16JsonProjection::root_string(display, units)
+            .expect("filesystem memory format is a valid source string");
+    }
+
+    let insertion_index = native_managed_insertion_index(files);
+    let mut blocks = Vec::<Vec<u16>>::new();
+    let mut inserted_native = false;
+    for (index, file) in files.iter().enumerate() {
+        if !inserted_native && index >= insertion_index {
+            append_native_managed_blocks(&mut blocks, native_managed);
+            inserted_native = true;
+        }
+        if !is_rendered_into_context(file) {
+            continue;
+        }
+        blocks.push(memory_file_block(file));
+    }
+    if !inserted_native {
+        append_native_managed_blocks(&mut blocks, native_managed);
+    }
+    if blocks.is_empty() {
+        return Utf16JsonProjection::root_string(String::new(), Vec::new())
+            .expect("empty memory content is a valid source string");
+    }
+    let mut units = MEMORY_INSTRUCTION_PROMPT.encode_utf16().collect::<Vec<_>>();
+    units.extend("\n\n".encode_utf16());
+    for (index, block) in blocks.into_iter().enumerate() {
+        if index > 0 {
+            units.extend("\n\n".encode_utf16());
+        }
+        units.extend(block);
+    }
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("memory projection display text matches exact UTF-16 units")
+}
+
+fn append_native_managed_blocks(
+    blocks: &mut Vec<Vec<u16>>,
+    native_managed: &[lingxi_core::host::instructions::InstructionFile],
+) {
+    use lingxi_core::host::instructions::InstructionFileType;
+    for row in native_managed
+        .iter()
+        .filter(|row| row.kind == InstructionFileType::Managed)
+    {
+        let body = trim_instruction_content(&row.content_units());
+        let mut block = "Contents of ".encode_utf16().collect::<Vec<_>>();
+        block.extend(row.path_units());
+        block.extend(" (organization-managed policy instructions):\n\n".encode_utf16());
+        block.extend(body);
+        blocks.push(block);
+    }
+}
+
+fn memory_file_block(file: &MemoryFile) -> Vec<u16> {
+    let mut block = "Contents of ".encode_utf16().collect::<Vec<_>>();
+    block.extend(
+        path_projection(&file.path)
+            .string_units("")
+            .unwrap_or_default(),
+    );
+    block.extend(tier_description(file.tier).encode_utf16());
+    block.extend(":\n\n".encode_utf16());
+    block.extend(lingxi_core::host::instruction_announcements::js_trim(&file.body).encode_utf16());
+    block
+}
+
+/// Project an OS path using the string boundary Native's filesystem APIs use.
+/// Windows paths retain every UTF-16 code unit; Unix paths follow the platform
+/// UTF-8 replacement behavior already used for filesystem strings.
+pub(crate) fn path_projection(path: &Path) -> Utf16JsonProjection {
+    #[cfg(windows)]
+    let units = {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().collect::<Vec<_>>()
+    };
+    #[cfg(not(windows))]
+    let units = path
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("filesystem path projection is a root string")
+}
+
+pub(crate) fn trim_instruction_content(units: &[u16]) -> Vec<u16> {
+    let mut start = 0;
+    let mut end = units.len();
+    while start < end && js_trim_unit(units[start]) {
+        start += 1;
+    }
+    while end > start && js_trim_unit(units[end - 1]) {
+        end -= 1;
+    }
+    units[start..end].to_vec()
+}
+
+fn js_trim_unit(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009..=0x000d
+            | 0x0020
+            | 0x00a0
+            | 0x1680
+            | 0x2000..=0x200a
+            | 0x2028..=0x2029
+            | 0x202f
+            | 0x205f
+            | 0x3000
+            | 0xfeff
+    )
 }
 
 /// A child reader bound once to the actual owning root's current Gv Promise.
@@ -614,9 +898,10 @@ impl lingxi_core::host::instructions::InstructionContextProvider
         _cwd: &Path,
         scope: lingxi_core::host::instructions::InstructionScope,
     ) -> Result<lingxi_core::host::instructions::InstructionContext, String> {
-        use lingxi_core::host::instructions::{InstructionFileType, InstructionScope};
+        use lingxi_core::host::instructions::InstructionScope;
         let root = self.owner()?;
         let (_, load) = root.main_instruction_load().await;
+        let provider = root.memory.clone();
         // A pending detached build owns independent dependencies. Keeping the
         // root here would create a cache/producer/root lifetime cycle.
         drop(root);
@@ -631,21 +916,22 @@ impl lingxi_core::host::instructions::InstructionContextProvider
             .filter(|file| file.tier == memory::lingxi_md::LingxiMdTier::Managed)
             .cloned()
             .collect::<Vec<_>>();
-        let body = format(&managed);
-        context.eager_instructions = context.eager_instructions.map(|files| {
-            files
-                .into_iter()
-                .filter(|file| file.kind == InstructionFileType::Managed)
-                .collect()
-        });
-        context.managed_instructions_only = !body.is_empty();
-        if body.is_empty() {
-            context.user_context.remove("instructions");
+        let native_managed = provider.native_managed_instruction_files();
+        let body = format_source_with_native_managed(&managed, &native_managed);
+        context.eager_instructions = Some(instruction_file_descriptors_with_native_managed(
+            &managed,
+            &native_managed,
+        ));
+        let body_is_empty = body.string_units("").is_none_or(|units| units.is_empty());
+        context.managed_instructions_only = !body_is_empty;
+        if body_is_empty {
             context
-                .user_context_order
-                .retain(|name| name != "instructions");
+                .remove_user_context_text("instructions")
+                .map_err(|error| error.to_string())?;
         } else {
-            context.user_context.insert("instructions".into(), body);
+            context
+                .set_user_context_text("instructions", body)
+                .map_err(|error| error.to_string())?;
         }
         Ok(context)
     }
@@ -925,6 +1211,7 @@ impl crate::ConversationOrchestrator {
         };
         let cwd = self.prompt_probe_cwd(&self.session_cwd.cwd());
         let provider = self.memory.clone();
+        let provider_for_context = provider.clone();
         let managed = provider.instruction_files_mode() == InstructionFilesMode::ManagedOnly;
         let file_scope = if managed {
             InstructionScope::ManagedOnly
@@ -939,23 +1226,33 @@ impl crate::ConversationOrchestrator {
             key,
             InstructionFileCacheKey { scope: file_scope, force_external: false },
             move || async move {
-                if managed { provider.load_managed(&file_cwd).await }
-                else { Ok(provider.load(&file_cwd).await) }
+                if managed {
+                    provider.load_managed(&file_cwd).await
+                } else {
+                    Ok(provider.load(&file_cwd).await)
+                }
             },
             move |files| async move {
                 let files = files.get().await?;
-                let mut context = context_from_instruction_files(&cwd, &files, managed);
+                let native_managed = provider_for_context.native_managed_instruction_files();
+                let mut context =
+                    context_from_instruction_files(&cwd, &files, &native_managed, managed);
                 let email = if let Some(provider) = email_provider {
                     provider.current_user_email().await
                 } else {
                     configured_email
                 };
                 if let Some(email) = email.as_deref().filter(|email| !email.is_empty()) {
-                    context.user_context.insert("userEmail".into(), format!("The user's email address is {email}. Use it only to identify the user, such as for authorship, attribution, or filtering their own work. Never send it to an unrelated service, such as in a request header, URL, or payload, unless the user explicitly asks."));
-                    context.user_context_order.push("userEmail".into());
+                    context
+                        .set_user_context_text(
+                            "userEmail",
+                            format!("The user's email address is {email}. Use it only to identify the user, such as for authorship, attribution, or filtering their own work. Never send it to an unrelated service, such as in a request header, URL, or payload, unless the user explicitly asks."),
+                        )
+                        .map_err(|error| error.to_string())?;
                 }
-                context.user_context.insert("currentDate".into(), format!("Today's date is {date}."));
-                context.user_context_order.push("currentDate".into());
+                context
+                    .set_user_context_text("currentDate", format!("Today's date is {date}."))
+                    .map_err(|error| error.to_string())?;
                 // The runtime has no native classifier or plugin instruction
                 // acquisition producer here. Their optional facts remain absent.
                 Ok(InstructionContextBuild::new(context, files))
@@ -1349,6 +1646,80 @@ pub fn format(files: &[MemoryFile]) -> String {
 #[cfg(test)]
 mod native_eager_origin_tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn memory_row(
+        path: PathBuf,
+        parent: Option<PathBuf>,
+        tier: memory::lingxi_md::LingxiMdTier,
+        body: &str,
+    ) -> MemoryFile {
+        MemoryFile {
+            path,
+            parent,
+            source_content: Some(body.to_owned()),
+            body: body.to_owned(),
+            is_local_override: false,
+            tier,
+            globs: None,
+            raw_content: body.to_owned(),
+            content_differs_from_disk: false,
+        }
+    }
+
+    #[test]
+    fn helper_managed_row_follows_root_imports_and_precedes_managed_rules() {
+        use lingxi_core::host::instructions::{InstructionFile, InstructionFileType};
+        use memory::lingxi_md::LingxiMdTier;
+
+        let managed = memory::lingxi_md::hierarchy::managed_path();
+        let root = managed.join(memory::lingxi_md::hierarchy::FILE_NAME);
+        let rules = managed.join(branding::DOT_DIR).join("rules");
+        let root_import = rules.join("included-from-root.md");
+        let rule = rules.join("managed-rule.md");
+        let user = PathBuf::from("/tmp/user/LINGXI.md");
+        let files = vec![
+            memory_row(root.clone(), None, LingxiMdTier::Managed, "managed root"),
+            memory_row(
+                root_import.clone(),
+                Some(root.clone()),
+                LingxiMdTier::Managed,
+                "root import",
+            ),
+            memory_row(rule.clone(), None, LingxiMdTier::Managed, "managed rule"),
+            memory_row(user.clone(), None, LingxiMdTier::User, "user"),
+        ];
+        let helper = vec![InstructionFile::new(
+            "<policyHelper>",
+            InstructionFileType::Managed,
+            "helper instructions",
+        )];
+
+        let descriptors = instruction_file_descriptors_with_native_managed(&files, &helper);
+        let paths = descriptors
+            .iter()
+            .map(|file| String::from_utf16(&file.path_units()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                root.display().to_string(),
+                root_import.display().to_string(),
+                "<policyHelper>".to_owned(),
+                rule.display().to_string(),
+                user.display().to_string(),
+            ]
+        );
+
+        let formatted = format_source_with_native_managed(&files, &helper);
+        let units = formatted.string_units("").unwrap();
+        let text = String::from_utf16(&units).unwrap();
+        let root_pos = text.find("managed root").unwrap();
+        let import_pos = text.find("root import").unwrap();
+        let helper_pos = text.find("helper instructions").unwrap();
+        let rule_pos = text.find("managed rule").unwrap();
+        assert!(root_pos < import_pos && import_pos < helper_pos && helper_pos < rule_pos);
+    }
 
     fn write(path: &Path, body: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

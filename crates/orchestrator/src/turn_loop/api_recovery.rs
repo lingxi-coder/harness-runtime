@@ -134,7 +134,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         &history_snapshot,
         context_announcements.inline_context.as_ref(),
     )
-    .await;
+    .await?;
     let tools =
         llm_runtime::convert::to_tool_declarations(tools).map_err(OrchestratorError::ApiCall)?;
     // SC-04: the compaction-failure detail is per-CALL state (the oracle reads

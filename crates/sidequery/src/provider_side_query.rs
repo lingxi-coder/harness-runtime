@@ -470,6 +470,25 @@ fn apply_native_side_query_prompt_context(
     Ok(())
 }
 
+fn apply_exact_model_source(
+    request: &mut llm_runtime::LlmRequest,
+    model_source: Option<&Utf16JsonProjection>,
+) -> Result<(), LlmError> {
+    request.input.model_source = model_source
+        .map(|source| {
+            let units = source
+                .string_units("")
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: "model source must be a JSON string projection".into(),
+                })?;
+            Ok::<_, LlmError>(
+                lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(&units),
+            )
+        })
+        .transpose()?;
+    Ok(())
+}
+
 #[async_trait]
 impl SideQueryClient for ProviderSideQueryClient {
     fn estimate_request(
@@ -483,6 +502,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             ) => {
                 let query_source = request.query_source.as_str();
                 let system_prompt = request.system_prompt.clone();
+                let model_source = request.model_source.clone();
                 let mut canonical = service.build_side_query_request_with_thinking(
                     &request.model,
                     request.profile.as_deref(),
@@ -501,6 +521,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                     request.typed_attachment_ids,
                     request.task_deliveries,
                 )?;
+                apply_exact_model_source(&mut canonical, model_source.as_ref())?;
                 canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
                 apply_native_side_query_prompt_context(
                     &mut canonical,
@@ -584,6 +605,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             let query_source = request.query_source.as_str();
             let native_prompt_context = request.native_prompt_context.clone();
             let system_prompt = request.system_prompt.clone();
+            let model_source = request.model_source.clone();
             let mut canonical = service.build_side_query_request_with_thinking(
                 &request.model,
                 request.profile.as_deref(),
@@ -608,6 +630,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                 request.typed_attachment_ids,
                 request.task_deliveries,
             )?;
+            apply_exact_model_source(&mut canonical, model_source.as_ref())?;
             canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
             canonical.execution.model_attempt = request.model_attempt;
             canonical.execution.fork_point_message_id = options.fork_point_message_id;
@@ -1273,6 +1296,7 @@ mod tests {
             model_attempt: None,
             native_prompt_context: None,
             model: "claude-haiku-4-5".into(),
+            model_source: None,
             profile: None,
             system_prompt: Some("system".into()),
             system_prompt_input: None,
@@ -1741,6 +1765,7 @@ mod tests {
         request.temperature = None;
         request.thinking = Some(llm_runtime::model::thinking::ThinkingConfig::Adaptive);
         request.effort = Some(serde_json::json!("high").into());
+        request.model_source = Some(Utf16JsonProjection::from("uncatalogued-claude-id"));
         let parent_tools = vec![tool_declaration(
             "Read",
             "Read a file from the parent session.",
@@ -1778,7 +1803,7 @@ mod tests {
         }));
         let body: serde_json::Value =
             serde_json::from_str(sent.body.as_deref().expect("request body")).unwrap();
-        assert_eq!(body["model"], "claude-sonnet-4-6");
+        assert_eq!(body["model"], "uncatalogued-claude-id");
         assert_eq!(body["tools"], serde_json::to_value(parent_tools).unwrap());
         assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
         assert_eq!(body["output_config"]["effort"], "high");

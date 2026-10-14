@@ -662,6 +662,10 @@ async fn run_owned(
     {
         Ok(runtime) => runtime,
         Err(error) => {
+            let startup_refusal = matches!(
+                &error.error,
+                crate::desktop::BuildError::PolicyHelperStartup(_)
+            );
             let message = error.to_string();
             let _ = io
                 .stderr
@@ -672,7 +676,13 @@ async fn run_owned(
             exit.errors.push(message);
             exit.cleanup = error.cleanup;
             exit.shutdown = error.shutdown;
-            close_prepared_stdio(&mut prepared_stdio, stream.as_deref(), &mut exit).await;
+            close_prepared_stdio(
+                &mut prepared_stdio,
+                stream.as_deref(),
+                &mut exit,
+                startup_refusal,
+            )
+            .await;
             return finish_delivery(exit, &io.stdout, &io.stderr, &last_signal, input_format).await;
         }
     };
@@ -705,6 +715,7 @@ async fn run_owned(
     );
     if let Some(stream) = &stream {
         stream.share_permission_denials(runtime.orchestrator.permission_denials_handle());
+        stream.set_policy_helper_refusal_probe(runtime.policy_helper_refusal.clone());
     }
     if let Some(plane) = &plane {
         runtime
@@ -714,7 +725,7 @@ async fn run_owned(
     if let Some(gate) = gate {
         gate.set_prompt_notifier(Arc::new(
             permission_prompt_notify::OrchestratorPermissionPromptNotifier::new(
-                runtime.orchestrator.clone(),
+                &runtime.orchestrator,
                 runtime.services.clone(),
             ),
         ));
@@ -735,7 +746,7 @@ async fn run_owned(
             exit.cleanup = Some(cleanup::retain_cleanup(runtime.clone(), report));
         }
         exit.errors.extend(exit.shutdown_errors.iter().cloned());
-        close_prepared_stdio(&mut prepared_stdio, stream.as_deref(), &mut exit).await;
+        close_prepared_stdio(&mut prepared_stdio, stream.as_deref(), &mut exit, false).await;
         return finish_delivery(exit, &io.stdout, &io.stderr, &last_signal, input_format).await;
     }
     host::configure_native_command_catalog(
@@ -754,30 +765,55 @@ async fn run_owned(
         runtime.shutdown.cancel();
         runtime.interrupt();
     }
-    exit.code = match (stream.as_ref(), plane) {
-        (Some(stream), Some(plane)) => {
-            run::run_stream_json_input_loop(
-                options,
-                &runtime,
-                stream.clone(),
-                permission_mode,
-                plane,
-                prepared_stdio
-                    .take()
-                    .expect("bidirectional transport prepared before build"),
-            )
-            .await
-        }
-        (Some(stream), None) => {
-            run::run_stream_json_print(options, &runtime, stream.clone(), permission_mode).await
-        }
-        (None, _) => {
-            run::run_oneshot(
-                options,
-                &runtime,
-                sink.as_ref().expect("plain sink").as_ref(),
-            )
-            .await
+    let policy_refusal = {
+        let operation = async {
+            match (stream.as_ref(), plane.clone()) {
+                (Some(stream), Some(plane)) => {
+                    run::run_stream_json_input_loop(
+                        options,
+                        &runtime,
+                        stream.clone(),
+                        permission_mode,
+                        plane,
+                        prepared_stdio
+                            .take()
+                            .expect("bidirectional transport prepared before build"),
+                    )
+                    .await
+                }
+                (Some(stream), None) => {
+                    run::run_stream_json_print(options, &runtime, stream.clone(), permission_mode)
+                        .await
+                }
+                (None, _) => {
+                    run::run_oneshot(
+                        options,
+                        &runtime,
+                        sink.as_ref().expect("plain sink").as_ref(),
+                    )
+                    .await
+                }
+            }
+        };
+        tokio::pin!(operation);
+        let mut refusal_probe = runtime.policy_helper_refusal.clone();
+        tokio::select! {
+            biased;
+            refusal = refusal_probe.wait() => {
+                runtime.shutdown.cancel();
+                runtime.interrupt();
+                if let Some(plane) = &plane {
+                    plane.shutdown("Policy helper refused").await;
+                }
+                // Keep polling the accepted operation so its own journal, reader,
+                // control-plane, and auxiliary-task cleanup runs to completion.
+                let _ = operation.as_mut().await;
+                Some(refusal)
+            }
+            code = operation.as_mut() => {
+                exit.code = code;
+                None
+            }
         }
     };
     let signal = *last_signal
@@ -862,11 +898,26 @@ async fn run_owned(
         ));
     }
     if let Some(stream) = stream {
-        if let Err(error) = stream.finish().await {
+        let finish = if policy_refusal.is_some() {
+            stream.finish_before_runtime().await
+        } else {
+            stream.finish().await
+        };
+        if let Err(error) = finish {
             exit.delivery_errors.push(error.to_string());
         }
     }
-    let exit = finish_delivery(exit, &io.stdout, &io.stderr, &last_signal, input_format).await;
+    let mut exit = finish_delivery(exit, &io.stdout, &io.stderr, &last_signal, input_format).await;
+    if let Some(refusal) = policy_refusal {
+        exit.code = exit_codes::RUNTIME_ERROR;
+        exit.reason = HeadlessExitReason::RuntimeError;
+        exit.execution = HeadlessExecutionStatus::Failed;
+        exit.errors.push(refusal.to_string());
+        if let Err(error) = write_live_policy_refusal(&io.stderr, refusal.as_ref()).await {
+            exit.delivery_errors.push(error.to_string());
+            exit.delivery = HeadlessDeliveryStatus::Failed;
+        }
+    }
     watcher.stop().await;
     exit
 }
@@ -875,6 +926,7 @@ async fn close_prepared_stdio(
     prepared: &mut Option<stdio::PreparedStdio>,
     stream: Option<&stream_json::StreamJsonStream>,
     exit: &mut HeadlessExit,
+    startup_refusal: bool,
 ) {
     if let Some(prepared) = prepared.as_mut() {
         if let Err(error) = prepared.shutdown("Headless startup failed").await {
@@ -882,7 +934,12 @@ async fn close_prepared_stdio(
         }
     }
     if let Some(stream) = stream {
-        if let Err(error) = stream.finish().await {
+        let finish = if startup_refusal {
+            stream.finish_before_runtime().await
+        } else {
+            stream.finish().await
+        };
+        if let Err(error) = finish {
             exit.delivery_errors.push(error.to_string());
         }
     }
@@ -948,6 +1005,14 @@ async fn finish_delivery(
     exit
 }
 
+async fn write_live_policy_refusal(
+    stderr: &io::Output,
+    refusal: &crate::desktop::PolicyHelperStartupError,
+) -> std::io::Result<()> {
+    let record = format!("\n{refusal}\n");
+    stderr.write_record(record.as_bytes()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,6 +1028,228 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    struct RefusalProbeHost {
+        probe: Arc<std::sync::Mutex<Option<crate::desktop::PolicyHelperRefusalProbe>>>,
+        ready: Arc<tokio::sync::Notify>,
+        orchestrator:
+            Arc<std::sync::Mutex<Option<std::sync::Weak<orchestrator::ConversationOrchestrator>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HeadlessHostServices for RefusalProbeHost {
+        async fn runtime_ready(
+            &self,
+            runtime: &crate::desktop::DesktopRuntime,
+        ) -> Result<(), String> {
+            *self.probe.lock().unwrap() = Some(runtime.policy_helper_refusal.clone());
+            *self.orchestrator.lock().unwrap() = Some(Arc::downgrade(&runtime.orchestrator));
+            self.ready.notify_one();
+            Ok(())
+        }
+
+        fn environment_variable(&self, _: &str) -> Option<String> {
+            None
+        }
+
+        fn update_environment_variables(
+            &self,
+            _: std::collections::HashMap<String, String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct PendingInput {
+        entered: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    impl tokio::io::AsyncRead for PendingInput {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            _buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if let Some(entered) = self.entered.take() {
+                entered.notify_one();
+            }
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn early_policy_refusal_has_no_final_print_frame_and_joins_the_writer() {
+        use tokio::io::AsyncReadExt;
+
+        for (verbose, refusal, expected) in [
+            (true, true, &b""[..]),
+            (false, true, &b""[..]),
+            (true, false, &b"[]\n"[..]),
+        ] {
+            let (writer, mut reader) = tokio::io::duplex(128);
+            let stream = if verbose {
+                stream_json::StreamJsonStream::new_verbose_json_mode_placeholder(io::Output::new(
+                    writer,
+                ))
+            } else {
+                stream_json::StreamJsonStream::new_json_mode_placeholder(io::Output::new(writer))
+            };
+            let mut exit = HeadlessExit {
+                code: exit_codes::RUNTIME_ERROR,
+                reason: HeadlessExitReason::RuntimeError,
+                session_id: None,
+                errors: Vec::new(),
+                execution: HeadlessExecutionStatus::NotStarted,
+                shutdown: HeadlessShutdownStatus::NotStarted,
+                delivery: HeadlessDeliveryStatus::Complete,
+                shutdown_errors: Vec::new(),
+                delivery_errors: Vec::new(),
+                cleanup: None,
+            };
+            close_prepared_stdio(&mut None, Some(&stream), &mut exit, refusal).await;
+            assert!(exit.delivery_errors.is_empty());
+            // Dropping the already-joined writer cannot publish a late array.
+            drop(stream);
+            let mut actual = Vec::new();
+            reader.read_to_end(&mut actual).await.unwrap();
+            assert_eq!(actual, expected, "verbose={verbose}, refusal={refusal}");
+            assert_eq!(exit.code, exit_codes::RUNTIME_ERROR);
+        }
+    }
+
+    #[tokio::test]
+    async fn live_policy_refusal_uses_one_newline_framed_stderr_record() {
+        use tokio::io::AsyncReadExt;
+
+        let fatal = crate::desktop::PolicyHelperStartupError::new(
+            lingxi_core::settings::NativePolicyStartupFatal {
+                source: lingxi_core::settings::NativePolicySource::ManagedFile,
+                source_paths: Vec::new(),
+                path: "policyHelpers.linux".into(),
+                diagnostic: None,
+            },
+        );
+        let (writer, mut reader) = tokio::io::duplex(64);
+        let stderr = io::Output::new(writer);
+        write_live_policy_refusal(&stderr, &fatal).await.unwrap();
+        drop(stderr);
+        let mut actual = Vec::new();
+        reader.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual, b"\npolicyHelpers.linux\n");
+    }
+
+    #[tokio::test]
+    async fn live_policy_refusal_cancels_pending_headless_input_and_suppresses_result() {
+        use tokio::io::AsyncReadExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let input_entered = Arc::new(tokio::sync::Notify::new());
+        let host_ready = Arc::new(tokio::sync::Notify::new());
+        let probe = Arc::new(std::sync::Mutex::new(None));
+        let orchestrator = Arc::new(std::sync::Mutex::new(None));
+        let (stdout, mut stdout_reader) = tokio::io::duplex(64 * 1024);
+        let (stderr, mut stderr_reader) = tokio::io::duplex(4096);
+        let mut desktop = crate::desktop::DesktopConfig::default();
+        desktop.cwd = project;
+        desktop.lingxi_home = root.path().join("home");
+        desktop.isolated_credential_storage = true;
+        desktop.composition = Some(crate::desktop::DesktopSessionComposition::HeadlessCli);
+        let run_task = tokio::spawn(run(
+            HeadlessConfig {
+                desktop,
+                options: HeadlessOptions {
+                    input_format: InputFormat::StreamJson,
+                    output_format: OutputFormat::StreamJson,
+                    verbose: true,
+                    ..Default::default()
+                },
+                session_start: SessionStart::New,
+            },
+            Arc::new(RefusalProbeHost {
+                probe: Arc::clone(&probe),
+                ready: Arc::clone(&host_ready),
+                orchestrator: Arc::clone(&orchestrator),
+            }),
+            HeadlessIo {
+                input: Box::pin(PendingInput {
+                    entered: Some(Arc::clone(&input_entered)),
+                }),
+                input_is_terminal: false,
+                stdout: io::Output::new(stdout),
+                stderr: io::Output::new(stderr),
+            },
+            HeadlessSignals::default(),
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), input_entered.notified())
+            .await
+            .expect("headless stdin reader should enter its pending read");
+        tokio::time::timeout(std::time::Duration::from_secs(5), host_ready.notified())
+            .await
+            .expect("headless runtime should publish its refusal probe");
+        let refusal_probe = probe.lock().unwrap().clone().unwrap();
+        refusal_probe.trigger_for_test(crate::desktop::PolicyHelperStartupError::new(
+            lingxi_core::settings::NativePolicyStartupFatal {
+                source: lingxi_core::settings::NativePolicySource::ManagedFile,
+                source_paths: Vec::new(),
+                path: "policyHelpers.linux".into(),
+                diagnostic: None,
+            },
+        ));
+        drop(refusal_probe);
+
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(5), run_task)
+            .await
+            .expect("terminal refusal should stop the active headless input loop")
+            .unwrap();
+        assert_eq!(exit.code, exit_codes::RUNTIME_ERROR);
+        assert_eq!(exit.reason, HeadlessExitReason::RuntimeError);
+        assert_eq!(exit.execution, HeadlessExecutionStatus::Failed);
+        assert_eq!(exit.delivery, HeadlessDeliveryStatus::Complete);
+        assert!(
+            orchestrator
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("runtime owner probe was captured")
+                .upgrade()
+                .is_none(),
+            "the final headless owner must release the orchestrator after run returns",
+        );
+
+        let mut actual_stdout = Vec::new();
+        let stdout_eof = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stdout_reader.read_to_end(&mut actual_stdout),
+        )
+        .await;
+        assert!(
+            stdout_eof.is_ok(),
+            "stdout did not close after headless returned; shutdown={:?}, shutdown_errors={:?}, retained_cleanup={:?}",
+            exit.shutdown,
+            exit.shutdown_errors,
+            exit.cleanup.as_ref().map(|cleanup| cleanup.status()),
+        );
+        stdout_eof.unwrap().unwrap();
+        assert!(!String::from_utf8_lossy(&actual_stdout).contains("\"type\":\"result\""));
+        let mut actual_stderr = Vec::new();
+        let stderr_eof = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stderr_reader.read_to_end(&mut actual_stderr),
+        )
+        .await;
+        assert!(
+            stderr_eof.is_ok(),
+            "stderr did not close after headless returned; shutdown={:?}, shutdown_errors={:?}, retained_cleanup={:?}",
+            exit.shutdown,
+            exit.shutdown_errors,
+            exit.cleanup.as_ref().map(|cleanup| cleanup.status()),
+        );
+        stderr_eof.unwrap().unwrap();
+        assert_eq!(actual_stderr, b"\npolicyHelpers.linux\n");
     }
 
     #[tokio::test]

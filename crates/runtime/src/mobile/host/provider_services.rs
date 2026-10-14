@@ -885,7 +885,7 @@ pub(super) fn mobile_provider_settings(
             ..SettingsJson::default()
         },
         layered,
-    );
+    )?;
     if !explicit_allowlist {
         if let Some(enabled) = merged
             .routing

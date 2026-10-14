@@ -132,6 +132,8 @@ impl ShellRunner for ParityShellRunner {
         &self,
         command: &Utf16JsonProjection,
         _shell: Option<command_api::FrontmatterShell>,
+
+        _cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<ShellOut, ShellRunError> {
         let command = command.string_at("").unwrap_or_default().to_owned();
         self.commands.lock().unwrap().push(command.clone());
@@ -474,7 +476,13 @@ async fn every_fixture_command_dispatches_to_handled() {
 
     for entry in &f.commands {
         let raw = format!("/{}", entry.name);
-        match d.dispatch(Utf16JsonProjection::from(raw)).await {
+        match d
+            .dispatch(
+                Utf16JsonProjection::from(raw),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn {
                 command,
                 body,
@@ -531,7 +539,10 @@ async fn unknown_command_uses_locked_literal() {
     let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
     let outcome = d
-        .dispatch(Utf16JsonProjection::from("/definitely-not-a-real-command"))
+        .dispatch(
+            Utf16JsonProjection::from("/definitely-not-a-real-command"),
+            lingxi_core::host::CancellationToken::new(),
+        )
         .await;
     match outcome {
         SlashDispatchResult::Unknown { name, display } => {

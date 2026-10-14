@@ -4,8 +4,8 @@
 
 use crate::builtin_support::names::core_description;
 use crate::model::{
-    BuiltinCommandHandler, CommandResult, NativeCommandPolicyGate, NativeCommandRequirements,
-    NativeCommandType, PromptPart, source_concat,
+    source_concat, BuiltinCommandHandler, CommandResult, NativeCommandPolicyGate,
+    NativeCommandRequirements, NativeCommandType, PromptPart,
 };
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
@@ -275,12 +275,10 @@ mod tests {
                  Want to dig into any section or try one of the suggestions?"
             )
         );
-        assert!(
-            !content
-                .string_at("")
-                .expect("valid display text")
-                .contains("Additional user input")
-        );
+        assert!(!content
+            .string_at("")
+            .expect("valid display text")
+            .contains("Additional user input"));
     }
 
     #[tokio::test]
@@ -297,11 +295,10 @@ mod tests {
         let CommandResult::InjectMessage { content } = with_line.handle(&args("")).await else {
             panic!("expected injected report");
         };
-        assert!(
-            content.string_at("").unwrap().contains(
-                "file:///tmp/report-2026-10-12.html\n\nTip: try auto mode.\n\nWant to dig"
-            )
-        );
+        assert!(content
+            .string_at("")
+            .unwrap()
+            .contains("file:///tmp/report-2026-10-12.html\n\nTip: try auto mode.\n\nWant to dig"));
     }
 
     #[tokio::test]
@@ -416,7 +413,10 @@ mod tests {
 
         let expected_body = render_report(&report(None));
         match dispatcher
-            .dispatch("/insights arbitrary user text".into())
+            .dispatch(
+                "/insights arbitrary user text".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
             .await
         {
             SlashDispatchResult::RunSkillAsTurn {
@@ -468,7 +468,13 @@ mod tests {
             crate::RegistrySlashDispatcher::new(Arc::new(tokio::sync::RwLock::new(registry)))
                 .with_shell_expansion(Arc::new(ShellExpansionMustNotRun));
 
-        match dispatcher.dispatch("/insights".into()).await {
+        match dispatcher
+            .dispatch(
+                "/insights".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
             SlashDispatchResult::RunSkillAsTurn { body, .. } => {
                 assert!(body.string_at("").unwrap().contains("!`echo MUST_NOT_RUN`"));
             }

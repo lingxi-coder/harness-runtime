@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::mcp_bridge::{remove_server, upsert_server, McpPaths};
-use crate::settings_bridge::{apply_patch_source, build_snapshot, SettingsContext};
+use crate::settings_bridge::{apply_patch_source, settings_error_message, SettingsContext};
 use client::protocol::commands::WritableScopeDto;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
 
@@ -51,11 +51,9 @@ pub fn snapshot_json(
     let project_key = project_path_for_config(&paths.project_dir);
     let local_map = get_project_config(&paths.global_config_path, &project_key)
         .map_err(|error| error.to_string())?;
-    let settings_snapshot = build_snapshot(
-        &context.paths,
-        context.active_snapshot(),
-        context.managed.clone(),
-    );
+    let settings_snapshot = context
+        .snapshot()
+        .map_err(|error| settings_error_message(&error))?;
     let local_layer = settings_snapshot
         .layers
         .get("local")
@@ -138,11 +136,9 @@ pub fn set_project_approval(
     payload_json: &str,
 ) -> Result<(), String> {
     let payload = parse_payload(payload_json)?;
-    let snapshot = build_snapshot(
-        &context.paths,
-        context.active_snapshot(),
-        context.managed.clone(),
-    );
+    let snapshot = context
+        .snapshot()
+        .map_err(|error| settings_error_message(&error))?;
     let local_layer = snapshot
         .layers
         .get("local")

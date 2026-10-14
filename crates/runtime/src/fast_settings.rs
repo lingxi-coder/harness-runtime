@@ -21,11 +21,15 @@ pub(crate) fn session_identity_from_environment(
     })
 }
 
-pub(crate) fn policy(home: &Path, flag: Option<&SettingsJson>, managed: &[SettingsJson]) -> Policy {
-    let managed = managed.iter().cloned().fold(
+pub(crate) fn policy(
+    home: &Path,
+    flag: Option<&SettingsJson>,
+    managed: &[SettingsJson],
+) -> Result<Policy, lingxi_core::settings::SettingsError> {
+    let managed = managed.iter().cloned().try_fold(
         SettingsJson::default(),
         lingxi_core::settings::merger::merge,
-    );
+    )?;
     let native_global = home.join(branding::LEGACY_GLOBAL_CONFIG_FILE);
     let path = if native_global.exists() {
         Some(native_global)
@@ -42,7 +46,7 @@ pub(crate) fn policy(home: &Path, flag: Option<&SettingsJson>, managed: &[Settin
         })
         .unwrap_or(false);
     let session = session_identity_from_environment();
-    Policy {
+    Ok(Policy {
         flag_fast: flag.and_then(|settings| settings.fast_mode) == Some(true),
         policy_fast: managed.fast_mode,
         policy_session_opt_in: managed.fast_mode_per_session_opt_in,
@@ -53,11 +57,31 @@ pub(crate) fn policy(home: &Path, flag: Option<&SettingsJson>, managed: &[Settin
         no_user_account: session.no_user_account,
         agent_owned_remote: session.agent_owned_remote,
         ..Policy::default()
-    }
+    })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn policy_returns_native_projection_merge_failures() {
+        let home = tempfile::tempdir().unwrap();
+        let lower: SettingsJson = serde_json::from_str(r#"{"policyHelpers":{"x":[]}}"#).unwrap();
+        let middle: SettingsJson =
+            serde_json::from_str(r#"{"policyHelpers":{"x":{"foo":[]}}}"#).unwrap();
+        let upper: SettingsJson =
+            serde_json::from_str(r#"{"policyHelpers":{"x":{"foo":{"length":1.5}}}}"#).unwrap();
+
+        let error = policy(home.path(), None, &[lower, middle, upper])
+            .expect_err("Native-compatible array length coercion must remain fallible");
+        assert_eq!(error.to_string(), "RangeError: Invalid array length");
+        assert!(matches!(
+            error,
+            lingxi_core::settings::SettingsError::Projection(
+                lingxi_core::types::utf16_json::Utf16JsonProjectionError::InvalidArraySetLength { .. }
+            )
+        ));
+    }
+
     #[test]
     fn managed_fast_denial_is_not_lost_behind_a_flag_opt_in() {
         let home = tempfile::tempdir().unwrap();
@@ -66,7 +90,8 @@ mod tests {
             r#"{"fastMode":false,"fastModePerSessionOptIn":true,"availableModels":["sonnet"]}"#,
         )
         .unwrap();
-        let policy = policy(home.path(), Some(&flag), &[managed]);
+        let policy =
+            policy(home.path(), Some(&flag), &[managed]).expect("valid policy settings merge");
         assert!(policy.flag_fast);
         assert_eq!(policy.policy_fast, Some(false));
         assert_eq!(policy.policy_session_opt_in, Some(true));

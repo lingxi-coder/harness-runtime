@@ -262,12 +262,39 @@ fn disable_extglob(shell_path: &str) -> Option<String> {
     }
 }
 
+async fn run_prompt_shell_process(
+    process: Arc<dyn lingxi_core::host::process::ProcessRunner>,
+    command: lingxi_core::host::sandbox::SandboxedCommand,
+    cancellation: lingxi_core::host::CancellationToken,
+) -> Result<lingxi_core::host::process::ForegroundRunResult, mobile_linux_api::ProcessError> {
+    let owner = format!("prompt-shell-{}", tool_api::util::ids::ulid_or_uuid());
+    let command = command
+        .with_process_owner(Some(owner.clone()))
+        .with_auto_background_on_timeout(false);
+    let mut run = Box::pin(process.run_foreground_with_output_limit(&command, None));
+    let mut cancellation_seen = false;
+    let mut kill_tick = tokio::time::interval(Duration::from_millis(100));
+    kill_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut run => return result,
+            _ = cancellation.cancelled(), if !cancellation_seen => cancellation_seen = true,
+            _ = kill_tick.tick(), if cancellation_seen => {
+                let _ = process.kill_owner_processes(&owner).await;
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl ShellRunner for PromptShellRunner {
     async fn run(
         &self,
         command: &Utf16JsonProjection,
         _shell: Option<FrontmatterShell>,
+        cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<ShellOut, ShellRunError> {
         use lingxi_core::host::sandbox::ProcessCommand;
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
@@ -275,6 +302,15 @@ impl ShellRunner for PromptShellRunner {
         // This is the real host process boundary. TextEncoder replaces only
         // unpaired UTF-16 units with U+FFFD; valid pairs and all other source
         // units are preserved in the executable command.
+        if cancellation.is_cancelled() {
+            return Err(ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
+                interrupted: true,
+                generic_message: None,
+            });
+        }
+
         let command_text = String::from_utf16_lossy(
             &command
                 .string_units("")
@@ -407,26 +443,57 @@ impl ShellRunner for PromptShellRunner {
             self.sandbox
                 .bypass_with_audit(pcmd, "prompt_shell_expansion")
         };
-        let run_result = self.process.run(&sandboxed).await;
-        // The wrapped command has finished: tear down any per-command sandbox
-        // state. No-op for the default `LegacyWrapRunner`.
-        self.sandbox_runner.cleanup_after_command().await;
-        match run_result {
-            // A timeout maps to the TS interrupted `ShellError` path so the engine
-            // formats "Shell command interrupted …" (mirrors bash's timeout->error).
-            Ok(out) if out.timed_out => Err(ShellRunError {
-                stdout: out.stdout,
-                stderr: out.stderr,
+        if cancellation.is_cancelled() {
+            self.sandbox_runner.cleanup_after_command().await;
+            return Err(ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
                 interrupted: true,
                 generic_message: None,
-            }),
-            // Non-zero exit is NOT an error here — TS `BashTool.call` returns
-            // stdout/stderr without throwing on a non-zero status; only an
-            // interruption throws. So every completed run yields `ShellOut`.
-            Ok(out) => Ok(ShellOut {
-                stdout: out.stdout,
-                stderr: out.stderr,
-                interrupted: false,
+            });
+        }
+        let run_result =
+            run_prompt_shell_process(self.process.clone(), sandboxed, cancellation.clone()).await;
+        // The wrapped command has finished and been joined: tear down any
+        // per-command sandbox state. No-op for the default `LegacyWrapRunner`.
+        self.sandbox_runner.cleanup_after_command().await;
+        match run_result {
+            Ok(result) => match result.outcome {
+                lingxi_core::host::process::ForegroundOutcome::Completed(out)
+                    if cancellation.is_cancelled() || out.timed_out =>
+                {
+                    Err(ShellRunError {
+                        stdout: out.stdout,
+                        stderr: out.stderr,
+                        interrupted: true,
+                        generic_message: None,
+                    })
+                }
+                // Non-zero exit is NOT an error here — TS `BashTool.call` returns
+                // stdout/stderr without throwing on a non-zero status; only an
+                // interruption throws. So every completed run yields `ShellOut`.
+                lingxi_core::host::process::ForegroundOutcome::Completed(out) => Ok(ShellOut {
+                    stdout: out.stdout,
+                    stderr: out.stderr,
+                    interrupted: false,
+                }),
+                lingxi_core::host::process::ForegroundOutcome::MovedToBackground(handle) => {
+                    let _ = self.process.kill(&handle).await;
+                    Err(ShellRunError {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        interrupted: true,
+                        generic_message: None,
+                    })
+                }
+            },
+            // A process error produced by the owner kill is still the
+            // interruption path; unrelated spawn/I/O failures remain generic.
+            Err(_) if cancellation.is_cancelled() => Err(ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
+                interrupted: true,
+                generic_message: None,
             }),
             // Spawn / I/O failure -> the TS `errorMessage(e)` generic path
             // (`[Error]\n{message}`).
@@ -1193,14 +1260,10 @@ fn native_is_automount_path(path: &[u16], base: &[u16], home_automount: Option<b
     if complete.is_empty() && partial.is_empty() {
         return false;
     }
-    let home_prefix = "/home/".encode_utf16().collect::<Vec<_>>();
-    if complete
-        .iter()
-        .filter(|root| root.starts_with(&home_prefix))
-        .any(|root| native_current_home_root().as_ref() != Some(root))
-    {
-        return true;
-    }
+    // Native pIr compares the candidate's completed autofs root with the
+    // base path's completed root. It does not require that root to match the
+    // process user's current HOME; paths under one shared /home mount are
+    // safe relative to one another.
     let Some(base_root) = base_complete.first() else {
         return true;
     };
@@ -1208,32 +1271,6 @@ fn native_is_automount_path(path: &[u16], base: &[u16], home_automount: Option<b
         || partial
             .iter()
             .any(|root| !native_units_starts_with(base_root, root))
-}
-
-fn native_current_home_root() -> Option<Vec<u16>> {
-    #[cfg(windows)]
-    let home = std::env::var_os("USERPROFILE");
-    #[cfg(not(windows))]
-    let home = std::env::var_os("HOME");
-    let home = home?;
-    #[cfg(windows)]
-    let units = {
-        use std::os::windows::ffi::OsStrExt;
-        home.encode_wide().collect::<Vec<_>>()
-    };
-    #[cfg(not(windows))]
-    let units = Path::new(&home)
-        .to_string_lossy()
-        .encode_utf16()
-        .collect::<Vec<_>>();
-    let canonical = native_macos_data_path(&units);
-    let components = native_normalized_posix_parts(&canonical);
-    if components.len() < 2 || !native_units_eq_ascii(&components[0], "home") {
-        return None;
-    }
-    let mut root = "/home/".encode_utf16().collect::<Vec<_>>();
-    root.extend(components[1].iter().copied());
-    Some(root)
 }
 
 fn native_automount_roots(path: &[u16], home_automount: bool) -> (Vec<Vec<u16>>, Vec<Vec<u16>>) {
@@ -1825,6 +1862,87 @@ mod tests {
         }
     }
 
+    struct CancellationProcessRunner {
+        started: tokio::sync::Notify,
+        killed: lingxi_core::host::CancellationToken,
+        kill_calls: AtomicUsize,
+        reaped: std::sync::atomic::AtomicBool,
+        owner: Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for CancellationProcessRunner {
+        async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            *self.owner.lock().unwrap() = command.process_owner().map(str::to_owned);
+            self.started.notify_one();
+            self.killed.cancelled().await;
+            self.reaped.store(true, Ordering::SeqCst);
+            Ok(ProcessOutput {
+                stdout: "stopped".into(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+        }
+
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            unreachable!()
+        }
+
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+
+        async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+            assert_eq!(self.owner.lock().unwrap().as_deref(), Some(owner));
+            self.kill_calls.fetch_add(1, Ordering::SeqCst);
+            self.killed.cancel();
+            vec![42]
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_shell_cancellation_kills_and_joins_owned_process() {
+        let mut ctx = test_ctx();
+        let runner = Arc::new(CancellationProcessRunner {
+            started: tokio::sync::Notify::new(),
+            killed: lingxi_core::host::CancellationToken::new(),
+            kill_calls: AtomicUsize::new(0),
+            reaped: std::sync::atomic::AtomicBool::new(false),
+            owner: Mutex::new(None),
+        });
+        ctx.process = runner.clone();
+        let expansion = build_prompt_shell_provider(&ctx).build(&[], None);
+        let cancellation = lingxi_core::host::CancellationToken::new();
+        let run_cancellation = cancellation.clone();
+        let run = tokio::spawn(async move {
+            expansion
+                .runner
+                .run(&"sleep 30".into(), None, run_cancellation)
+                .await
+        });
+        runner.started.notified().await;
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), run)
+            .await
+            .expect("the owner kill must let the same process future reap")
+            .expect("shell-run task must not panic");
+        assert!(
+            result
+                .expect_err("cancelled shell should return interrupted")
+                .interrupted
+        );
+        assert!(runner.kill_calls.load(Ordering::SeqCst) >= 1);
+        assert!(runner.reaped.load(Ordering::SeqCst));
+    }
+
     struct GitProbeProcessRunner {
         commands: Mutex<Vec<lingxi_core::host::sandbox::ProcessCommand>>,
         stdout: String,
@@ -2354,7 +2472,11 @@ mod tests {
         let expansion = provider.build(&[], None);
         let out = expansion
             .runner
-            .run(&"printf ok".into(), None)
+            .run(
+                &"printf ok".into(),
+                None,
+                lingxi_core::host::CancellationToken::new(),
+            )
             .await
             .expect("mobile prompt-shell run");
         assert_eq!(out.stdout, "ok");
@@ -2387,7 +2509,7 @@ mod tests {
             .expect("raw process command fixture");
         expansion
             .runner
-            .run(&command, None)
+            .run(&command, None, lingxi_core::host::CancellationToken::new())
             .await
             .expect("process boundary accepts raw UTF-16 command source");
 
@@ -2423,7 +2545,11 @@ mod tests {
         ));
         let error = expansion
             .runner
-            .run(&"printf ok".into(), None)
+            .run(
+                &"printf ok".into(),
+                None,
+                lingxi_core::host::CancellationToken::new(),
+            )
             .await
             .expect_err("disabled mobile shell must fail closed");
         assert_eq!(

@@ -507,6 +507,7 @@ async fn live_orchestrator_prompt_uses_production_context() {
     let additional_context = orchestrator
         .additional_context_preview()
         .await
+        .unwrap()
         .expect("live memory must produce additional context");
     assert!(
         additional_context.contains(memory_body),

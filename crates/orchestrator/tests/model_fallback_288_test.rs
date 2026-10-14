@@ -212,12 +212,14 @@ fn make(
         } else {
             ThinkingConfig::Disabled
         })
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            flag_fast: true,
-            cached_org_enabled: true,
-            remote: true,
-            agent_owned_remote: false,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                flag_fast: true,
+                cached_org_enabled: true,
+                remote: true,
+                agent_owned_remote: false,
+                ..Default::default()
+            })
         })),
     );
     let adapter = Arc::new(

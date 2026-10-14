@@ -5,8 +5,8 @@ fn write_settings(path: &std::path::Path, body: &str) {
     std::fs::write(path, body).unwrap();
 }
 
-fn effective(cfg: &DesktopConfig) -> Option<lingxi_core::settings::EffectiveSettings> {
-    load_effective_settings_for_config(cfg, &[])
+fn effective(cfg: &DesktopConfig) -> lingxi_core::settings::EffectiveSettings {
+    load_effective_settings_for_config(cfg, None).expect("settings merge should succeed")
 }
 
 /// A config whose USER settings file is not also its PROJECT settings file.
@@ -40,13 +40,15 @@ fn a_project_settings_file_cannot_turn_the_diff_on() {
 
     let eff = effective(&cfg);
     assert_eq!(
-        eff.as_ref().and_then(|e| e.settings.bash_edit_diff_enabled),
+        eff.settings.bash_edit_diff_enabled,
         Some(true),
         "the project layer must actually be reaching the merged settings, \
          or this test proves nothing"
     );
     assert!(
-        resolve_bash_edit_diff_with(&cfg, eff.as_ref(), &[], "s", None, false).is_none(),
+        resolve_bash_edit_diff_with(&cfg, &eff, None, "s", None, false)
+            .expect("settings merge should succeed")
+            .is_none(),
         "a project `true` reached the enabling arm — a repository can now \
          make Claude hash and diff its files"
     );
@@ -61,9 +63,9 @@ fn the_user_tier_turns_the_diff_on() {
         r#"{"bashEditDiffEnabled": true}"#,
     );
 
-    let setup =
-        resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "sess", None, false)
-            .expect("the user tier enables it");
+    let setup = resolve_bash_edit_diff_with(&cfg, &effective(&cfg), None, "sess", None, false)
+        .expect("settings merge should succeed")
+        .expect("the user tier enables it");
     assert_eq!(
         setup.shadow_root,
         cfg.lingxi_home.join("bash-edit-diff").join("sess"),
@@ -86,7 +88,8 @@ fn a_project_false_turns_off_what_the_user_tier_turned_on() {
         r#"{"bashEditDiffEnabled": false}"#,
     );
     assert!(
-        resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "s", None, false)
+        resolve_bash_edit_diff_with(&cfg, &effective(&cfg), None, "s", None, false)
+            .expect("settings merge should succeed")
             .is_none(),
         "the merged value is read separately from the tier, and a `false` \
          from any layer wins"
@@ -100,11 +103,14 @@ fn an_unconfigured_install_is_off_even_in_auto_mode() {
     let (_tmp, mut cfg) = distinct_layer_config();
     cfg.permission_mode = permission::PermissionMode::Auto;
     assert!(
-        resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "s", None, false)
+        resolve_bash_edit_diff_with(&cfg, &effective(&cfg), None, "s", None, false)
+            .expect("settings merge should succeed")
             .is_none()
     );
     assert!(
-        resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "s", None, true).is_some(),
+        resolve_bash_edit_diff_with(&cfg, &effective(&cfg), None, "s", None, true)
+            .expect("settings merge should succeed")
+            .is_some(),
         "…and it is the ROLLOUT that is missing, not the mode"
     );
 }

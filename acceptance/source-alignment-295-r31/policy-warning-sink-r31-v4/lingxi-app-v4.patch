@@ -1,0 +1,270 @@
+--- a/apps/cli/host/src/logging.rs
++++ b/apps/cli/host/src/logging.rs
+@@ -138,7 +138,9 @@
+         debug_enabled,
+         to_stderr: argv.debug_to_stderr,
+         minimum_level: NativeWarningLevel::from_environment(),
+-        filter: argv.debug_filter().and_then(NativeDebugFilter::parse),
++        filter_source_units: argv
++            .debug_filter()
++            .map(|source| source.encode_utf16().collect()),
+         file_sink,
+     }))
+ }
+@@ -191,157 +193,32 @@
+     }
+ }
+ 
+-#[derive(Clone, Debug, PartialEq, Eq)]
+-struct NativeDebugFilter {
+-    include: Vec<String>,
+-    exclude: Vec<String>,
+-    exclusive: bool,
+-}
+-
+-impl NativeDebugFilter {
+-    fn parse(source: &str) -> Option<Self> {
+-        let entries = source
+-            .split(',')
+-            .map(str::trim)
+-            .filter(|entry| !entry.is_empty())
+-            .collect::<Vec<_>>();
+-        if entries.is_empty() {
+-            return None;
+-        }
+-        let exclusive = entries.iter().any(|entry| entry.starts_with('!'));
+-        let has_include = entries.iter().any(|entry| !entry.starts_with('!'));
+-        if exclusive && has_include {
+-            return None;
+-        }
+-        let values = entries
+-            .into_iter()
+-            .map(|entry| entry.strip_prefix('!').unwrap_or(entry).to_lowercase())
+-            .collect::<Vec<_>>();
+-        Some(if exclusive {
+-            Self {
+-                include: Vec::new(),
+-                exclude: values,
+-                exclusive: true,
+-            }
+-        } else {
+-            Self {
+-                include: values,
+-                exclude: Vec::new(),
+-                exclusive: false,
+-            }
+-        })
+-    }
+-
+-    fn allows(&self, message: &str) -> bool {
+-        let categories = native_warning_categories(message);
+-        if categories.is_empty() {
+-            return false;
+-        }
+-        if self.exclusive {
+-            !categories
+-                .iter()
+-                .any(|category| self.exclude.iter().any(|excluded| excluded == category))
+-        } else {
+-            categories
+-                .iter()
+-                .any(|category| self.include.iter().any(|included| included == category))
+-        }
+-    }
+-}
+-
+-fn native_warning_categories(message: &str) -> Vec<String> {
+-    let mut categories = Vec::new();
+-    if let Some(rest) = message
+-        .strip_prefix("MCP server \"")
+-        .or_else(|| message.strip_prefix("MCP server '"))
+-    {
+-        let name = rest
+-            .split(|character| character == '"' || character == '\'')
+-            .next()
+-            .unwrap_or_default()
+-            .to_lowercase();
+-        if !name.is_empty() {
+-            categories.push("mcp".to_owned());
+-            categories.push(name);
+-        }
+-    } else if let Some((prefix, _)) = message.split_once(':') {
+-        if !prefix.contains('[') && !prefix.trim().is_empty() {
+-            categories.push(prefix.trim().to_lowercase());
+-        }
+-    }
+-    if let Some(rest) = message.strip_prefix('[') {
+-        if let Some((category, _)) = rest.split_once(']') {
+-            if !category.trim().is_empty() {
+-                categories.push(category.trim().to_lowercase());
+-            }
+-        }
+-    }
+-    if message.to_lowercase().contains("1p event:") {
+-        categories.push("1p".to_owned());
+-    }
+-    if let Some((_, after_first_colon)) = message.split_once(':') {
+-        if let Some((raw_category, _)) = after_first_colon.split_once(':') {
+-            let mut category = raw_category.trim();
+-            for suffix in [" type", " mode", " status", " event"] {
+-                if let Some(without_suffix) = category.strip_suffix(suffix) {
+-                    category = without_suffix.trim_end();
+-                    break;
+-                }
+-            }
+-            if category.encode_utf16().count() < 30
+-                && !category.chars().any(char::is_whitespace)
+-                && !category.is_empty()
+-            {
+-                categories.push(category.to_lowercase());
+-            }
+-        }
+-    }
+-    categories.sort();
+-    categories.dedup();
+-    categories
+-}
+-
+ struct CliNativePolicyWarningLogger {
+     is_ant: bool,
+     debug_enabled: bool,
+     to_stderr: bool,
+     minimum_level: NativeWarningLevel,
+-    filter: Option<NativeDebugFilter>,
++    filter_source_units: Option<Vec<u16>>,
+     file_sink: Option<FileSink>,
+ }
+ 
+-fn native_warning_log_line(message: &str, timestamp: &str) -> String {
+-    let message = message.trim();
+-    let message = if message.contains('\n') {
+-        serde_json::to_string(message).unwrap_or_else(|_| message.to_owned())
+-    } else {
+-        message.to_owned()
+-    };
+-    format!("{timestamp} [WARN] {message}")
+-}
+-
+ impl NativePolicyWarningLogger for CliNativePolicyWarningLogger {
+-    fn warn(&self, message: &lingxi_core::types::utf16_json::Utf16JsonProjection) {
+-        if (!self.is_ant && !self.debug_enabled) || !self.minimum_level.allows_warning() {
+-            return;
+-        }
+-        let Some(units) = message.string_units("") else {
++    fn warning_enabled(&self) -> bool {
++        (self.is_ant || self.debug_enabled) && self.minimum_level.allows_warning()
++    }
++
++    fn filter_source_units(&self) -> Option<Vec<u16>> {
++        self.filter_source_units.clone()
++    }
++
++    fn write_rendered_warning(&self, line_units: &[u16]) {
++        let Ok(rendered) = String::from_utf16(line_units) else {
+             return;
+         };
+-        let text = String::from_utf16_lossy(&units);
+-        if self
+-            .filter
+-            .as_ref()
+-            .is_some_and(|filter| !filter.allows(&text))
+-        {
+-            return;
+-        }
+-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+-        let rendered = native_warning_log_line(&text, &timestamp);
+         if self.to_stderr {
+-            eprintln!("{rendered}");
++            let _ = std::io::stderr().write_all(rendered.as_bytes());
+         } else if let Some(mut sink) = self.file_sink.clone() {
+-            let _ = writeln!(sink, "{rendered}");
++            let _ = sink.write_all(rendered.as_bytes());
+         }
+     }
+ }
+@@ -434,9 +311,7 @@
+     use super::*;
+ 
+     #[test]
+-    fn native_policy_warning_sink_uses_debug_level_category_and_file_gates() {
+-        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+-
++    fn native_policy_warning_sink_keeps_filter_source_and_applies_debug_level_gates() {
+         let dir = tempfile::tempdir().unwrap();
+         let path = dir.path().join("policy.log");
+         let file = File::options()
+@@ -445,43 +320,52 @@
+             .open(&path)
+             .unwrap();
+         let sink = FileSink(Arc::new(Mutex::new(file)));
++        let filter_source_units = "policyHelper".encode_utf16().collect::<Vec<_>>();
+         let logger = CliNativePolicyWarningLogger {
+             is_ant: false,
+             debug_enabled: true,
+             to_stderr: false,
+             minimum_level: NativeWarningLevel::Warn,
+-            filter: NativeDebugFilter::parse("policyhelper"),
++            filter_source_units: Some(filter_source_units.clone()),
+             file_sink: Some(sink.clone()),
+         };
+-        let first = Utf16JsonProjection::parse("\"policyHelper: warning one\"").unwrap();
+-        let filtered = Utf16JsonProjection::parse("\"mcp: warning two\"").unwrap();
+-        logger.warn(&first);
+-        logger.warn(&filtered);
++        assert!(logger.warning_enabled());
++        assert_eq!(logger.filter_source_units(), Some(filter_source_units));
++
++        let line = "2026-10-13T12:34:56.789Z [WARN] policyHelper: warning one\n";
++        logger.write_rendered_warning(&line.encode_utf16().collect::<Vec<_>>());
+         let mut flushed_sink = sink.clone();
+         flushed_sink.flush().unwrap();
+-        let contents = std::fs::read_to_string(path).unwrap();
+-        assert!(contents.ends_with(" [WARN] policyHelper: warning one\n"));
++        assert_eq!(std::fs::read_to_string(&path).unwrap(), line);
+ 
+         let disabled = CliNativePolicyWarningLogger {
+             debug_enabled: false,
+             file_sink: logger.file_sink.clone(),
+             ..logger
+         };
+-        disabled.warn(&first);
+-        let contents = std::fs::read_to_string(path).unwrap();
+-        assert!(contents.ends_with(" [WARN] policyHelper: warning one\n"));
+-    }
+-
+-    #[test]
+-    fn native_warning_log_line_matches_native_timestamp_level_and_multiline_framing() {
+-        assert_eq!(
+-            native_warning_log_line("policyHelper: warning", "2026-10-13T12:34:56.789Z"),
+-            "2026-10-13T12:34:56.789Z [WARN] policyHelper: warning"
+-        );
+-        assert_eq!(
+-            native_warning_log_line("first\nsecond", "2026-10-13T12:34:56.789Z"),
+-            "2026-10-13T12:34:56.789Z [WARN] \"first\\nsecond\""
+-        );
++        assert!(!disabled.warning_enabled());
++    }
++
++    #[test]
++    fn native_policy_warning_sink_encodes_only_already_escaped_utf16_at_output() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("policy.log");
++        let file = File::options()
++            .create(true)
++            .append(true)
++            .open(&path)
++            .unwrap();
++        let logger = CliNativePolicyWarningLogger {
++            is_ant: false,
++            debug_enabled: true,
++            to_stderr: false,
++            minimum_level: NativeWarningLevel::Warn,
++            filter_source_units: None,
++            file_sink: Some(FileSink(Arc::new(Mutex::new(file)))),
++        };
++        let line = "2026-10-13T12:34:56.789Z [WARN] \"first\\n\\ud800 paired 😀\"\n";
++        logger.write_rendered_warning(&line.encode_utf16().collect::<Vec<_>>());
++        assert_eq!(std::fs::read_to_string(path).unwrap(), line);
+     }
+ 
+     #[test]

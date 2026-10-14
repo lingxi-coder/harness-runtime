@@ -40,7 +40,10 @@ async fn plan_attachment_precedes_output_style_in_outgoing_order() {
         state.plan_mode = true;
         state.plan_reminder_shown = false;
     }
-    let reminders = orch.collect_turn_reminders(true, true, None, &[]).await;
+    let reminders = orch
+        .collect_turn_reminders(true, true, None, &[])
+        .await
+        .expect("valid output-style fixture settings build reminders");
     let plan = reminders
         .transient
         .iter()
@@ -124,7 +127,10 @@ async fn mod_attachment_rewrites_the_outgoing_style_reminder_and_caches_by_messa
     )
     .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
 
-    let reminders = orch.collect_turn_reminders(true, true, None, &[]).await;
+    let reminders = orch
+        .collect_turn_reminders(true, true, None, &[])
+        .await
+        .expect("valid output-style fixture settings build reminders");
     assert!(reminders.transient.iter().any(|message| {
         text_of(message) == "<system-reminder>\nrewritten 1\n</system-reminder>"
     }));
@@ -209,6 +215,7 @@ async fn mod_attachment_rewrites_the_outgoing_style_reminder_and_caches_by_messa
     assert!(!learning
         .collect_turn_reminders(true, true, None, &[])
         .await
+        .expect("valid Learning-style fixture settings build reminders")
         .transient
         .iter()
         .any(|message| text_of(message) == LEARNING_REMINDER));

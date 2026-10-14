@@ -1,6 +1,9 @@
 //! A queue batch keeps per-message origin metadata and runs one model turn.
+use async_trait::async_trait;
 use lingxi_core::host::FileSystem;
-use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId,
+};
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -12,10 +15,102 @@ use orchestrator::test_support_stream::{
 use orchestrator::{
     scripted, ConversationOrchestrator, OrchestratorConfig, QueuedPromptInput, TurnOutcome,
 };
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use platform_posix::fs::PosixFileSystem;
 use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio_util::sync::CancellationToken;
+use tool_api::progress::ToolProgressSender;
+use tool_api::registry::ToolRegistry;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+};
+
+struct CaptureShellInput {
+    input: Arc<StdMutex<Option<Utf16JsonProjection>>>,
+}
+
+#[async_trait]
+impl Tool for CaptureShellInput {
+    fn name(&self) -> &str {
+        "Shell"
+    }
+
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| serde_json::json!({"type": "object"}));
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
+    fn is_enabled(&self, _context: &ToolStaticContext) -> bool {
+        true
+    }
+
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
+        false
+    }
+
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
+        false
+    }
+
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _context: &tool_api::context::ToolUseContext,
+    ) -> PermissionResult {
+        PermissionResult::Allow {
+            reason: PermissionDecisionReason::Other {
+                reason: "registered direct-call fixture".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: PermissionMetadata::default(),
+        }
+    }
+
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _options: &DescriptionOptions,
+    ) -> String {
+        "Capture direct Shell input".into()
+    }
+
+    async fn prompt(&self, _options: &PromptOptions) -> Utf16JsonProjection {
+        String::new().into()
+    }
+
+    async fn call(
+        &self,
+        input: Utf16JsonProjection,
+        _context: tool_api::context::ToolUseContext,
+        _progress: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        *self
+            .input
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(input);
+        Ok(ToolCallResult::from_data(
+            Utf16JsonProjection::parse("{}").unwrap(),
+        ))
+    }
+}
 
 fn first_user_utf16_units(message: &ConversationMessage) -> Option<&[u16]> {
     let ConversationMessage::User { content, .. } = message else {
@@ -67,6 +162,7 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
             .map(|(i, is_meta)| QueuedPromptInput {
                 goal_retry_id: None,
                 text: format!("queued text {i}").into(),
+                images: Vec::new(),
                 is_meta: *is_meta,
                 turn_companion: false,
                 trailing_history_rows: Vec::new(),
@@ -82,8 +178,11 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
                     .unwrap()
                 }),
                 prompt_source: None,
+                prompt_ingress_kind: None,
+                skip_model_query: false,
                 message_id: Some(ids[i]),
                 transcript_row_token: None,
+                pending_prompt_identity: None,
                 queue_priority: is_meta.then(|| "later".into()),
                 scheduled_task_id: is_meta.then(|| format!("task-{i}")),
                 scheduled_fire_id: Some(format!("fire-{i}")),
@@ -246,6 +345,104 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
             })
             .is_some_and(|message| !message.is_meta()));
     }
+}
+
+#[tokio::test]
+async fn cancelled_direct_bash_still_appends_its_source_rows_without_querying() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![]));
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        api.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    ));
+    let bash_id = MessageId::new();
+    let inputs = vec![
+        QueuedPromptInput {
+            text: "<system-reminder>direct Bash result follows</system-reminder>".into(),
+            is_meta: true,
+            ..QueuedPromptInput::default()
+        },
+        QueuedPromptInput {
+            text: "<bash-input>printf done</bash-input>".into(),
+            prompt_ingress_kind: Some(orchestrator::PromptIngressKind::DirectBash),
+            message_id: Some(bash_id),
+            ..QueuedPromptInput::default()
+        },
+    ];
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    assert!(matches!(
+        orch.run_queued_prompt_batch(inputs, cancel).await.unwrap(),
+        TurnOutcome::Cancelled
+    ));
+    assert!(api.captured_calls().await.is_empty());
+    let history = orch.snapshot_history().await;
+    assert_eq!(
+        history.len(),
+        2,
+        "the durable source rows survive cancellation"
+    );
+    assert!(matches!(
+        &history[0],
+        ConversationMessage::User { is_meta: true, .. }
+    ));
+    assert!(matches!(
+        &history[1],
+        ConversationMessage::User { id, is_meta: false, .. } if *id == bash_id
+    ));
+    assert_eq!(
+        first_user_utf16_units(&history[1]).unwrap(),
+        "<bash-input>printf done</bash-input>"
+            .encode_utf16()
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn direct_bash_host_call_passes_native_unsandbox_override_to_registered_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = Arc::new(StdMutex::new(None));
+    let mut registry = ToolRegistry::new();
+    registry.register_builtin(Arc::new(CaptureShellInput {
+        input: input.clone(),
+    }));
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(MockStreamingApiClient::with_turns(vec![])),
+        Arc::new(registry),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    ));
+
+    orch.call_direct_bash_from_host("printf direct-bash".into(), CancellationToken::new())
+        .await
+        .expect("registered Shell direct call");
+
+    let captured = input
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .expect("registered Shell received the direct command");
+    assert_eq!(captured.string_at("/command"), Some("printf direct-bash"));
+    assert_eq!(
+        captured
+            .at_pointer("/dangerouslyDisableSandbox")
+            .and_then(|value| value.as_bool()),
+        Some(true),
+        "Native processBashCommand invokes Shell.call with the explicit override"
+    );
 }
 
 #[tokio::test]

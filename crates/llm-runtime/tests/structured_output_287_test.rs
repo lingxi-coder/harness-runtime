@@ -362,9 +362,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         Some(0),
         None,
     )
-    .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-        cached_org_enabled: true,
-        ..Default::default()
+    .with_fast_policy_source(Arc::new(|| {
+        Ok(llm_runtime::model::fast_admission::Policy {
+            cached_org_enabled: true,
+            ..Default::default()
+        })
     }))
     .with_thinking(ThinkingConfig::Disabled);
     // All public side-query paths reach the SDK transport without a schema.
@@ -449,9 +451,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         Some(0),
         None,
     )
-    .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-        cached_org_enabled: true,
-        ..Default::default()
+    .with_fast_policy_source(Arc::new(|| {
+        Ok(llm_runtime::model::fast_admission::Policy {
+            cached_org_enabled: true,
+            ..Default::default()
+        })
     }))
     .with_thinking(ThinkingConfig::Disabled);
     for kind in [
@@ -557,9 +561,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             Some(0),
             None,
         )
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
         .with_thinking(ThinkingConfig::Disabled);
         std::env::set_var(
@@ -623,9 +629,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             Some(0),
             None,
         )
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
         .with_thinking(ThinkingConfig::Disabled);
         for betas in [
@@ -700,9 +708,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             Some(0),
             None,
         )
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
         .with_thinking(ThinkingConfig::Disabled);
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", json!({"output_format":{"type":"json_schema","schema":{"type":"object"}},"output_config":{"effort":"low"}}).to_string());
@@ -778,9 +788,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             Some(0),
             None,
         )
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
         .with_thinking(ThinkingConfig::Disabled);
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", json!({"numbers":{"large":1e21,"small":1e-7,"zero":-0.0,"integer":u64::MAX,"2":1.0,"0":-0.0,"01":2.0}}).to_string());
@@ -849,9 +861,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             Some(0),
             None,
         )
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
         .with_thinking(ThinkingConfig::Disabled);
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", json!({"metadata":{"user_id":r#"{"tk":"secret","id":"\ud800","\udc00":"value"}"#},"extension":true}).to_string());
@@ -936,9 +950,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             Some(0),
             None,
         )
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
         .with_thinking(ThinkingConfig::Disabled);
         std::env::set_var(
@@ -1019,10 +1035,10 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                         None,
                     )
                     .with_fast_policy_source(Arc::new(|| {
-                        llm_runtime::model::fast_admission::Policy {
+                        Ok(llm_runtime::model::fast_admission::Policy {
                             cached_org_enabled: true,
                             ..Default::default()
-                        }
+                        })
                     }))
                     .with_thinking(ThinkingConfig::Disabled)
                     .with_interactive_session(false);
@@ -1258,9 +1274,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             Some(0),
             None,
         )
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
         .with_thinking(ThinkingConfig::Disabled)
         .with_interactive_session(false);
@@ -1335,9 +1353,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         Some(0),
         None,
     )
-    .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-        cached_org_enabled: true,
-        ..Default::default()
+    .with_fast_policy_source(Arc::new(|| {
+        Ok(llm_runtime::model::fast_admission::Policy {
+            cached_org_enabled: true,
+            ..Default::default()
+        })
     }))
     .with_thinking(ThinkingConfig::Disabled);
     for index in 0..2 {
@@ -1433,7 +1453,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         Arc::new(move || {
             sample_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if !admitted.load(std::sync::atomic::Ordering::SeqCst) {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             lingxi_core::settings::Settings::load_with_layers_from_user_path(
                 lingxi_core::settings::LoadInputs {
@@ -1451,14 +1471,16 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                     managed_layers: &[],
                 },
                 Some(&path),
-            )
-            .unwrap()
+            )?
             .effort_layers
         })
     })
-    .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-        cached_org_enabled: true,
-        ..Default::default()
+    .unwrap()
+    .with_fast_policy_source(Arc::new(|| {
+        Ok(llm_runtime::model::fast_admission::Policy {
+            cached_org_enabled: true,
+            ..Default::default()
+        })
     }))
     .with_thinking(ThinkingConfig::Disabled);
     for (document, env, expected, allow, stream) in [
@@ -1586,11 +1608,12 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             None,
         )
         .with_effort_settings_source(Arc::new(move || {
-            vec![lingxi_core::host::effort::EffortSettingsLayer::new(
+            Ok(vec![lingxi_core::host::effort::EffortSettingsLayer::new(
                 lingxi_core::settings::tracer::Source::Managed,
                 &settings,
-            )]
-        }));
+            )])
+        }))
+        .unwrap();
         service
             .execute_non_stream_request(
                 LlmRequest::new("production-deployment").with_user_text("underlying identity"),
@@ -1669,14 +1692,16 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                     },
                     Default::default(),
                     Some(&path),
-                )
-                .unwrap()
+                )?
                 .effort_layers
             })
         })
-        .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-            cached_org_enabled: true,
-            ..Default::default()
+        .unwrap()
+        .with_fast_policy_source(Arc::new(|| {
+            Ok(llm_runtime::model::fast_admission::Policy {
+                cached_org_enabled: true,
+                ..Default::default()
+            })
         }))
         .with_thinking(ThinkingConfig::Disabled);
         (service, capture)
@@ -1854,9 +1879,11 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         Some(0),
         None,
     )
-    .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-        cached_org_enabled: true,
-        ..Default::default()
+    .with_fast_policy_source(Arc::new(|| {
+        Ok(llm_runtime::model::fast_admission::Policy {
+            cached_org_enabled: true,
+            ..Default::default()
+        })
     }))
     .with_thinking(ThinkingConfig::Disabled);
     service
@@ -2162,9 +2189,11 @@ async fn current_fast_catalog_reaches_transport() {
                 Some(0),
                 None,
             )
-            .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-                cached_org_enabled: true,
-                ..Default::default()
+            .with_fast_policy_source(Arc::new(|| {
+                Ok(llm_runtime::model::fast_admission::Policy {
+                    cached_org_enabled: true,
+                    ..Default::default()
+                })
             }))
             .with_thinking(ThinkingConfig::Disabled);
             for stream in [false, true] {
@@ -2255,9 +2284,11 @@ async fn current_fast_environment_reaches_transport() {
                 Some(0),
                 None,
             )
-            .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-                cached_org_enabled: true,
-                ..Default::default()
+            .with_fast_policy_source(Arc::new(|| {
+                Ok(llm_runtime::model::fast_admission::Policy {
+                    cached_org_enabled: true,
+                    ..Default::default()
+                })
             }))
             .with_thinking(ThinkingConfig::Disabled);
             (service, capture)
@@ -2371,9 +2402,11 @@ async fn fast_environment_is_refreshed_for_physical_retry() {
         Some(1),
         Some(0),
     )
-    .with_fast_policy_source(Arc::new(|| llm_runtime::model::fast_admission::Policy {
-        cached_org_enabled: true,
-        ..Default::default()
+    .with_fast_policy_source(Arc::new(|| {
+        Ok(llm_runtime::model::fast_admission::Policy {
+            cached_org_enabled: true,
+            ..Default::default()
+        })
     }))
     .with_thinking(ThinkingConfig::Disabled);
     let mut request = LlmRequest::new("claude-opus-4-7").with_user_text("retry fast fixture");

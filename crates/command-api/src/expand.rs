@@ -24,6 +24,7 @@ use crate::parser::ParsedSlashCommand;
 use crate::shell_expansion::{
     execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionError,
 };
+use lingxi_core::host::CancellationToken;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Context for [`expand_markdown_command`]. Carries the session id (for the
@@ -33,6 +34,8 @@ pub struct ExpandCtx<'a> {
     pub session_id: &'a str,
     /// Injected runner + permission gate for embedded shell commands.
     pub shell: &'a ShellExpansionCtx,
+    /// Cancellation inherited from the owning command turn.
+    pub cancellation: CancellationToken,
 }
 
 /// Why expanding a markdown command failed.
@@ -121,8 +124,14 @@ pub async fn expand_markdown_command(
     // The shell parser scans the source projection directly. Non-shell spans
     // retain their exact UTF-16 units; only extracted commands cross the
     // injected process runner's host boundary.
-    content =
-        execute_shell_commands_in_prompt(&content, ctx.shell, &cmd.name, frontmatter.shell).await?;
+    content = execute_shell_commands_in_prompt(
+        &content,
+        ctx.shell,
+        &cmd.name,
+        frontmatter.shell,
+        ctx.cancellation.clone(),
+    )
+    .await?;
 
     Ok(content)
 }
@@ -171,6 +180,8 @@ mod tests {
             &self,
             command: &Utf16JsonProjection,
             _shell: Option<FrontmatterShell>,
+
+            _cancellation: lingxi_core::host::CancellationToken,
         ) -> Result<ShellOut, ShellRunError> {
             self.calls.lock().unwrap().push(command.clone());
             Ok(ShellOut {
@@ -210,7 +221,11 @@ mod tests {
     }
 
     fn make_ctx<'a>(session_id: &'a str, shell: &'a ShellExpansionCtx) -> ExpandCtx<'a> {
-        ExpandCtx { session_id, shell }
+        ExpandCtx {
+            session_id,
+            shell,
+            cancellation: CancellationToken::new(),
+        }
     }
 
     fn shell_ctx(runner: Arc<dyn ShellRunner>) -> ShellExpansionCtx {

@@ -249,6 +249,7 @@ fn mod_turn_step_stream(
     default_model: String,
     input: serde_json::Value,
     model_profile: Option<String>,
+    configured_model_source: Option<Utf16JsonProjection>,
     system_prompt: Option<
         lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
     >,
@@ -299,6 +300,7 @@ fn mod_turn_step_stream(
             let source_requested = requested_model.clone();
             let pending_output = Arc::new(StdMutex::new(Vec::<PendingModStepOutput>::new()));
             let fallback_api = api.clone();
+            let fallback_model_source = configured_model_source.clone();
             let fallback_model = model.clone();
             let fallback_profile = model_profile.clone();
             let fallback_system = system_prompt.clone();
@@ -322,6 +324,7 @@ fn mod_turn_step_stream(
             let source_task_deliveries = task_deliveries;
             let source_dispatch_observer = request_dispatch_observer.clone();
             let source_output = output.clone();
+            let source_model_source = configured_model_source.clone();
             let source = move |forwarded: Utf16JsonProjection| {
                 let api = api.clone();
                 let main_api = main_api.clone();
@@ -351,28 +354,33 @@ fn mod_turn_step_stream(
                     source_native_anthropic_request_context.clone();
                 let typed_attachment_ids = source_typed_attachment_ids.clone();
                 let task_deliveries = source_task_deliveries.clone();
+                let configured_model_source = source_model_source.clone();
                 async move {
                     let requested = forwarded.string_at("/model").unwrap_or_default().to_owned();
                     let default_sentinel =
                         lingxi_core::host::effort::trim_js_whitespace(&requested)
                             .eq_ignore_ascii_case("default");
+                    // Keep the route identity alive independently from the
+                    // output model/profile selected below. The later source
+                    // carrier comparison must still observe the exact request
+                    // route after fallback handling consumes owned values.
                     let route_model = if default_sentinel {
-                        default_model.as_str()
+                        default_model.clone()
                     } else {
-                        requested.as_str()
+                        requested.clone()
                     };
                     let route_profile = if default_sentinel {
                         None
                     } else {
-                        model_profile.as_deref()
+                        model_profile.clone()
                     };
                     let resolved = main_api
-                        .resolve_media_route(route_model, route_profile)
-                        .or_else(|_| main_api.resolve_media_route(route_model, None))
+                        .resolve_media_route(&route_model, route_profile.as_deref())
+                        .or_else(|_| main_api.resolve_media_route(&route_model, None))
                         .ok();
-                    let resolved_model = resolved
-                        .as_ref()
-                        .map_or(route_model, |route| route.main.request_model.as_str());
+                    let resolved_model = resolved.as_ref().map_or(route_model.as_str(), |route| {
+                        route.main.request_model.as_str()
+                    });
                     let is_explicit_model_override = requested.as_str() != original_model.as_str();
                     let native_catalog_route = resolved.as_ref().is_some_and(
                         crate::ConversationOrchestrator::route_uses_native_model_catalog,
@@ -380,16 +388,16 @@ fn mod_turn_step_stream(
                     let same_active_model = is_explicit_model_override
                         && crate::ConversationOrchestrator::same_native_model_identity(
                             main_api.as_ref(),
-                            route_model,
-                            route_profile,
+                            &route_model,
+                            route_profile.as_deref(),
                             &original_model,
                             model_profile.as_deref(),
                         );
                     let same_default_model = is_explicit_model_override
                         && crate::ConversationOrchestrator::matches_native_default_model_identity(
                             main_api.as_ref(),
-                            route_model,
-                            route_profile,
+                            &route_model,
+                            route_profile.as_deref(),
                             &default_model,
                             None,
                         );
@@ -415,21 +423,21 @@ fn mod_turn_step_stream(
                     };
                     let model = if denied {
                         tracing::warn!(requested, "turn.step model rewrite denied by policy");
-                        original_model
+                        original_model.clone()
                     } else if default_sentinel {
                         resolved_model.to_owned()
                     } else {
                         requested
                     };
                     let profile = if denied {
-                        model_profile
+                        model_profile.clone()
                     } else {
                         resolved
                             .map(|route| route.main.profile_name)
                             .or(if default_sentinel {
                                 None
                             } else {
-                                model_profile
+                                model_profile.clone()
                             })
                     };
                     let effort_override = forwarded
@@ -453,6 +461,15 @@ fn mod_turn_step_stream(
                             &snapshot,
                             &guarded_reminders,
                         );
+                    let model_source =
+                        crate::ConversationOrchestrator::configured_source_for_effective_route(
+                            main_api.as_ref(),
+                            &model,
+                            profile.as_deref(),
+                            &original_model,
+                            model_profile.as_deref(),
+                            configured_model_source.clone(),
+                        );
                     let stream = retry_scope
                         .run(request_capture.scope(api.stream_with_effort_override(
                             &model,
@@ -469,6 +486,7 @@ fn mod_turn_step_stream(
                             native_anthropic_request_context,
                             typed_attachment_ids,
                             task_deliveries,
+                            model_source,
                         )))
                         .await
                         .map_err(|error| {
@@ -649,6 +667,7 @@ fn mod_turn_step_stream(
                                     fallback_native_anthropic_request_context.clone(),
                                     fallback_typed_attachment_ids,
                                     fallback_task_deliveries,
+                                    fallback_model_source,
                                 ),
                             ))
                             .await;
@@ -1103,6 +1122,8 @@ impl StreamingTurnDriver<'_> {
                 orch.config.model.clone(),
                 input,
                 model_profile.clone(),
+                orch.configured_model_source_for_request(&model, model_profile.as_deref())
+                    .await,
                 system_prompt.clone(),
                 snapshot,
                 guarded_async_hook_reminders.clone(),
@@ -1155,24 +1176,34 @@ impl StreamingTurnDriver<'_> {
                     &guarded_async_hook_reminders,
                 );
             retry_scope
-                .run(orch.model_runtime.prompt_cache_capture.scope(
-                    orch.streaming_api.stream_with_effort_override(
-                        &model,
-                        model_profile.as_deref(),
-                        system_prompt.as_ref(),
-                        snapshot,
-                        tool_declarations.clone(),
-                        None,
-                        tool_result_reminder_suffixes.clone(),
-                        crate::config::sanitize_query_source(&orch.config.query_source),
-                        skip_global_cache_for_system_prompt,
-                        request_dispatch_admission,
-                        observe_main_dispatch(orch.turn_request_dispatch_observer(), &orch.output),
-                        native_anthropic_request_context.clone(),
-                        typed_attachment_ids,
-                        task_deliveries,
+                .run(
+                    orch.model_runtime.prompt_cache_capture.scope(
+                        orch.streaming_api.stream_with_effort_override(
+                            &model,
+                            model_profile.as_deref(),
+                            system_prompt.as_ref(),
+                            snapshot,
+                            tool_declarations.clone(),
+                            None,
+                            tool_result_reminder_suffixes.clone(),
+                            crate::config::sanitize_query_source(&orch.config.query_source),
+                            skip_global_cache_for_system_prompt,
+                            request_dispatch_admission,
+                            observe_main_dispatch(
+                                orch.turn_request_dispatch_observer(),
+                                &orch.output,
+                            ),
+                            native_anthropic_request_context.clone(),
+                            typed_attachment_ids,
+                            task_deliveries,
+                            orch.configured_model_source_for_request(
+                                &model,
+                                model_profile.as_deref(),
+                            )
+                            .await,
+                        ),
                     ),
-                ))
+                )
                 .await
                 .map(|stream| {
                     output_accounting_impl::account_stream(
@@ -1707,6 +1738,12 @@ impl StreamingTurnDriver<'_> {
                                     crate::config::sanitize_query_source(&orch.config.query_source)
                                         .to_string(),
                                 );
+                                request.opts.model_source = orch
+                                    .configured_model_source_for_request(
+                                        &non_stream_model,
+                                        non_stream_profile.as_deref(),
+                                    )
+                                    .await;
                                 request.opts.initial_consecutive_overloaded = Some(seed);
                                 request.opts.failed_stream_outlasted_timeout =
                                     failed_stream_outlasted_timeout;
@@ -2304,6 +2341,11 @@ impl StreamingTurnDriver<'_> {
                                             native_anthropic_request_context.clone(),
                                             typed_attachment_ids,
                                             task_deliveries,
+                                            orch.configured_model_source_for_request(
+                                                &re_model,
+                                                re_profile.as_deref(),
+                                            )
+                                            .await,
                                         ),
                                     ),
                                 )
@@ -2958,7 +3000,7 @@ impl StreamingTurnDriver<'_> {
                 &cache_request_history,
                 cache_inline_context.as_ref(),
             )
-            .await;
+            .await?;
         }
 
         // Task 8 (llm-runtime future-work batch 3): the streamed call (or
@@ -3744,18 +3786,36 @@ impl StreamingTurnDriver<'_> {
         // the `--agent`-adopted main-thread agent's prompt; else the default.
         let system_prompt: Option<
             lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
-        > = Some(orch.provider_system_prompt().await);
+        > = Some(orch.provider_system_prompt().await?);
 
         // A side query left unfinished when the previous user turn ended was
         // keyed to that previous prompt. Never surface it against new intent.
         orch.discard_stale_prefetches().await;
 
-        // Screen each submission before a user row is committed. A Mod answer
-        // without `next(e)` can drop it; a forwarded rewrite becomes the text
-        // the model and the persisted transcript receive.
+        // Direct Bash already passed the host's explicit command ingress and
+        // Native sends no PromptSubmit event for it. Preserve its source rows
+        // exactly instead of feeding them through ordinary prompt screening.
+        let direct_bash_ingress = queued_inputs.as_ref().is_some_and(|inputs| {
+            inputs.iter().filter(|input| !input.is_meta).count() == 1
+                && inputs.iter().filter(|input| !input.is_meta).all(|input| {
+                    input.prompt_ingress_kind
+                        == Some(crate::request_context::PromptIngressKind::DirectBash)
+                })
+                && inputs.iter().all(|input| {
+                    input.is_meta || {
+                        input.prompt_ingress_kind
+                            == Some(crate::request_context::PromptIngressKind::DirectBash)
+                    }
+                })
+        });
+        let direct_bash_no_query = direct_bash_ingress
+            && queued_inputs
+                .as_ref()
+                .is_some_and(|inputs| inputs.iter().any(|input| input.skip_model_query));
+        // Screen each ordinary submission before a user row is committed.
         let mut mod_contexts = Vec::new();
         let mut screened_prompt = None;
-        let queued_inputs = if transient_rewake {
+        let queued_inputs = if transient_rewake || direct_bash_ingress {
             queued_inputs
         } else {
             match queued_inputs {
@@ -3858,20 +3918,13 @@ impl StreamingTurnDriver<'_> {
         // first; the bridge converts inline `ImageRefDto`s straight to sources).
         let submissions: Vec<(QueuedPromptInput, ConversationMessage)> = match queued_inputs {
             Some(inputs) => {
-                let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
-                let mut attached_images = Some(images);
                 let mut submissions = Vec::with_capacity(inputs.len());
-                for (index, input) in inputs.into_iter().enumerate() {
-                    let message_images = if index == image_owner {
-                        attached_images.take().unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
+                for input in inputs {
                     let mut message = super::user_message_from_projection(
                         input.message_id.unwrap_or_default(),
                         &input.text,
                         input.is_meta,
-                        message_images,
+                        input.images.clone(),
                     );
                     if input.turn_companion {
                         if let ConversationMessage::User { turn_companion, .. } = &mut message {
@@ -3895,7 +3948,7 @@ impl StreamingTurnDriver<'_> {
                     message_id.unwrap_or_default(),
                     &prompt_projection,
                     !in_human_turn,
-                    images,
+                    images.clone(),
                 );
                 let native_source =
                     crate::native_user_message_source::current().unwrap_or_default();
@@ -3910,6 +3963,7 @@ impl StreamingTurnDriver<'_> {
                     QueuedPromptInput {
                         goal_retry_id: None,
                         text: prompt_projection.clone(),
+                        images,
                         is_meta: !in_human_turn,
                         message_id,
                         transcript_row_token: row_token,
@@ -3949,8 +4003,20 @@ impl StreamingTurnDriver<'_> {
                 // rows durable first; then attach request context and the
                 // body's ordered hook history rows.
                 for (input, message) in &submissions {
-                    orch.session.lock().await.history.push(message.clone());
-                    orch.persist_queued_message_to_jsonl(message, input).await;
+                    if let Some(identity) = &input.pending_prompt_identity {
+                        let persisted_message = orch
+                            .persist_pending_prompt_queued_message_once(
+                                message,
+                                input,
+                                &identity.prompt_id,
+                            )
+                            .await?;
+                        orch.append_pending_prompt_message_to_history_once(&persisted_message)
+                            .await?;
+                    } else {
+                        orch.session.lock().await.history.push(message.clone());
+                        orch.persist_queued_message_to_jsonl(message, input).await;
+                    }
                 }
                 for (index, ((input, message), _)) in
                     submissions.iter().zip(&mod_contexts).enumerate()
@@ -3959,14 +4025,26 @@ impl StreamingTurnDriver<'_> {
                         crate::request_context::persist_prompt_ingress_after_user(
                             orch,
                             message.id(),
-                            true,
+                            input
+                                .prompt_ingress_kind
+                                .unwrap_or(crate::request_context::PromptIngressKind::LocalSkill),
                         )
-                        .await;
+                        .await?;
                     }
                 }
                 for (input, _) in &submissions {
-                    orch.append_native_prompt_expansion_history_rows(&input.trailing_history_rows)
+                    if let Some(identity) = &input.pending_prompt_identity {
+                        orch.append_native_prompt_expansion_history_rows_once(
+                            &input.trailing_history_rows,
+                            &identity.trailing_history_row_ids,
+                        )
+                        .await?;
+                    } else {
+                        orch.append_native_prompt_expansion_history_rows(
+                            &input.trailing_history_rows,
+                        )
                         .await;
+                    }
                 }
                 for context in &mod_contexts {
                     orch.append_mod_prompt_context(context).await;
@@ -3975,19 +4053,55 @@ impl StreamingTurnDriver<'_> {
                 for (index, ((input, message), context)) in
                     submissions.iter().zip(&mod_contexts).enumerate()
                 {
-                    orch.session.lock().await.history.push(message.clone());
-                    orch.persist_queued_message_to_jsonl(message, input).await;
+                    if let Some(identity) = &input.pending_prompt_identity {
+                        let persisted_message = orch
+                            .persist_pending_prompt_queued_message_once(
+                                message,
+                                input,
+                                &identity.prompt_id,
+                            )
+                            .await?;
+                        orch.append_pending_prompt_message_to_history_once(&persisted_message)
+                            .await?;
+                    } else {
+                        orch.session.lock().await.history.push(message.clone());
+                        orch.persist_queued_message_to_jsonl(message, input).await;
+                    }
                     if index == primary && !input.is_meta {
                         crate::request_context::persist_prompt_ingress_after_user(
                             orch,
                             message.id(),
-                            true,
+                            input.prompt_ingress_kind.unwrap_or_else(|| {
+                                crate::request_context::prompt_ingress_kind_for_user_submission(
+                                    false,
+                                )
+                            }),
+                        )
+                        .await?;
+                    }
+                    if let Some(identity) = &input.pending_prompt_identity {
+                        orch.append_native_prompt_expansion_history_rows_once(
+                            &input.trailing_history_rows,
+                            &identity.trailing_history_row_ids,
+                        )
+                        .await?;
+                    } else {
+                        orch.append_native_prompt_expansion_history_rows(
+                            &input.trailing_history_rows,
                         )
                         .await;
                     }
                     orch.append_mod_prompt_context(context).await;
                 }
             }
+        }
+        if !transient_rewake && direct_bash_ingress {
+            crate::request_context::persist_prompt_ingress_after_user(
+                orch,
+                user_msg.id(),
+                crate::request_context::PromptIngressKind::DirectBash,
+            )
+            .await?;
         }
         // (/rewind) Snapshot the pre-turn file state IN MEMORY, keyed by this
         // user message, so `track_edit` (fired by Edit/Write/NotebookEdit during
@@ -4002,6 +4116,18 @@ impl StreamingTurnDriver<'_> {
             fh.make_snapshot(message_id).await;
         }
 
+        // A completed DirectBash with response disabled, or an interrupted
+        // command, persists its Native rows and ends before any model request.
+        if direct_bash_no_query {
+            let final_message_id = user_msg.id();
+            orch.emit_turn_terminal("end_turn", &orch.snapshot_cost_real().await)
+                .await;
+            return Ok(ConversationOutcome::EndTurn {
+                turn_count: 0,
+                final_message_id,
+            });
+        }
+
         // hooks B4: UserPromptSubmit (streaming twin). A Block aborts before the
         // first stream is opened. No-op when unregistered.
         if !transient_rewake {
@@ -4009,7 +4135,10 @@ impl StreamingTurnDriver<'_> {
                 // Synthetic entries (cron fires, `/loop` wakeups) are not user
                 // prompts: firing the hook for them double-counts telemetry and
                 // re-runs `append_ultracode_attachments` per batch entry.
-                if input.is_meta {
+                if input.is_meta
+                    || input.prompt_ingress_kind
+                        == Some(crate::request_context::PromptIngressKind::DirectBash)
+                {
                     continue;
                 }
                 let prompt_projection = super::projected_content::exact_message_text(message);

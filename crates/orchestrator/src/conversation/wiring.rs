@@ -51,7 +51,7 @@ impl ConversationOrchestrator {
         // session's mode+provider decision rather than the bare `false` default.
         lingxi_core::host::session_flags::set_tool_search_enabled(
             tools.deferral().mode().is_enabled()
-                && tool_search_supported_for_request(api.as_ref(), &config.model, None),
+                && tool_search_supported_for_request(api.as_ref(), &config.model, None, None),
         );
         let session = SessionState::empty(SessionId::new(), config.model.clone());
         let main_reports = super::main_reports_impl::MainReportInbox::new(session.session_id);
@@ -600,16 +600,39 @@ impl ConversationOrchestrator {
     pub async fn with_main_model_selection(
         self,
         raw_model_setting: Option<String>,
+        model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         provenance: lingxi_core::host::ModelProvenance,
         restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
     ) -> Self {
+        let fallback_anchor = {
+            let session = self.session.lock().await;
+            lingxi_core::host::ModelRouteAnchor {
+                model: session.model.clone(),
+                profile: session.model_profile.clone(),
+            }
+        };
+        let source = model_source.or_else(|| {
+            raw_model_setting.map(lingxi_core::types::utf16_json::Utf16JsonProjection::from)
+        });
+        let binding = source.as_ref().map(|source| {
+            ConversationOrchestrator::bind_model_source(
+                source,
+                fallback_anchor,
+                self.model_resolution_context_provider.as_deref(),
+            )
+        });
         {
             let mut session = self.session.lock().await;
-            session.user_model_setting = raw_model_setting;
+            session.user_model_setting = binding.clone();
             session.user_model_setting_provenance = provenance;
             session.user_model_setting_source =
                 lingxi_core::session::SessionModelSettingSource::Configured;
         }
+        *self
+            .model_runtime
+            .configured_model_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = binding;
         *self
             .model_runtime
             .main_model_restriction

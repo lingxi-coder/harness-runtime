@@ -241,24 +241,30 @@ async fn mid_turn_peer_arrivals_are_screened_before_joining_with_human_input() {
         vec![
             MidTurnInput {
                 text: source_text("hello"),
+                images: Vec::new(),
                 origin_kind: Some("peer"),
                 projected_content: None,
                 source_message_uuid: None,
                 queue_delivery: None,
+                pending_prompt_identity: None,
             },
             MidTurnInput {
                 text: source_text("muted"),
+                images: Vec::new(),
                 origin_kind: Some("peer"),
                 projected_content: None,
                 source_message_uuid: None,
                 queue_delivery: None,
+                pending_prompt_identity: None,
             },
             MidTurnInput {
                 text: source_text("human"),
+                images: Vec::new(),
                 origin_kind: None,
                 projected_content: None,
                 source_message_uuid: None,
                 queue_delivery: None,
+                pending_prompt_identity: None,
             },
         ],
     )))));
