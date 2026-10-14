@@ -1067,6 +1067,7 @@ dependencies = [
  "orchestrator",
  "permission",
  "pulldown-cmark",
+ "rquickjs",
  "serde",
  "serde_json",
  "session",

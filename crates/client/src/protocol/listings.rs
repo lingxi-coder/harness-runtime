@@ -538,6 +538,9 @@ pub struct SlashCommandDto {
     /// Optional argument hint rendered alongside the command name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
+    /// Positional names used to show the remaining arguments while typing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argument_names: Vec<String>,
     /// Compact menu label; when absent, clients fall back to `description`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menu_description: Option<String>,

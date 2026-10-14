@@ -1740,6 +1740,7 @@ fn current_contract_index() -> ContractIndex {
     put("SlashCommandDto.source", "String");
     put("SlashCommandDto.aliases", "Vec<String>");
     put("SlashCommandDto.argument_hint", "Option<String>");
+    put("SlashCommandDto.argument_names", "Vec<String>");
     put("SlashCommandDto.menu_description", "Option<String>");
     put("SlashCommandDto.hidden", "bool");
 
@@ -2768,6 +2769,7 @@ fn contract_index_covers_every_dto() {
             source: String::new(),
             aliases: vec![],
             argument_hint: None,
+            argument_names: Vec::new(),
             menu_description: None,
             hidden: false,
         },

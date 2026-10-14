@@ -858,6 +858,7 @@
   "SkillDto.source_dir": "String",
   "SlashCommandDto.aliases": "Vec<String>",
   "SlashCommandDto.argument_hint": "Option<String>",
+  "SlashCommandDto.argument_names": "Vec<String>",
   "SlashCommandDto.description": "String",
   "SlashCommandDto.hidden": "bool",
   "SlashCommandDto.menu_description": "Option<String>",

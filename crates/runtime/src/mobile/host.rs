@@ -6214,6 +6214,14 @@ impl MobileEngineHandle {
                 description: command.description,
                 aliases: command.aliases,
                 argument_hint: command.argument_hint,
+                argument_names: if matches!(
+                    command.kind,
+                    command_api::SlashCommandKind::Builtin { .. }
+                ) {
+                    Vec::new()
+                } else {
+                    command.argument_names
+                },
                 menu_description: command.menu_description,
             })
             .collect();
