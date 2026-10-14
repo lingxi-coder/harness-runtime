@@ -37,6 +37,7 @@ pub struct CapturedStreamCall {
     pub profile: Option<String>,
     /// Per-request override supplied by a `turn.step` hook, if any.
     pub effort_override: Option<String>,
+    pub output_budget: Option<u32>,
     /// Assembled system prompt (`None` if omitted).
     pub system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     /// Conversation history snapshot at the time of the call.
@@ -114,6 +115,18 @@ impl MockStreamingApiClient {
 
 #[async_trait]
 impl StreamingApiClient for MockStreamingApiClient {
+    async fn stream_with_output_budget(
+        &self, model: &str, profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>, tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        max_tokens: Option<u32>, query_source: &str, skip_global_cache_for_system_prompt: bool,
+        admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        let result = self.stream(model, profile, system, messages, tools, query_source, skip_global_cache_for_system_prompt, admission).await?;
+        if let Some(last) = self.captured.lock().await.last_mut() { last.output_budget = max_tokens; }
+        Ok(result)
+    }
+
     async fn stream(
         &self,
         model: &str,
@@ -137,6 +150,7 @@ impl StreamingApiClient for MockStreamingApiClient {
             model: model.to_string(),
             profile: profile.map(str::to_string),
             effort_override: None,
+            output_budget: None,
             system: system.cloned(),
             messages,
             tools,

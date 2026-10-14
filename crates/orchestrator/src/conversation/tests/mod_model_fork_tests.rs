@@ -172,7 +172,7 @@ async fn model_fork_uses_captured_prefix_and_reports_cold_session() {
 
     slot.save(sidequery::CacheSafeParams {
         system_prompt: Arc::from("shared prefix"),
-        tools: vec![serde_json::json!({"name":"Read"})],
+        tools: vec![serde_json::json!({"name":"Read"}).into()],
         effort: Some(serde_json::json!("high")),
         user_context: Default::default(),
         system_context: Default::default(),
@@ -217,7 +217,7 @@ async fn model_fork_uses_captured_prefix_and_reports_cold_session() {
     assert_eq!(requests[0].messages.len(), 3);
     assert_eq!(requests[0].messages[1].text_content(), "thinking aloud");
     assert!(!requests[0].messages[1].has_tool_use());
-    assert_eq!(requests[0].tools, vec![serde_json::json!({"name":"Read"})]);
+    assert_eq!(requests[0].tools, vec![serde_json::json!({"name":"Read"}).into()]);
     assert_eq!(requests[0].query_source.as_str(), "hook_prompt");
 }
 
@@ -300,7 +300,7 @@ async fn model_complete_is_stateless_and_uses_explicit_request_options() {
     assert_eq!(requests[0].messages.len(), 1);
     assert_eq!(requests[0].messages[0].text_content(), "question");
     assert!(requests[0].tools.is_empty());
-    assert_eq!(requests[0].max_tokens, 2112);
+    assert_eq!(requests[0].max_tokens, Some(2112));
     assert_eq!(requests[0].effort, Some(serde_json::json!("high")));
     assert_eq!(requests[0].query_source.as_str(), "hook_prompt");
     drop(requests);
@@ -492,7 +492,7 @@ async fn model_classify_uses_native_prompt_and_label_resolution() {
     assert_eq!(collision_result.string_units(""), Some(vec![0xfffd]));
     let requests = client.requests.lock().unwrap();
     assert_eq!(requests.len(), 5);
-    assert_eq!(requests[0].max_tokens, 2068);
+    assert_eq!(requests[0].max_tokens, Some(2068));
     assert_eq!(
         requests[0].system_prompt.as_deref(),
         Some(

@@ -640,7 +640,7 @@ impl WebFetchTool {
             output_format: None,
             // claude-code's queryHaiku uses getMaxOutputTokensForModel = min(native,
             // CAPPED_DEFAULT_MAX_TOKENS) = 8000 for the apply call.
-            max_tokens: 8000,
+            max_tokens: Some(8000),
             max_retries: 1,
             temperature: None,
             thinking: None,

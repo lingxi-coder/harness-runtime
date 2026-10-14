@@ -5,12 +5,12 @@ lifecycle, credentials, routing, retries, prompt-cache policy, Fusion admission,
 and durable physical-attempt accounting. Provider wire encoding/decoding,
 native replay content, usage normalization and built-in catalog facts come from
 `lingxi-llm-client`, pinned in root `[workspace.dependencies]` and inherited by
-this crate. Development from the repository root applies a Cargo patch to the sibling
-`../llm-client` checkout, so SDK changes are compiled directly; its own tests run with
-`cargo test --manifest-path ../llm-client/Cargo.toml --locked`.
-The SDK is outside the runtime workspace and retains its own lockfile.
-Downstream consumers keep the pinned Git dependency because Cargo patches apply
-only at the consuming workspace root.
+this crate. The current root workspace does not automatically patch the sibling
+`../llm-client`; its declared Git revision remains the ordinary build source.
+Working-tree consumers must explicitly overlay the complete dependency closure
+and check Cargo source identities. The SDK retains its own workspace and lockfile;
+run its tests separately. System integration is maintained in the LingXi technical
+handbook (`lingxi-app/docs/technical/en/llm-client.md` in a sibling checkout).
 
 The 0.3 client integration provides typed hosted tools, prompt caching, output
 contracts and scoped continuation to `LlmRequest`. `services::ProviderServices`

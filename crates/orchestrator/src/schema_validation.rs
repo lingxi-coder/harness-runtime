@@ -775,7 +775,7 @@ mod tests {
                 Some(&json!(format!(
                     "InputValidationError: {}",
                     case["raw"].as_str().unwrap()
-                ))),
+                )).into()),
                 "persisted {index}"
             );
         }
@@ -856,7 +856,7 @@ mod tests {
                 Some(&json!(format!(
                     "InputValidationError: {}",
                     case["raw"].as_str().unwrap()
-                ))),
+                )).into()),
                 "raw {index}"
             );
         }

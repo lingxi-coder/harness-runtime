@@ -1,0 +1,5065 @@
+{
+  "version": "2.1.296",
+  "binary_sha256": "c9b5341637becbd423ddffc5b254afb645682a3868cb708bbc6cc0e7bb419937",
+  "evidence": "shipped native source, executed in Node VM with dependency stubs",
+  "sources": {
+    "controls": {
+      "start": 203662913,
+      "end": 203665216,
+      "sha256": "90b333511e6035e8d2c151a34a9ec9b7f200ca01526d7b92aea50ee61b09a3a4"
+    },
+    "suggestions": {
+      "start": 203671299,
+      "end": 203682871,
+      "sha256": "4f88982b9b1517f39839925450d7f238e923623f179efc24b72e6ad3fe1547bf"
+    },
+    "env": {
+      "start": 186747852,
+      "end": 186750592,
+      "sha256": "3c625e31827ca4ef7cc3a4691103fbbb3abbdd338778cbf70c0054f37359507b"
+    },
+    "input": {
+      "start": 216782427,
+      "end": 218499168,
+      "sha256": "1d064454003e46bba8086468918622fd0cad3673bf3ba900031c380b27ed1d31"
+    },
+    "session": {
+      "start": 186752238,
+      "end": 186876609,
+      "sha256": "1a8788672a623975dc4a807604528e46b128f16b5ec159495c0ec2370f805713"
+    }
+  },
+  "envCases": [
+    {
+      "raw": null,
+      "expected": null
+    },
+    {
+      "raw": "",
+      "expected": null
+    },
+    {
+      "raw": "true",
+      "expected": true
+    },
+    {
+      "raw": "TRUE",
+      "expected": true
+    },
+    {
+      "raw": " tRuE\t",
+      "expected": true
+    },
+    {
+      "raw": "﻿On　",
+      "expected": true
+    },
+    {
+      "raw": "true",
+      "expected": null
+    },
+    {
+      "raw": "yes",
+      "expected": true
+    },
+    {
+      "raw": "1",
+      "expected": true
+    },
+    {
+      "raw": "false",
+      "expected": false
+    },
+    {
+      "raw": "FALSE",
+      "expected": false
+    },
+    {
+      "raw": "  No ",
+      "expected": false
+    },
+    {
+      "raw": "off",
+      "expected": false
+    },
+    {
+      "raw": "0",
+      "expected": false
+    },
+    {
+      "raw": "enabled",
+      "expected": null
+    },
+    {
+      "raw": "2",
+      "expected": null
+    },
+    {
+      "raw": "true\nfalse",
+      "expected": null
+    }
+  ],
+  "initialCases": [
+    {
+      "env": null,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "setting"
+      }
+    },
+    {
+      "env": null,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "swarm_teammate"
+      }
+    },
+    {
+      "env": null,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "non_interactive"
+      }
+    },
+    {
+      "env": null,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "non_interactive"
+      }
+    },
+    {
+      "env": null,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "setting"
+      }
+    },
+    {
+      "env": null,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "swarm_teammate"
+      }
+    },
+    {
+      "env": null,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "non_interactive"
+      }
+    },
+    {
+      "env": null,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "non_interactive"
+      }
+    },
+    {
+      "env": null,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "growthbook"
+      }
+    },
+    {
+      "env": null,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "setting"
+      }
+    },
+    {
+      "env": null,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "swarm_teammate"
+      }
+    },
+    {
+      "env": null,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "non_interactive"
+      }
+    },
+    {
+      "env": null,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "non_interactive"
+      }
+    },
+    {
+      "env": false,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": false,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": false,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": null,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": null,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": false,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": false,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": true,
+      "rollout": false,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": false,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": false,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    },
+    {
+      "env": true,
+      "setting": true,
+      "rollout": true,
+      "non_interactive": true,
+      "swarm_teammate": true,
+      "expected": {
+        "enabled": true,
+        "source": "env"
+      }
+    }
+  ],
+  "explicitCases": [
+    {
+      "env": null,
+      "setting": null,
+      "expected": true
+    },
+    {
+      "env": null,
+      "setting": false,
+      "expected": false
+    },
+    {
+      "env": null,
+      "setting": true,
+      "expected": true
+    },
+    {
+      "env": false,
+      "setting": null,
+      "expected": false
+    },
+    {
+      "env": false,
+      "setting": false,
+      "expected": false
+    },
+    {
+      "env": false,
+      "setting": true,
+      "expected": false
+    },
+    {
+      "env": true,
+      "setting": null,
+      "expected": true
+    },
+    {
+      "env": true,
+      "setting": false,
+      "expected": true
+    },
+    {
+      "env": true,
+      "setting": true,
+      "expected": true
+    }
+  ],
+  "gateCases": [
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": true,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "aborted"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 0,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "early_conversation"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 1,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "early_conversation"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": true,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "last_response_error"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": false,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "disabled"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": true,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "pending_permission"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": true,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "elicitation_active"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": true,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "plan_mode"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": false,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": true,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed_warning",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed_warning",
+      "env": false,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed_warning",
+      "env": true,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "rejected",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "rejected",
+      "env": false,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "rejected",
+      "env": true,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "unknown",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "unknown",
+      "env": false,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "unknown",
+      "env": true,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "",
+      "env": false,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "",
+      "env": true,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "rate_limit"
+      }
+    },
+    {
+      "aborted": true,
+      "assistant_count": 0,
+      "last_response_api_error": false,
+      "enabled": false,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "aborted"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 1,
+      "last_response_api_error": true,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "early_conversation"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": true,
+      "enabled": false,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "last_response_error"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": false,
+      "pending_permission": true,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "disabled"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": true,
+      "elicitation_active": true,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "pending_permission"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": true,
+      "plan_mode": true,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "elicitation_active"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": true,
+      "rate_limit_status": "rejected",
+      "env": null,
+      "usage": null,
+      "cache_thaw": false,
+      "expected": {
+        "reason": "plan_mode"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "cache_thaw": true,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 9999,
+        "output_tokens": 1,
+        "cache_creation_input_tokens": 0
+      },
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 9999,
+        "output_tokens": 1,
+        "cache_creation_input_tokens": 0
+      },
+      "cache_thaw": true,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 10000,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 10000,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "cache_thaw": true,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 10000,
+        "output_tokens": 1,
+        "cache_creation_input_tokens": 0
+      },
+      "cache_thaw": false,
+      "expected": {
+        "reason": "cache_cold",
+        "cacheColdBy": "uncached"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 10000,
+        "output_tokens": 1,
+        "cache_creation_input_tokens": 0
+      },
+      "cache_thaw": true,
+      "expected": {
+        "reason": "cache_cold",
+        "cacheColdBy": "uncached"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 9999,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 1
+      },
+      "cache_thaw": false,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 9999,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 1
+      },
+      "cache_thaw": true,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 9999,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 2
+      },
+      "cache_thaw": false,
+      "expected": {
+        "reason": "cache_cold",
+        "cacheColdBy": "cache_write"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 9999,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 2
+      },
+      "cache_thaw": true,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 10001
+      },
+      "cache_thaw": false,
+      "expected": {
+        "reason": "cache_cold",
+        "cacheColdBy": "cache_write"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 10001
+      },
+      "cache_thaw": true,
+      "expected": null
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 10001,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 1
+      },
+      "cache_thaw": false,
+      "expected": {
+        "reason": "cache_cold",
+        "cacheColdBy": "uncached"
+      }
+    },
+    {
+      "aborted": false,
+      "assistant_count": 2,
+      "last_response_api_error": false,
+      "enabled": true,
+      "pending_permission": false,
+      "elicitation_active": false,
+      "plan_mode": false,
+      "rate_limit_status": "allowed",
+      "env": null,
+      "usage": {
+        "input_tokens": 10001,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 1
+      },
+      "cache_thaw": true,
+      "expected": {
+        "reason": "cache_cold",
+        "cacheColdBy": "uncached"
+      }
+    }
+  ],
+  "backoffCases": [
+    {
+      "streak": null,
+      "env": null,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": null,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": null,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": null,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": false,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": false,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": false,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": false,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": null,
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": null
+    },
+    {
+      "streak": "20",
+      "env": null,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": null,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": null,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": null,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": false,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": false,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": false,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": false,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": "20",
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": "20"
+    },
+    {
+      "streak": -1,
+      "env": null,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": null,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": null,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": null,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": false,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": false,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": false,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": false,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": -1,
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": -1
+    },
+    {
+      "streak": 0,
+      "env": null,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": null,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": null,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": null,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": false,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": false,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": false,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": false,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 0,
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 0
+    },
+    {
+      "streak": 19,
+      "env": null,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": null,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": null,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": null,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": false,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": false,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": false,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": false,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19,
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19
+    },
+    {
+      "streak": 19.999,
+      "env": null,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": null,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": null,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": null,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": false,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": false,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": false,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": false,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 19.999,
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 19.999
+    },
+    {
+      "streak": 20,
+      "env": null,
+      "age": null,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20,
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": null,
+      "age": 1209600000,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20,
+      "env": null,
+      "age": 1209600001,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20,
+      "env": null,
+      "age": "invalid",
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20,
+      "env": false,
+      "age": null,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20,
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": false,
+      "age": 1209600000,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20,
+      "env": false,
+      "age": 1209600001,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20,
+      "env": false,
+      "age": "invalid",
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20,
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20,
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20
+    },
+    {
+      "streak": 20.001,
+      "env": null,
+      "age": null,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20.001,
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": null,
+      "age": 1209600000,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20.001,
+      "env": null,
+      "age": 1209600001,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20.001,
+      "env": null,
+      "age": "invalid",
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20.001,
+      "env": false,
+      "age": null,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20.001,
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": false,
+      "age": 1209600000,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20.001,
+      "env": false,
+      "age": 1209600001,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20.001,
+      "env": false,
+      "age": "invalid",
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 20.001,
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 20.001,
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 20.001
+    },
+    {
+      "streak": 21,
+      "env": null,
+      "age": null,
+      "expected": true,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": null,
+      "age": 1209600000,
+      "expected": true,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": null,
+      "age": 1209600001,
+      "expected": true,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": null,
+      "age": "invalid",
+      "expected": true,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": false,
+      "age": null,
+      "expected": true,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": false,
+      "age": 1209600000,
+      "expected": true,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": false,
+      "age": 1209600001,
+      "expected": true,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": false,
+      "age": "invalid",
+      "expected": true,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 21,
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 21
+    },
+    {
+      "streak": 22,
+      "env": null,
+      "age": null,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 22,
+      "env": null,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": null,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": null,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": null,
+      "age": 1209600000,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 22,
+      "env": null,
+      "age": 1209600001,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 22,
+      "env": null,
+      "age": "invalid",
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 22,
+      "env": false,
+      "age": null,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 22,
+      "env": false,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": false,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": false,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": false,
+      "age": 1209600000,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 22,
+      "env": false,
+      "age": 1209600001,
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 22,
+      "env": false,
+      "age": "invalid",
+      "expected": true,
+      "notice_claimed": true,
+      "notice_streak": 21
+    },
+    {
+      "streak": 22,
+      "env": true,
+      "age": null,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": true,
+      "age": -1,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": true,
+      "age": 0,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": true,
+      "age": 1209599999,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": true,
+      "age": 1209600000,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": true,
+      "age": 1209600001,
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    },
+    {
+      "streak": 22,
+      "env": true,
+      "age": "invalid",
+      "expected": false,
+      "notice_claimed": false,
+      "notice_streak": 22
+    }
+  ],
+  "eligibleCases": [
+    {
+      "backing_off": false,
+      "eligible_turns": 0,
+      "expected": true,
+      "after_eligible": 0,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": false,
+      "eligible_turns": 1,
+      "expected": true,
+      "after_eligible": 1,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": false,
+      "eligible_turns": 9,
+      "expected": true,
+      "after_eligible": 9,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": false,
+      "eligible_turns": 10,
+      "expected": true,
+      "after_eligible": 10,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": false,
+      "eligible_turns": 19,
+      "expected": true,
+      "after_eligible": 19,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": false,
+      "eligible_turns": 20,
+      "expected": true,
+      "after_eligible": 20,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": true,
+      "eligible_turns": 0,
+      "expected": true,
+      "after_eligible": 1,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": true,
+      "eligible_turns": 1,
+      "expected": false,
+      "after_eligible": 2,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": true,
+      "eligible_turns": 9,
+      "expected": false,
+      "after_eligible": 10,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": true,
+      "eligible_turns": 10,
+      "expected": true,
+      "after_eligible": 11,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": true,
+      "eligible_turns": 19,
+      "expected": false,
+      "after_eligible": 20,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    },
+    {
+      "backing_off": true,
+      "eligible_turns": 20,
+      "expected": true,
+      "after_eligible": 21,
+      "after_ask": 0,
+      "unused_after_ask": 17
+    }
+  ],
+  "submissionCases": [
+    {
+      "accepted": false,
+      "streak": null,
+      "unused": 0,
+      "expected_unused": 1,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": null,
+      "unused": 18,
+      "expected_unused": 19,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": null,
+      "unused": 19,
+      "expected_unused": 0,
+      "update": 20
+    },
+    {
+      "accepted": false,
+      "streak": null,
+      "unused": 20,
+      "expected_unused": 0,
+      "update": 20
+    },
+    {
+      "accepted": false,
+      "streak": 0,
+      "unused": 0,
+      "expected_unused": 1,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 0,
+      "unused": 18,
+      "expected_unused": 19,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 0,
+      "unused": 19,
+      "expected_unused": 0,
+      "update": 20
+    },
+    {
+      "accepted": false,
+      "streak": 0,
+      "unused": 20,
+      "expected_unused": 0,
+      "update": 20
+    },
+    {
+      "accepted": false,
+      "streak": 19,
+      "unused": 0,
+      "expected_unused": 1,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 19,
+      "unused": 18,
+      "expected_unused": 19,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 19,
+      "unused": 19,
+      "expected_unused": 0,
+      "update": 20
+    },
+    {
+      "accepted": false,
+      "streak": 19,
+      "unused": 20,
+      "expected_unused": 0,
+      "update": 20
+    },
+    {
+      "accepted": false,
+      "streak": 20,
+      "unused": 0,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 20,
+      "unused": 18,
+      "expected_unused": 18,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 20,
+      "unused": 19,
+      "expected_unused": 19,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 20,
+      "unused": 20,
+      "expected_unused": 20,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 21,
+      "unused": 0,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 21,
+      "unused": 18,
+      "expected_unused": 18,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 21,
+      "unused": 19,
+      "expected_unused": 19,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 21,
+      "unused": 20,
+      "expected_unused": 20,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 22,
+      "unused": 0,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 22,
+      "unused": 18,
+      "expected_unused": 18,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 22,
+      "unused": 19,
+      "expected_unused": 19,
+      "update": null
+    },
+    {
+      "accepted": false,
+      "streak": 22,
+      "unused": 20,
+      "expected_unused": 20,
+      "update": null
+    },
+    {
+      "accepted": true,
+      "streak": null,
+      "unused": 0,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": true,
+      "streak": null,
+      "unused": 18,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": true,
+      "streak": null,
+      "unused": 19,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": true,
+      "streak": null,
+      "unused": 20,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": true,
+      "streak": 0,
+      "unused": 0,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": true,
+      "streak": 0,
+      "unused": 18,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": true,
+      "streak": 0,
+      "unused": 19,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": true,
+      "streak": 0,
+      "unused": 20,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "accepted": true,
+      "streak": 19,
+      "unused": 0,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 19,
+      "unused": 18,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 19,
+      "unused": 19,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 19,
+      "unused": 20,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 20,
+      "unused": 0,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 20,
+      "unused": 18,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 20,
+      "unused": 19,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 20,
+      "unused": 20,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 21,
+      "unused": 0,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 21,
+      "unused": 18,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 21,
+      "unused": 19,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 21,
+      "unused": 20,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 22,
+      "unused": 0,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 22,
+      "unused": 18,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 22,
+      "unused": 19,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "accepted": true,
+      "streak": 22,
+      "unused": 20,
+      "expected_unused": 0,
+      "update": 0
+    }
+  ],
+  "reenableCases": [
+    {
+      "streak": null,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "streak": 0,
+      "expected_unused": 0,
+      "update": null
+    },
+    {
+      "streak": 19,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "streak": 20,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "streak": 21,
+      "expected_unused": 0,
+      "update": 0
+    },
+    {
+      "streak": 22,
+      "expected_unused": 0,
+      "update": 0
+    }
+  ],
+  "presentationCases": [
+    {
+      "state": {
+        "status": "empty"
+      },
+      "input": "run tests",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "empty"
+      },
+      "input": "run tests",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "empty"
+      },
+      "input": "RUN TESTS",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "empty"
+      },
+      "input": "RUN TESTS",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "empty"
+      },
+      "input": "different input",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "empty"
+      },
+      "input": "different input",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "empty"
+      },
+      "input": "",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "empty"
+      },
+      "input": "",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      },
+      "input": "run tests",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      }
+    },
+    {
+      "state": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      },
+      "input": "run tests",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      }
+    },
+    {
+      "state": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      },
+      "input": "RUN TESTS",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      }
+    },
+    {
+      "state": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      },
+      "input": "RUN TESTS",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      }
+    },
+    {
+      "state": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      },
+      "input": "different input",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      }
+    },
+    {
+      "state": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      },
+      "input": "different input",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      }
+    },
+    {
+      "state": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      },
+      "input": "",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      }
+    },
+    {
+      "state": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      },
+      "input": "",
+      "now": 200,
+      "expected": null,
+      "after": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": "req_native"
+      }
+    },
+    {
+      "state": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100
+      },
+      "input": "run tests",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "enter",
+        "elapsedMs": 100,
+        "similarity": 1,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100
+      },
+      "input": "run tests",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "enter",
+        "elapsedMs": 100,
+        "similarity": 1,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100
+      },
+      "input": "RUN TESTS",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "enter",
+        "elapsedMs": 100,
+        "similarity": 1,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100
+      },
+      "input": "RUN TESTS",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "enter",
+        "elapsedMs": 100,
+        "similarity": 1,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100
+      },
+      "input": "different input",
+      "now": 200,
+      "expected": {
+        "accepted": false,
+        "acceptMethod": null,
+        "elapsedMs": 100,
+        "similarity": 1.67,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100
+      },
+      "input": "different input",
+      "now": 200,
+      "expected": {
+        "accepted": false,
+        "acceptMethod": null,
+        "elapsedMs": 100,
+        "similarity": 1.67,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100
+      },
+      "input": "",
+      "now": 200,
+      "expected": {
+        "accepted": false,
+        "acceptMethod": null,
+        "elapsedMs": 100,
+        "similarity": 0,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100
+      },
+      "input": "",
+      "now": 200,
+      "expected": {
+        "accepted": false,
+        "acceptMethod": null,
+        "elapsedMs": 100,
+        "similarity": 0,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100,
+        "acceptedAt": 100
+      },
+      "input": "run tests",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "enter",
+        "elapsedMs": 0,
+        "similarity": 1,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100,
+        "acceptedAt": 101
+      },
+      "input": "run tests",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "tab",
+        "elapsedMs": 1,
+        "similarity": 1,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100,
+        "acceptedAt": 100
+      },
+      "input": "RUN TESTS",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "enter",
+        "elapsedMs": 0,
+        "similarity": 1,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100,
+        "acceptedAt": 101
+      },
+      "input": "RUN TESTS",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "tab",
+        "elapsedMs": 1,
+        "similarity": 1,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100,
+        "acceptedAt": 100
+      },
+      "input": "different input",
+      "now": 200,
+      "expected": {
+        "accepted": false,
+        "acceptMethod": null,
+        "elapsedMs": 100,
+        "similarity": 1.67,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100,
+        "acceptedAt": 101
+      },
+      "input": "different input",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "tab",
+        "elapsedMs": 1,
+        "similarity": 1.67,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100,
+        "acceptedAt": 100
+      },
+      "input": "",
+      "now": 200,
+      "expected": {
+        "accepted": false,
+        "acceptMethod": null,
+        "elapsedMs": 100,
+        "similarity": 0,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    },
+    {
+      "state": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": "req_native",
+        "shownAt": 100,
+        "acceptedAt": 101
+      },
+      "input": "",
+      "now": 200,
+      "expected": {
+        "accepted": true,
+        "acceptMethod": "tab",
+        "elapsedMs": 1,
+        "similarity": 0,
+        "generationRequestId": "req_native"
+      },
+      "after": {
+        "status": "empty"
+      }
+    }
+  ],
+  "transitionCases": [
+    {
+      "actions": [],
+      "expected": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": null
+      }
+    },
+    {
+      "actions": [
+        "shown"
+      ],
+      "expected": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": null,
+        "shownAt": 100
+      }
+    },
+    {
+      "actions": [
+        "accepted"
+      ],
+      "expected": {
+        "status": "generated",
+        "text": "run tests",
+        "generationRequestId": null
+      }
+    },
+    {
+      "actions": [
+        "shown",
+        "shown"
+      ],
+      "expected": {
+        "status": "shown",
+        "text": "run tests",
+        "generationRequestId": null,
+        "shownAt": 100
+      }
+    },
+    {
+      "actions": [
+        "shown",
+        "accepted"
+      ],
+      "expected": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": null,
+        "shownAt": 100,
+        "acceptedAt": 101
+      }
+    },
+    {
+      "actions": [
+        "shown",
+        "accepted",
+        "shown"
+      ],
+      "expected": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": null,
+        "shownAt": 100,
+        "acceptedAt": 101
+      }
+    },
+    {
+      "actions": [
+        "shown",
+        "accepted",
+        "accepted"
+      ],
+      "expected": {
+        "status": "accepted",
+        "text": "run tests",
+        "generationRequestId": null,
+        "shownAt": 100,
+        "acceptedAt": 102
+      }
+    }
+  ],
+  "focusCases": [
+    {
+      "query_source": null,
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": null,
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": "bg_unattached",
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": "unfocused",
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": "unfocused",
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": "bg_unattached",
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread",
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": "bg_unattached",
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": true
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": "unfocused",
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": "unfocused",
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": "bg_unattached",
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "repl_main_thread:agent",
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": true,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "sdk",
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "unknown",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "unknown",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "focused",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "focused",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "blurred",
+      "background_mode": false,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": false,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    },
+    {
+      "query_source": "prompt_suggestion",
+      "current_focus": "blurred",
+      "background_mode": true,
+      "background_blocked_without_block": true,
+      "expected": null,
+      "query_called": false,
+      "passed_throttle": false
+    }
+  ]
+}

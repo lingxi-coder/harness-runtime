@@ -300,7 +300,9 @@ impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         if let Some(handle) = self.0.take() {
             self.1.store(true, std::sync::atomic::Ordering::SeqCst);
-            if let Some(token) = &self.2 { token.cancelled_after_completion(); }
+            if let Some(token) = &self.2 {
+                token.cancelled_after_completion();
+            }
             handle.abort();
         }
     }
@@ -357,7 +359,11 @@ pub(super) async fn run(
             .spawn_with_observer(request, inherit, Some(progress), Some(observer))
             .await
     });
-    let mut guard = CancelOnDrop(Some(worker.abort_handle()), control.stop_requested.clone(), control.request.agent_spawn_token.clone());
+    let mut guard = CancelOnDrop(
+        Some(worker.abort_handle()),
+        control.stop_requested.clone(),
+        control.request.agent_spawn_token.clone(),
+    );
     *control.abort.lock().unwrap() = Some(worker.abort_handle());
     let _ = release_worker.send(());
     let completion_control = control.clone();

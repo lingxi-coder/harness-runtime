@@ -342,6 +342,9 @@ pub struct TurnExecutionMetrics {
     pub num_turns: u32,
     /// Actual terminal reason emitted by the driver; absent if it emitted none.
     pub stop_reason: Option<String>,
+    /// Provider message stop reason, independent of the driver's termination
+    /// (for example StructuredOutput completes while the model says tool_use).
+    pub model_stop_reason: Option<String>,
     /// HTTP status retained from the typed provider error, absent for local errors.
     pub api_error_status: Option<u16>,
     /// Inner stop reason of the final synthetic API-error assistant, if any.
@@ -399,6 +402,14 @@ impl ConversationOrchestrator {
             .as_mut()
         {
             active.stop_reason = Some(stop_reason.to_owned());
+        }
+    }
+
+    pub(super) fn note_turn_model_stop_reason(&self, reason: Option<&str>) {
+        if let Some(active) = self.prompt_runtime.turn_execution_metrics.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).active.as_mut()
+        {
+            active.model_stop_reason = reason.map(str::to_owned);
         }
     }
 
@@ -465,6 +476,9 @@ impl ConversationOrchestrator {
 }
 
 pub(crate) struct PromptRuntime {
+    pub(crate) suggestion_background: std::sync::Mutex<super::prompt_suggestion_background::state::BackgroundSuggestionState>,
+    pub(crate) suggestion_cancel: std::sync::Mutex<Option<CancellationToken>>,
+    pub(crate) suggestion: std::sync::Mutex<super::prompt_suggestion::SuggestionRuntime>,
     /// Frozen gitStatus probe + rendered attachment for this conversation.
     /// Claude documents gitStatus as a start-of-conversation snapshot that does
     /// not update, including after a worktree/session-cwd swap.
@@ -753,6 +767,9 @@ pub(crate) struct PromptRuntime {
 impl PromptRuntime {
     pub(crate) fn new() -> Self {
         Self {
+            suggestion_background: std::sync::Mutex::new(Default::default()),
+            suggestion_cancel: std::sync::Mutex::new(None),
+            suggestion: std::sync::Mutex::new(Default::default()),
             git_status_snapshot: Mutex::new(None),
             mod_prompt_sections: Mutex::new(ModPromptSectionCache::default()),
             mod_prompt_context: Mutex::new(ModPromptContextCache::default()),
@@ -2033,7 +2050,7 @@ mod api_error_metrics_tests {
         orch.begin_turn_metrics();
         let error = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text {
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "API Error: bad request".into(),
                 citations: None,
             }],
@@ -2053,7 +2070,7 @@ mod api_error_metrics_tests {
         }
         let ordinary = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text {
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "recovered".into(),
                 citations: None,
             }],

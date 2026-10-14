@@ -11,7 +11,7 @@ use crate::builtin_support::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -311,33 +311,18 @@ fn read_unlocked(path: &Path) -> Result<BTreeSet<String>, String> {
 }
 
 fn write_unlocked(path: &Path, unlocked: &BTreeSet<String>) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    }
-    let mut object: Map<String, Value> = match std::fs::read_to_string(path) {
-        Ok(content) if content.trim().is_empty() => Map::new(),
-        Ok(content) => serde_json::from_str::<Value>(&content)
-            .map_err(|error| format!("invalid JSON in {}: {error}", path.display()))?
-            .as_object()
-            .cloned()
-            .ok_or_else(|| format!("settings root in {} is not an object", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Map::new(),
-        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
-    };
-    object.insert(
-        POWERUPS_UNLOCKED_KEY.to_string(),
-        Value::Array(
-            unlocked
-                .iter()
-                .map(|id| Value::String(id.clone()))
-                .collect(),
-        ),
-    );
-    let serialized = serde_json::to_string_pretty(&Value::Object(object))
-        .map_err(|error| format!("failed to serialize {}: {error}", path.display()))?;
-    std::fs::write(path, format!("{serialized}\n"))
-        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+    migrations::settings_update::update_settings(
+        path,
+        vec![(
+            POWERUPS_UNLOCKED_KEY.to_string(),
+            Some(Value::Array(
+                unlocked
+                    .iter()
+                    .map(|id| Value::String(id.clone()))
+                    .collect(),
+            )),
+        )],
+    )
 }
 
 #[cfg(test)]
@@ -439,5 +424,58 @@ mod tests {
             handler.description(),
             "Discover LingXi features through quick interactive lessons"
         );
+    }
+
+    #[test]
+    fn completion_preserves_a_pending_fusion_registry_update() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let root = temp_root("fusion-lock");
+        let path = root.join("settings.json");
+        std::fs::write(&path, r#"{"fusion":{"strategies":[]},"other":7}"#).unwrap();
+        let fusion =
+            serde_json::json!({"strategies":[{"id":"review","name":"Review","config":{}}]});
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (publish_tx, publish_rx) = mpsc::channel();
+        let fusion_path = path.clone();
+        let expected = fusion.clone();
+        let fusion_writer = std::thread::spawn(move || {
+            migrations::settings_update::transform_settings_with_before_publish(
+                &fusion_path,
+                |map| {
+                    locked_tx.send(()).unwrap();
+                    publish_rx.recv().unwrap();
+                    map.insert("fusion".into(), expected);
+                    Ok(())
+                },
+                || {},
+            )
+        });
+        locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let completion_path = path.clone();
+        let completion = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = write_unlocked(&completion_path, &BTreeSet::from(["undo".into()]));
+            completed_tx.send(()).unwrap();
+            result
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let blocked = completed_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err();
+        publish_tx.send(()).unwrap();
+        fusion_writer.join().unwrap().unwrap();
+        completion.join().unwrap().unwrap();
+        assert!(
+            blocked,
+            "powerup persistence must wait for the Fusion write"
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["fusion"], fusion);
+        assert_eq!(saved["other"], 7);
+        assert_eq!(saved[POWERUPS_UNLOCKED_KEY], serde_json::json!(["undo"]));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

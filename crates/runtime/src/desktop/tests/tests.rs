@@ -6635,13 +6635,19 @@ must be filtered out: got {after:?}"
 /// `load_effective_settings_for_config` — the SAME managed/CLI/scoped
 /// loader every other setting uses — not a bare `Settings::load` that
 /// never even looks at a managed tier (`SupplementalLayers::default()`).
-/// A managed-only `fusion.enabled=true` (no project/user file at all)
+/// A managed-only `fusion.enabled=true` control on a selected strategy
 /// must be honored; the pre-fix bare loader would have returned the
 /// documented default (`enabled: false`) regardless.
 #[tokio::test]
 async fn desktop_fusion_runtime_config_honors_a_managed_only_tier() {
     let _guard = MANAGED_ENV_LOCK.lock().unwrap();
-    let (_tmp, cfg) = test_config(true);
+    let (tmp, mut cfg) = test_config(true);
+    cfg.lingxi_home = tmp.path().join("strategy-home");
+    std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
+    std::fs::write(
+        cfg.lingxi_home.join("settings.json"),
+        r#"{"fusion":{"defaultStrategyId":"test","strategies":[{"id":"test","name":"Test","config":{}}]}}"#,
+    ).unwrap();
     let managed_tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         managed_tmp.path().join("managed-settings.json"),
@@ -6682,7 +6688,7 @@ async fn desktop_fusion_runtime_config_managed_tier_beats_project_tier() {
     .expect("create project .lingxi dir");
     std::fs::write(
         &project_settings_path,
-        r#"{"fusion":{"allowCrossProviderForAgent":true}}"#,
+        r#"{"fusion":{"allowCrossProviderForAgent":true,"defaultStrategyId":"test","strategies":[{"id":"test","name":"Test","config":{}}]}}"#,
     )
     .expect("write project settings");
 
@@ -8910,6 +8916,7 @@ fn model_setting_provenance_is_provider_neutral() {
             settings,
             trace,
             effort_layers: Vec::new(),
+            fusion_layers: Vec::new(),
         }
     }
 

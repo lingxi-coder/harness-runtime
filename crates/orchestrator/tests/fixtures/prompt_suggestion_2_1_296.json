@@ -1,0 +1,947 @@
+{
+  "version": "2.1.296",
+  "binary_sha256": "c9b5341637becbd423ddffc5b254afb645682a3868cb708bbc6cc0e7bb419937",
+  "prompt_sha256": "848ab6d7d37cb9e01ff58d81467438a21ff26e5287bbf510e76d387df592fb0d",
+  "cases": [
+    {
+      "raw": "",
+      "normalized": "",
+      "reason": "empty",
+      "expected": null
+    },
+    {
+      "raw": " ",
+      "normalized": "",
+      "reason": "empty",
+      "expected": null
+    },
+    {
+      "raw": "yes",
+      "normalized": "yes",
+      "reason": null,
+      "expected": "yes"
+    },
+    {
+      "raw": "Yes",
+      "normalized": "Yes",
+      "reason": null,
+      "expected": "Yes"
+    },
+    {
+      "raw": "commit",
+      "normalized": "commit",
+      "reason": null,
+      "expected": "commit"
+    },
+    {
+      "raw": "continue",
+      "normalized": "continue",
+      "reason": null,
+      "expected": "continue"
+    },
+    {
+      "raw": "go ahead",
+      "normalized": "go ahead",
+      "reason": null,
+      "expected": "go ahead"
+    },
+    {
+      "raw": "run the tests",
+      "normalized": "run the tests",
+      "reason": null,
+      "expected": "run the tests"
+    },
+    {
+      "raw": "/commit",
+      "normalized": "/commit",
+      "reason": null,
+      "expected": "/commit"
+    },
+    {
+      "raw": "/x",
+      "normalized": "/x",
+      "reason": null,
+      "expected": "/x"
+    },
+    {
+      "raw": "x",
+      "normalized": "x",
+      "reason": "too_few_words",
+      "expected": null
+    },
+    {
+      "raw": "建议：继续测试",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": "回复:运行测试",
+      "normalized": "运行测试",
+      "reason": null,
+      "expected": "运行测试"
+    },
+    {
+      "raw": "提案：テストを実行",
+      "normalized": "テストを実行",
+      "reason": null,
+      "expected": "テストを実行"
+    },
+    {
+      "raw": "제안：테스트 실행",
+      "normalized": "테스트 실행",
+      "reason": null,
+      "expected": "테스트 실행"
+    },
+    {
+      "raw": "回答：完了しました",
+      "normalized": "完了しました",
+      "reason": "done",
+      "expected": null
+    },
+    {
+      "raw": "完成",
+      "normalized": "完成",
+      "reason": "done",
+      "expected": null
+    },
+    {
+      "raw": "完成了",
+      "normalized": "完成了",
+      "reason": "done",
+      "expected": null
+    },
+    {
+      "raw": "완료",
+      "normalized": "완료",
+      "reason": "done",
+      "expected": null
+    },
+    {
+      "raw": "완료됨",
+      "normalized": "완료됨",
+      "reason": "done",
+      "expected": null
+    },
+    {
+      "raw": "done",
+      "normalized": "done",
+      "reason": "done",
+      "expected": null
+    },
+    {
+      "raw": "Done.",
+      "normalized": "Done.",
+      "reason": "too_few_words",
+      "expected": null
+    },
+    {
+      "raw": "沉默",
+      "normalized": "沉默",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "沈黙",
+      "normalized": "沈黙",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "静默",
+      "normalized": "静默",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "침묵",
+      "normalized": "침묵",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "提案なし",
+      "normalized": "提案なし",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "特にありません",
+      "normalized": "特にありません",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "没有建议",
+      "normalized": "没有建议",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "無建議",
+      "normalized": "無建議",
+      "reason": null,
+      "expected": "無建議"
+    },
+    {
+      "raw": "沒建議",
+      "normalized": "沒建議",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "제안 없음",
+      "normalized": "제안 없음",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "（继续测试）",
+      "normalized": "（继续测试）",
+      "reason": "meta_wrapped",
+      "expected": null
+    },
+    {
+      "raw": "［go ahead］",
+      "normalized": "［go ahead］",
+      "reason": "meta_wrapped",
+      "expected": null
+    },
+    {
+      "raw": "【测试】",
+      "normalized": "【测试】",
+      "reason": "meta_wrapped",
+      "expected": null
+    },
+    {
+      "raw": "〔test it〕",
+      "normalized": "〔test it〕",
+      "reason": "meta_wrapped",
+      "expected": null
+    },
+    {
+      "raw": "[run tests]",
+      "normalized": "[run tests]",
+      "reason": "meta_wrapped",
+      "expected": null
+    },
+    {
+      "raw": "(run tests)",
+      "normalized": "(run tests)",
+      "reason": "meta_wrapped",
+      "expected": null
+    },
+    {
+      "raw": "继续",
+      "normalized": "继续",
+      "reason": null,
+      "expected": "继续"
+    },
+    {
+      "raw": "好",
+      "normalized": "好",
+      "reason": "too_few_words",
+      "expected": null
+    },
+    {
+      "raw": "テスト",
+      "normalized": "テスト",
+      "reason": null,
+      "expected": "テスト"
+    },
+    {
+      "raw": "한글",
+      "normalized": "한글",
+      "reason": null,
+      "expected": "한글"
+    },
+    {
+      "raw": "运行测试。然后提交",
+      "normalized": "运行测试。然后提交",
+      "reason": "multiple_sentences",
+      "expected": null
+    },
+    {
+      "raw": "テスト！次に",
+      "normalized": "テスト！次に",
+      "reason": "multiple_sentences",
+      "expected": null
+    },
+    {
+      "raw": "run tests. Then commit",
+      "normalized": "run tests. Then commit",
+      "reason": "multiple_sentences",
+      "expected": null
+    },
+    {
+      "raw": "谢谢",
+      "normalized": "谢谢",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "谢谢你的帮助",
+      "normalized": "谢谢你的帮助",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "感谢您",
+      "normalized": "感谢您",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "ありがとう",
+      "normalized": "ありがとう",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "ありがとうございます",
+      "normalized": "ありがとうございます",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "감사합니다",
+      "normalized": "감사합니다",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "고마워요",
+      "normalized": "고마워요",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "完美",
+      "normalized": "完美",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "看起来不错",
+      "normalized": "看起来不错",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "いいですね",
+      "normalized": "いいですね",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "좋네요",
+      "normalized": "좋네요",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "thanks for that",
+      "normalized": "thanks for that",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "push nice changes",
+      "normalized": "push nice changes",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "raw": "让我看看",
+      "normalized": "让我看看",
+      "reason": "claude_voice",
+      "expected": null
+    },
+    {
+      "raw": "让我们测试",
+      "normalized": "让我们测试",
+      "reason": null,
+      "expected": "让我们测试"
+    },
+    {
+      "raw": "我来测试",
+      "normalized": "我来测试",
+      "reason": "claude_voice",
+      "expected": null
+    },
+    {
+      "raw": "我会处理",
+      "normalized": "我会处理",
+      "reason": "claude_voice",
+      "expected": null
+    },
+    {
+      "raw": "我将处理",
+      "normalized": "我将处理",
+      "reason": "claude_voice",
+      "expected": null
+    },
+    {
+      "raw": "you can run tests",
+      "normalized": "you can run tests",
+      "reason": "claude_voice",
+      "expected": null
+    },
+    {
+      "raw": "API Error: 500",
+      "normalized": "API Error: 500",
+      "reason": "error_message",
+      "expected": null
+    },
+    {
+      "raw": "prompt is too long",
+      "normalized": "prompt is too long",
+      "reason": "error_message",
+      "expected": null
+    },
+    {
+      "raw": "nothing found.",
+      "normalized": "nothing found.",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "no suggestion",
+      "normalized": "no suggestion",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "silence is best",
+      "normalized": "silence is best",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "silence",
+      "normalized": "silence",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "User: run tests",
+      "normalized": "User: run tests",
+      "reason": "prefixed_label",
+      "expected": null
+    },
+    {
+      "raw": "用户: 继续测试",
+      "normalized": "用户: 继续测试",
+      "reason": null,
+      "expected": "用户: 继续测试"
+    },
+    {
+      "raw": "run\ntests",
+      "normalized": "run\ntests",
+      "reason": "has_formatting",
+      "expected": null
+    },
+    {
+      "raw": "run *tests*",
+      "normalized": "run *tests*",
+      "reason": "has_formatting",
+      "expected": null
+    },
+    {
+      "raw": "<suggestion>run tests</suggestion>",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "<SUGGESTION>建议：继续测试</suggestion>",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": "<response> <response>run tests</response> </response>",
+      "normalized": "<response> <response>run tests</response> </response>",
+      "reason": null,
+      "expected": "<response> <response>run tests</response> </response>"
+    },
+    {
+      "raw": "Suggestion: go ahead",
+      "normalized": "go ahead",
+      "reason": null,
+      "expected": "go ahead"
+    },
+    {
+      "raw": "a a a a a a a a a a a a a ",
+      "normalized": "a a a a a a a a a a a a a",
+      "reason": "too_many_words",
+      "expected": null
+    },
+    {
+      "raw": "中中中中中中中中中中中中中中中中中中中中中中中中中",
+      "normalized": "中中中中中中中中中中中中中中中中中中中中中中中中中",
+      "reason": "too_many_words",
+      "expected": null
+    },
+    {
+      "raw": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "normalized": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "reason": "too_few_words",
+      "expected": null
+    },
+    {
+      "raw": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "normalized": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "reason": "too_few_words",
+      "expected": null
+    },
+    {
+      "raw": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀 go",
+      "normalized": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀 go",
+      "reason": "too_long",
+      "expected": null
+    },
+    {
+      "raw": "﻿run tests﻿",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "run tests",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "Suggestion﻿:﻿run tests",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "Suggestion:run tests",
+      "normalized": "Suggestion:run tests",
+      "reason": null,
+      "expected": "Suggestion:run tests"
+    },
+    {
+      "raw": "go﻿ahead",
+      "normalized": "go﻿ahead",
+      "reason": null,
+      "expected": "go﻿ahead"
+    },
+    {
+      "raw": "goahead",
+      "normalized": "goahead",
+      "reason": "too_few_words",
+      "expected": null
+    },
+    {
+      "raw": "é: run tests",
+      "normalized": "é: run tests",
+      "reason": null,
+      "expected": "é: run tests"
+    },
+    {
+      "raw": "ſuggestion: run tests",
+      "normalized": "ſuggestion: run tests",
+      "reason": null,
+      "expected": "ſuggestion: run tests"
+    },
+    {
+      "raw": "<ſuggestion>run tests</ſuggestion>",
+      "normalized": "<ſuggestion>run tests</ſuggestion>",
+      "reason": null,
+      "expected": "<ſuggestion>run tests</ſuggestion>"
+    },
+    {
+      "raw": "ſure",
+      "normalized": "ſure",
+      "reason": "too_few_words",
+      "expected": null
+    },
+    {
+      "raw": "(go\rahead)",
+      "normalized": "(go\rahead)",
+      "reason": null,
+      "expected": "(go\rahead)"
+    },
+    {
+      "raw": "(go ahead)",
+      "normalized": "(go ahead)",
+      "reason": null,
+      "expected": "(go ahead)"
+    },
+    {
+      "raw": "ſilence is best",
+      "normalized": "ſilence is best",
+      "reason": null,
+      "expected": "ſilence is best"
+    },
+    {
+      "raw": "ſounds good",
+      "normalized": "ſounds good",
+      "reason": null,
+      "expected": "ſounds good"
+    },
+    {
+      "raw": " run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": " run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": " run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": " run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": " run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "　run tests　",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "﻿run tests﻿",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "run tests",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": " 继续测试 ",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": " 继续测试 ",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": " 继续测试 ",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": " 继续测试 ",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": " 继续测试 ",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": "　继续测试　",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": "﻿继续测试﻿",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": "继续测试",
+      "normalized": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    },
+    {
+      "raw": " silence ",
+      "normalized": "silence",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": " silence ",
+      "normalized": "silence",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": " silence ",
+      "normalized": "silence",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": " silence ",
+      "normalized": "silence",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": " silence ",
+      "normalized": "silence",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "　silence　",
+      "normalized": "silence",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "﻿silence﻿",
+      "normalized": "silence",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": "silence",
+      "normalized": "silence",
+      "reason": "meta_text",
+      "expected": null
+    },
+    {
+      "raw": " Suggestion: run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": " Suggestion: run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": " Suggestion: run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": " Suggestion: run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": " Suggestion: run tests ",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "　Suggestion: run tests　",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "﻿Suggestion: run tests﻿",
+      "normalized": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "raw": "Suggestion: run tests",
+      "normalized": "Suggestion: run tests",
+      "reason": null,
+      "expected": "Suggestion: run tests"
+    },
+    {
+      "raw": " a b ",
+      "normalized": "a b",
+      "reason": null,
+      "expected": "a b"
+    },
+    {
+      "raw": " a b ",
+      "normalized": "a b",
+      "reason": null,
+      "expected": "a b"
+    },
+    {
+      "raw": " a b ",
+      "normalized": "a b",
+      "reason": null,
+      "expected": "a b"
+    },
+    {
+      "raw": " a b ",
+      "normalized": "a b",
+      "reason": null,
+      "expected": "a b"
+    },
+    {
+      "raw": " a b ",
+      "normalized": "a b",
+      "reason": null,
+      "expected": "a b"
+    },
+    {
+      "raw": "　a b　",
+      "normalized": "a b",
+      "reason": null,
+      "expected": "a b"
+    },
+    {
+      "raw": "﻿a b﻿",
+      "normalized": "a b",
+      "reason": null,
+      "expected": "a b"
+    },
+    {
+      "raw": "a b",
+      "normalized": "a b",
+      "reason": null,
+      "expected": "a b"
+    }
+  ],
+  "coldCases": [
+    {
+      "input": 0,
+      "output": 0,
+      "write": 0,
+      "expected": null
+    },
+    {
+      "input": 10000,
+      "output": 0,
+      "write": 0,
+      "expected": null
+    },
+    {
+      "input": 10001,
+      "output": 0,
+      "write": 0,
+      "expected": "uncached"
+    },
+    {
+      "input": 5000,
+      "output": 5000,
+      "write": 0,
+      "expected": null
+    },
+    {
+      "input": 5000,
+      "output": 5001,
+      "write": 0,
+      "expected": "uncached"
+    },
+    {
+      "input": 0,
+      "output": 0,
+      "write": 10001,
+      "expected": "cache_write"
+    }
+  ],
+  "candidateCases": [
+    {
+      "candidates": [],
+      "selected": null,
+      "reason": null,
+      "expected": null
+    },
+    {
+      "candidates": [
+        ""
+      ],
+      "selected": null,
+      "reason": null,
+      "expected": null
+    },
+    {
+      "candidates": [
+        "",
+        "run tests"
+      ],
+      "selected": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "candidates": [
+        "  ",
+        "Suggestion:",
+        "go ahead"
+      ],
+      "selected": "go ahead",
+      "reason": null,
+      "expected": "go ahead"
+    },
+    {
+      "candidates": [
+        "thanks for that",
+        "run tests"
+      ],
+      "selected": "thanks for that",
+      "reason": "evaluative",
+      "expected": null
+    },
+    {
+      "candidates": [
+        "done",
+        "go ahead"
+      ],
+      "selected": "done",
+      "reason": "done",
+      "expected": null
+    },
+    {
+      "candidates": [
+        "<response></response>",
+        "run tests"
+      ],
+      "selected": "run tests",
+      "reason": null,
+      "expected": "run tests"
+    },
+    {
+      "candidates": [
+        "go ahead",
+        "run tests"
+      ],
+      "selected": "go ahead",
+      "reason": null,
+      "expected": "go ahead"
+    },
+    {
+      "candidates": [
+        "﻿",
+        "建议：继续测试"
+      ],
+      "selected": "继续测试",
+      "reason": null,
+      "expected": "继续测试"
+    }
+  ]
+}

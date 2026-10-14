@@ -3485,6 +3485,14 @@ impl ConversationOrchestrator {
         let msg = &rewritten;
         self.note_assistant_commit(msg).await;
         if matches!(msg, ConversationMessage::Assistant { .. }) {
+            if api_error.is_some()
+                || preappended
+                    .as_ref()
+                    .and_then(|metadata| metadata.api_error)
+                    .is_some_and(|row| row.is_api_error_message)
+            {
+                self.mark_prompt_suggestion_api_error(msg.id());
+            }
             // Native's final isApiErrorMessage flag belongs to the accepted
             // assistant row, including writer-less embedded sessions.
             let error_stop_reason = api_error

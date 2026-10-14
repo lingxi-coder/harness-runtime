@@ -1,0 +1,1338 @@
+{
+  "version": "2.1.299",
+  "binary_sha256": "ba5ab7b8c195fa03ab8d5bf3915c76153b576a2c40e79a5c46e265e7ed9744b3",
+  "sources": [
+    {
+      "name": "shell-parser-module",
+      "start": 198366413,
+      "end": 198428312,
+      "sha256": "33ba5daa774f1935977fb217645ede069415b514726bbdf266dc6c90c49cdea8"
+    },
+    {
+      "name": "shell-ast-module",
+      "start": 198428313,
+      "end": 198521886,
+      "sha256": "7614be09f90d2ec5a3e326977df9344773924decb431f3f73814f1fd5788861c"
+    },
+    {
+      "name": "shell-wrapper-module",
+      "start": 201446848,
+      "end": 201458411,
+      "sha256": "340437fcbb8d65e3a849365df89e54d2583841b12b3a2d29033a4bca401a6a99"
+    },
+    {
+      "name": "argument-helper-module",
+      "start": 201978516,
+      "end": 206858749,
+      "sha256": "fa3c15f9d5272a21349265e32ced23af54935844ca6469bbd6edaa893f9f9df9"
+    },
+    {
+      "name": "command-lookup-module",
+      "start": 200469765,
+      "end": 201174551,
+      "sha256": "7cd61a8818cda851ea5d60a6b543b9cc0662b08fcb727350ab7d1cc7aed5ea97"
+    },
+    {
+      "name": "command-identity-module",
+      "start": 198812498,
+      "end": 198823272,
+      "sha256": "5474dfa8ec75edba5ad9e26591c411334407a5aecb58a22a64b43e4e5dcbdcb1"
+    },
+    {
+      "name": "autocomplete-module",
+      "start": 225149439,
+      "end": 226874176,
+      "sha256": "7a67bcc28d29c3b4776f808fa93d883840cdb54609e93587b2ae4609b9d8d430"
+    },
+    {
+      "name": "review-module",
+      "start": 211476489,
+      "end": 211709634,
+      "sha256": "c1d93c7e5cfd6d2d5769dd30da8c19096452840b9292c1a4bbff56b870f6871f"
+    },
+    {
+      "name": "input-render-module",
+      "start": 220394385,
+      "end": 220405479,
+      "sha256": "11152d1c9d187694cca5dc6a0da9338bf7370ab1db25933a9a7226f99b3e84ca"
+    },
+    {
+      "name": "shell-ast-constants",
+      "start": 198429481,
+      "end": 198429731,
+      "sha256": "02222105d2c3f34f3c93abd1c12b94043cea7264ced18aa87399f9373bad9b2a"
+    },
+    {
+      "name": "shell-argument-traversal",
+      "start": 198430294,
+      "end": 198431649,
+      "sha256": "6b009dc643b50b2d660791063d6dbb7f7a682656b823d29bbb49ea3f52e3551e"
+    },
+    {
+      "name": "shell-argument-entry",
+      "start": 201451545,
+      "end": 201451670,
+      "sha256": "ff512986eb4a0ef30f69c1626df09b3e9b13ec4af020462bfd6797248e367441"
+    },
+    {
+      "name": "argument-parse-and-remaining",
+      "start": 202703711,
+      "end": 202704117,
+      "sha256": "a72598cc0e12240cf0f8affddbe5e8576349c7846da986f4938a81f17b18b9e5"
+    },
+    {
+      "name": "display-name",
+      "start": 198814618,
+      "end": 198814669,
+      "sha256": "a9056d720592cb9745e885d1058d272dd384b3574f1e5c6bce6d48652dae495d"
+    },
+    {
+      "name": "command-lookup",
+      "start": 200502995,
+      "end": 200503178,
+      "sha256": "9ee234978f5ecf50cc33de5066575fe1a57f72c943cf36eded1edbd8bccd823f"
+    },
+    {
+      "name": "slash-token-grammar",
+      "start": 225660280,
+      "end": 225660445,
+      "sha256": "af7bf20f7f79c1672d136534b255381abb7b3f40a7439205f625b8089d8f389f"
+    },
+    {
+      "name": "argument-entry-gate",
+      "start": 225723260,
+      "end": 225723322,
+      "sha256": "6599ed6ead76d00c5e771a13f085e97d40fc98e3d7daa7c4f5a3e3b1d4b22535"
+    },
+    {
+      "name": "hint-selector",
+      "start": 225732150,
+      "end": 225732667,
+      "sha256": "51265fa66bba18e4f1185e40ad9d9673969c03df5878418d2c29c4f7161604cd"
+    },
+    {
+      "name": "code-review-hint",
+      "start": 211568928,
+      "end": 211569067,
+      "sha256": "dfcc366621a8abe0d769c850e15b2946f5b7e6271600803f02e6f63b667e967b"
+    },
+    {
+      "name": "hint-render-gate",
+      "start": 220400231,
+      "end": 220400369,
+      "sha256": "4bb64412f6aafdb12e49c91feb2f2e91a6b9f80f7a4bf8e5c6af5608b85dbe0f"
+    }
+  ],
+  "generated_parser_sha256": "f3a36c719f973c818c61068cb1f1c4db61de84647ad49395f8da532b370256ed",
+  "commands": [
+    {
+      "name": "review",
+      "aliases": [
+        "rv"
+      ],
+      "argumentHint": "[level] [target]",
+      "type": "prompt"
+    },
+    {
+      "name": "named",
+      "aliases": [
+        "n"
+      ],
+      "argumentHint": "[custom hint]",
+      "argNames": [
+        "first",
+        "second",
+        "third"
+      ],
+      "type": "prompt"
+    },
+    {
+      "name": "names-only",
+      "argNames": [
+        "first",
+        "second",
+        "third"
+      ],
+      "type": "prompt"
+    },
+    {
+      "name": "empty-hint",
+      "argumentHint": "",
+      "argNames": [
+        "first",
+        "second"
+      ],
+      "type": "prompt"
+    },
+    {
+      "name": "local",
+      "argumentHint": "[path]",
+      "argNames": [
+        "ignored"
+      ],
+      "type": "local"
+    },
+    {
+      "name": "local-names",
+      "argNames": [
+        "ignored"
+      ],
+      "type": "local"
+    },
+    {
+      "name": "no-hint",
+      "type": "prompt"
+    },
+    {
+      "name": "hidden",
+      "argumentHint": "[still resolvable]",
+      "type": "prompt",
+      "isHidden": true
+    },
+    {
+      "name": "plugin:skill",
+      "displayName": "display.name",
+      "aliases": [
+        "alias_name"
+      ],
+      "argumentHint": "[value]",
+      "type": "prompt"
+    },
+    {
+      "name": "early",
+      "aliases": [
+        "winner"
+      ],
+      "argumentHint": "[alias]",
+      "type": "prompt"
+    },
+    {
+      "name": "winner",
+      "argumentHint": "[primary]",
+      "type": "prompt"
+    }
+  ],
+  "cases": [
+    {
+      "input": "",
+      "cursor": 0,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/",
+      "cursor": 1,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review",
+      "cursor": 7,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/rev ",
+      "cursor": 5,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review ",
+      "cursor": 8,
+      "mode": "prompt",
+      "expected": "[level] [target]"
+    },
+    {
+      "input": "/review  ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review arg",
+      "cursor": 11,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review arg ",
+      "cursor": 12,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review\t",
+      "cursor": 8,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/rv ",
+      "cursor": 4,
+      "mode": "prompt",
+      "expected": "[level] [target]"
+    },
+    {
+      "input": "/REVIEW ",
+      "cursor": 8,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": " /review ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "\n/review ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review\n ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review \n",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review \n ",
+      "cursor": 10,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review ",
+      "cursor": 8,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review  ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review\t ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review \t",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review \t ",
+      "cursor": 10,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/named ",
+      "cursor": 7,
+      "mode": "prompt",
+      "expected": "[custom hint]"
+    },
+    {
+      "input": "/named  ",
+      "cursor": 8,
+      "mode": "prompt",
+      "expected": "[first] [second] [third]"
+    },
+    {
+      "input": "/named a ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": "[second] [third]"
+    },
+    {
+      "input": "/named a b ",
+      "cursor": 11,
+      "mode": "prompt",
+      "expected": "[third]"
+    },
+    {
+      "input": "/named a b c ",
+      "cursor": 13,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/named a b c d ",
+      "cursor": 15,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/n a ",
+      "cursor": 5,
+      "mode": "prompt",
+      "expected": "[second] [third]"
+    },
+    {
+      "input": "/names-only ",
+      "cursor": 12,
+      "mode": "prompt",
+      "expected": "[first] [second] [third]"
+    },
+    {
+      "input": "/empty-hint ",
+      "cursor": 12,
+      "mode": "prompt",
+      "expected": "[first] [second]"
+    },
+    {
+      "input": "/local ",
+      "cursor": 7,
+      "mode": "prompt",
+      "expected": "[path]"
+    },
+    {
+      "input": "/local a ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/local-names ",
+      "cursor": 13,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/no-hint ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/hidden ",
+      "cursor": 8,
+      "mode": "prompt",
+      "expected": "[still resolvable]"
+    },
+    {
+      "input": "/plugin:skill ",
+      "cursor": 14,
+      "mode": "prompt",
+      "expected": "[value]"
+    },
+    {
+      "input": "/display.name ",
+      "cursor": 14,
+      "mode": "prompt",
+      "expected": "[value]"
+    },
+    {
+      "input": "/alias_name ",
+      "cursor": 12,
+      "mode": "prompt",
+      "expected": "[value]"
+    },
+    {
+      "input": "/winner ",
+      "cursor": 8,
+      "mode": "prompt",
+      "expected": "[primary]"
+    },
+    {
+      "input": "/unknown ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/unknown a ",
+      "cursor": 11,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/foo/bar ",
+      "cursor": 9,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/中文 ",
+      "cursor": 4,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/name+extra ",
+      "cursor": 12,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review ",
+      "cursor": 0,
+      "mode": "prompt",
+      "expected": null
+    },
+    {
+      "input": "/review ",
+      "cursor": 1,
+      "mode": "prompt",
+      "expected": "[level] [target]"
+    },
+    {
+      "input": "/review ",
+      "cursor": 3,
+      "mode": "prompt",
+      "expected": "[level] [target]"
+    },
+    {
+      "input": "/review ",
+      "cursor": 6,
+      "mode": "prompt",
+      "expected": "[level] [target]"
+    },
+    {
+      "input": "/review ",
+      "cursor": 7,
+      "mode": "prompt",
+      "expected": "[level] [target]"
+    },
+    {
+      "input": "/review ",
+      "cursor": 8,
+      "mode": "prompt",
+      "expected": "[level] [target]"
+    },
+    {
+      "input": "/review ",
+      "cursor": 8,
+      "mode": "bash",
+      "expected": null
+    }
+  ],
+  "argumentCases": [
+    {
+      "input": "",
+      "parsed": [],
+      "count": 0,
+      "hint": "[first] [second] [third]"
+    },
+    {
+      "input": " ",
+      "parsed": [],
+      "count": 0,
+      "hint": "[first] [second] [third]"
+    },
+    {
+      "input": "a ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a b ",
+      "parsed": [
+        "a",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a b c ",
+      "parsed": [
+        "a",
+        "b",
+        "c"
+      ],
+      "count": 3,
+      "hint": null
+    },
+    {
+      "input": "a  b ",
+      "parsed": [
+        "a",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "\"a b\" ",
+      "parsed": [
+        "a b"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "'a b' ",
+      "parsed": [
+        "a b"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "\"\" ",
+      "parsed": [
+        ""
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "'' ",
+      "parsed": [
+        ""
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a\\ b ",
+      "parsed": [
+        "a b"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a\"b c\" ",
+      "parsed": [
+        "ab c"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "\"a\"b ",
+      "parsed": [
+        "ab"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "\"a\\\"b\" ",
+      "parsed": [
+        "a\\\"b"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "\"unterminated ",
+      "parsed": [
+        "\"unterminated "
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "'unterminated ",
+      "parsed": [
+        "'unterminated "
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "foo \"bar ",
+      "parsed": [
+        "foo",
+        "\"bar "
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a; b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a;b c ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a | b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a && b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a || b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a & b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a\nb ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a\tb ",
+      "parsed": [
+        "a",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a\rb ",
+      "parsed": [
+        "a",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a # comment ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "#comment ",
+      "parsed": [
+        "#comment"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "# comment ",
+      "parsed": [
+        "#",
+        "comment"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a#comment b ",
+      "parsed": [
+        "a#comment",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a\\ ",
+      "parsed": [
+        "a "
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "\\ ",
+      "parsed": [
+        " "
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "A=b foo ",
+      "parsed": [
+        "foo"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "A=\"b c\" foo bar ",
+      "parsed": [
+        "foo",
+        "bar"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "A=b ",
+      "parsed": [
+        "A=b"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "A=b B=c ",
+      "parsed": [
+        "A=b",
+        "B=c"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "export A=b C=d ",
+      "parsed": [
+        "export"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "unset a b ",
+      "parsed": [
+        "unset",
+        "a",
+        "b"
+      ],
+      "count": 3,
+      "hint": null
+    },
+    {
+      "input": "$(echo hi) ",
+      "parsed": [
+        "$(echo hi)"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "`echo hi` ",
+      "parsed": [
+        "echo"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a $(echo hi) b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a `echo hi` b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a pre$(echo hi)post b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "$VAR b ",
+      "parsed": [
+        "$VAR",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "${x} b ",
+      "parsed": [
+        "${x}",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "$((1 + 2)) b ",
+      "parsed": [
+        "$((1 + 2))",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a >out b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": ">out a b ",
+      "parsed": [
+        "a",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a 2>out b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a >>out b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a <input b ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "(a b) ",
+      "parsed": [
+        "a",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "{ a b; } ",
+      "parsed": [
+        "a",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a (b c) ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "if true; then a b; fi ",
+      "parsed": [
+        "true"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "*.ts ",
+      "parsed": [
+        "*.ts"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "[abc] foo ",
+      "parsed": [
+        "foo"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "{a,b} c ",
+      "parsed": [
+        "{a,b}",
+        "c"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "~root a ",
+      "parsed": [
+        "~root",
+        "a"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a b ",
+      "parsed": [
+        "a b"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a　b ",
+      "parsed": [
+        "a　b"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": " ",
+      "parsed": [],
+      "count": 0,
+      "hint": "[first] [second] [third]"
+    },
+    {
+      "input": "﻿",
+      "parsed": [],
+      "count": 0,
+      "hint": "[first] [second] [third]"
+    },
+    {
+      "input": "a b ",
+      "parsed": [
+        "a b"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "ab ",
+      "parsed": [
+        "ab"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "😀 \"二 三\" ",
+      "parsed": [
+        "😀",
+        "二 三"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a\\\nb ",
+      "parsed": [
+        "a",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "--flag=value foo ",
+      "parsed": [
+        "--flag=value",
+        "foo"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "--flag \"value with spaces\" ",
+      "parsed": [
+        "--flag",
+        "value with spaces"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a $'b c' d ",
+      "parsed": [
+        "a",
+        "d"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a $\"b c\" d ",
+      "parsed": [
+        "a",
+        "$b c",
+        "d"
+      ],
+      "count": 3,
+      "hint": null
+    },
+    {
+      "input": "a <(b c) d ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "<(a b) ",
+      "parsed": [
+        "<(a b)"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "((1+2)) ",
+      "parsed": [
+        "((1+2))"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "[[ a == b ]] ",
+      "parsed": [
+        "[[",
+        "a",
+        "==",
+        "b",
+        "]]"
+      ],
+      "count": 5,
+      "hint": null
+    },
+    {
+      "input": "! a b ",
+      "parsed": [
+        "a",
+        "b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "time a b ",
+      "parsed": [
+        "time",
+        "a",
+        "b"
+      ],
+      "count": 3,
+      "hint": null
+    },
+    {
+      "input": "a\\;b c ",
+      "parsed": [
+        "a;b",
+        "c"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a \\# b ",
+      "parsed": [
+        "a",
+        "#",
+        "b"
+      ],
+      "count": 3,
+      "hint": null
+    },
+    {
+      "input": "a \"# b\" ",
+      "parsed": [
+        "a",
+        "# b"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a \"b;c\" ",
+      "parsed": [
+        "a",
+        "b;c"
+      ],
+      "count": 2,
+      "hint": "[third]"
+    },
+    {
+      "input": "a; b                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    },
+    {
+      "input": "a; b                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            ",
+      "parsed": [
+        "a"
+      ],
+      "count": 1,
+      "hint": "[second] [third]"
+    }
+  ],
+  "argumentNameCases": [
+    {
+      "expected": []
+    },
+    {
+      "input": null,
+      "expected": []
+    },
+    {
+      "input": "",
+      "expected": []
+    },
+    {
+      "input": "one two",
+      "expected": [
+        "one",
+        "two"
+      ]
+    },
+    {
+      "input": " one  two ",
+      "expected": [
+        "one",
+        "two"
+      ]
+    },
+    {
+      "input": [
+        "one",
+        "2",
+        "",
+        "two"
+      ],
+      "expected": [
+        "one",
+        "two"
+      ]
+    },
+    {
+      "input": "0 1 02 a2",
+      "expected": [
+        "a2"
+      ]
+    },
+    {
+      "input": [
+        " a ",
+        "3",
+        "003",
+        "x"
+      ],
+      "expected": [
+        " a ",
+        "x"
+      ]
+    },
+    {
+      "input": "first second",
+      "expected": [
+        "first",
+        "second"
+      ]
+    },
+    {
+      "input": [
+        "first",
+        null,
+        5,
+        "second"
+      ],
+      "expected": [
+        "first",
+        "second"
+      ]
+    }
+  ],
+  "renderCases": [
+    {
+      "input": "/review",
+      "hint": "[level]",
+      "expected": " [level]"
+    },
+    {
+      "input": "/review ",
+      "hint": "[level]",
+      "expected": "[level]"
+    },
+    {
+      "input": "/review arg",
+      "hint": "[level]",
+      "expected": null
+    },
+    {
+      "input": "/review arg ",
+      "hint": "[next]",
+      "expected": "[next]"
+    },
+    {
+      "input": " /review ",
+      "hint": "[level]",
+      "expected": null
+    },
+    {
+      "input": "/review ",
+      "hint": "",
+      "expected": null
+    },
+    {
+      "input": "",
+      "hint": "[level]",
+      "expected": null
+    }
+  ],
+  "codeReviewHints": {
+    "ultraEnabled": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]",
+    "ultraDisabled": "[low|medium|high|xhigh|max] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]"
+  }
+}

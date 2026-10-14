@@ -13,6 +13,7 @@
 //! the host collects each worktree's patch and verifies it.
 
 use crate::host::budget::BudgetEnforcerHandle;
+use crate::host::fusion_strategy::{FusionStrategyRef, FusionStrategySelection};
 use crate::host::subagent_spawn::SubagentInheritance;
 use async_trait::async_trait;
 use futures_core::future::BoxFuture;
@@ -160,7 +161,7 @@ impl std::str::FromStr for FusionPreset {
     }
 }
 
-/// Which of Fusion's three model roles a configured route fills.
+/// Which of Fusion's two model roles a configured route fills.
 ///
 /// Fusion runs two different kinds of call and they have genuinely different
 /// requirements, which is why they are configured separately rather than as one
@@ -184,8 +185,8 @@ impl FusionModelRole {
     #[must_use]
     pub const fn setting_key(self) -> &'static str {
         match self {
-            Self::Panels => "fusion.panelModels",
-            Self::Analyst => "fusion.analystModel",
+            Self::Panels => "fusion.strategies[].config.panelModels",
+            Self::Analyst => "fusion.strategies[].config.analystModel",
         }
     }
 
@@ -310,9 +311,19 @@ pub fn parse_fusion_models(raw: &[String]) -> Result<Vec<FusionModelRef>, Fusion
 }
 
 /// Per-request Fusion input. Unknown fields are rejected (caller-facing).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FusionRequest {
+    /// Stable scoped selection. Omission uses the configured scoped default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<FusionStrategyRef>,
+    /// Revision captured before credential preparation; stale requests fail closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_revision: Option<String>,
+    /// Trusted in-process configuration captured before applying request defaults.
+    /// External callers cannot inject configuration through the request wire shape.
+    #[serde(skip)]
+    pub strategy_snapshot: Option<Arc<FusionStrategySelection>>,
     /// Schema version. Missing values deserialize as [`FUSION_SCHEMA_VERSION`].
     #[serde(default = "fusion_schema_version")]
     pub schema_version: u16,
@@ -351,6 +362,46 @@ pub struct FusionRequest {
     /// `/fusion` line the user typed, because it multiplies the analyst's cost.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub verify_claims: bool,
+}
+
+/// Non-secret strategy identity retained with prepared and durable run records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FusionStrategyMetadata {
+    /// Stable scope and ID.
+    pub reference: FusionStrategyRef,
+    /// Display name when the request was accepted.
+    pub name: String,
+    /// Configuration revision when the request was accepted.
+    pub revision: String,
+}
+
+impl From<&FusionStrategySelection> for FusionStrategyMetadata {
+    fn from(selection: &FusionStrategySelection) -> Self {
+        Self {
+            reference: selection.reference.clone(),
+            name: selection.name.clone(),
+            revision: selection.revision.clone(),
+        }
+    }
+}
+
+impl FusionRequest {
+    /// Pin the same selection used to materialize this request's defaults.
+    pub fn capture_strategy(&mut self, selection: Option<FusionStrategySelection>) {
+        if let Some(selection) = selection {
+            self.strategy = Some(selection.reference.clone());
+            self.strategy_revision = Some(selection.revision.clone());
+            self.strategy_snapshot = Some(Arc::new(selection));
+        }
+    }
+
+    /// Captured display identity, without execution settings.
+    #[must_use]
+    pub fn strategy_metadata(&self) -> Option<FusionStrategyMetadata> {
+        self.strategy_snapshot
+            .as_deref()
+            .map(FusionStrategyMetadata::from)
+    }
 }
 
 const fn fusion_schema_version() -> u16 {
@@ -537,6 +588,9 @@ impl FusionSubmission {
 /// Summary available to task registries before activation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FusionPreparedSummary {
+    /// Strategy captured before defaults, credentials and preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<FusionStrategyMetadata>,
     /// Immutable run identity.
     pub identity: FusionRunIdentity,
     /// Captured outer duration in milliseconds.
@@ -583,6 +637,9 @@ pub enum FusionAttemptSettlementStatus {
 /// replace this recorder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FusionRunFacts {
+    /// Strategy captured before defaults, credentials and preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<FusionStrategyMetadata>,
     /// Absent for legacy aggregate runners. A computed answer does not imply
     /// that accepted physical attempts have settled successfully.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -622,6 +679,13 @@ pub struct FusionRunFacts {
 pub struct FusionRunFactsRecorder(Arc<std::sync::Mutex<FusionRunFacts>>);
 
 impl FusionRunFactsRecorder {
+    /// Retain the selected strategy with terminal accounting facts.
+    pub fn set_strategy(&self, strategy: Option<FusionStrategyMetadata>) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .strategy = strategy;
+    }
     /// Record the host-owned attempt finalizer status without changing the
     /// computation result or the independent transcript publication receipt.
     pub fn set_attempt_settlement(&self, status: FusionAttemptSettlementStatus) {
@@ -3737,6 +3801,7 @@ where
         .or(effective_timeout_ms)
         .unwrap_or_default();
     let summary = FusionPreparedSummary {
+        strategy: request.strategy_metadata(),
         identity: identity.clone(),
         duration_ms,
         planned_panels: None,
@@ -3747,6 +3812,7 @@ where
         inherit.cancel.clone(),
         FusionRunFactsRecorder::default(),
     );
+    control.facts().set_strategy(request.strategy_metadata());
     let facts_control = control.clone();
     Ok(PreparedFusionRun::new(
         summary,
@@ -3807,6 +3873,27 @@ pub trait FusionImplementHost: Send + Sync {
 /// Executor implemented by the `fusion` crate and injected at the composition root.
 #[async_trait]
 pub trait FusionExecutor: Send + Sync + 'static {
+    /// Capture a selected strategy before deriving any request defaults.
+    /// Fixed/test executors have no registry and return `None`.
+    fn capture_strategy(
+        &self,
+        requested: Option<&FusionStrategyRef>,
+    ) -> Result<Option<FusionStrategySelection>, FusionError> {
+        if requested.is_some() {
+            return Err(FusionError::InvalidConfiguration(
+                "fusion strategy selection is unavailable".into(),
+            ));
+        }
+        Ok(None)
+    }
+
+    /// Request defaults from the already captured strategy.
+    fn agent_surface_for_strategy(
+        &self,
+        _selection: Option<&FusionStrategySelection>,
+    ) -> Result<FusionAgentSurface, FusionError> {
+        Ok(self.agent_surface())
+    }
     /// Prepare one immutable route/config/identity handoff.
     ///
     /// This is the only entrypoint. Preparation is pure: it resolves the
@@ -4197,6 +4284,7 @@ mod tests {
         );
         let summary = FusionPreparedSummary {
             identity,
+            strategy: None,
             duration_ms: 1_000,
             planned_panels: Some(1),
         };
@@ -4280,6 +4368,23 @@ mod tests {
         });
         let err = serde_json::from_value::<FusionRequest>(json).unwrap_err();
         assert!(err.to_string().contains("unexpected"));
+    }
+
+    #[test]
+    fn external_request_cannot_supply_a_strategy_snapshot() {
+        let mut json = serde_json::json!({
+            "origin": "agent", "prompt": "x", "preset": "fast",
+            "dimensions": ["coverage"], "partial_ok": true,
+            "cross_provider": false, "parent_profile": "anthropic",
+            "parent_model": "claude-sonnet-5",
+            "strategy": {"scope": "user", "id": "review"},
+            "strategy_revision": "captured-revision"
+        });
+        let request: FusionRequest = serde_json::from_value(json.clone()).unwrap();
+        assert!(request.strategy_snapshot.is_none());
+        assert_eq!(request.strategy.as_ref().unwrap().id, "review");
+        json["strategy_snapshot"] = serde_json::json!({"config": {"enabled": true}});
+        assert!(serde_json::from_value::<FusionRequest>(json).is_err());
     }
 
     #[test]
@@ -5328,6 +5433,7 @@ mod tests {
             FusionRunFactsRecorder::default(),
         );
         let summary = FusionPreparedSummary {
+            strategy: None,
             identity: control.identity().clone(),
             duration_ms: 1_000,
             planned_panels: None,
@@ -5395,6 +5501,7 @@ mod tests {
         let identity = control.identity().clone();
         let summary = FusionPreparedSummary {
             identity,
+            strategy: None,
             duration_ms: 1_000,
             planned_panels: None,
         };
@@ -5419,6 +5526,7 @@ mod tests {
             FusionRunFactsRecorder::default(),
         );
         let summary = FusionPreparedSummary {
+            strategy: None,
             identity: control.identity().clone(),
             duration_ms: 1_000,
             planned_panels: None,
@@ -5449,6 +5557,7 @@ mod tests {
             FusionRunFactsRecorder::default(),
         );
         let summary = FusionPreparedSummary {
+            strategy: None,
             identity: control.identity().clone(),
             duration_ms: 1_000,
             planned_panels: Some(2),
@@ -5485,6 +5594,7 @@ mod tests {
             FusionRunFactsRecorder::default(),
         );
         let summary = FusionPreparedSummary {
+            strategy: None,
             identity: control.identity().clone(),
             duration_ms: 1_000,
             planned_panels: None,

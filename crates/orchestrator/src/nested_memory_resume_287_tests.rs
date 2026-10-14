@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_core::host::{OrchestratorHandle, ResumeRuntimeSnapshot};
 use platform_posix::fs::PosixFileSystem;

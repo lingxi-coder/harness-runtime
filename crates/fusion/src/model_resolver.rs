@@ -208,7 +208,7 @@ pub fn resolve(
 /// The configured roster, trimmed to the preset's panel count.
 ///
 /// Roster ORDER is the operator's priority order, so a preset takes a prefix
-/// rather than re-ranking: `fusion.panelModels` is what the settings file says
+/// rather than re-ranking: `fusion.strategies[].config.panelModels` is what the settings file says
 /// will run, and a run that quietly substituted a different subset would make
 /// that statement false.
 fn resolve_configured_panels(
@@ -299,7 +299,7 @@ fn reject_duplicate_underlying_models(panels: &[ResolvedPanel]) -> Result<(), Fu
             .find(|earlier| canonical_key(&earlier.model) == canonical_key(&panel.model))
         {
             return Err(FusionError::InvalidConfiguration(format!(
-                "fusion.panelModels seats the same underlying model twice: `{}/{}` and \
+                "fusion.strategies[].config.panelModels seats the same underlying model twice: `{}/{}` and \
                  `{}/{}` are the same model behind different profiles",
                 earlier.profile, earlier.model, panel.profile, panel.model
             )));
@@ -532,6 +532,9 @@ mod tests {
 
     fn req() -> FusionRequest {
         FusionRequest {
+            strategy: None,
+            strategy_revision: None,
+            strategy_snapshot: None,
             verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Slash,
@@ -702,7 +705,7 @@ mod tests {
         // An operator who has to re-run to discover the next gap will conclude
         // the wizard is broken, so the message must list them together.
         let rendered = error.to_string();
-        for key in ["fusion.panelModels", "fusion.analystModel"] {
+        for key in ["fusion.strategies[].config.panelModels", "fusion.strategies[].config.analystModel"] {
             assert!(rendered.contains(key), "{rendered}");
         }
         assert!(rendered.contains("/fusion setup"), "{rendered}");
@@ -768,7 +771,7 @@ mod tests {
         // Running the other two and reporting success would bill for an
         // ensemble the operator never approved and hide the typo indefinitely.
         assert!(rendered.contains("openai/gpt-5.6-typo"), "{rendered}");
-        assert!(rendered.contains("fusion.panelModels"), "{rendered}");
+        assert!(rendered.contains("fusion.strategies[].config.panelModels"), "{rendered}");
         assert!(matches!(error, FusionError::InvalidConfiguration(_)));
     }
 
@@ -894,7 +897,7 @@ mod tests {
         config.analyst_model = Some(FusionModelChoice::new("openai", "gpt-5.6-ghost"));
         let error = resolve(&req(), &config, &three_provider_catalog()).unwrap_err();
         let rendered = error.to_string();
-        assert!(rendered.contains("fusion.analystModel"), "{rendered}");
+        assert!(rendered.contains("fusion.strategies[].config.analystModel"), "{rendered}");
         assert!(rendered.contains("openai/gpt-5.6-ghost"), "{rendered}");
     }
 

@@ -151,6 +151,7 @@ async fn cwd_during_replay(
         "off",
         None,
         &StreamFileSuggestionIndex::default(),
+            &SdkPromptSuggestions::new(false),
         runtime.services.as_ref(),
         &Arc::new(super::lifecycle::PrintAuxTaskGroup::default()),
         &runtime.execution_errors,

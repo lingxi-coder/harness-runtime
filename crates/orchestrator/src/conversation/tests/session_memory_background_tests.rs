@@ -102,7 +102,7 @@ async fn compact_snapshot_keeps_request_tool_schema_profile_and_effort() {
         "name": "Read", "description": "Read text 🧭",
         "input_schema": {"type": "object", "properties": {}},
         "defer_loading": true,
-    })];
+    }).into()];
     orch.save_cache_safe_params(Some("parent prompt"), "claude-sonnet-4-6", &tools)
         .await;
     let captured = slot.get_last().await.unwrap();

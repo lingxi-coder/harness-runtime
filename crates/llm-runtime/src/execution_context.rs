@@ -200,6 +200,9 @@ pub struct ExecutionContext {
     /// account generation comes from a separate live getter, not from the SDK
     /// credential snapshot.
     pub prompt_cache: Option<PromptCacheRequestContext>,
+    /// Classifier utility blocks keep their boundaries; cache TTL/scope still
+    /// resolve against the selected request credential and current policy.
+    pub classifier_system_blocks: bool,
     /// Host-admitted native server fallback policy, outside provider input.
     pub server_fallback:
         Option<lingxi_llm_client::providers::anthropic::fallback_request::RequestPolicy>,
@@ -241,6 +244,11 @@ pub struct ExecutionContext {
     /// Host message sources whose content contributes to the canonical request.
     /// Used to project row-scoped admission only after all normalization passes.
     pub request_message_source_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
+    /// Canonical indices after host normalization, used to retain an isolated
+    /// fork's parent breakpoint through consecutive-message merges.
+    pub request_message_source_indices: std::collections::HashMap<lingxi_core::types::MessageId, usize>,
+    /// Stable parent identity for Native's optional fork cache pin.
+    pub fork_point_message_id: Option<lingxi_core::types::MessageId>,
     /// Historical identities used by signature recovery; never provider wire.
     pub thinking_source_message_ids: Vec<::lingxi_core::types::MessageId>,
     /// Query ownership for retries and lazy streams; never provider wire.

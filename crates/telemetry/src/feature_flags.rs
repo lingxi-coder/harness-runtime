@@ -73,6 +73,24 @@ pub fn flag_bool(key: &str, default: bool) -> bool {
     }
 }
 
+/// Read a structured/string GrowthBook value from the same cached snapshot as
+/// [`flag_bool`]. The caller supplies Native's default and validates its shape.
+#[must_use]
+pub fn flag_value(key: &str, default: serde_json::Value) -> serde_json::Value {
+    if let Some(value) = flag_test_override().read().unwrap().get(key) {
+        return serde_json::Value::Bool(*value);
+    }
+    match flag_snapshot().read().unwrap().get(key) {
+        Some(FeatureValue::Bool(value)) => serde_json::Value::Bool(*value),
+        Some(FeatureValue::Number(value)) => serde_json::Number::from_f64(*value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(default),
+        Some(FeatureValue::String(value)) => serde_json::Value::String(value.clone()),
+        Some(FeatureValue::Json(value)) => value.clone(),
+        None => default,
+    }
+}
+
 /// Test-only: set a flag in the override layer (binary `ROt()`/`Uvi`). Lets tests
 /// exercise flag-gated paths without process-wide env vars.
 pub fn test_set_flag(key: &str, value: bool) {

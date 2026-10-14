@@ -44,7 +44,8 @@ pub struct SideQueryRequest {
     /// Structured-output schema (e.g. JSON Schema for `response_format`).
     pub output_format: Option<Value>,
     /// Output cap.
-    pub max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     /// Caller-side retry budget for transient API errors.
     pub max_retries: u32,
     /// Sampling temperature; defaults to provider default when `None`.
@@ -84,6 +85,30 @@ pub struct SideQueryResponse {
     pub stop_reason: Option<String>,
     /// Budget-consuming retries performed by this specific provider call.
     pub retry_count: u32,
+}
+
+/// A response retained by an isolated fork, including replayable assistant
+/// blocks and the HTTP request id. Neither field is a session-global snapshot.
+#[derive(Debug, Clone)]
+pub struct ForkedSideQueryResponse {
+    /// Ordinary side-query result.
+    pub response: SideQueryResponse,
+    /// Complete assistant blocks for a denied-tool continuation.
+    pub assistant_content: Vec<lingxi_core::types::ContentBlock>,
+    /// Native assistant text candidates in their emission order.
+    pub candidates: Vec<String>,
+    /// HTTP request id, distinct from the assistant's message id.
+    pub request_id: Option<String>,
+}
+
+/// Host-owned fork identity, retained across denied-tool continuations.
+#[derive(Debug, Clone, Default)]
+pub struct ForkedSideQueryOptions {
+    /// Explicit system blocks, including each block's cache boundary.
+    /// Bypasses native prompt prefixing and implicit message cache markers.
+    pub system_blocks: Option<Vec<llm_runtime::SystemBlock>>,
+    /// Parent's last assistant group (or last message for an unfinished turn).
+    pub fork_point_message_id: Option<lingxi_core::types::MessageId>,
 }
 
 /// Side-query failure surface.
@@ -136,7 +161,8 @@ pub struct StrictStructuredQueryRequest {
     /// JSON Schema the response must satisfy.
     pub schema: Value,
     /// Output cap.
-    pub max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     /// Temperature. Analyst should pass `Some(0.0)`.
     pub temperature: Option<f32>,
     /// COGS tag.
@@ -188,6 +214,22 @@ pub struct StrictStructuredQueryResponse {
 pub trait SideQueryClient: Send + Sync {
     /// Issue one side query and return the decoded response.
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError>;
+
+    /// Retain a call's native assistant blocks for a cache-prefix fork.
+    /// The default lets in-memory clients exercise the same denial loop.
+    async fn query_fork(
+        &self,
+        request: SideQueryRequest,
+        options: ForkedSideQueryOptions,
+    ) -> Result<ForkedSideQueryResponse, SideQueryError> {
+        if options.system_blocks.is_some() {
+            return Err(SideQueryError::InvalidResponse(
+                "explicit system blocks are unsupported by this side-query client".into(),
+            ));
+        }
+        let response = self.query(request).await?;
+        Ok(crate::fork_response::synthesize(response))
+    }
 
     /// Retry attempts observed by the most recently completed provider call.
     /// Test doubles and direct clients default to zero.

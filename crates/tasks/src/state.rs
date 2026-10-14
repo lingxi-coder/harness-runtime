@@ -571,6 +571,9 @@ pub struct DreamTaskState {
 /// State specific to a Fusion deliberation task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalFusionTaskState {
+    /// Named strategy captured at admission, including scope for same-name rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<lingxi_core::host::FusionStrategyMetadata>,
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,

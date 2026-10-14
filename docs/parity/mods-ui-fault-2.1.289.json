@@ -1,0 +1,347 @@
+{
+  "version": "2.1.289",
+  "binary": {
+    "path": "/tmp/harness-claude-code-2.1.289-darwin-arm64",
+    "sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69"
+  },
+  "sourceByteRanges": [
+    {
+      "label": "ui_client_fault component enum",
+      "start": 181077075,
+      "end": 181077472,
+      "sha256": "9fb3958e6ae4fe5b1acb3c594e8858a119e7aec0c098c9fa4ef20946334ab85e"
+    },
+    {
+      "label": "ui_client_fault shared request address",
+      "start": 181095164,
+      "end": 181095854,
+      "sha256": "076fe7797a979dda92a631dc2b486d4990ce165edaaf8a7809b7e0cc9c5ffd71"
+    },
+    {
+      "label": "ui_client_fault request schema",
+      "start": 181100761,
+      "end": 181102273,
+      "sha256": "693fae4140b465ae7bd1fdf6e5e4aa3a6b67ea13b9cb9313148967c4b249e6f1"
+    },
+    {
+      "label": "ui.fault pinned hook envelope",
+      "start": 182668805,
+      "end": 182668977,
+      "sha256": "fea23ce0f7ce1aceec80f0b3342f89eb97505eca0a841c2fc3afd6fd842e72eb"
+    },
+    {
+      "label": "function-hook scanner allowlist",
+      "start": 182596971,
+      "end": 182597657,
+      "sha256": "4116461f149f4f7e474ad14185870e921cd99ff69c69be0ad344e3d62bdbdec3"
+    },
+    {
+      "label": "fault site identity helper",
+      "start": 186063234,
+      "end": 186063296,
+      "sha256": "b1f076bb240612abc0f3e3a33865179a9f6af86958fe2e1022632aa3ef6ae7fc"
+    },
+    {
+      "label": "fault current-version lookup",
+      "start": 186073286,
+      "end": 186073321,
+      "sha256": "5e6ffceaee4f8f4fd663afda7d814a17a31c982f92e70641e7832db0b019f073"
+    },
+    {
+      "label": "fault current Client registry and generation guard",
+      "start": 186075934,
+      "end": 186077175,
+      "sha256": "7b9385ffb1f7026da547ae4ef1f10e863e486009390d0dc12a691e25c7f7bddf"
+    },
+    {
+      "label": "fault draw gate and duplicate predicate",
+      "start": 186077175,
+      "end": 186077601,
+      "sha256": "a3f09f2325ca4b87ff367024b4ccfd899dc975306da6a0fba46397b0fd50ce1c"
+    },
+    {
+      "label": "fault dispatch, matcher, and post-dispatch invalidation",
+      "start": 186077601,
+      "end": 186078649,
+      "sha256": "8ddc67706bf42056bb3c4d9915365e3185328e1983a69af629b2266b92cefa19"
+    },
+    {
+      "label": "fault final reason normalizer",
+      "start": 186078649,
+      "end": 186079128,
+      "sha256": "c1cc13647de907da30923899317af7d21826d633bee2be69dd71007b494862f8"
+    },
+    {
+      "label": "fault hook payload and WX producer",
+      "start": 186079128,
+      "end": 186079534,
+      "sha256": "fc8b8c3dfcade48ccf4d0fd5d8b3b0366df6acafe7311abe6cd46d112cced267"
+    },
+    {
+      "label": "Client fault callback attachment",
+      "start": 186099249,
+      "end": 186099267,
+      "sha256": "9b61783615300917f9d0cb4f282b1f557a4029bf3aa994d3db94fa8088443e01"
+    },
+    {
+      "label": "fault control and lone-surrogate scrub regex",
+      "start": 182639750,
+      "end": 182639987,
+      "sha256": "baec57e91c2bc5d5447f2635a7fb24553b4204f964f2f39afe5db4bfe65efd1c"
+    },
+    {
+      "label": "fault UTF-16 safe truncation helper",
+      "start": 179171341,
+      "end": 179171483,
+      "sha256": "0cd9c06e168964b38d4d40e576fb3ecc8b21f8d0f864efa607f0f0fec619afe7"
+    },
+    {
+      "label": "fault UTF-16 buffer helpers",
+      "start": 179171754,
+      "end": 179172058,
+      "sha256": "99eb1d0aae1519737ae76411f7449aa99cc69ef759131289afcedcb7a7b4e1f8"
+    },
+    {
+      "label": "Client frame rejection-to-text conversion",
+      "start": 78987945,
+      "end": 78988248,
+      "sha256": "b63a7ae94eed893416674e2cb0f6c4317ba12e2d63472158447ff24522084702"
+    },
+    {
+      "label": "Client promise rejection error wrapper",
+      "start": 197824868,
+      "end": 197824944,
+      "sha256": "7a8a9fcb748ef4e7f93b79c21cafb45a93f0256a857ee3227b232db5428744d1"
+    },
+    {
+      "label": "Client lifecycle Error-to-text conversion",
+      "start": 179164635,
+      "end": 179164695,
+      "sha256": "2f921ed78ffeed39032d7e9c4783e05c294cba2ce61cc5ac20466ece27a81075"
+    },
+    {
+      "label": "Client failure report constructor",
+      "start": 197829242,
+      "end": 197829538,
+      "sha256": "55d8c5a1c3d6c4040c4fc4f91fc5ca5140055cf91dac93230437b1a15e0bf048"
+    },
+    {
+      "label": "Client run and render failure path",
+      "start": 197829587,
+      "end": 197830936,
+      "sha256": "94ba28d05606c05a39785f5eee88d6de2d0016bf65df341c8904804944ee5cb5"
+    },
+    {
+      "label": "Client mount/load failure path",
+      "start": 197831959,
+      "end": 197832658,
+      "sha256": "479c25e08df41bfe106655b7548dc9fe175f4c0b0929f868d5c027e0c8250cd8"
+    },
+    {
+      "label": "ordinary ui.render invalid-tree fallback",
+      "start": 186072521,
+      "end": 186072886,
+      "sha256": "f335b3328b9f021349a3ca9b242f6b0b75d721102f93a660e80c09ad36865f08"
+    },
+    {
+      "label": "internal system ui_invalidate instances schema",
+      "start": 180875737,
+      "end": 180877101,
+      "sha256": "01a251bab24d3f9bee03259064fadf0abb3b2f7719e5edde016164a7b1d60751"
+    }
+  ],
+  "requestContract": {
+    "internalControlRequest": {
+      "subtype": "ui_client_fault",
+      "requiredAddressFields": {
+        "plugin": "string, max 256",
+        "component": "one of AskUserQuestion, UserMessage, AssistantMessage, ToolUse, ToolResult, ToolGroup, ToolProgress, CommandOutput, Spinner, TurnDuration, InfoNotice, SessionMode, PromptHint, AbovePrompt, Pane",
+        "instance_id": "string, max 256; ui_render instance requestId",
+        "client": "string, max 256; Client key",
+        "module": "string, max 256; Client surface-module path"
+      },
+      "requiredFields": {
+        "phase": [
+          "load",
+          "render",
+          "run"
+        ],
+        "reason": "string, max 200; empty allowed"
+      },
+      "surface": "absent from control request"
+    },
+    "pluginHookPinnedEnvelope": {
+      "event": "ui.fault",
+      "pinnedFields": [
+        "surface",
+        "component",
+        "requestId",
+        "element",
+        "module",
+        "phase",
+        "reason"
+      ],
+      "validator": "checkArgument prevents changes to pinned fields; hook pin check is a no-op and contains no field-level enum or length schema",
+      "plugin": "dispatcher scope, not a fault field"
+    },
+    "producedHookArgument": {
+      "surface": "desktop",
+      "component": "parent UI render component",
+      "requestId": "parent ui_render instance_id, not the derived nested Client drawing id",
+      "element": "Client key",
+      "module": "plugin surface-module path",
+      "phase": "load, render, or run from Client lifecycle call sites",
+      "reason": "mO output"
+    }
+  },
+  "reasonVm": {
+    "cases": [
+      {
+        "id": "Error with message",
+        "frameReason": "broken render",
+        "hookReason": "a promise it returned was rejected: broken render"
+      },
+      {
+        "id": "empty Error",
+        "frameReason": "",
+        "hookReason": "a promise it returned was rejected: "
+      },
+      {
+        "id": "null",
+        "frameReason": "null",
+        "hookReason": "a promise it returned was rejected: null"
+      },
+      {
+        "id": "undefined",
+        "frameReason": "undefined",
+        "hookReason": "a promise it returned was rejected: undefined"
+      },
+      {
+        "id": "number",
+        "frameReason": "42",
+        "hookReason": "a promise it returned was rejected: 42"
+      },
+      {
+        "id": "object with non-string message",
+        "frameReason": "42",
+        "hookReason": "a promise it returned was rejected: 42"
+      },
+      {
+        "id": "object without message",
+        "frameReason": "undefined",
+        "hookReason": "a promise it returned was rejected: undefined"
+      },
+      {
+        "id": "throwing message getter",
+        "frameReason": "a rejection that could not be read",
+        "hookReason": "a promise it returned was rejected: a rejection that could not be read"
+      }
+    ],
+    "directEmptyReason": "the module failed without a message",
+    "controlInput": "a\t\n\u0000bc\ud800d e f",
+    "controlOutput": "a   b c d e f",
+    "cappedOutput": {
+      "length": 200,
+      "tail": "…"
+    },
+    "astralBoundary": {
+      "inputUtf16Length": 201,
+      "outputUtf16Length": 199,
+      "outputEndsInLoneSurrogate": false
+    },
+    "doublePrefix": "fixture-mod: Client hooks/ui.ts: remaining"
+  },
+  "dispatchVm": {
+    "currentRegistryGeneration": {
+      "staleGenerationDrawn": false,
+      "latestGenerationDrawn": true
+    },
+    "cases": [
+      {
+        "id": "current site with matching listener",
+        "trace": [
+          "dispatch-start",
+          "dispatch-end",
+          "invalidate"
+        ],
+        "event": {
+          "surface": "desktop",
+          "component": "AbovePrompt",
+          "requestId": "instance-1",
+          "element": "client-1",
+          "module": "hooks/ui.ts",
+          "phase": "render",
+          "reason": "broken render"
+        },
+        "invalidations": 1
+      },
+      {
+        "id": "unmounted while plugin dispatch awaits",
+        "trace": [
+          "dispatch-start",
+          "dispatch-end"
+        ],
+        "dispatchedEvent": {
+          "surface": "desktop",
+          "component": "AbovePrompt",
+          "requestId": "instance-1",
+          "element": "client-1",
+          "module": "hooks/ui.ts",
+          "phase": "render",
+          "reason": "broken render"
+        },
+        "invalidations": 0
+      },
+      {
+        "id": "version changes while same Client remains drawn",
+        "trace": [
+          "dispatch-start",
+          "dispatch-end",
+          "invalidate"
+        ],
+        "invalidations": 1
+      },
+      {
+        "id": "repeat at the already-invalidated version",
+        "trace": [
+          "dispatch-start",
+          "dispatch-end",
+          "invalidate",
+          "dispatch-start",
+          "dispatch-end"
+        ],
+        "dispatchCount": 2,
+        "invalidations": 1
+      },
+      {
+        "id": "no matching ui.fault listener",
+        "trace": [
+          "dispatch-start",
+          "dispatch-end"
+        ],
+        "dispatchCount": 1,
+        "invalidations": 0
+      },
+      {
+        "id": "Client absent before producer call",
+        "trace": [],
+        "dispatchCount": 0,
+        "invalidations": 0
+      }
+    ]
+  },
+  "sourceOnlyClaims": [
+    "The pinned request schema and hook pinned envelope are separate contracts.",
+    "WX requires an exact currently drawn Client before dispatch.",
+    "dO awaits the plugin-scoped hook chain before cO performs the current-site and listener checks.",
+    "sO suppresses only an invalidation already recorded for both the bornAt and current Lue versions; it is not a pre-dispatch stale-version gate.",
+    "The UI invalidation signal reached through uO/xS is internal; this evidence adds no public stream-json frame.",
+    "Ordinary ui.render invalid-tree fallback is separate from Client lifecycle faults."
+  ],
+  "vmClaims": [
+    "The exact extracted reasonText, promise rejection Error wrapper, Error-to-text helper, mO, re and UTF-16 buffer helper functions were executed in Node VM.",
+    "The exact extracted eO registry, WX producer, dO dispatcher and cO/sO/uO invalidation path were executed in Node VM.",
+    "Host version lookup, listener enumeration, qP/qT dispatch, unmount timing and xS invalidation effects are injected seams; they are not presented as Native implementations."
+  ],
+  "boundary": "These tests execute exact source slices from the pinned Native binary in Node VM. Host state/version lookup, hook enumeration, async dispatch completion, and invalidation effect are injected so the Native source order and guards can be observed; this is not a full installed plugin, terminal renderer, live session, or public stream-json end-to-end run."
+}

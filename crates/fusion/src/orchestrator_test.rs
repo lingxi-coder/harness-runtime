@@ -849,6 +849,9 @@ fn anthropic_only_catalog(models: &[&str]) -> Vec<CatalogModel> {
 
 fn request(prompt: &str) -> FusionRequest {
     FusionRequest {
+        strategy: None,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: 1,
         origin: FusionOrigin::Slash,
@@ -2258,6 +2261,9 @@ async fn anthropic_only_catalog_clears_structured_output_preflight() {
         ])),
     );
     let req = FusionRequest {
+        strategy: None,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: 1,
         origin: FusionOrigin::Slash,
@@ -6013,6 +6019,9 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
 async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
     let panel_catalog = leftover_gateway_panel_catalog();
     let explicit_request = FusionRequest {
+        strategy: None,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: 1,
         origin: FusionOrigin::Slash,
@@ -7949,4 +7958,220 @@ async fn the_analyst_stays_a_single_call_unless_tools_are_asked_for() {
     let mut fast = request("task");
     fast.preset = FusionPreset::Fast;
     assert!(!tool_analyst_config().analyst_uses_tools(&fast));
+}
+
+/// A live registry fixture exercises the same resolver used by desktop,
+/// without rebuilding the executor after settings changes.
+struct StrategyRegistrySource {
+    layers: Mutex<Vec<lingxi_core::host::fusion_strategy::FusionSettingsLayer>>,
+}
+
+impl crate::FusionConfigSource for StrategyRegistrySource {
+    fn capture_strategy(
+        &self,
+        requested: Option<&lingxi_core::host::FusionStrategyRef>,
+    ) -> Result<Option<lingxi_core::host::FusionStrategySelection>, FusionError> {
+        lingxi_core::host::resolve_fusion_strategy(&self.layers.lock().unwrap(), requested)
+            .map(Some)
+            .map_err(|error| FusionError::InvalidConfiguration(error.to_string()))
+    }
+
+    fn load(&self) -> Result<FusionRuntimeConfig, FusionError> {
+        self.load_strategy(None)
+    }
+}
+
+fn strategy_registry_source() -> Arc<StrategyRegistrySource> {
+    let registry = serde_json::from_value(serde_json::json!({
+        "enabled": true,
+        "defaultStrategyId": "primary",
+        "strategies": [
+            {"id": "primary", "name": "Original", "config": {
+                "preset": "fast", "totalTimeoutMs": 20000,
+                "panelIdleTimeoutMs": 2000, "panelTotalTimeoutMs": 2000, "analystTimeoutMs": 2000,
+                "panelModels": [
+                    {"profile":"anthropic", "model":"claude-sonnet-5"},
+                    {"profile":"openai", "model":"gpt-5.6-terra"}
+                ],
+                "analystModel": {"profile":"anthropic", "model":"claude-sonnet-5"}
+            }},
+            {"id": "other", "name": "Other", "config": {
+                "preset": "quality", "totalTimeoutMs": 40000,
+                "panelIdleTimeoutMs": 2000, "panelTotalTimeoutMs": 2000, "analystTimeoutMs": 2000,
+                "panelModels": [
+                    {"profile":"openai", "model":"gpt-5.6-terra"},
+                    {"profile":"deepseek", "model":"deepseek-v4-pro"}
+                ],
+                "analystModel": {"profile":"anthropic", "model":"claude-sonnet-5"}
+            }}
+        ]
+    }))
+    .unwrap();
+    Arc::new(StrategyRegistrySource {
+        layers: Mutex::new(vec![lingxi_core::host::FusionSettingsLayer {
+            source: lingxi_core::settings::tracer::Source::User,
+            path: None,
+            registry,
+        }]),
+    })
+}
+
+fn strategy_orchestrator(source: Arc<StrategyRegistrySource>) -> Arc<FusionOrchestrator> {
+    Arc::new(FusionOrchestrator::new(
+        FakeSpawner::new(three_ok()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        source,
+        Arc::new(catalog()),
+    ))
+}
+
+fn strategy_submission(request: FusionRequest) -> FusionSubmission {
+    FusionSubmission::new(
+        request,
+        inherit(),
+        FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn captured_strategy_keeps_defaults_timeout_and_name_when_registry_changes() {
+    let source = strategy_registry_source();
+    let orchestrator = strategy_orchestrator(source.clone());
+    let selected = orchestrator.capture_strategy(None).unwrap();
+    let surface = orchestrator
+        .agent_surface_for_strategy(selected.as_ref())
+        .unwrap();
+    let mut request = request("task");
+    request.models = None;
+    request.preset = surface.default_preset;
+    request.capture_strategy(selected);
+    {
+        let mut layers = source.layers.lock().unwrap();
+        layers[0].registry.default_strategy_id = Some("other".into());
+        layers[0].registry.strategies[0].name = "Renamed".into();
+        layers[0].registry.strategies[0].config.total_timeout_ms = Some(80000);
+    }
+    let prepared = orchestrator.prepare(strategy_submission(request)).unwrap();
+    assert_eq!(prepared.summary().duration_ms, 20250);
+    assert_eq!(prepared.summary().planned_panels, Some(2));
+    assert_eq!(
+        prepared.summary().strategy.as_ref().unwrap().name,
+        "Original"
+    );
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(outcome.facts.strategy.unwrap().reference.id, "primary");
+}
+
+#[tokio::test]
+async fn captured_strategy_deletion_does_not_switch_to_new_default() {
+    let source = strategy_registry_source();
+    let orchestrator = strategy_orchestrator(source.clone());
+    let mut request = request("task");
+    request.models = None;
+    request.preset = FusionPreset::Fast;
+    let prepared = orchestrator.prepare(strategy_submission(request)).unwrap();
+    {
+        let mut layers = source.layers.lock().unwrap();
+        layers[0].registry.strategies.remove(0);
+        layers[0].registry.default_strategy_id = Some("other".into());
+    }
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+    assert!(matches!(
+        outcome.result,
+        Err(FusionError::InvalidConfiguration(_))
+    ));
+    assert_eq!(outcome.facts.strategy.unwrap().reference.id, "primary");
+    assert_eq!(outcome.facts.dispatched_panels, Some(0));
+}
+
+#[test]
+fn strategy_revision_fence_rejects_stale_credential_preparation() {
+    let source = strategy_registry_source();
+    let orchestrator = strategy_orchestrator(source.clone());
+    let selected = orchestrator.capture_strategy(None).unwrap().unwrap();
+    let mut request = request("task");
+    request.strategy = Some(selected.reference);
+    request.strategy_revision = Some(selected.revision);
+    source.layers.lock().unwrap()[0].registry.strategies[0]
+        .config
+        .total_timeout_ms = Some(80000);
+    let result = orchestrator.prepare(strategy_submission(request));
+    assert!(
+        matches!(result, Err(FusionError::InvalidConfiguration(message)) if message.contains("changed since preparation"))
+    );
+}
+
+#[tokio::test]
+async fn captured_strategy_obeys_new_managed_restrictions() {
+    let source = strategy_registry_source();
+    let orchestrator = strategy_orchestrator(source.clone());
+    let mut request = request("task");
+    request.models = None;
+    request.preset = FusionPreset::Fast;
+    let prepared = orchestrator.prepare(strategy_submission(request)).unwrap();
+    source
+        .layers
+        .lock()
+        .unwrap()
+        .push(lingxi_core::host::FusionSettingsLayer {
+            source: lingxi_core::settings::tracer::Source::Managed,
+            path: None,
+            registry: serde_json::from_value(serde_json::json!({"enabled": false})).unwrap(),
+        });
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+    assert!(
+        matches!(outcome.result, Err(FusionError::InvalidConfiguration(message)) if message.contains("disabled"))
+    );
+    assert_eq!(outcome.facts.dispatched_panels, Some(0));
+}
+
+#[test]
+fn explicit_strategy_does_not_require_a_default_or_other_strategy_routes() {
+    let source = strategy_registry_source();
+    {
+        let mut layers = source.layers.lock().unwrap();
+        layers[0].registry.default_strategy_id = None;
+        layers[0].registry.strategies[1]
+            .config
+            .panel_models
+            .as_mut()
+            .unwrap()[0]
+            .profile = "missing-provider".into();
+    }
+    let orchestrator = strategy_orchestrator(source);
+    assert!(orchestrator.capture_strategy(None).is_err());
+    let reference = "user:primary".parse().unwrap();
+    let selected = orchestrator.capture_strategy(Some(&reference)).unwrap();
+    let defaults = orchestrator
+        .agent_surface_for_strategy(selected.as_ref())
+        .unwrap();
+    assert_eq!(defaults.default_preset, FusionPreset::Fast);
+    let mut request = request("task");
+    request.models = None;
+    request.preset = defaults.default_preset;
+    request.capture_strategy(selected);
+    let prepared = orchestrator.prepare(strategy_submission(request)).unwrap();
+    assert_eq!(prepared.summary().planned_panels, Some(2));
+    assert_eq!(
+        prepared.summary().strategy.as_ref().unwrap().reference,
+        reference
+    );
+}
+
+#[test]
+fn credential_revision_fence_rejects_a_changed_default_strategy() {
+    let source = strategy_registry_source();
+    let orchestrator = strategy_orchestrator(source.clone());
+    let selected = orchestrator.capture_strategy(None).unwrap().unwrap();
+    let mut request = request("task");
+    request.strategy_revision = Some(selected.revision);
+    source.layers.lock().unwrap()[0]
+        .registry
+        .default_strategy_id = Some("other".into());
+    let result = orchestrator.prepare(strategy_submission(request));
+    assert!(
+        matches!(result, Err(FusionError::InvalidConfiguration(message)) if message.contains("changed since preparation"))
+    );
 }

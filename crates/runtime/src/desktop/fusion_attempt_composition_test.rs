@@ -172,6 +172,9 @@ fn submission(
     budget: Arc<cost::BudgetEnforcer>,
 ) -> lingxi_core::host::FusionSubmission {
     let request = lingxi_core::host::FusionRequest {
+        strategy: None,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: 1,
         origin: lingxi_core::host::FusionOrigin::Slash,
@@ -227,31 +230,39 @@ fn budget(tracker: Arc<cost::CostTracker>) -> Arc<cost::BudgetEnforcer> {
     ))
 }
 
-/// The three model roles every Fusion run now requires, over this file's own
+/// The two model roles every Fusion run requires, over this file's own
 /// two-model catalog. Fusion has no automatic selection to fall back on, so a
 /// composition fixture that only flips `fusion.enabled` is refused at preflight
 /// with `NotConfigured` before any of the metering this file tests can run.
-fn fusion_settings(extra: serde_json::Value) -> lingxi_core::settings::SettingsJson {
+fn write_fusion_settings(cfg: &DesktopConfig, extra: serde_json::Value) {
     let mut fusion = serde_json::json!({
-        "enabled": true,
         "panelModels": [
             {"profile": "anthropic", "model": MODELS[0]},
             {"profile": "anthropic", "model": MODELS[1]},
         ],
         "analystModel": {"profile": "anthropic", "model": MODELS[0]},
-        "synthesizerModel": {"profile": "anthropic", "model": MODELS[0]},
     });
     let object = fusion.as_object_mut().expect("object literal");
     for (key, value) in extra.as_object().cloned().unwrap_or_default() {
         object.insert(key, value);
     }
-    serde_json::from_value(serde_json::json!({ "fusion": fusion })).expect("valid fusion settings")
+    let settings = serde_json::json!({"fusion": {
+        "enabled": true,
+        "defaultStrategyId": "metered",
+        "strategies": [{"id":"metered", "name":"Metered test", "config":fusion}]
+    }});
+    std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
+    std::fs::write(
+        cfg.lingxi_home.join("settings.json"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
 }
 
 #[tokio::test]
 async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare() {
-    let (tmp, mut cfg) = tests::test_config(true);
-    cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
+    let (tmp, cfg) = tests::test_config(true);
+    write_fusion_settings(&cfg, serde_json::json!({}));
     let session = lingxi_core::types::SessionId::new();
     let lease =
         lingxi_core::host::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
@@ -350,7 +361,7 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
     // No transcript, but the ledger below still lands under a real directory:
     // production roots it at a temporary `LINGXI_HOME` removed at shutdown.
     cfg.session_persistence = false;
-    cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
+    write_fusion_settings(&cfg, serde_json::json!({}));
     let session = lingxi_core::types::SessionId::new();
     let lease =
         lingxi_core::host::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
@@ -412,12 +423,12 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
 
 #[tokio::test]
 async fn desktop_fusion_composition_refuses_ephemeral_tracker_even_with_output_scope() {
-    let (_tmp, mut cfg) = tests::test_config(true);
+    let (_tmp, cfg) = tests::test_config(true);
     // The models must be configured for this test to still reach its subject.
     // Without them the run is refused earlier, with `NotConfigured`, and the
     // assertion below would be checking a message about a gate it never got
     // to — a green test proving nothing.
-    cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
+    write_fusion_settings(&cfg, serde_json::json!({}));
     let session = lingxi_core::types::SessionId::new();
     let pricing = Arc::new(cost::PricingCatalog::builtin_reference());
     let (tx, _) = tokio::sync::mpsc::channel(1);

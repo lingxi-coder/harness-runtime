@@ -244,6 +244,22 @@ fn current_contract_index() -> ContractIndex {
         ix.insert(path.to_string(), ty.to_string());
     };
 
+    put("ClientCommand::FusionAdmin", "fusion_admin");
+    put("ClientCommand::FusionAdmin.command", "FusionAdminCommandDto");
+    put("FusionAdminCommandDto.action", "String");
+    put("FusionAdminCommandDto.operation_id", "Option<u64>");
+    put("FusionAdminCommandDto.target", "Option<String>");
+    put("FusionAdminCommandDto.scope", "Option<String>");
+    put("FusionAdminCommandDto.revision", "Option<String>");
+    put("FusionAdminCommandDto.payload_json", "Option<String>");
+    put("ConfigurationDomainDto::Fusion", "fusion");
+    put("ClientEvent::FusionCatalog", "fusion_catalog");
+    put("ClientEvent::FusionCatalog.catalog_json", "String");
+    put("ClientEvent::FusionStrategyResolved", "fusion_strategy_resolved");
+    put("ClientEvent::FusionStrategyResolved.operation_id", "u64");
+    put("ClientEvent::FusionStrategyResolved.selection_json", "Option<String>");
+    put("ClientEvent::FusionStrategyResolved.error", "Option<String>");
+
     // ── ClientEvent (events.rs) ───────────────────────────────────────────
     put("ClientEvent::Error", "error");
     put("ClientEvent::Error.kind", "ErrorKindDto");
@@ -282,6 +298,13 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::UiClientFrame", "ui_client_frame");
     put("ClientEvent::UiClientFrame.runtime_id", "String");
     put("ClientEvent::UiClientFrame.frame_json", "String");
+    put("ClientEvent::PromptSuggestion", "prompt_suggestion");
+    put("ClientEvent::PromptSuggestion.suggestion", "String");
+    put("ClientEvent::PromptSuggestion.uuid", "String");
+    put("ClientEvent::PromptSuggestion.session_id", "String");
+    put("ClientEvent::PromptSuggestionState", "prompt_suggestion_state");
+    put("ClientEvent::PromptSuggestionState.enabled", "bool");
+    put("ClientEvent::PromptSuggestionState.notice", "Option<String>");
     put("ClientEvent::UiInvalidate", "ui_invalidate");
     put("ClientEvent::UiInvalidate.instances_json", "Option<String>");
     put("ClientEvent::UiInvalidate.uuid", "String");
@@ -1052,6 +1075,18 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::UiSelect", "ui_select");
     put("ClientCommand::UiSelect.request_id", "String");
     put("ClientCommand::UiSelect.request_json", "String");
+    put("ClientCommand::UpdatePromptSuggestionContext", "update_prompt_suggestion_context");
+    put("ClientCommand::UpdatePromptSuggestionContext.session_id", "String");
+    put("ClientCommand::UpdatePromptSuggestionContext.focus", "String");
+    put("ClientCommand::UpdatePromptSuggestionContext.input_empty", "bool");
+    put("ClientCommand::UpdatePromptSuggestionContext.pending_permission", "bool");
+    put("ClientCommand::UpdatePromptSuggestionContext.elicitation_active", "bool");
+    put("ClientCommand::RecordPromptSuggestionSubmission", "record_prompt_suggestion_submission");
+    put("ClientCommand::RecordPromptSuggestionSubmission.text", "String");
+    put("ClientCommand::PromptSuggestionFeedback", "prompt_suggestion_feedback");
+    put("ClientCommand::PromptSuggestionFeedback.session_id", "String");
+    put("ClientCommand::PromptSuggestionFeedback.uuid", "String");
+    put("ClientCommand::PromptSuggestionFeedback.action", "String");
     put("ClientCommand::UiClientOperation", "ui_client_operation");
     put("ClientCommand::UiClientOperation.request_id", "String");
     put("ClientCommand::UiClientOperation.operation_json", "String");
@@ -1705,6 +1740,7 @@ fn current_contract_index() -> ContractIndex {
     put("SlashCommandDto.source", "String");
     put("SlashCommandDto.aliases", "Vec<String>");
     put("SlashCommandDto.argument_hint", "Option<String>");
+    put("SlashCommandDto.argument_names", "Vec<String>");
     put("SlashCommandDto.menu_description", "Option<String>");
     put("SlashCommandDto.hidden", "bool");
 
@@ -2116,6 +2152,8 @@ fn contract_index_covers_every_dto() {
             runtime_id: String::new(),
             frame_json: String::new(),
         },
+        ClientEvent::PromptSuggestion { suggestion: String::new(), uuid: String::new(), session_id: String::new() },
+        ClientEvent::PromptSuggestionState { enabled: true, notice: None },
         ClientEvent::UiInvalidate {
             instances_json: None,
             uuid: String::new(),
@@ -2493,6 +2531,14 @@ fn contract_index_covers_every_dto() {
             request_id: String::new(),
             request_json: String::new(),
         },
+        ClientCommand::UpdatePromptSuggestionContext {
+            session_id: String::new(), focus: "focused".into(), input_empty: true,
+            pending_permission: false, elicitation_active: false,
+        },
+        ClientCommand::RecordPromptSuggestionSubmission { text: String::new() },
+        ClientCommand::PromptSuggestionFeedback {
+            session_id: String::new(), uuid: String::new(), action: "shown".into(),
+        },
         ClientCommand::UiClientOperation {
             request_id: String::new(),
             operation_json: String::new(),
@@ -2723,6 +2769,7 @@ fn contract_index_covers_every_dto() {
             source: String::new(),
             aliases: vec![],
             argument_hint: None,
+            argument_names: Vec::new(),
             menu_description: None,
             hidden: false,
         },

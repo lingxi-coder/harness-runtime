@@ -3527,7 +3527,9 @@ mod tests {
                         context_modifier: None,
                         is_error: false,
                         mcp_meta: None,
-                    })
+
+            data_projection:None,model_content_projection:None,mcp_meta_projection:None,
+})
                 }
                 () = async { match token { Some(t) => t.cancelled().await, None => std::future::pending().await } } => {
                     Err(ToolError::Aborted)
@@ -3747,7 +3749,7 @@ mod tests {
                 .lock()
                 .await
                 .get(tool_id.as_str()),
-            Some(&serde_json::Value::String("User rejected tool use".into())),
+            Some(&serde_json::Value::String("User rejected tool use".into()).into()),
             "the accepted synthetic result remains in transcript metadata"
         );
     }

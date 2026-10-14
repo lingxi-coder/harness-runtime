@@ -112,7 +112,11 @@ pub(super) async fn wind_down_print_tasks(
             continue;
         }
         if !has_work {
-            break;
+            let waiting_for_notification = match publisher.as_deref_mut() {
+                Some(publisher) => publisher.should_hold_results().await,
+                None => false,
+            };
+            if !waiting_for_notification { break; }
         }
         tokio::select! {
             _ = shutdown.cancelled() => break,

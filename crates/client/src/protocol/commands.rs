@@ -120,6 +120,29 @@ pub struct McpAdminCommandDto {
     pub payload_json: Option<String>,
 }
 
+/// One nested Desktop Fusion-management command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct FusionAdminCommandDto {
+    /// Operation verb, such as `get_catalog`, `save`, or `resolve_strategy`.
+    pub action: String,
+    /// Correlation id for a mutating operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<u64>,
+    /// Optional Fusion strategy ID targeted by the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Configuration scope (`user`, `local`, or `project`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Expected SHA-256 revision used for compare-and-swap writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Action-specific JSON payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<String>,
+}
+
 /// One nested Desktop plugin-management command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -809,6 +832,27 @@ pub enum ClientCommand {
     UiClientOperation {
         request_id: String,
         operation_json: String,
+    },
+    /// Ephemeral composer observations; independent of the native SDK stream.
+    UpdatePromptSuggestionContext {
+        session_id: String,
+        focus: String,
+        input_empty: bool,
+        pending_permission: bool,
+        elicitation_active: bool,
+    },
+    PromptSuggestionFeedback {
+        session_id: String,
+        uuid: String,
+        action: String,
+    },
+    /// Admission of a command executed entirely by the attached frontend.
+    RecordPromptSuggestionSubmission {
+        text: String,
+    },
+    /// Manage scoped Fusion strategies. Appended to preserve native ordinals.
+    FusionAdmin {
+        command: FusionAdminCommandDto,
     },
 }
 

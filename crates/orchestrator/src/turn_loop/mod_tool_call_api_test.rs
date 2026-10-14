@@ -800,7 +800,7 @@ async fn dispatch_preflight_case(
         .await
         .get(outer_id.as_str())
         .cloned()
-        .expect("outer result should be recorded")
+        .expect("outer result should be recorded").value
 }
 
 #[tokio::test]
@@ -1446,7 +1446,7 @@ async fn tool_call_api_uses_permissioned_executor_without_publishing_virtual_row
     assert_eq!(stored_results.len(), 1, "only the outer row is retained");
     assert_eq!(
         stored_results.get(outer_id.as_str()),
-        Some(&serde_json::json!({"ok":true}))
+        Some(&serde_json::json!({"ok":true}).into())
     );
     drop(stored_results);
 

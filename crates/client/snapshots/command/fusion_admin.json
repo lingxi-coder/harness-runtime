@@ -1,0 +1,10 @@
+{
+  "type": "fusion_admin",
+  "command": {
+    "action": "save",
+    "operation_id": 71,
+    "scope": "user",
+    "revision": "abc",
+    "payload_json": "{\"id\":\"review\",\"name\":\"Review\",\"config\":{}}"
+  }
+}

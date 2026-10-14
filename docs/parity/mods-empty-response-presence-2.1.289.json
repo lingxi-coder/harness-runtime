@@ -1,0 +1,48 @@
+{
+  "result": "PASS",
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "source_windows": [
+    {
+      "label": "Native no-content text constant",
+      "start": 181809988,
+      "end": 181810009,
+      "sha256": "6f46bfb26da2c3a986c65fcf061f27296adc857feb87ee2378a79695b10c2fc5"
+    },
+    {
+      "label": "Native nonstream empty-content placeholder",
+      "start": 189342866,
+      "end": 189342954,
+      "sha256": "1a062842d3ce72f3b452d4e79637401f1fcc40432624dd15568f5dc209621980"
+    }
+  ],
+  "cases": [
+    {
+      "name": "removed raw control",
+      "content": [
+        {
+          "type": "text",
+          "text": "(no content)",
+          "citations": []
+        }
+      ]
+    },
+    {
+      "name": "empty raw content",
+      "content": []
+    },
+    {
+      "name": "missing raw content",
+      "content": []
+    },
+    {
+      "name": "existing accepted text",
+      "content": [
+        {
+          "type": "text",
+          "text": "answer"
+        }
+      ]
+    }
+  ],
+  "scope": "Executes the exact Native nonstream placeholder statement and text constant on controlled pre/post-filter arrays; the content filtering, fallback admission, full CLI, network and provider are not executed."
+}

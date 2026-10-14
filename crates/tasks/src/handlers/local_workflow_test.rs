@@ -763,6 +763,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
                     "{}\n",
                     serde_json::json!({
                         "message": lingxi_core::types::ConversationMessage::Assistant {
+                            per_turn_effort: None,
                             id: lingxi_core::types::MessageId::new(),
                             content: vec![lingxi_core::types::ContentBlock::Text {
                                 text: "hello from child".to_string(), citations: None,

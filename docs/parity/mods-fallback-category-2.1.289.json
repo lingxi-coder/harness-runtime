@@ -1,0 +1,248 @@
+{
+  "oracle": "Claude Code 2.1.289 server-fallback refusal-category producer gate",
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "execution_scope": "Executes the exact Native category gate and start/completed extraction helpers; source-callsite windows establish their physical stream and completed-response use. No provider request or CLI workflow is executed.",
+  "source_windows": [
+    {
+      "label": "category gate and stream/completed-block helpers",
+      "start": 189077574,
+      "end_exclusive": 189078881,
+      "sha256": "90cc9dd6bbfa9385897227fba4a268d7d9cb6c7290b27ffa297ad5435d726499"
+    },
+    {
+      "label": "physical stream event loop invokes TNe on each decoded event",
+      "start": 189361945,
+      "end_exclusive": 189362753,
+      "sha256": "6936612c6e9b578654a43e6610de55b407f1e76d1df03440f256538f759bb96a"
+    },
+    {
+      "label": "completed response content projector invokes Sjt for fallback blocks",
+      "start": 189341909,
+      "end_exclusive": 189343262,
+      "sha256": "d43c94214c4a5ded8987c61306284e5a9ab6e3873a27f16be5a3c73c0cb700a4"
+    },
+    {
+      "label": "completed response invokes the projector on parsed provider response",
+      "start": 189348533,
+      "end_exclusive": 189348599,
+      "sha256": "04957b66a4efebaeedb000a982f39c000672b6991c52b50dc28cf0a05c3d5d70"
+    }
+  ],
+  "contract": {
+    "accepted_category": "A string whose JavaScript length is 1 through 64 UTF-16 code units, returned unchanged.",
+    "rejected_category": "Missing, null, non-string, empty, or longer than 64 UTF-16 code units yields null category while a structurally valid fallback block remains recognized.",
+    "raw_lone_surrogates": "The extracted JS helper accepts lone high and low surrogates as one-unit strings. This tests the helper value contract, not the separate Rust serde_json ingress path.",
+    "formatter_255_unit_slice": "Separate contract: the refusal Details formatter later slices sanitized text to 255 UTF-16 units. This oracle does not execute or merge that formatter rule."
+  },
+  "cases": [
+    {
+      "label": "empty string",
+      "trigger": {
+        "type": "refusal",
+        "category": ""
+      },
+      "utf16_length": 0,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "one ASCII unit",
+      "trigger": {
+        "type": "refusal",
+        "category": "x"
+      },
+      "utf16_length": 1,
+      "accepted": true,
+      "direct_result": "x",
+      "streamed_result": "x",
+      "completed_result": "x"
+    },
+    {
+      "label": "64 ASCII units",
+      "trigger": {
+        "type": "refusal",
+        "category": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "utf16_length": 64,
+      "accepted": true,
+      "direct_result": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "streamed_result": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "completed_result": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "label": "65 ASCII units",
+      "trigger": {
+        "type": "refusal",
+        "category": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "utf16_length": 65,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "32 astral characters (64 UTF-16 units)",
+      "trigger": {
+        "type": "refusal",
+        "category": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      },
+      "utf16_length": 64,
+      "accepted": true,
+      "direct_result": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "streamed_result": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "completed_result": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+    },
+    {
+      "label": "33 astral characters (66 UTF-16 units)",
+      "trigger": {
+        "type": "refusal",
+        "category": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      },
+      "utf16_length": 66,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "63 units then an astral pair (65 units)",
+      "trigger": {
+        "type": "refusal",
+        "category": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀"
+      },
+      "utf16_length": 65,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "lone high surrogate",
+      "trigger": {
+        "type": "refusal",
+        "category": "\ud800"
+      },
+      "utf16_length": 1,
+      "accepted": true,
+      "direct_result": "\ud800",
+      "streamed_result": "\ud800",
+      "completed_result": "\ud800"
+    },
+    {
+      "label": "lone low surrogate",
+      "trigger": {
+        "type": "refusal",
+        "category": "\udc00"
+      },
+      "utf16_length": 1,
+      "accepted": true,
+      "direct_result": "\udc00",
+      "streamed_result": "\udc00",
+      "completed_result": "\udc00"
+    },
+    {
+      "label": "null category",
+      "trigger": {
+        "type": "refusal",
+        "category": null
+      },
+      "utf16_length": null,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "number category",
+      "trigger": {
+        "type": "refusal",
+        "category": 1
+      },
+      "utf16_length": null,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "boolean category",
+      "trigger": {
+        "type": "refusal",
+        "category": true
+      },
+      "utf16_length": null,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "object category",
+      "trigger": {
+        "type": "refusal",
+        "category": {}
+      },
+      "utf16_length": null,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "array category",
+      "trigger": {
+        "type": "refusal",
+        "category": []
+      },
+      "utf16_length": null,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "missing category",
+      "trigger": {
+        "type": "refusal"
+      },
+      "utf16_length": null,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "wrong trigger type",
+      "trigger": {
+        "type": "other",
+        "category": "cyber"
+      },
+      "utf16_length": 5,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "null trigger",
+      "trigger": null,
+      "utf16_length": null,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    },
+    {
+      "label": "string trigger",
+      "trigger": "refusal",
+      "utf16_length": null,
+      "accepted": false,
+      "direct_result": null,
+      "streamed_result": null,
+      "completed_result": null
+    }
+  ]
+}

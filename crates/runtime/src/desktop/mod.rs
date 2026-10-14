@@ -46,6 +46,7 @@ pub mod fork_resume;
 mod fusion_attempt_composition_test;
 mod fusion_attempts;
 mod fusion_command;
+pub use fusion_command::record_fusion_command_failure;
 mod fusion_implement;
 #[cfg(test)]
 mod fusion_implement_e2e_test;
@@ -2576,18 +2577,11 @@ impl DesktopRuntime {
         )
     }
     /// Current local Agent statistics, sampled when a result is published.
-    /// Hosts without the Agent tool omit the field instead of inventing zeros.
+    /// Tool selection does not disable the session's statistics owner: Native
+    /// reports its empty snapshot even with an explicitly empty tool catalog.
     pub async fn agent_session_statistics(
         &self,
     ) -> Option<lingxi_core::host::agent_statistics::AgentSessionStatisticsSnapshot> {
-        if !self
-            .orchestrator
-            .tool_names()
-            .iter()
-            .any(|name| name == "Agent")
-        {
-            return None;
-        }
         let session_id = self.orchestrator.current_session_id().await;
         Some(
             self.task_registry
@@ -3413,6 +3407,15 @@ fn load_effective_settings_for_config(
         Some(&cfg.lingxi_home.join("settings.json")),
     )
     .ok()
+}
+
+/// Read the exact admitted Fusion layers used by runtime strategy selection.
+/// Configuration administration uses this hook before credential preparation,
+/// including fresh managed policy and this host's CLI and trust restrictions.
+pub fn fusion_settings_layers_for_config(
+    cfg: &DesktopConfig,
+) -> Result<Vec<lingxi_core::host::FusionSettingsLayer>, String> {
+    fusion_services::desktop_fusion_layers(cfg).map_err(|error| error.to_string())
 }
 
 /// Sample the current merged main/subagent prompt-cache settings for an API

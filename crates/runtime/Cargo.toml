@@ -371,3 +371,7 @@ required-features = ["mobile"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "sdk_prompt_suggestions"
+path = "tests/sdk_prompt_suggestions.rs"

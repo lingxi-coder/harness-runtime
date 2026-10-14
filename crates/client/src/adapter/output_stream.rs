@@ -815,6 +815,26 @@ impl OutputStream for AdapterOutputStream {
         self.emit_tool_result_event(id, tool, &tagged).await;
     }
 
+    fn wants_prompt_suggestions(&self) -> bool {
+        true
+    }
+
+    async fn emit_prompt_suggestion_state(&self, enabled: bool, notice: Option<&str>) {
+        self.sink.emit(ClientEvent::PromptSuggestionState {
+            enabled, notice: notice.map(str::to_owned),
+        }).await;
+    }
+
+    async fn emit_prompt_suggestion(&self, session_id: &str, uuid: &str, suggestion: &str) {
+        self.sink
+            .emit(ClientEvent::PromptSuggestion {
+                suggestion: suggestion.into(),
+                session_id: session_id.into(),
+                uuid: uuid.into(),
+            })
+            .await;
+    }
+
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
         // Any call still awaiting a result at turn end never gets one; drop
         // the side-table so it cannot leak across turns. Mirrors

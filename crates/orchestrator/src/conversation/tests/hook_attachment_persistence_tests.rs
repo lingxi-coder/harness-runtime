@@ -83,7 +83,7 @@ mod tool_frame_ordering_tests {
             .await;
         })
         .await;
-        assert_eq!(stage.tool_use_result, Some(serde_json::json!("staged")));
+        assert_eq!(stage.tool_use_result, Some(serde_json::json!("staged").into()));
         assert_eq!(
             result_ids(&output.snapshot().await),
             vec![nested.to_string()]

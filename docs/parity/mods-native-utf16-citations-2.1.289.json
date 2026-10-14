@@ -1,0 +1,53 @@
+{
+  "native_version": "2.1.289",
+  "binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "runner": "scripts/tests/mods_native_utf16_citations_289_loopback.mjs",
+  "runner_sha256": "ae56a32aa77bb6f1667f6a51c8712fff82823a0dd2a4f5e534b65d1f47e48399",
+  "receipt": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/mods-native-row-wire-289-sequential-6G5y0w/receipt.json",
+  "receipt_sha256": "4eb08d04cbe0247d855af506aa10e5d454b0ef11c6b89ff88ad1d82171c8b774",
+  "acceptance": {
+    "passed": true,
+    "model_request_count": 3,
+    "native_processes": 2,
+    "health_probe_count": 2,
+    "unexpected_local_routes": 0,
+    "before_forwarded_result_units": [
+      55296,
+      937,
+      56320
+    ],
+    "durable_text_units": [
+      55296,
+      937,
+      56320
+    ],
+    "durable_standard_jsonl_escape": true,
+    "internal_sidecar_leaked": false,
+    "live_session_messages_units": [
+      55296,
+      937,
+      56320
+    ],
+    "cold_resume_session_messages_units": [
+      65533,
+      937,
+      65533
+    ],
+    "first_subsequent_http_units": [
+      65533,
+      937,
+      65533
+    ],
+    "cold_resume_normalization_observed": true,
+    "provider_wire_normalization_observed": true,
+    "public_sdk_capability_tested_here": false,
+    "cold_resume_http_units": [
+      65533,
+      937,
+      65533
+    ],
+    "cold_resume_http_normalization_observed": true,
+    "second_and_third_http_requests_asserted": true
+  },
+  "limits": "Pinned Native only. The process restart behavior is not inferred from live session/API behavior; this runner observed replacement units only after --resume. The local HTTP spy does not establish public SDK capability or Harness parity."
+}

@@ -1,0 +1,371 @@
+{
+  "version": "2.1.289",
+  "binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "source_windows": [
+    {
+      "label": "terminal status predicate",
+      "start": 185139913,
+      "end_exclusive": 185139979,
+      "sha256": "97b7f941c1c09455cb734a557cb33b37fcdd82297be2af30b4d77296dd6ccbcd"
+    },
+    {
+      "label": "agent task identity projection",
+      "start": 188340930,
+      "end_exclusive": 188341386,
+      "sha256": "676c1b52ae40467ef77100eb7bd9601729b8e4a9617ee7c543f9f4ad619a1f44"
+    },
+    {
+      "label": "background Bash and monitor predicate",
+      "start": 188505877,
+      "end_exclusive": 188506078,
+      "sha256": "b0cc613b8c0411e79e0d9470f30f95ed73402e90a6dfb1b477d0a75f55526120"
+    },
+    {
+      "label": "idle keepalive reason",
+      "start": 188506130,
+      "end_exclusive": 188506156,
+      "sha256": "56d4037ee4da4a91e82e03ab2289eb92f335720636fa323a924f19fa71bc3f38"
+    },
+    {
+      "label": "PAt status projection and MAt membership",
+      "start": 188506311,
+      "end_exclusive": 188507089,
+      "sha256": "d36381136a0e262d37de6838e1d3d623451a01899a02a2d78b43c6f512691a9e"
+    },
+    {
+      "label": "ifo agent.list reducer",
+      "start": 188507089,
+      "end_exclusive": 188507928,
+      "sha256": "e003640923c46f03788a530b61ae435e10be9c2ba9dbe9713195b5257d6cba15"
+    },
+    {
+      "label": "hook caller and origin projection",
+      "start": 188508612,
+      "end_exclusive": 188508693,
+      "sha256": "728dd2ce55ef1c33361b9377a85efb109048e09ca338f7258e2c689e0db4e4ee"
+    },
+    {
+      "label": "agent wrapper and spawn helpers",
+      "start": 182843403,
+      "end_exclusive": 182844999,
+      "sha256": "4f818cf4e1cd61e152a4503060f655e40c2c23d864427aa2ad027f668b3d6401"
+    },
+    {
+      "label": "rw agent.list/agent.spawn wrapper",
+      "start": 182844300,
+      "end_exclusive": 182844999,
+      "sha256": "1f639d650c75229f9e9ebac6cf50ae7694bb4e6fea77fec2763158c8966b47a7"
+    },
+    {
+      "label": "VOt/YOt/c_o spawn result bridge",
+      "start": 188857631,
+      "end_exclusive": 188858131,
+      "sha256": "f6999ad4718a1d17944ae61c5f02fc8d1f70eb16fe3b55f376fe7c4edb0c2e97"
+    },
+    {
+      "label": "CMr provenance writer",
+      "start": 188963827,
+      "end_exclusive": 188963992,
+      "sha256": "b4a9186fc470ab1b5ad28b53ca6d5d8856ec7e8506c36d2bd8f562f18e339259"
+    },
+    {
+      "label": "Py team-file reader, source-only",
+      "start": 186836941,
+      "end_exclusive": 186837441,
+      "sha256": "de6f3328d7a7cbbcb620d50e432ef40c2af070bd6baf2f5fbe78814248f61ce6"
+    },
+    {
+      "label": "bn agent.spawn hook dispatcher, source-only",
+      "start": 194820648,
+      "end_exclusive": 194821115,
+      "sha256": "34306bd3e01fba34e855d3afee63788a83fd860c71c9f383cbca4beb3157f485"
+    },
+    {
+      "label": "named teammate call into bn, source-only",
+      "start": 194832917,
+      "end_exclusive": 194834998,
+      "sha256": "5996c73dc5590ab0a8c2579029c04b31680eb434e399c45a4df621f5675b852e"
+    },
+    {
+      "label": "embedded missing-name-registry error resource",
+      "start": 78657088,
+      "end_exclusive": 78657164,
+      "sha256": "059760913df7073fb0e0d12b842fa838978bbbefb9dc0dc0ab58142cdd0cf88a"
+    },
+    {
+      "label": "embedded missing-provenance error resource",
+      "start": 78657172,
+      "end_exclusive": 78657246,
+      "sha256": "edda4f2c11efec10fe504625527248ef8eb90bae2d2154800f7fa49dae0e9207"
+    }
+  ],
+  "vm_results": {
+    "PAt": [
+      {
+        "type": "local_agent",
+        "input": "running",
+        "hasName": false,
+        "expected": "running"
+      },
+      {
+        "type": "local_agent",
+        "input": "running",
+        "hasName": false,
+        "expected": "waiting"
+      },
+      {
+        "type": "in_process_teammate",
+        "input": "running",
+        "hasName": false,
+        "expected": "running"
+      },
+      {
+        "type": "in_process_teammate",
+        "input": "running",
+        "hasName": false,
+        "expected": "waiting"
+      },
+      {
+        "type": "in_process_teammate",
+        "input": "running",
+        "hasName": false,
+        "expected": "idle"
+      },
+      {
+        "type": "in_process_teammate",
+        "input": "running",
+        "hasName": false,
+        "expected": "waiting"
+      },
+      {
+        "type": "local_agent",
+        "input": "completed",
+        "hasName": true,
+        "expected": "running"
+      },
+      {
+        "type": "local_agent",
+        "input": "completed",
+        "hasName": false,
+        "expected": "waiting"
+      },
+      {
+        "type": "local_agent",
+        "input": "completed",
+        "hasName": false,
+        "expected": "idle"
+      },
+      {
+        "type": "local_agent",
+        "input": "completed",
+        "hasName": true,
+        "expected": "idle"
+      },
+      {
+        "type": "local_agent",
+        "input": "completed",
+        "hasName": false,
+        "expected": "completed"
+      },
+      {
+        "type": "in_process_teammate",
+        "input": "completed",
+        "hasName": true,
+        "expected": "completed"
+      },
+      {
+        "type": "local_agent",
+        "input": "paused",
+        "hasName": false,
+        "expected": "idle"
+      },
+      {
+        "type": "local_agent",
+        "input": "failed",
+        "hasName": false,
+        "expected": "failed"
+      },
+      {
+        "type": "local_agent",
+        "input": "custom-status",
+        "hasName": false,
+        "expected": "custom-status"
+      }
+    ],
+    "dedup_order_json": [
+      {
+        "id": "agent-A",
+        "description": "A last active",
+        "type": "Explore",
+        "status": "running",
+        "parentId": "parent-A",
+        "spawnedBy": "spawn-plugin"
+      },
+      {
+        "id": "agent-B",
+        "description": "B first-seen",
+        "type": "Explore",
+        "status": "running",
+        "name": "B mapped name"
+      },
+      {
+        "id": "agent-D",
+        "description": "D last terminal",
+        "type": "Explore",
+        "status": "failed"
+      }
+    ],
+    "identity_json": [
+      {
+        "id": "local-id",
+        "description": "local-id description",
+        "type": "Explore",
+        "status": "running",
+        "parentId": "parent-id",
+        "spawnedBy": "plugin-caller",
+        "name": "registered local name"
+      },
+      {
+        "id": "resumed-loop-id",
+        "teammateId": "teammate@team",
+        "description": "",
+        "type": "Explore",
+        "status": "running",
+        "parentId": "parent-id",
+        "spawnedBy": "teammate-caller",
+        "name": "Teammate"
+      },
+      {
+        "id": "local-null-parent",
+        "description": "local-null-parent description",
+        "type": "Explore",
+        "status": "running",
+        "parentId": null
+      }
+    ],
+    "membership_background": {
+      "inactive": "idle",
+      "inactiveBackgroundBash": "waiting",
+      "inactiveForegroundBash": "idle",
+      "inactiveMonitor": "waiting",
+      "resumableInactive": "running"
+    },
+    "spawn_errors": [
+      "oracle-plugin: $.agent.spawn takes { prompt, ... } (a non-empty prompt)",
+      "oracle-plugin: $.agent.spawn takes { prompt, ... } (a non-empty prompt)"
+    ],
+    "spawn_returns": {
+      "success": {
+        "model": "resolved-model",
+        "agentId": "loop-id",
+        "teammateId": "worker@team"
+      },
+      "omitted": {
+        "model": "inherit"
+      },
+      "emptyStringIsPresent": {
+        "model": "inherit",
+        "agentId": "stable",
+        "teammateId": ""
+      },
+      "deny": {
+        "deny": "denied"
+      }
+    },
+    "spawn_bridge": {
+      "firstLive": {
+        "status": "teammate_spawned",
+        "teammate_id": "worker@team",
+        "model": "model-x",
+        "agentId": "live-loop-1",
+        "resolvedModel": "model-x"
+      },
+      "lastWhenOnlyTerminal": {
+        "status": "teammate_spawned",
+        "teammate_id": "worker@team",
+        "agentId": "last-terminal"
+      },
+      "rawIdFallback": {
+        "status": "teammate_spawned",
+        "teammate_id": "orphan@team",
+        "agentId": "orphan@team"
+      },
+      "nullTeammateIdIgnored": {
+        "status": "teammate_spawned",
+        "teammate_id": null
+      }
+    },
+    "provenance": {
+      "stored": {
+        "hookOrigin": [
+          "plugin@marketplace"
+        ],
+        "hookCaller": "plugin@marketplace"
+      },
+      "cleared": true
+    },
+    "missing_context_node_vm_errors": [
+      "Cannot destructure property 'agentNameRegistry' of 'DQn(...).namedAgents(...)' as it is null.",
+      "Cannot destructure property 'spawnProvenance' of 'dt(...)' as it is null."
+    ],
+    "embedded_binary_error_resources": [
+      {
+        "message": "Cannot destructure property 'agentNameRegistry' from null or undefined value",
+        "byte_offset": 78657088
+      },
+      {
+        "message": "Cannot destructure property 'spawnProvenance' from null or undefined value",
+        "byte_offset": 78657172
+      }
+    ],
+    "nullable_optional_json": [
+      {
+        "id": "stable-null-address",
+        "teammateId": null,
+        "description": "row fallback description",
+        "type": "Explore",
+        "status": "running",
+        "parentId": null,
+        "spawnedBy": null,
+        "name": "Teammate"
+      },
+      {
+        "id": "stable-missing-address",
+        "type": "Explore",
+        "status": "running",
+        "name": ""
+      }
+    ],
+    "terminal_before_active_json": [
+      {
+        "id": "agent-C",
+        "description": "paused nonterminal",
+        "type": "Explore",
+        "status": "idle"
+      }
+    ],
+    "priority_edges": {
+      "inactiveOverridesPlanApproval": "idle",
+      "activePreservesPlanApproval": "waiting",
+      "monitorOnlyPromotesIdle": "running"
+    },
+    "json_return_utf8_hex": [
+      {
+        "json": "[{\"id\":\"agent-A\",\"description\":\"A last active\",\"type\":\"Explore\",\"status\":\"running\",\"parentId\":\"parent-A\",\"spawnedBy\":\"spawn-plugin\"},{\"id\":\"agent-B\",\"description\":\"B first-seen\",\"type\":\"Explore\",\"status\":\"running\",\"name\":\"B mapped name\"},{\"id\":\"agent-D\",\"description\":\"D last terminal\",\"type\":\"Explore\",\"status\":\"failed\"}]",
+        "bytes": 322,
+        "hex": "5b7b226964223a226167656e742d41222c226465736372697074696f6e223a2241206c61737420616374697665222c2274797065223a224578706c6f7265222c22737461747573223a2272756e6e696e67222c22706172656e744964223a22706172656e742d41222c22737061776e65644279223a22737061776e2d706c7567696e227d2c7b226964223a226167656e742d42222c226465736372697074696f6e223a22422066697273742d7365656e222c2274797065223a224578706c6f7265222c22737461747573223a2272756e6e696e67222c226e616d65223a2242206d6170706564206e616d65227d2c7b226964223a226167656e742d44222c226465736372697074696f6e223a2244206c617374207465726d696e616c222c2274797065223a224578706c6f7265222c22737461747573223a226661696c6564227d5d"
+      },
+      {
+        "json": "[{\"id\":\"stable-null-address\",\"teammateId\":null,\"description\":\"row fallback description\",\"type\":\"Explore\",\"status\":\"running\",\"parentId\":null,\"spawnedBy\":null,\"name\":\"Teammate\"},{\"id\":\"stable-missing-address\",\"type\":\"Explore\",\"status\":\"running\",\"name\":\"\"}]",
+        "bytes": 254,
+        "hex": "5b7b226964223a22737461626c652d6e756c6c2d61646472657373222c227465616d6d6174654964223a6e756c6c2c226465736372697074696f6e223a22726f772066616c6c6261636b206465736372697074696f6e222c2274797065223a224578706c6f7265222c22737461747573223a2272756e6e696e67222c22706172656e744964223a6e756c6c2c22737061776e65644279223a6e756c6c2c226e616d65223a225465616d6d617465227d2c7b226964223a22737461626c652d6d697373696e672d61646472657373222c2274797065223a224578706c6f7265222c22737461747573223a2272756e6e696e67222c226e616d65223a22227d5d"
+      },
+      {
+        "json": "{\"model\":\"resolved-model\",\"agentId\":\"loop-id\",\"teammateId\":\"worker@team\"}",
+        "bytes": 73,
+        "hex": "7b226d6f64656c223a227265736f6c7665642d6d6f64656c222c226167656e744964223a226c6f6f702d6964222c227465616d6d6174654964223a22776f726b6572407465616d227d"
+      }
+    ]
+  },
+  "boundary": "Exact extracted Native functions run in Node VM. Task rows, plugin maps, team files and bridge host facts are injected; named-teammate launcher is source-asserted. Node VM engine errors are separate from pinned Native binary error resources. No enabled installed-Mod runtime or provider call."
+}

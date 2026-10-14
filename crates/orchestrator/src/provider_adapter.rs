@@ -241,6 +241,8 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
 
 #[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
+    fn next_output_budget(&self, model: &str, profile: Option<&str>, usage: &llm_runtime::ExecutionUsage) -> Result<Option<u32>, LlmError> { self.service.next_output_budget(model, profile, usage) }
+
     fn is_first_party_route(&self, model: &str, profile: Option<&str>) -> bool {
         self.service
             .is_first_party_route(model, profile)
@@ -253,6 +255,14 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         profile: Option<&str>,
     ) -> Result<llm_runtime::CredentialSource, LlmError> {
         self.service.credential_source(model, profile).await
+    }
+
+    async fn classifier_model_route_facts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<llm_runtime::model::classifier_model_policy::ClassifierModelRouteFacts, LlmError> {
+        self.service.classifier_model_route_facts(model, profile).await
     }
 
     fn native_computer_provider(
@@ -990,65 +1000,22 @@ impl StreamingApiClient for ProviderApiAdapter {
     }
 
     async fn stream_with_effort_override(
-        &self,
-        model: &str,
-        profile: Option<&str>,
+        &self, model: &str, profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
-        effort: Option<&str>,
-        query_source: &str,
-        skip_global_cache_for_system_prompt: bool,
+        messages: Vec<ConversationMessage>, tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        effort: Option<&str>, query_source: &str, skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.build_scheduled_request(
-                settings,
-                system,
-                skip_global_cache_for_system_prompt,
-                messages,
-                tools,
-                None,
-            )?;
-            let mut request = request;
-            request
-                .execution
-                .set_request_dispatch_admission(request_dispatch_admission);
-            return self.service.stream_request(request).await;
-        }
-        // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
-        // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
-        // the pre-M4 body byte-identical.
-        // (/fast) When the shared fast-mode flag is set AND the active model
-        // passes the resolved route/environment gate, send `speed:"fast"` — the
-        // service's `beta_context` reads it back to add the fast-mode beta.
-        // `None` (flag off, or an unsupported model) keeps the body unchanged.
-        let speed = if self.fast_mode.load(std::sync::atomic::Ordering::SeqCst)
-            && self
-                .service
-                .fast_model_allowed(model, profile)
-                .unwrap_or(false)
-        {
-            Some("fast".to_string())
-        } else {
-            None
-        };
-        self.service
-            .stream_with_system_prompt(
-                model,
-                profile,
-                system,
-                messages,
-                tools,
-                effort
-                    .map(|effort| serde_json::Value::String(effort.to_owned()))
-                    .or_else(|| self.current_effort()),
-                speed,
-                skip_global_cache_for_system_prompt,
-                Some(query_source),
-                request_dispatch_admission,
-            )
-            .await
+        self.stream_with_options(model, profile, system, messages, tools, effort, None, query_source, skip_global_cache_for_system_prompt, request_dispatch_admission).await
+    }
+    async fn stream_with_output_budget(
+        &self, model: &str, profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>, tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        max_tokens: Option<u32>, query_source: &str, skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        self.stream_with_options(model, profile, system, messages, tools, None, max_tokens, query_source, skip_global_cache_for_system_prompt, request_dispatch_admission).await
     }
 
     fn last_retry_count(&self) -> u32 {
@@ -1698,7 +1665,7 @@ mod tests {
             Some("anthropic"),
             None,
             Vec::new(),
-            vec![tool],
+            vec![tool.into()],
         );
         let main_error = adapter
             .messages_create(crate::OrchestratorApiRequest::Main(main))
@@ -2508,7 +2475,7 @@ mod tests {
                 profile: None,
                 system: None,
                 messages: Vec::new(),
-                tools: vec![serde_json::json!({"name":"StructuredOutput","description":"Return structured output","input_schema":{"type":"object","properties":{}}})],
+                tools: vec![serde_json::json!({"name":"StructuredOutput","description":"Return structured output","input_schema":{"type":"object","properties":{}}}).into()],
                 forced_tool: Some("StructuredOutput".into()),
                 effort: None,
                 opts: agent::api::SubagentApiCallOpts {
@@ -2599,7 +2566,7 @@ mod tests {
                         lingxi_core::types::MessageId::new(),
                         label.into(),
                     )],
-                    tools: tool_names.iter().map(|name| tool(*name)).collect(),
+                    tools: tool_names.iter().map(|name| tool(*name).into()).collect(),
                     forced_tool: forced_tool.map(str::to_string),
                     effort: None,
                     opts: agent::api::SubagentApiCallOpts {
@@ -2654,7 +2621,7 @@ mod tests {
                 lingxi_core::types::MessageId::new(),
                 "main-turn".into(),
             )],
-            vec![tool("Read"), tool("StructuredOutput")],
+            vec![tool("Read").into(), tool("StructuredOutput").into()],
             "sdk", false, None,
         )
         .await
@@ -3454,11 +3421,15 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         use futures::StreamExt;
         use llm_runtime::services::sdk;
         use llm_runtime::HistoryEvent;
-        let mut request = llm_runtime::LlmRequest::new(input.model).with_user_text(format!(
+        let route = self.service.hosted_search_route(&input.model, input.profile.as_deref())
+            .map_err(hosted_search_error)?;
+        let require_native_results = matches!(&route.provider_id,
+            llm_runtime::ProviderId::OpenAICompatible { name } | llm_runtime::ProviderId::Custom { name } if name == "deepseek");
+        let mut request = llm_runtime::LlmRequest::new(route.request_model).with_user_text(format!(
             "Perform a web search for the query: {}",
             input.query
         ));
-        request.profile = input.profile;
+        request.profile = Some(route.profile_name);
         request.input.max_tokens = Some(4096);
         request.execution.query_source = Some("web_search_tool".into());
         request.input.system = vec![sdk::protocol::SystemBlock {
@@ -3473,6 +3444,29 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                     .hosted_search_max_uses(&request.input.model, request.profile.as_deref()),
             },
         )];
+        if self.service.uses_codex_standalone_search(&request.input.model, request.profile.as_deref()) {
+            request.input.native_options.push(sdk::protocol::NativeExtension::from_typed(
+                sdk::providers::openai::codex_search::CodexSearchRequest {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    query: input.query,
+                },
+            ).expect("Codex search options are serializable"));
+            let response = self.service.execute_non_stream_request(
+                request, llm_runtime::NonStreamingRequestClass::Auxiliary, Default::default(),
+            ).await.map_err(hosted_search_error)?;
+            let native = response.content.iter()
+                .map(|block| serde_json::to_value(block).unwrap_or_default()).collect::<Vec<_>>();
+            let mut results = sdk::hosted_search::parse_response_content(&native);
+            let observations = serde_json::Value::Array(
+                response.provider_metadata.pointer("/llm_client/web_search").cloned().into_iter().collect(),
+            );
+            sdk::hosted_search::append_citations(&mut results, Some(&observations));
+            let _ = progress.send(());
+            return Ok(tool_api::HostedSearchOutput {
+                results, searches: 1, input_tokens: response.usage.counts().input_tokens,
+                output_tokens: response.usage.counts().output_tokens.saturating_sub(response.usage.counts().reasoning_tokens),
+            });
+        }
         let usage = Arc::new(std::sync::Mutex::new(llm_runtime::ExecutionUsage::default()));
         let searches = Arc::new(std::sync::atomic::AtomicU64::new(0));
         // A failed stream may never deliver its terminal metadata snapshot.
@@ -3542,6 +3536,12 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             .map(|block| serde_json::to_value(block).unwrap_or_default())
             .collect::<Vec<_>>();
         let mut results = sdk::hosted_search::parse_response_content(&native);
+        if require_native_results && !results.iter().any(|entry| matches!(entry, sdk::hosted_search::SearchResultEntry::Hit(_))) {
+            return Err(tool_api::HostedSearchError {
+                message: "DeepSeek returned no structured web_search_tool_result; native search did not complete".into(),
+                http_status: None, timeout: false,
+            });
+        }
         let mut observations = metadata
             .get("llm_client")
             .and_then(|v| v.get("web_search"))
@@ -3634,4 +3634,71 @@ mod hosted_error_tests {
             assert_eq!(mapped.timeout, timeout);
         }
     }
+}
+
+impl ProviderApiAdapter {
+    async fn stream_with_options(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        effort: Option<&str>,
+        max_tokens: Option<u32>,
+        query_source: &str,
+        skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            let request = self.build_scheduled_request(
+                settings,
+                system,
+                skip_global_cache_for_system_prompt,
+                messages,
+                tools,
+                max_tokens,
+            )?;
+            let mut request = request;
+            request
+                .execution
+                .set_request_dispatch_admission(request_dispatch_admission);
+            return self.service.stream_request(request).await;
+        }
+        // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
+        // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
+        // the pre-M4 body byte-identical.
+        // (/fast) When the shared fast-mode flag is set AND the active model
+        // passes the resolved route/environment gate, send `speed:"fast"` — the
+        // service's `beta_context` reads it back to add the fast-mode beta.
+        // `None` (flag off, or an unsupported model) keeps the body unchanged.
+        let speed = if self.fast_mode.load(std::sync::atomic::Ordering::SeqCst)
+            && self
+                .service
+                .fast_model_allowed(model, profile)
+                .unwrap_or(false)
+        {
+            Some("fast".to_string())
+        } else {
+            None
+        };
+        self.service
+            .stream_with_system_prompt(
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                effort
+                    .map(|effort| serde_json::Value::String(effort.to_owned()))
+                    .or_else(|| self.current_effort()),
+                speed,
+                max_tokens,
+                skip_global_cache_for_system_prompt,
+                Some(query_source),
+                request_dispatch_admission,
+            )
+            .await
+    }
+
 }

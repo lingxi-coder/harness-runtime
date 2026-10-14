@@ -843,6 +843,9 @@ pub enum StdinControlFrame {
     Request(Utf16JsonProjection),
     Cancel(Utf16JsonProjection),
     UpdateEnvironmentVariables(HashMap<String, String>),
+    /// Native `Se(true)` initialization latch, ordered before any later control
+    /// request even when the first user command is still waiting to dispatch.
+    UserInputStarted,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StdinReaderStatus {
@@ -926,6 +929,7 @@ pub(crate) fn spawn_stdin_router_from_reader<R: tokio::io::AsyncRead + Send + 's
     let task = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(Box::pin(reader)).lines();
         let mut seen = HashSet::new();
+        let mut user_input_started = false;
         let mut outcome = StdinReaderStatus::Eof;
         let mut ended = false;
         'reader: loop {
@@ -970,6 +974,10 @@ pub(crate) fn spawn_stdin_router_from_reader<R: tokio::io::AsyncRead + Send + 's
                     }
                     match action {
                         Ok(FrameAction::UserTurn(mut turn)) => {
+                            if !user_input_started {
+                                user_input_started = true;
+                                let _ = control_req_tx.send(StdinControlFrame::UserInputStarted);
+                            }
                             turn.queue_delivery = Some(lifecycle.input_delivery());
                             let mut pending = pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             lifecycle.record_enqueued(&turn);
@@ -1908,6 +1916,14 @@ mod tests {
             tx,
             lifecycle,
         );
+        let control = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            channels.control_req_rx.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(control, StdinControlFrame::UserInputStarted));
         let control = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             channels.control_req_rx.recv(),

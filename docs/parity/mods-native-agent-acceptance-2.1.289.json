@@ -1,0 +1,110 @@
+{
+  "native_binary_path": "/tmp/harness-claude-code-2.1.289-darwin-arm64",
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "command": "node scripts/tests/mods_native_agent_acceptance_289_loopback.mjs --execute /tmp/harness-claude-code-2.1.289-darwin-arm64",
+  "argv": [
+    "--print",
+    "--verbose",
+    "--output-format",
+    "stream-json",
+    "--include-hook-events",
+    "--no-session-persistence",
+    "--plugin-dir",
+    "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/mods-native-agent-acceptance-289-uXgceg/plugin",
+    "--model",
+    "sonnet",
+    "--permission-mode",
+    "acceptEdits",
+    "--permission-prompts",
+    "none",
+    "--max-budget-usd",
+    "0.01",
+    "Reply with the exact text NATIVE_AGENT_ROOT_RESPONSE_289."
+  ],
+  "fixture_hashes": {
+    ".claude-plugin/plugin.json": "0716928d4370000ce5951138c843f0407afe17d66caf86be53b1839c1820464f",
+    "hooks/hooks.json": "448e29b17c4ce3ee767d3caf0ff9e35b5501b1cfb3b59952e7b7625744bbf070",
+    "hooks/register.js": "2e24fc0e37f6137719dcbedb52f37aed3fd907efedd41226160143b29234734c"
+  },
+  "local_provider": {
+    "bind": "127.0.0.1 only",
+    "endpoints": [
+      "HEAD /api/hello (source-pinned preconnect)",
+      "POST /v1/messages?beta=true"
+    ],
+    "request_limit": 2,
+    "request_count": 2,
+    "requests": [
+      {
+        "method": "POST",
+        "path": "/v1/messages?beta=true",
+        "auth_matches_dummy": true,
+        "request_kind": "agent_child",
+        "model": "claude-sonnet-5-5",
+        "stream": true,
+        "message_count": 2
+      },
+      {
+        "method": "POST",
+        "path": "/v1/messages?beta=true",
+        "auth_matches_dummy": true,
+        "request_kind": "root_prompt",
+        "model": "claude-sonnet-5-5",
+        "stream": true,
+        "message_count": 2
+      }
+    ],
+    "health_checks": [
+      {
+        "method": "HEAD",
+        "path": "/api/hello",
+        "peer": "loopback"
+      }
+    ],
+    "unexpected_request": null,
+    "relayed_externally": false
+  },
+  "agent_observation": {
+    "before": [],
+    "spawned": {
+      "model": "claude-sonnet-5-5",
+      "agent_id_present": true
+    },
+    "spawn_error": null,
+    "after_launch_statuses": [
+      "running"
+    ],
+    "after_wait_statuses": [
+      "completed"
+    ],
+    "wait_error": null,
+    "completed_row_spawned_by": "mods-native-agent-local-acceptance"
+  },
+  "exit": {
+    "code": 0,
+    "signal": null
+  },
+  "timed_out": false,
+  "stdout": {
+    "bytes": 7143,
+    "sha256": "36407adc13d4836f6cf281e6891910a8e3ddce6886088f7ff3ee5525595a9cb4"
+  },
+  "stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "acceptance": {
+    "passed": true,
+    "checks": [
+      "one source-pinned loopback HEAD health check",
+      "exactly one child and one root model request with the dummy auth",
+      "Native $.agent.spawn returned a model and agent ID",
+      "Native $.agent.list observed that ID in an in-flight status",
+      "Native $.agent.list observed the same ID completed after the child reply",
+      "root print output contains the fixed local reply"
+    ]
+  },
+  "full_receipt": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/mods-native-agent-acceptance-289-uXgceg/receipt.json",
+  "raw_stdout": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/mods-native-agent-acceptance-289-uXgceg/stdout.bin",
+  "raw_stderr": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/mods-native-agent-acceptance-289-uXgceg/stderr.bin"
+}

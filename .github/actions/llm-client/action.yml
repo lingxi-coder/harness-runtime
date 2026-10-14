@@ -1,7 +1,8 @@
 name: Check out llm-client
 description: >-
   Check out the llm-client revision pinned in the root Cargo.toml next to the
-  repository, at ../llm-client, where the root [patch] points.
+  repository at ../llm-client for independent SDK checks. Ordinary Cargo builds
+  still use the pinned Git source unless the consuming workspace declares a patch.
 inputs:
   token:
     description: Token with read access to lingxi-coder/llm-client.

@@ -1,0 +1,765 @@
+{
+  "version": "2.1.289",
+  "binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "source_windows": [
+    {
+      "label": "Agent tool constant module",
+      "start": 183186057,
+      "end_exclusive": 183186439,
+      "sha256": "bf9ef56e8aa155f24c3d07df7efa5652fd7bd8644d05e1b77c7d5a5e6f98e78a"
+    },
+    {
+      "label": "N5 async-idle Agent tool-name set",
+      "start": 194759826,
+      "end_exclusive": 194759847,
+      "sha256": "b115186b6407cf0232ff71738a113e2873a15743bc3ff8b00d65be213409c464"
+    },
+    {
+      "label": "rw $.agent.list/spawn wrapper",
+      "start": 182844300,
+      "end_exclusive": 182844999,
+      "sha256": "1f639d650c75229f9e9ebac6cf50ae7694bb4e6fea77fec2763158c8966b47a7"
+    },
+    {
+      "label": "agent-spawn quota default and LAt projection",
+      "start": 188508125,
+      "end_exclusive": 188508286,
+      "sha256": "cadbadbd8584f178c650fb910a96972bdff50e856f1822f45151794e1869a299"
+    },
+    {
+      "label": "async_launched Agent id extractor",
+      "start": 188508499,
+      "end_exclusive": 188508612,
+      "sha256": "ad60de1ed98d460840f58b1427f6bc00a15e9b526078b73548a8fbd73e1ec948"
+    },
+    {
+      "label": "Agent tool API context projection",
+      "start": 188508612,
+      "end_exclusive": 188508693,
+      "sha256": "728dd2ce55ef1c33361b9377a85efb109048e09ca338f7258e2c689e0db4e4ee"
+    },
+    {
+      "label": "virtual tool result row helpers",
+      "start": 188508693,
+      "end_exclusive": 188508932,
+      "sha256": "89cc9adc39c72964386f8db2929af58a446c5dd19f324158373d0381c778c70e"
+    },
+    {
+      "label": "Agent wrapper resolved model helper",
+      "start": 182844131,
+      "end_exclusive": 182844217,
+      "sha256": "d5e529c1e38c148dd82169f5b3386ed096ffa039e2d3ad397d32047b36e79566"
+    },
+    {
+      "label": "direct agent.spawn Host API route",
+      "start": 188896338,
+      "end_exclusive": 188896451,
+      "sha256": "f6a3fad95285deacb10c27fe5a386824309967a48edeef3e3ae89832b90e5310"
+    },
+    {
+      "label": "$.tool.call shared eU route",
+      "start": 188892087,
+      "end_exclusive": 188892605,
+      "sha256": "1a9ef07bed39f6a442c825693c0479491c19a33adb14a8b7893b4d1772d6fcb0"
+    },
+    {
+      "label": "eU virtual Agent execution and launch-only branch",
+      "start": 188853212,
+      "end_exclusive": 188855653,
+      "sha256": "a8488d8e2775de457b6ff288249a54f1367ef3116b6f9b64b78863bedf22dd66"
+    },
+    {
+      "label": "BOt detached Agent settlement waiter",
+      "start": 188853103,
+      "end_exclusive": 188853212,
+      "sha256": "caa26e4acdc771ea59d5ecfdc7ab29d7d447a55ce62bfaa6537b302aa5a7b0ad"
+    },
+    {
+      "label": "Yyo per-plugin spawn quota lease",
+      "start": 188855653,
+      "end_exclusive": 188856054,
+      "sha256": "871a5bd9cefdb815fd357ef4ada0687c23924b4e2c766ec4b8f166806e1ccf87"
+    },
+    {
+      "label": "UOt task-registry settlement helper",
+      "start": 188856054,
+      "end_exclusive": 188857230,
+      "sha256": "5cc59e9e5cb646dae8f99b544e87f369842ae2b5db725146ceb7b076374573bb"
+    },
+    {
+      "label": "c_o teammate stable-id bridge",
+      "start": 188857631,
+      "end_exclusive": 188858131,
+      "sha256": "f6999ad4718a1d17944ae61c5f02fc8d1f70eb16fe3b55f376fe7c4edb0c2e97"
+    },
+    {
+      "label": "Native task terminal status predicate",
+      "start": 185139913,
+      "end_exclusive": 185139979,
+      "sha256": "97b7f941c1c09455cb734a557cb33b37fcdd82297be2af30b4d77296dd6ccbcd"
+    },
+    {
+      "label": "Native model aliases and 1m suffix helper",
+      "start": 179588224,
+      "end_exclusive": 179588545,
+      "sha256": "20d559fcbc34c301f5f2ddd6a6a09e5ee9affa43e71625890d9e73fe42546340"
+    },
+    {
+      "label": "Native At(model) canonicalizer used by VOt",
+      "start": 182058341,
+      "end_exclusive": 182058885,
+      "sha256": "2c89875db104852dc30d6bdcc8746bd27ba8fe89098abd42d4dea745d44a50ae"
+    },
+    {
+      "label": "Native legacy Opus IDs and remap flag",
+      "start": 182059234,
+      "end_exclusive": 182059432,
+      "sha256": "8dacfaf870f77868a191a159fbf64080d1101b8e4eff032b6d645a341229b904"
+    },
+    {
+      "label": "Native configurable default model selectors",
+      "start": 182034000,
+      "end_exclusive": 182035355,
+      "sha256": "6504246fb40bcc2967d1ec59b47e6c3dc7fdbbbe918b31fbc073018ec276bb9b"
+    },
+    {
+      "label": "embedded Fable 5.1 model catalog record",
+      "start": 180321533,
+      "end_exclusive": 180322597,
+      "sha256": "1aa57accbbe4542ee0cdbeb268a309968f7804ac82fa7a1fac7f98fb853e8789"
+    },
+    {
+      "label": "embedded Fable 5 model catalog record",
+      "start": 180320565,
+      "end_exclusive": 180321532,
+      "sha256": "128508c0ed612a156f58caf41ed94ad8ebbf4f9863300e0c60d659ce40080428"
+    },
+    {
+      "label": "embedded Fable alias catalog entry",
+      "start": 180324304,
+      "end_exclusive": 180324378,
+      "sha256": "9b81701cb225f228ae81148601d52b486008de8d820e3b9b450662f73b98b007"
+    },
+    {
+      "label": "Native catalog alias provider selector QWe",
+      "start": 180328974,
+      "end_exclusive": 180329131,
+      "sha256": "776928835e74d1e4a4324635b00e6f0d32cbd50f41b2899fcf41c887c58df8df"
+    },
+    {
+      "label": "Native catalog provider ID mapper D",
+      "start": 180329878,
+      "end_exclusive": 180330236,
+      "sha256": "c83cd89310ff7e65b796e506d3ac699e29981ac568623fde8364585d843c6f83"
+    },
+    {
+      "label": "Native best-alias dynamic selector",
+      "start": 182029166,
+      "end_exclusive": 182029364,
+      "sha256": "e0a5ee06a2e39bebd4631b2ae437a633f51fab55d640db6ca408e0a37a522cfe"
+    },
+    {
+      "label": "Native disable-1m-context flag reader",
+      "start": 182063933,
+      "end_exclusive": 182063987,
+      "sha256": "e3564c21fea9fc724c50317934f506fabcd8a61df2aec800660b2f2371f1bab8"
+    },
+    {
+      "label": "Native [1m] model-context gate",
+      "start": 182063987,
+      "end_exclusive": 182064540,
+      "sha256": "4d474daa66af006303903b33d831d4bb84d0f34baa7da85a619102cfbbc4c057"
+    },
+    {
+      "label": "Native fable-family predicate",
+      "start": 182033873,
+      "end_exclusive": 182033929,
+      "sha256": "5efb4eec5e22422e7fc49868feb8f06e5693509c305b6f75d2fdec5a9809d4ef"
+    },
+    {
+      "label": "Native provider-first-party predicate",
+      "start": 180333359,
+      "end_exclusive": 180333425,
+      "sha256": "de840b41441378c63a741c9a8c41b484c8ea6149481502b001d3b7ddf8f074bf"
+    },
+    {
+      "label": "Native identity model mapper",
+      "start": 181702158,
+      "end_exclusive": 181702182,
+      "sha256": "6de1c795288a69a41d3687906d55ec6eabd18bf6ad34eedd0a5177a15ff2ded3"
+    },
+    {
+      "label": "Native 1m suffix builder",
+      "start": 182037196,
+      "end_exclusive": 182037253,
+      "sha256": "6a671212aca2a2b68db48030c2be9c02fc125ccdc98c56e3dce359d3eff17dd0"
+    },
+    {
+      "label": "local Agent row initialization bJ",
+      "start": 191176717,
+      "end_exclusive": 191177565,
+      "sha256": "c5ad60d5cc38f5a90ab6d79f4be405b40c54575d2b5b21e842825b50831cff9e"
+    },
+    {
+      "label": "N5 local Agent query-event runner",
+      "start": 194760296,
+      "end_exclusive": 194770594,
+      "sha256": "c3fbc7491ba06e1c1b4297004f310679fcf8df1eecb622159bcff42160783021"
+    },
+    {
+      "label": "N5 outstanding tool-use / Agent-only idle expression",
+      "start": 194761173,
+      "end_exclusive": 194761293,
+      "sha256": "de2ccf8c903f06142348454c66da950bcb66b5eadb4e80f394dd4c47d25bc6c3"
+    },
+    {
+      "label": "N5 completed assistant/user row tool-use updates",
+      "start": 194764875,
+      "end_exclusive": 194765302,
+      "sha256": "b313f4db1c32c2968e3c7f77813a8a9cffda4e943fd3ec5c157771638f6305ef"
+    },
+    {
+      "label": "local Agent N5 makeStream feeds MC query events",
+      "start": 194853818,
+      "end_exclusive": 194854211,
+      "sha256": "86f17195b67dbb036fbf15a499e6823cb9dc03d02ba18c507a081c23be72eb4f"
+    },
+    {
+      "label": "W1 marks tool call in-progress after call-start",
+      "start": 188837912,
+      "end_exclusive": 188838111,
+      "sha256": "07a14997feab7a9a2d76f4b23a4e6d3d9af60979f7c9623c4752b8527db2ca69"
+    },
+    {
+      "label": "serial W1 wrappers remove IDs after result yield",
+      "start": 194678722,
+      "end_exclusive": 194679364,
+      "sha256": "c0031ad9213a5845a06f348cb70703140f054847f59a308d51990562ca33cb43"
+    },
+    {
+      "label": "EMr local terminal/finalizing update",
+      "start": 191175230,
+      "end_exclusive": 191176232,
+      "sha256": "9c70d273542cf503d4e25e12bec5ea203a086ad33161c575f29045a51666ecec"
+    },
+    {
+      "label": "kHo clears finalizing after completion sequence",
+      "start": 191176232,
+      "end_exclusive": 191176367,
+      "sha256": "5e3643b9197b3fa4a06280502c660b0650f1fa461729eb630222b73c219fa4a1"
+    },
+    {
+      "label": "N5 normal-success finalizing call",
+      "start": 194766535,
+      "end_exclusive": 194766900,
+      "sha256": "ff76763788a2d77f87db917628f24ebecac196ad6e8e856c09fec8490e36fdda"
+    },
+    {
+      "label": "YP/hx single-reason Set helpers",
+      "start": 185181785,
+      "end_exclusive": 185182220,
+      "sha256": "5afaa202299fcb45a856631a642f21b9c48dc42c44eac2d579969e15afe76413"
+    },
+    {
+      "label": "Iwr idle-window timer and owner cleanup",
+      "start": 191165306,
+      "end_exclusive": 191165588,
+      "sha256": "74f503538d17fc5d45c509c05957f0731d6a1911ff483eb591b6741f11f7d410"
+    },
+    {
+      "label": "Yq task owner keepalive cleanup predicate",
+      "start": 191166682,
+      "end_exclusive": 191167081,
+      "sha256": "f642cb79e37b7f633ee77002f33fe1696bb646e212d72d969e15d20642f2540c"
+    },
+    {
+      "label": "kill-unsettled reason producer",
+      "start": 191172580,
+      "end_exclusive": 191172780,
+      "sha256": "499c8779afd8282fbb4e8b7e511576c795d710b8ef38f8df925f2cc03fa7d377"
+    },
+    {
+      "label": "background Bash keepalive producer",
+      "start": 191201280,
+      "end_exclusive": 191201365,
+      "sha256": "39e596560429c552047532ff66cb0bf0e3bf188c9ce2c0d1bd2afe7af436ce12"
+    },
+    {
+      "label": "monitor websocket keepalive producer",
+      "start": 194299360,
+      "end_exclusive": 194299500,
+      "sha256": "e5c72ba48c02e4ef616512457c4744677fbb2c2219d34064d5796605b8493286"
+    },
+    {
+      "label": "monitor command keepalive producer",
+      "start": 194303910,
+      "end_exclusive": 194304045,
+      "sha256": "efdcab152939058b90612c235771cd9b96aa00f9546d59e058540f09e2e23ad6"
+    },
+    {
+      "label": "workflow keepalive producer",
+      "start": 200084060,
+      "end_exclusive": 200084180,
+      "sha256": "dfdd6030ebe0647ed4f98c4864d8d455f1b3bf655c4c427e8c815ef37543ab1f"
+    },
+    {
+      "label": "local Agent child keepalive producer",
+      "start": 194849120,
+      "end_exclusive": 194849370,
+      "sha256": "3fc739482e58eb739749eabcb2ad2ccf38874b7e4965ece0cc0a23382cd282bf"
+    },
+    {
+      "label": "backgrounded Agent result keepalive producer",
+      "start": 194855185,
+      "end_exclusive": 194855370,
+      "sha256": "9b25972472ebc773bd07d0b4515012b7ff4ac086b34b7211b6c8550dd60d6afa"
+    },
+    {
+      "label": "custom Agent child keepalive producer",
+      "start": 194887493,
+      "end_exclusive": 194887690,
+      "sha256": "11523244339e68b95804ba236060180724bf215d1f5ea2d93987fa7dda6310b4"
+    },
+    {
+      "label": "pwo ordered agentNameRegistry writer",
+      "start": 200985406,
+      "end_exclusive": 200986838,
+      "sha256": "99d75adb94adcb3d2fc8e7052c0b1c547a8c30e70d714be56cedb85f3eeda7e8"
+    },
+    {
+      "label": "j_r in-process teammate resumable-id producer",
+      "start": 212153014,
+      "end_exclusive": 212153570,
+      "sha256": "db3566808294c13b5f06d57915f714f06da6cff3fd77e5c01f1d10b4f99a4403"
+    },
+    {
+      "label": "te external teammate row identity producer",
+      "start": 212182907,
+      "end_exclusive": 212183800,
+      "sha256": "b63c3796861af0028c080aac9fe26f315ec60092685e321ab16c7d6a95fbef46"
+    },
+    {
+      "label": "oBt exact team-member isActive writer",
+      "start": 186842404,
+      "end_exclusive": 186842863,
+      "sha256": "08e29f637c4d9b81cebb846b5ed16197147ff0b8fbeb66b3c941e9c1cc5f5bd0"
+    },
+    {
+      "label": "nonleader teammate Stop-hook inactive write",
+      "start": 208548468,
+      "end_exclusive": 208549035,
+      "sha256": "5a9878faa156de33a946314e055fe315f251a1b13549fe96d6af32e0efc753e1"
+    },
+    {
+      "label": "teammate failure-notification inactive write",
+      "start": 208549035,
+      "end_exclusive": 208549742,
+      "sha256": "15c7aa064342e639621b466e1fd8e5868aadf706bbc747bb2b95b7f586823557"
+    },
+    {
+      "label": "current teammate active write at query entry",
+      "start": 209678585,
+      "end_exclusive": 209678720,
+      "sha256": "f150db77ed56f94424accaa96a2e6ab155d1d1a7b0c24f684ccefa36c6509af9"
+    },
+    {
+      "label": "team path Node imports",
+      "start": 186835420,
+      "end_exclusive": 186835523,
+      "sha256": "ae3f3476adebb17fe1260713c95c7355dd616a8c5ab230c1862ba9dfda9aadbe"
+    },
+    {
+      "label": "team name sanitizer, config path and member filter",
+      "start": 186835822,
+      "end_exclusive": 186836941,
+      "sha256": "c1e196c4426d3e9a362133ab862011fc5bcd267f2b9c63874eec17d39f2282c1"
+    },
+    {
+      "label": "Py V5/filesystem team config reader and sanitizer",
+      "start": 186836941,
+      "end_exclusive": 186837441,
+      "sha256": "de6f3328d7a7cbbcb620d50e432ef40c2af070bd6baf2f5fbe78814248f61ce6"
+    },
+    {
+      "label": "homedir and path join imports for team config root",
+      "start": 179345763,
+      "end_exclusive": 179345860,
+      "sha256": "b7965c0d30dd10a7b759b5d790542dcb2d0278666bdfcc4d6f24219cae1c3823"
+    },
+    {
+      "label": "CLAUDE_CONFIG_DIR and teams root helpers",
+      "start": 179346876,
+      "end_exclusive": 179347229,
+      "sha256": "4166408c3a7e021e7cda59f3b3f39fda3a32432626a71ad6d704288d4b7bc0d5"
+    }
+  ],
+  "probes": {
+    "agent_spawn": {
+      "default_limit": 20,
+      "test_environment_limit": 1,
+      "immediate_result": {
+        "result": {
+          "agentId": "child-id",
+          "resolvedModel": "model-x"
+        },
+        "text": ""
+      },
+      "row_status_at_return": "running",
+      "w1_virtual_tool_call": {
+        "toolUseName": "Agent",
+        "isVirtual": true,
+        "contextSignalAborted": false,
+        "catalogToolName": "Agent",
+        "permissionExecutorInjected": true
+      },
+      "caller_signal_linked_during_tool_execution": true,
+      "detached_settlement_signal_is_fresh": true,
+      "quota_refusal_while_left_running": "plugin-one: $.agent.spawn refused: 1 spawns are running at once",
+      "detached_settlement_poll_ms": [
+        150
+      ],
+      "same_plugin_accepted_after_terminal_row": true,
+      "runner_or_tool_catalog_executed": false
+    },
+    "agent_model_canonicalizer": {
+      "vectors": [
+        {
+          "input": "  CuStOm-ClAuDe-MoDeL  ",
+          "actual": "CuStOm-ClAuDe-MoDeL",
+          "expected": "CuStOm-ClAuDe-MoDeL",
+          "label": "trim but preserve non-alias casing"
+        },
+        {
+          "input": "FABLE",
+          "actual": "native-fable-default",
+          "expected": "native-fable-default",
+          "label": "Fable alias resolves through configured default"
+        },
+        {
+          "input": "OPUS",
+          "actual": "native-opus-default",
+          "expected": "native-opus-default",
+          "label": "case-insensitive Opus alias"
+        },
+        {
+          "input": "SoNnEt",
+          "actual": "native-sonnet-default",
+          "expected": "native-sonnet-default",
+          "label": "case-insensitive Sonnet alias"
+        },
+        {
+          "input": "HAIKU",
+          "actual": "native-haiku-default",
+          "expected": "native-haiku-default",
+          "label": "case-insensitive Haiku alias"
+        },
+        {
+          "input": "opusplan",
+          "actual": "native-sonnet-default",
+          "expected": "native-sonnet-default",
+          "label": "opusplan chooses Sonnet outside plan-mode runtime"
+        },
+        {
+          "input": "BEST[1m]",
+          "actual": "native-best-from-catalog",
+          "expected": "native-best-from-catalog",
+          "label": "best alias ignores explicit 1m suffix"
+        },
+        {
+          "input": "OPUS[1M]",
+          "actual": "native-opus-default[1m]",
+          "expected": "native-opus-default[1m]",
+          "label": "1m Opus alias resolves then restores suffix"
+        },
+        {
+          "input": "CLAUDE-OPUS-4-1-20250805",
+          "actual": "native-opus-default",
+          "expected": "native-opus-default",
+          "label": "first-party legacy Opus remap enabled"
+        },
+        {
+          "input": "CLAUDE-OPUS-4-1-20250805",
+          "actual": "CLAUDE-OPUS-4-1-20250805",
+          "expected": "CLAUDE-OPUS-4-1-20250805",
+          "label": "legacy remap disable flag preserves explicit id"
+        },
+        {
+          "input": "CLAUDE-OPUS-4-1-20250805",
+          "actual": "CLAUDE-OPUS-4-1-20250805",
+          "expected": "CLAUDE-OPUS-4-1-20250805",
+          "label": "legacy remap is first-party-only"
+        },
+        {
+          "input": "OPUS[1m]",
+          "actual": "OPUS[1m]",
+          "expected": "OPUS[1m]",
+          "label": "disabled 1m context leaves suffixed alias spelling untouched"
+        },
+        {
+          "input": "Custom-Model[2m]",
+          "actual": "Custom-Model[2m]",
+          "expected": "Custom-Model[2m]",
+          "label": "At does not strip or reinterpret 2m suffix"
+        },
+        {
+          "input": "Claude-Fable-4-6[1m]",
+          "actual": "Claude-Fable-4-6",
+          "expected": "Claude-Fable-4-6",
+          "label": "enabled native 1m Fable context removes explicit suffix"
+        },
+        {
+          "input": "Claude-Fable-4-6[1m]",
+          "actual": "Claude-Fable-4-6[1m]",
+          "expected": "Claude-Fable-4-6[1m]",
+          "label": "unsupported native 1m Fable context keeps suffix"
+        }
+      ],
+      "voT_model_rewrite": {
+        "model": "OPUS[1M]",
+        "status": "teammate_spawned",
+        "teammate_id": "worker@team",
+        "agentId": "loop-id",
+        "resolvedModel": "native-opus-default[1m]"
+      },
+      "configured_defaults": {
+        "opus": "native-opus-default",
+        "sonnet": "native-sonnet-default",
+        "haiku": "native-haiku-default",
+        "fable": "native-fable-default",
+        "best_model_catalog_stub": "native-best-from-catalog"
+      },
+      "live_provider_catalog_executed": false
+    },
+    "native_fable_catalog_default": {
+      "alias_vectors": [
+        {
+          "provider": "first_party",
+          "actual": "claude-fable-5-1",
+          "expected": "claude-fable-5-1"
+        },
+        {
+          "provider": "bedrock",
+          "actual": "claude-fable-5-1",
+          "expected": "claude-fable-5-1"
+        },
+        {
+          "provider": "vertex",
+          "actual": "claude-fable-5-1",
+          "expected": "claude-fable-5-1"
+        },
+        {
+          "provider": "foundry",
+          "actual": "claude-fable-5-1",
+          "expected": "claude-fable-5-1"
+        },
+        {
+          "provider": "anthropic_aws",
+          "actual": "claude-fable-5-1",
+          "expected": "claude-fable-5-1"
+        },
+        {
+          "provider": "anthropic_google_cloud",
+          "actual": "claude-fable-5-1",
+          "expected": "claude-fable-5-1"
+        },
+        {
+          "provider": "mantle",
+          "actual": "claude-fable-5-1",
+          "expected": "claude-fable-5-1"
+        },
+        {
+          "provider": "gateway",
+          "actual": "claude-fable-5",
+          "expected": "claude-fable-5"
+        }
+      ],
+      "selected_catalog_rows": {
+        "default_fable_alias": "claude-fable-5-1",
+        "gateway_fable_alias": "claude-fable-5"
+      },
+      "fable_5_1_provider_ids": {
+        "first_party": "claude-fable-5-1",
+        "bedrock": "us.anthropic.claude-fable-5-1",
+        "vertex": "claude-fable-5-1",
+        "foundry": "claude-fable-5-1",
+        "anthropic_aws": "claude-fable-5-1",
+        "anthropic_google_cloud": "claude-fable-5-1",
+        "mantle": "anthropic.claude-fable-5-1",
+        "gateway": "claude-fable-5-1"
+      },
+      "fable_5_gateway_id": "claude-fable-5",
+      "selector_path": "k0e missing env -> Wd -> pa(\"fable\", current model map) ?? current map fable51",
+      "runtime_provider_cache_and_model_overrides_executed": false
+    },
+    "local_idle_tracker": [
+      {
+        "row": {
+          "isIdle": true
+        },
+        "outstanding": [
+          "agent-1"
+        ],
+        "agentUses": [
+          "agent-1"
+        ]
+      },
+      {
+        "row": {
+          "isIdle": false
+        },
+        "outstanding": [
+          "agent-1",
+          "agent-2",
+          "read-1"
+        ],
+        "agentUses": [
+          "agent-1",
+          "agent-2"
+        ]
+      },
+      {
+        "row": {
+          "isIdle": true
+        },
+        "outstanding": [
+          "agent-1",
+          "agent-2"
+        ],
+        "agentUses": [
+          "agent-1",
+          "agent-2"
+        ]
+      },
+      {
+        "row": {
+          "isIdle": true
+        },
+        "outstanding": [
+          "agent-2"
+        ],
+        "agentUses": [
+          "agent-2"
+        ]
+      },
+      {
+        "row": {
+          "isIdle": false
+        },
+        "outstanding": [],
+        "agentUses": []
+      }
+    ],
+    "name_registry": {
+      "after_insertions": [
+        [
+          "alpha",
+          "agent-a"
+        ],
+        [
+          "beta",
+          "agent-b"
+        ],
+        [
+          "gamma",
+          "agent-a"
+        ]
+      ],
+      "first_name_for_duplicate_id": "alpha",
+      "after_updating_existing_key": [
+        [
+          "alpha",
+          "agent-c"
+        ],
+        [
+          "beta",
+          "agent-b"
+        ],
+        [
+          "gamma",
+          "agent-a"
+        ]
+      ],
+      "first_name_for_agent_a_after_update": "gamma",
+      "name_for_agent_c_after_update": "alpha"
+    },
+    "keepalive_single_reason_updates": {
+      "after_removing_agent_reason": [
+        "bash:child"
+      ],
+      "after_removing_last_reason": [],
+      "terminal_delayed_eviction_written": true
+    },
+    "team_member_active": {
+      "controlled_false_setter_value": false,
+      "controlled_true_setter_value": true,
+      "no_op_duplicate_false_write": true,
+      "writer_logs": [
+        "persisted",
+        "[TeammateTool] Set member Worker in team team-name to idle",
+        "persisted",
+        "[TeammateTool] Set member Worker in team team-name to active"
+      ]
+    },
+    "teammate_resumable_identity": {
+      "in_process_has_defaulted_resumable_id": true,
+      "external_backend_identity_field": "missing"
+    },
+    "team_file_read": {
+      "filesystem_path": "/custom/.claude/teams/worker-team/config.json",
+      "default_teams_root": "/controlled-home/.claude/teams",
+      "v5_namespace_key": "v5:teams/worker-team",
+      "sanitizer_vectors": [
+        {
+          "input": "Worker@Team",
+          "actual": "worker-team",
+          "expected": "worker-team"
+        },
+        {
+          "input": "A B__C",
+          "actual": "a-b--c",
+          "expected": "a-b--c"
+        },
+        {
+          "input": "é漢",
+          "actual": "--",
+          "expected": "--"
+        },
+        {
+          "input": "💩",
+          "actual": "--",
+          "expected": "--"
+        }
+      ],
+      "filesystem_config": {
+        "members": [
+          {
+            "agentId": "worker@team",
+            "name": "Worker",
+            "isActive": false
+          }
+        ],
+        "extra": "preserved"
+      },
+      "v5_config_after_native_member_filter": {
+        "members": [
+          {
+            "agentId": "worker@team",
+            "name": "Worker",
+            "isActive": false
+          }
+        ],
+        "extra": "preserved"
+      },
+      "v5_path_builder_internal_serialization": "injected De.team stub; namespace argument is source-pinned"
+    }
+  },
+  "limitations": [
+    "eU/Yyo/BOt/UOt use exact Native source, but W1 catalog/tool dispatch and Agent task creation are injected; no provider or permission engine is run.",
+    "The Yyo VM overrides CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to 1 for the cap/refusal/settlement case; exact Native fallback default 20 is source-pinned.",
+    "The UOt 150 ms poll value is source-pinned; the VM wait primitive is stubbed to 1 ms so the controlled test stays fast.",
+    "oBt/Py use exact Native source with injected lock-backed task file and filesystem/V5 readers; no real user team file is read or written.",
+    "At(model) canonicalizer vectors use controlled model-default env values, provider identity, best-model catalog entry, and [1m] capability facts. A separate Fable alias probe executes exact QWe against the embedded Native alias literal and model rows; it does not read this host’s provider cache, modelOverrides, or user settings.",
+    "The `De.team(slug)` V5 namespace is passed through and recorded by a stub; this probe does not claim its backend-key serializer or product reader wiring.",
+    "j_r and te are source-asserted producer windows, not invoked as complete runners."
+  ]
+}

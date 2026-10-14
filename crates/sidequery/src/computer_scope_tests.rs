@@ -95,7 +95,7 @@ async fn direct_plain_and_strict_queries_ignore_the_parent_computer_continuation
                     tools: vec![],
                     tool_choice: None,
                     output_format: None,
-                    max_tokens: 512,
+                    max_tokens: Some(512),
                     max_retries: 0,
                     temperature: None,
                     thinking: None,
@@ -113,7 +113,7 @@ async fn direct_plain_and_strict_queries_ignore_the_parent_computer_continuation
                     system_prompt: None,
                     messages,
                     schema: json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
-                    max_tokens: 512,
+                    max_tokens: Some(512),
                     temperature: None,
                     query_source: QuerySource::Compaction,
                     skip_system_prompt_prefix: true,
@@ -169,7 +169,7 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
     ));
     let client = Arc::new(ProviderSideQueryClient::from_service(service));
     let tools = vec![
-        json!({"name":"computer","description":"Manage desktop","input_schema":{"type":"object"}}),
+        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({"name":"computer","description":"Manage desktop","input_schema":{"type":"object"}})),
     ];
     let prefix = vec![user("early context")];
     let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "model".into());
@@ -201,7 +201,7 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
                     tools: tools.clone(),
                     tool_choice: None,
                     output_format: None,
-                    max_tokens: 512,
+                    max_tokens: Some(512),
                     max_retries: 0,
                     temperature: None,
                     thinking: None,

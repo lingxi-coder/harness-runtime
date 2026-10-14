@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use branding::{
     MAX_CONCURRENT_SUBAGENTS_ENV, MAX_SUBAGENTS_PER_SESSION_ENV, MAX_SUBAGENT_SPAWN_DEPTH_ENV,
 };
-use lingxi_core::host::budget::BudgetError;
 use lingxi_core::host::agent_statistics::{AgentSpawnRefusal, AgentSpawnToken};
+use lingxi_core::host::budget::BudgetError;
 use lingxi_core::host::fusion::{
     FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
     FusionOrigin, FusionPanelMode, FusionPreparedSummary, FusionPreset, FusionProgress,
@@ -235,6 +235,9 @@ pub struct AgentToolInput {
     /// `subagent_type` is `"fusion"`.
     #[serde(default)]
     pub preset: Option<String>,
+    /// Optional named Fusion strategy (`user:id`, `project:id`, or `local:id`).
+    #[serde(default)]
+    pub strategy: Option<String>,
     /// Explicit Fusion panel models (`"profile:model"` or `"model"`).
     #[serde(default)]
     pub models: Option<Vec<String>>,
@@ -561,6 +564,10 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "cross_provider": {
                 "type": "boolean",
                 "description": "Allow Fusion panels to leave the parent provider. Agent default is same-provider."
+            },
+            "strategy": {
+                "type": "string",
+                "description": "Stable Fusion strategy reference (user:id, project:id, or local:id) when subagent_type is fusion. Omit to use the configured default."
             },
             "fusion_mode": {
                 "type": "string",
@@ -956,7 +963,10 @@ fn async_launch_result(
     if let Some(task_id) = task_id {
         data["task_id"] = json!(task_id);
     }
-    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+    ToolCallResult {
+        mcp_meta_projection: None,
+        model_content_projection: None,
+        data_projection: None,
         data,
         model_content: None,
         new_messages: vec![],
@@ -1040,6 +1050,20 @@ fn render_completed_model_content(
     blocks.join("\n")
 }
 
+/// Pending strategy authority captured by a physical tool invocation.
+struct FusionPermissionStrategy {
+    input: Value,
+    selection: Option<lingxi_core::host::FusionStrategySelection>,
+    reviewed_at: Instant,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+}
+
+// Permission denials never reach `call`, so retain only a bounded set of
+// pending reviews. An evicted or expired approval must be reviewed again.
+const MAX_FUSION_PERMISSION_STRATEGIES: usize = 64;
+const FUSION_PERMISSION_REVIEW_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
+
 /// `AgentTool` — spawn a subagent (surface only; recursive dispatch lands
 /// in `lingxi-coordinator` post-M5).
 pub struct AgentTool {
@@ -1054,6 +1078,9 @@ pub struct AgentTool {
     projected_input_schema: std::sync::OnceLock<Value>,
     /// Injected Fusion orchestrator. `None` on mobile and in `register_all`.
     fusion: Option<Arc<dyn FusionExecutor>>,
+    /// Exact strategy quoted during implement permission review, consumed by execution.
+    fusion_permission_strategies:
+        std::sync::Mutex<std::collections::HashMap<String, FusionPermissionStrategy>>,
     /// Host-owned common terminal recorder for Agent-origin Fusion runs.
     terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
     /// Pure per-session recorder factory for long-lived hot-switch hosts.
@@ -1151,6 +1178,14 @@ fn fusion_request_from_agent(
             ))
         })?;
     Ok(FusionRequest {
+        strategy: parsed
+            .strategy
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|e| ToolError::InvalidInput(format!("{e}")))?,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Agent,
@@ -1196,8 +1231,7 @@ fn fusion_implement_prompt(
         "{panels} will each change the code in their own git worktree, made from a snapshot of \
 your workspace, and the host will run your verification commands on every result. Your \
 workspace itself is not modified; the model then writes the final change.\n{cost}\n\
-Set fusion.implement.autoApproveMaxUsd in your user settings to skip this question for runs \
-up to a limit.\n\nTask: {task}"
+\nTask: {task}"
     )
 }
 
@@ -1287,7 +1321,10 @@ fn fusion_tool_result(result: lingxi_core::host::FusionResult) -> ToolCallResult
             })
         })
         .collect();
-    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+    ToolCallResult {
+        mcp_meta_projection: None,
+        model_content_projection: None,
+        data_projection: None,
         data: json!({
             "runId": result.run_id,
             "mode": result.mode,
@@ -1805,6 +1842,7 @@ impl AgentTool {
             advertise_run_in_background,
             projected_input_schema: std::sync::OnceLock::new(),
             fusion: None,
+            fusion_permission_strategies: Default::default(),
             terminal_recorder: None,
             terminal_recorder_factory: None,
         }
@@ -1880,6 +1918,55 @@ impl AgentTool {
             .unwrap_or(budget)
     }
 
+    fn fusion_permission_input(parsed: &AgentToolInput) -> Value {
+        json!({
+            "prompt":parsed.prompt, "strategy":parsed.strategy, "preset":parsed.preset,
+            "models":parsed.models, "dimensions":parsed.dimensions, "max_panel":parsed.max_panel,
+            "partial_ok":parsed.partial_ok, "cross_provider":parsed.cross_provider, "fusion_mode":parsed.fusion_mode,
+        })
+    }
+
+    fn fusion_permission_key(parsed: &AgentToolInput, ctx: &ToolUseContext) -> String {
+        ctx.tool_use_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| Self::fusion_permission_input(parsed).to_string())
+    }
+
+    fn prune_fusion_permission_strategies(
+        reviews: &mut std::collections::HashMap<String, FusionPermissionStrategy>,
+    ) {
+        reviews.retain(|_, review| {
+            review.reviewed_at.elapsed() < FUSION_PERMISSION_REVIEW_MAX_AGE
+                && !review
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.is_cancelled())
+        });
+    }
+
+    fn take_fusion_permission_strategy(
+        &self,
+        parsed: &AgentToolInput,
+        ctx: &ToolUseContext,
+    ) -> Option<FusionPermissionStrategy> {
+        let mut reviews = self
+            .fusion_permission_strategies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::prune_fusion_permission_strategies(&mut reviews);
+        reviews.remove(&Self::fusion_permission_key(parsed, ctx))
+    }
+
+    fn deny_fusion_implement(reason: impl ToString) -> PermissionResult {
+        let reason = reason.to_string();
+        PermissionResult::Deny {
+            explanation: Some(reason.clone()),
+            reason: PermissionDecisionReason::Other { reason },
+            metadata: PermissionMetadata::default(),
+        }
+    }
+
     /// A model-initiated implement-mode Fusion run changes files in several
     /// worktrees, runs the user's verification commands and costs several
     /// times an analysis run. Ask the user first, unless the host says the run
@@ -1900,27 +1987,82 @@ impl AgentTool {
         {
             return None;
         }
-        let executor = self.fusion.as_ref()?;
-        let surface = executor.agent_surface();
-        if !surface.enabled || !surface.implement_available {
-            return None;
+        // Invalidate any earlier review for this physical invocation before
+        // resolving again. A failed review may never leave usable authority.
+        self.take_fusion_permission_strategy(&parsed, ctx);
+        let captured = (|| {
+            let executor = self.fusion.as_ref().ok_or_else(|| {
+                ToolError::InvalidInput("Fusion is unavailable on this host".into())
+            })?;
+            if let Some(error) = executor.preflight_error() {
+                return Err(fusion_tool_error(error));
+            }
+            let selector = parsed
+                .strategy
+                .as_deref()
+                .map(str::parse::<lingxi_core::host::FusionStrategyRef>)
+                .transpose()
+                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+            let selection = executor
+                .capture_strategy(selector.as_ref())
+                .map_err(fusion_tool_error)?;
+            let surface = executor
+                .agent_surface_for_strategy(selection.as_ref())
+                .map_err(fusion_tool_error)?;
+            if !surface.enabled || !surface.implement_available {
+                return Err(ToolError::InvalidInput(
+                    "Fusion implement mode is unavailable or disabled".into(),
+                ));
+            }
+            let request = fusion_request_from_agent(
+                self.ctx.main_loop_model_profile_provider.as_ref(),
+                &parsed,
+                ctx,
+                surface,
+                executor.as_ref(),
+            )?;
+            Ok((executor, selection, request))
+        })();
+        let (executor, selection, mut request) = match captured {
+            Ok(captured) => captured,
+            Err(error) => return Some(Self::deny_fusion_implement(error)),
+        };
+        {
+            let mut reviews = self
+                .fusion_permission_strategies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Self::prune_fusion_permission_strategies(&mut reviews);
+            if reviews.len() >= MAX_FUSION_PERMISSION_STRATEGIES {
+                if let Some(oldest) = reviews
+                    .iter()
+                    .min_by_key(|(_, review)| review.reviewed_at)
+                    .map(|(key, _)| key.clone())
+                {
+                    reviews.remove(&oldest);
+                }
+            }
+            reviews.insert(
+                Self::fusion_permission_key(&parsed, ctx),
+                FusionPermissionStrategy {
+                    input: Self::fusion_permission_input(&parsed),
+                    selection: selection.clone(),
+                    reviewed_at: Instant::now(),
+                    cancel: ctx.cancel.clone(),
+                },
+            );
         }
-        let request = fusion_request_from_agent(
-            self.ctx.main_loop_model_profile_provider.as_ref(),
-            &parsed,
-            ctx,
-            surface,
-            executor.as_ref(),
-        )
-        .ok()?;
+        request.capture_strategy(selection);
         let confirmation = executor.implement_confirmation(&request);
         if !confirmation.required {
             return None;
         }
         let message = fusion_implement_prompt(&parsed.prompt, &confirmation);
         Some(PermissionResult::Ask {
-            reason: PermissionDecisionReason::Other {
-                reason: "Fusion implement mode changes files and runs commands".into(),
+            // This is a per-call user interaction. The shared dispatchers
+            // protect this carrier from outer allow rules and missing gates.
+            reason: PermissionDecisionReason::PermissionPromptTool {
+                tool_name: "Agent".into(),
             },
             prompt: permission::result::PermissionPrompt {
                 title: "Fusion implement mode".into(),
@@ -2012,6 +2154,10 @@ impl AgentTool {
         started: Instant,
         is_coordinator: bool,
     ) -> Result<ToolCallResult, ToolError> {
+        // Consume before any early rejection so a denied/invalid call cannot
+        // leave a prepared strategy behind for a later invocation.
+        let reviewed = self.take_fusion_permission_strategy(&parsed, &ctx);
+        let permission_reviewed = reviewed.is_some();
         // F008: `call`'s catalog-lookup dispatch (a few lines above the
         // `call_fusion` call site) intercepts `subagent_type: "fusion"`
         // BEFORE the `Agent(<type>)` deny-rule and tools-denied checks that
@@ -2112,7 +2258,44 @@ impl AgentTool {
             .await;
             return Err(fusion_tool_error(error));
         }
-        let surface = executor.agent_surface();
+        let captured = (|| {
+            let selector = parsed
+                .strategy
+                .as_deref()
+                .map(str::parse::<lingxi_core::host::FusionStrategyRef>)
+                .transpose()
+                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+            let selection = if let Some(reviewed) = reviewed {
+                if reviewed.input != Self::fusion_permission_input(&parsed) {
+                    return Err(ToolError::InvalidInput(
+                        "Fusion request changed since permission review; request approval again"
+                            .into(),
+                    ));
+                }
+                reviewed.selection
+            } else {
+                executor
+                    .capture_strategy(selector.as_ref())
+                    .map_err(fusion_tool_error)?
+            };
+            let surface = executor
+                .agent_surface_for_strategy(selection.as_ref())
+                .map_err(fusion_tool_error)?;
+            Ok::<_, ToolError>((selection, surface))
+        })();
+        let (selection, surface) = match captured {
+            Ok(captured) => captured,
+            Err(error) => {
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "fusion_invalid_strategy",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(error);
+            }
+        };
         if !surface.enabled {
             let available = self.fusion_available_agents_display(is_coordinator).await;
             Self::emit_failed(
@@ -2174,7 +2357,7 @@ impl AgentTool {
         // dashboard joining started -> terminal on `invocation_id` showed
         // the invocation running forever and per-type failure counts
         // under-reported exactly the invalid-request class.
-        let request = match fusion_request_from_agent(
+        let mut request = match fusion_request_from_agent(
             self.ctx.main_loop_model_profile_provider.as_ref(),
             &parsed,
             &ctx,
@@ -2193,6 +2376,23 @@ impl AgentTool {
                 return Err(err);
             }
         };
+        request.capture_strategy(selection);
+        if request.mode == FusionPanelMode::Implement
+            && !permission_reviewed
+            && executor.implement_confirmation(&request).required
+        {
+            Self::emit_failed(
+                bus,
+                invocation_id,
+                "fusion_permission_review_required",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::InvalidInput(
+                "Fusion implement mode requires a current permission review; request approval again"
+                    .into(),
+            ));
+        }
         // The run's session is `identity.session_id` below, read live
         // immediately before dispatch so a session switch earlier in this turn
         // cannot leave the run scoped to the wrong ledger.
@@ -2220,6 +2420,7 @@ impl AgentTool {
             Some(invocation_id.to_string()),
         );
         let terminal_recorder = self.terminal_recorder_for(origin_session_id);
+        let strategy_metadata = request.strategy_metadata();
         let prepared = match executor.clone().prepare(FusionSubmission {
             request,
             inherit,
@@ -2234,6 +2435,7 @@ impl AgentTool {
                     FusionRunFactsRecorder::default(),
                 );
                 let summary = FusionPreparedSummary {
+                    strategy: strategy_metadata,
                     identity,
                     duration_ms: 0,
                     planned_panels: None,
@@ -3579,7 +3781,9 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 ))
             }
             Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
-                if let Some(token) = &agent_spawn_token { token.refused(AgentSpawnRefusal::ConcurrencyLimit); }
+                if let Some(token) = &agent_spawn_token {
+                    token.refused(AgentSpawnRefusal::ConcurrencyLimit);
+                }
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     bus,
@@ -3876,17 +4080,25 @@ impl Tool for AgentTool {
         };
 
         let inherited_statistics = match (self.ctx.task_registry.as_ref(), ctx.agent_id) {
-            (Some(registry), Some(agent_id)) => registry.agent_statistics_for_parent(agent_id).await,
+            (Some(registry), Some(agent_id)) => {
+                registry.agent_statistics_for_parent(agent_id).await
+            }
             _ => None,
         };
         let statistics = match inherited_statistics {
             Some(statistics) => Some(statistics),
-            None => match (self.ctx.task_registry.as_ref(), Self::origin_session_id(&ctx).await) {
+            None => match (
+                self.ctx.task_registry.as_ref(),
+                Self::origin_session_id(&ctx).await,
+            ) {
                 (Some(registry), Some(session_id)) => registry.agent_session_statistics(session_id),
                 _ => None,
             },
         };
-        let requested_background = self.advertise_run_in_background.then_some(parsed.run_in_background).flatten();
+        let requested_background = self
+            .advertise_run_in_background
+            .then_some(parsed.run_in_background)
+            .flatten();
 
         // Model and profile are one selection: forced inheritance clears both.
         // Keep this policy for Mod rewrites as well as the original call.
@@ -3929,7 +4141,9 @@ impl Tool for AgentTool {
         // unless LINGXI_MAX_SUBAGENT_SPAWN_DEPTH raises the limit.
         let depth_limit = lingxi_core::host::subagent_spawn::max_subagent_spawn_depth();
         if ctx.depth >= depth_limit {
-            if let Some(statistics) = &statistics { statistics.record_refused(AgentSpawnRefusal::DepthLimit); }
+            if let Some(statistics) = &statistics {
+                statistics.record_refused(AgentSpawnRefusal::DepthLimit);
+            }
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -4664,7 +4878,9 @@ impl Tool for AgentTool {
         // does not consume one of the 200 lifetime slots.
         let concurrent_cap = lingxi_core::host::subagent_spawn::max_concurrent_subagents();
         if spawner.concurrent_subagent_count().await >= concurrent_cap {
-            if let Some(statistics) = &statistics { statistics.record_refused(AgentSpawnRefusal::ConcurrencyLimit); }
+            if let Some(statistics) = &statistics {
+                statistics.record_refused(AgentSpawnRefusal::ConcurrencyLimit);
+            }
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -4688,7 +4904,9 @@ impl Tool for AgentTool {
         let origin_session_id = Self::origin_session_id(&ctx).await;
         let budget = Self::budget_for_origin(budget, origin_session_id);
         if let Err(BudgetError::Exceeded { current_nano_usd }) = budget.check_and_charge(0).await {
-            if let Some(statistics) = &statistics { statistics.record_refused(AgentSpawnRefusal::Budget); }
+            if let Some(statistics) = &statistics {
+                statistics.record_refused(AgentSpawnRefusal::Budget);
+            }
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -5134,9 +5352,14 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 )));
             }
         }
-        let agent_spawn_token = statistics.as_ref().map(|statistics| statistics.prepare_spawn(
-            selected.agent_type.clone(), requested_background, run_in_background, ctx.depth + 1,
-        ));
+        let agent_spawn_token = statistics.as_ref().map(|statistics| {
+            statistics.prepare_spawn(
+                selected.agent_type.clone(),
+                requested_background,
+                run_in_background,
+                ctx.depth + 1,
+            )
+        });
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -5793,7 +6016,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
                         obj.insert("worktreeBranch".into(), json!(branch));
                     }
                 }
-                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+                Ok(ToolCallResult {
+                    mcp_meta_projection: None,
+                    model_content_projection: None,
+                    data_projection: None,
                     data,
                     model_content: None,
                     new_messages: vec![],
@@ -5831,7 +6057,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 Err(ToolError::Internal("Agent: subagent was killed".into()))
             }
             Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
-                if let Some(token) = &agent_spawn_token { token.refused(AgentSpawnRefusal::ConcurrencyLimit); }
+                if let Some(token) = &agent_spawn_token {
+                    token.refused(AgentSpawnRefusal::ConcurrencyLimit);
+                }
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     &bus,

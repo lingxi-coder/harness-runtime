@@ -910,6 +910,7 @@ impl ConversationOrchestrator {
     }
 
     fn main_loop_activity(&self, user_interaction: bool) -> MainLoopActivityGuard {
+        self.cancel_prompt_suggestion();
         let provider = self.prompt_runtime.task_notifications.clone();
         let interactive = self.prompt_is_interactive();
         if let Some(provider) = &provider {
@@ -1594,12 +1595,15 @@ impl ConversationOrchestrator {
 
         // The oracle guard checks the immediately preceding transition,
         // rather than whether any earlier attempt in this turn was malformed.
-        if pumped.stop_reason.as_deref() != Some("tool_use") || !pumped.tool_uses.is_empty() {
+        if (pumped.stop_reason.as_deref() != Some("tool_use") && pumped.tool_input_issues.is_empty()) || !pumped.tool_uses.is_empty() {
             loop_state.malformed_tool_use_retried = false;
         }
 
         // 6. Decide loop disposition.
-        match pumped.stop_reason.as_deref() {
+        let disposition_reason = if !pumped.tool_input_issues.is_empty() && matches!(pumped.stop_reason.as_deref(),Some("end_turn"|"stop_sequence")) {
+            Some("tool_use")
+        } else { pumped.stop_reason.as_deref() };
+        match disposition_reason {
             // #1 needsFollowUp gate (claude-code `query.ts:554-558`/`832-835`/
             // `1062`): continuation is keyed on tool-block PRESENCE, NOT the raw
             // `stop_reason` string (the ref notes `stop_reason == "tool_use"` is
@@ -1885,6 +1889,15 @@ impl ConversationOrchestrator {
                 if self.config.max_turns == 0 || loop_state.turn_count < self.config.max_turns {
                     self.drain_mid_turn_input_after_tools().await?;
                 }
+                if !pumped.tool_input_issues.is_empty() {
+                    if loop_state.recovery.output_recovery_actions >= MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
+                        let cost = self.snapshot_cost_real().await;
+                        self.emit_turn_terminal("max_tokens", &cost).await;
+                        return Ok(StreamingIterationDisposition::Complete(assistant_id));
+                    }
+                    loop_state.recovery.output_recovery_actions += 1;
+                    self.inject_meta_user_message(crate::output_recovery::INCOMPLETE_TOOL_NUDGE).await;
+                }
                 Ok(StreamingIterationDisposition::Continue)
             }
             Some("end_turn") => {
@@ -1925,7 +1938,7 @@ impl ConversationOrchestrator {
             // upstream as `Err(..)`). cc 2.1.263 unconditionally removes
             // the malformed attempt and injects the clean-retry nudge (`ZZe`).
             Some("tool_use") => {
-                if loop_state.malformed_tool_use_retried {
+                if loop_state.malformed_tool_use_retried || loop_state.recovery.output_recovery_actions >= MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
                     // Second failure → terminal NON-meta message, complete.
                     // Binary `ql(...)`→`mcc({isApiErrorMessage:!0})`: an
                     // ASSISTANT api-error message (`role:"assistant",
@@ -1964,7 +1977,7 @@ impl ConversationOrchestrator {
                 // TS resets the recovery counters on the retry transition so
                 // the continued turn starts a fresh max-output-tokens
                 // escalation episode.
-                loop_state.recovery.reset_max_output_tokens_recovery();
+                loop_state.recovery.output_recovery_actions += 1;
                 loop_state.malformed_tool_use_retried = true;
                 Ok(StreamingIterationDisposition::Continue)
             }
@@ -1974,16 +1987,36 @@ impl ConversationOrchestrator {
             // (TS `query.ts:1223-1252`). On exhaustion, fall through to the
             // generic terminal below (end with stop_reason `max_tokens`).
             Some("max_tokens")
-                if loop_state.recovery.max_output_tokens_recovery_count
+                if loop_state.recovery.output_recovery_actions
                     < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT =>
             {
                 // The nudge is a META user message carrying the byte-exact
                 // string — CC 2.1.207 builds it via `createUserMessage({…,
                 // isMeta:!0})`, so it persists with top-level `isMeta:true`.
-                let nudge_msg = ConversationMessage::user_meta(
-                    MessageId::new(),
-                    MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.to_string(),
-                );
+                let can_repeat_original = pumped.usage.as_ref().and_then(|usage| usage.provider_metadata.get("stream").or(Some(&usage.provider_metadata)))
+                    .and_then(|meta| meta.get("llm_client")).and_then(|meta| meta.get("output_budget"))
+                    .and_then(|budget| budget.get("can_repeat_original")).and_then(serde_json::Value::as_bool)==Some(true);
+                let no_hosted_effects = !pumped.hosted_tool_observed && pumped.assistant_blocks.iter().all(|block| matches!(block, ContentBlock::Text { .. } | ContentBlock::TextJsUtf16 { .. } | ContentBlock::Thinking { .. }));
+                if (!pumped.tool_input_issues.is_empty() || !pumped_has_visible_text(&pumped.assistant_blocks)) && can_repeat_original && no_hosted_effects && !loop_state.recovery.max_output_tokens_escalated {
+                    if let (Some(usage), Some(frozen)) = (pumped.usage.as_ref(), loop_state.recovery.last_generation.as_ref()) {
+                        if let Some(next) = self.api.next_output_budget(&frozen.model, frozen.profile.as_deref(), usage).map_err(OrchestratorError::ApiCall)? {
+                            loop_state.recovery.retry_generation = Some(frozen.clone());
+                            loop_state.recovery.max_output_tokens_override = Some(next);
+                            loop_state.recovery.max_output_tokens_escalated = true;
+                            loop_state.recovery.output_recovery_actions += 1;
+                            self.discard_retry_attempt(assistant_id).await;
+                            return Ok(StreamingIterationDisposition::Continue);
+                        }
+                    }
+                }
+                let action = crate::output_recovery::decide_output_recovery(crate::output_recovery::CompletionFacts {
+                    stop_reason: pumped.stop_reason.as_deref(), malformed_tool: !pumped.tool_input_issues.is_empty(),
+                    accepted_tools: false, actions_used: loop_state.recovery.output_recovery_actions,
+                });
+                let nudge = if action == crate::output_recovery::OutputRecoveryAction::RegenerateIncompleteTool {
+                    crate::output_recovery::INCOMPLETE_TOOL_NUDGE
+                } else { MAX_OUTPUT_TOKENS_RECOVERY_NUDGE };
+                let nudge_msg = ConversationMessage::user_meta(MessageId::new(), nudge.to_string());
                 {
                     let mut s = self.session.lock().await;
                     s.history.push(nudge_msg.clone());
@@ -1994,6 +2027,7 @@ impl ConversationOrchestrator {
                     .max_output_tokens_recovery_count
                     .saturating_add(1);
                 loop_state.recovery.max_output_tokens_override = None;
+                loop_state.recovery.output_recovery_actions += 1;
                 Ok(StreamingIterationDisposition::Continue)
             }
             // #78 thinking-only nudge for `stop_sequence` (claude-code
@@ -2152,6 +2186,15 @@ impl ConversationOrchestrator {
         row_token: Option<String>,
         projected_content: Option<ProjectedUserContent>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        let suggestion_origin = queued_inputs.as_ref()
+            .and_then(|inputs| inputs.iter().rev().find(|input| !input.is_meta))
+            .and_then(|input| input.mod_origin.as_ref())
+            .and_then(|origin| origin.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|kind| !matches!(*kind, "user" | "human"))
+            .map(str::to_owned)
+            .or_else(|| (!in_human_turn).then(|| "task_notification".into()));
+        self.begin_prompt_suggestion_turn(prompt, in_human_turn, suggestion_origin).await;
         if !transient_rewake {
             self.begin_turn_metrics();
         }
@@ -2186,6 +2229,11 @@ impl ConversationOrchestrator {
         .await;
         if !transient_rewake {
             self.complete_turn_metrics(&result);
+            if matches!(&result, Ok(ConversationOutcome::EndTurn { .. }))
+                && !completion_cancel.as_ref().is_some_and(CancellationToken::is_cancelled)
+            {
+                self.spawn_prompt_suggestion().await;
+            }
         }
         result
     }
@@ -2939,6 +2987,8 @@ pub(super) fn llm_response_to_pumped_turn(
         handled_server_fallback_events: 0,
         assistant_blocks,
         tool_uses,
+        hosted_tool_observed: resp.content.iter().any(|block| matches!(block, llm_runtime::ContentBlock::ServerToolUse { .. } | llm_runtime::ContentBlock::ProviderContent { .. })),
+        tool_input_issues: resp.provider_metadata.get("tool_input_issues").and_then(serde_json::Value::as_array).cloned().unwrap_or_default(),
         stop_reason,
         output_tokens,
         usage,

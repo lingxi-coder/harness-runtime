@@ -51,7 +51,7 @@ pub enum StreamingError {
     /// `input_json_delta` accumulation could not be JSON-parsed at
     /// `content_block_stop`. The buffer is preserved in the error for
     /// debugging.
-    #[error("streaming: tool_use input failed to parse as JSON: {reason}: buffer={buffer:?}")]
+    #[error("streaming: tool_use input for block {index} failed to parse as JSON: {reason}")]
     ToolUseJsonParse {
         /// Block index reported by the API.
         index: u32,

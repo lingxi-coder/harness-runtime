@@ -1048,7 +1048,7 @@ mod query_retry_tests {
             tool_use_id: tool_id,
             content: error.into(),
             is_error: Some(true),
-            provider_id: None,
+            provider_tool_use_id: None,
             content_blocks: None,
         }];
         vec![assistant, result]

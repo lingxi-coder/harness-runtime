@@ -1,0 +1,61 @@
+{
+  "native_version": "2.1.289",
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "frozen_audit": {
+    "path": "/tmp/mods-289-bun-runtime-audit/report.md",
+    "sha256": "f94f45133259245df01d05a570032f308b2b1840e23f037df465aa2bd244529b"
+  },
+  "current_fix": {
+    "path": "crates/hooks/src/mod_ui_client_source.rs",
+    "before_sha256": "098d25f099aa4254c907909ffa6108696a527a1ba45b93a1e35eae1370f4cab1",
+    "after_sha256": "aa06276f2a7ff26d09a5b5e992995f8413b26ab92909fef5dfaa0bbdfb90b56a",
+    "behavior": "Source compiler selects explicit argument, then LINGXI_MOD_BUN_EXECUTABLE, then bun on PATH. Product already passes packaged path."
+  },
+  "root_validation": [
+    {
+      "receipt": "/tmp/mods-289-ui-regressions-v288.json",
+      "sha256": "7bacafced6b771fa55930f93ce2a8be99776afbd319a140b5cc87ea34cc8982e",
+      "results": [
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 698 filtered out; finished in 0.00s"
+      ],
+      "input_count": 976,
+      "acceptance": "Compilation accepted if applicable; filtered execution ran zero tests due wrong module path and is NOT acceptance."
+    },
+    {
+      "receipt": "/tmp/mods-289-ui-regressions-v290.json",
+      "sha256": "84c27deb5e51dcb51d9e39f8b7f427fb1436dc7b7d1cd2f6d1978d7d43d0af87",
+      "results": [
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 698 filtered out; finished in 0.00s"
+      ],
+      "input_count": 976,
+      "acceptance": "Compilation accepted if applicable; filtered execution ran zero tests due wrong module path and is NOT acceptance."
+    },
+    {
+      "receipt": "/tmp/mods-289-ui-regressions-v292.json",
+      "sha256": "c83af7373a6e2d028416314a90db089294c0be4239f2ebac1062e908124ab538",
+      "results": [
+        [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 697 filtered out; finished in 0.04s"
+        ],
+        [
+          "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 690 filtered out; finished in 0.04s"
+        ]
+      ],
+      "input_count": 976,
+      "acceptance": "Correct module path executed one isolated actual configured compiler test, then eight complete source-preparation tests. The one test is included in the eight, not nine distinct tests; positive executed test count enforced."
+    }
+  ],
+  "native_worker_topology": "Pinned Native source new Worker/shared buffers proves a Worker object, not an OS-process boundary. Current Host child-process supervision remains a distinct implementation boundary.",
+  "runtime_readiness": "Installed Bun1.3.11 lacks stripTypeScriptTypes and TLA SourceTextModule linking crashes with OS signal5; Basic prepared-JS hook/Client mount probe passed. Exact embedded1.4.3 runtime capability remains unverified.",
+  "open": [
+    "Worker runtime migration",
+    "Exact private compiler/helper byte identity",
+    "Native worker respawn/rebuild lifecycle",
+    "Full Native/live provider/visible Product/signed acceptance"
+  ],
+  "runtime_escape_followup": {
+    "path": "/tmp/mods-289-bun-runtime-followup-v289/followup.md",
+    "sha256": "71cb49548fb7b369ee2e365191ff3b445ed30dbc62db27aca69091c94f39553c",
+    "result": "Generic official BUN_BE_BUN escape is documented; pinned binary with that setting still returns Claude2.1.289 for --version. No compiler/VM invocation followed; no private runtime exposure proved."
+  }
+}
