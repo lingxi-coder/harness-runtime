@@ -2927,14 +2927,16 @@ mod imp {
     /// Move a fully written temporary file to `file_name` without replacing an
     /// existing entry.
     ///
-    /// A hard link is preferred because it is atomic on every Unix. Android
-    /// refuses `link(2)` for app-private files (EACCES/EPERM), which used to
-    /// make every first write of a Host sidecar fail there. When the link is
-    /// refused, `renameat2(RENAME_NOREPLACE)` gives the same guarantee; where
-    /// that is unavailable too, an absence check followed by a plain rename is
-    /// the last resort. The callers hold the per-file advisory lock for every
-    /// sidecar write, so the residual window only exists against a process
-    /// that ignores that lock.
+    /// Order follows `tempfile::persist_noclobber`: `renameat2(RENAME_NOREPLACE)`
+    /// first, because it is a single atomic step and works where hard links do
+    /// not. Android refuses `link(2)` for app-private files (EACCES, by an
+    /// SELinux neverallow for `untrusted_app`), which used to make the first
+    /// write of every Host sidecar fail there. Where the kernel or filesystem
+    /// lacks the flag (ENOSYS/EINVAL) a hard link is the atomic alternative,
+    /// and only when that is refused too does an absence check plus plain
+    /// rename remain. Callers hold the per-file advisory lock for every sidecar
+    /// write, so that last window only exists against a process that ignores
+    /// the lock.
     fn publish_without_replace(
         parent: &OwnedFd,
         temp_name: &OsStr,
@@ -2942,48 +2944,45 @@ mod imp {
         relative: &Path,
     ) -> Result<(), FsError> {
         use rustix::io::Errno;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            use std::sync::atomic::AtomicBool;
+            static NO_RENAME_FLAGS: AtomicBool = AtomicBool::new(false);
+            if !NO_RENAME_FLAGS.load(Ordering::Relaxed) {
+                match fs::renameat_with(
+                    parent,
+                    temp_name,
+                    parent,
+                    file_name,
+                    fs::RenameFlags::NOREPLACE,
+                ) {
+                    Ok(()) => return Ok(()),
+                    Err(Errno::NOSYS) => NO_RENAME_FLAGS.store(true, Ordering::Relaxed),
+                    Err(Errno::INVAL | Errno::OPNOTSUPP | Errno::PERM | Errno::ACCESS) => {}
+                    Err(error) => return Err(map_unix_io(relative, error)),
+                }
+            }
+        }
         match fs::linkat(parent, temp_name, parent, file_name, AtFlags::empty()) {
             Ok(()) => {
                 let _ = fs::unlinkat(parent, temp_name, AtFlags::empty());
                 return Ok(());
             }
-            Err(error)
-                if matches!(
-                    error,
-                    Errno::ACCESS | Errno::PERM | Errno::NOSYS | Errno::OPNOTSUPP | Errno::MLINK
-                ) => {}
+            Err(Errno::ACCESS | Errno::PERM | Errno::NOSYS | Errno::OPNOTSUPP | Errno::MLINK) => {}
             Err(error) => return Err(map_unix_io(relative, error)),
         }
-        publish_by_rename(parent, temp_name, file_name, relative)
+        publish_after_absence_check(parent, temp_name, file_name, relative)
     }
 
-    pub(super) fn publish_by_rename(
+    pub(super) fn publish_after_absence_check(
         parent: &OwnedFd,
         temp_name: &OsStr,
         file_name: &OsStr,
         relative: &Path,
     ) -> Result<(), FsError> {
         use rustix::io::Errno;
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        match fs::renameat_with(
-            parent,
-            temp_name,
-            parent,
-            file_name,
-            fs::RenameFlags::NOREPLACE,
-        ) {
-            Ok(()) => return Ok(()),
-            Err(error)
-                if matches!(
-                    error,
-                    Errno::INVAL | Errno::NOSYS | Errno::OPNOTSUPP | Errno::PERM | Errno::ACCESS
-                ) => {}
-            Err(error) => return Err(map_unix_io(relative, error)),
-        }
         match fs::statat(parent, file_name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(_) => {
-                return Err(FsError::AlreadyExists(relative.display().to_string()));
-            }
+            Ok(_) => return Err(FsError::AlreadyExists(relative.display().to_string())),
             Err(Errno::NOENT) => {}
             Err(error) => return Err(map_unix_io(relative, error)),
         }
@@ -4530,20 +4529,31 @@ mod tests {
     /// publish must also work by rename; this drives that fallback directly.
     #[cfg(unix)]
     #[test]
-    fn rename_fallback_publishes_without_replacing() {
+    fn absence_check_fallback_publishes_without_replacing() {
         use std::ffi::OsStr;
         let root = tempfile::tempdir().unwrap();
         let parent = std::os::fd::OwnedFd::from(std::fs::File::open(root.path()).unwrap());
         let relative = Path::new("session.jsonl.lingxi-message-identities");
 
         std::fs::write(root.path().join(".t1"), b"first").unwrap();
-        imp::publish_by_rename(&parent, OsStr::new(".t1"), relative.as_os_str(), relative).unwrap();
+        imp::publish_after_absence_check(
+            &parent,
+            OsStr::new(".t1"),
+            relative.as_os_str(),
+            relative,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(root.path().join(relative)).unwrap(), b"first");
         assert!(!root.path().join(".t1").exists());
 
         std::fs::write(root.path().join(".t2"), b"second").unwrap();
         assert!(matches!(
-            imp::publish_by_rename(&parent, OsStr::new(".t2"), relative.as_os_str(), relative),
+            imp::publish_after_absence_check(
+                &parent,
+                OsStr::new(".t2"),
+                relative.as_os_str(),
+                relative
+            ),
             Err(FsError::AlreadyExists(_))
         ));
         assert_eq!(std::fs::read(root.path().join(relative)).unwrap(), b"first");
