@@ -2924,6 +2924,73 @@ mod imp {
     {
         atomic_write_stream_checked(root, relative, options, expected, write_body)
     }
+    /// Move a fully written temporary file to `file_name` without replacing an
+    /// existing entry.
+    ///
+    /// A hard link is preferred because it is atomic on every Unix. Android
+    /// refuses `link(2)` for app-private files (EACCES/EPERM), which used to
+    /// make every first write of a Host sidecar fail there. When the link is
+    /// refused, `renameat2(RENAME_NOREPLACE)` gives the same guarantee; where
+    /// that is unavailable too, an absence check followed by a plain rename is
+    /// the last resort. The callers hold the per-file advisory lock for every
+    /// sidecar write, so the residual window only exists against a process
+    /// that ignores that lock.
+    fn publish_without_replace(
+        parent: &OwnedFd,
+        temp_name: &OsStr,
+        file_name: &OsStr,
+        relative: &Path,
+    ) -> Result<(), FsError> {
+        use rustix::io::Errno;
+        match fs::linkat(parent, temp_name, parent, file_name, AtFlags::empty()) {
+            Ok(()) => {
+                let _ = fs::unlinkat(parent, temp_name, AtFlags::empty());
+                return Ok(());
+            }
+            Err(error)
+                if matches!(
+                    error,
+                    Errno::ACCESS | Errno::PERM | Errno::NOSYS | Errno::OPNOTSUPP | Errno::MLINK
+                ) => {}
+            Err(error) => return Err(map_unix_io(relative, error)),
+        }
+        publish_by_rename(parent, temp_name, file_name, relative)
+    }
+
+    pub(super) fn publish_by_rename(
+        parent: &OwnedFd,
+        temp_name: &OsStr,
+        file_name: &OsStr,
+        relative: &Path,
+    ) -> Result<(), FsError> {
+        use rustix::io::Errno;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        match fs::renameat_with(
+            parent,
+            temp_name,
+            parent,
+            file_name,
+            fs::RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if matches!(
+                    error,
+                    Errno::INVAL | Errno::NOSYS | Errno::OPNOTSUPP | Errno::PERM | Errno::ACCESS
+                ) => {}
+            Err(error) => return Err(map_unix_io(relative, error)),
+        }
+        match fs::statat(parent, file_name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => {
+                return Err(FsError::AlreadyExists(relative.display().to_string()));
+            }
+            Err(Errno::NOENT) => {}
+            Err(error) => return Err(map_unix_io(relative, error)),
+        }
+        fs::renameat(parent, temp_name, parent, file_name)
+            .map_err(|error| map_unix_io(relative, error))
+    }
+
     fn atomic_write_checked(
         root: &Path,
         relative: &Path,
@@ -2957,9 +3024,7 @@ mod imp {
                 fs::renameat(&parent, &temp_name, &parent, &file_name)
                     .map_err(|error| map_unix_io(relative, error))?;
             } else {
-                fs::linkat(&parent, &temp_name, &parent, &file_name, AtFlags::empty())
-                    .map_err(|error| map_unix_io(relative, error))?;
-                let _ = fs::unlinkat(&parent, &temp_name, AtFlags::empty());
+                publish_without_replace(&parent, &temp_name, &file_name, relative)?;
             }
             fs::fsync(&parent).map_err(|error| map_unix_io(relative, error))?;
             Ok(())
@@ -3005,9 +3070,7 @@ mod imp {
                 fs::renameat(&parent, &temp_name, &parent, &file_name)
                     .map_err(|error| map_unix_io(relative, error))?;
             } else {
-                fs::linkat(&parent, &temp_name, &parent, &file_name, AtFlags::empty())
-                    .map_err(|error| map_unix_io(relative, error))?;
-                let _ = fs::unlinkat(&parent, &temp_name, AtFlags::empty());
+                publish_without_replace(&parent, &temp_name, &file_name, relative)?;
             }
             fs::fsync(&parent).map_err(|error| map_unix_io(relative, error))?;
             Ok(())
@@ -4461,6 +4524,29 @@ mod tests {
             Err(FsError::AlreadyExists(_))
         ));
         assert_eq!(read_to_string(root.path(), relative).unwrap(), "old");
+    }
+
+    /// Android refuses `link(2)` for app-private files, so the no-replace
+    /// publish must also work by rename; this drives that fallback directly.
+    #[cfg(unix)]
+    #[test]
+    fn rename_fallback_publishes_without_replacing() {
+        use std::ffi::OsStr;
+        let root = tempfile::tempdir().unwrap();
+        let parent = std::os::fd::OwnedFd::from(std::fs::File::open(root.path()).unwrap());
+        let relative = Path::new("session.jsonl.lingxi-message-identities");
+
+        std::fs::write(root.path().join(".t1"), b"first").unwrap();
+        imp::publish_by_rename(&parent, OsStr::new(".t1"), relative.as_os_str(), relative).unwrap();
+        assert_eq!(std::fs::read(root.path().join(relative)).unwrap(), b"first");
+        assert!(!root.path().join(".t1").exists());
+
+        std::fs::write(root.path().join(".t2"), b"second").unwrap();
+        assert!(matches!(
+            imp::publish_by_rename(&parent, OsStr::new(".t2"), relative.as_os_str(), relative),
+            Err(FsError::AlreadyExists(_))
+        ));
+        assert_eq!(std::fs::read(root.path().join(relative)).unwrap(), b"first");
     }
 
     #[test]
