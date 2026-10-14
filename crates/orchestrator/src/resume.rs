@@ -1347,7 +1347,16 @@ fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
 ///   user actually approved reads as still being prepared.
 /// * `Visualization` — `{id, revision, title}` let a resumed tool row reopen
 ///   the widget it published even when the reply never placed it.
-pub const CLIENT_STATE_TOOLS: &[&str] = &["Agent", "Skill", "ExitPlanMode", "Visualization"];
+/// * `LocalApp` — `{action, id, revision, name}` let a resumed tool row show
+///   the card that opens the app it published. The payload never carries
+///   the document itself.
+pub const CLIENT_STATE_TOOLS: &[&str] = &[
+    "Agent",
+    "Skill",
+    "ExitPlanMode",
+    "Visualization",
+    "LocalApp",
+];
 
 /// Recover the [`CLIENT_STATE_TOOLS`] results from the persisted MAIN-CHAIN
 /// transcript, keyed by the `tool_use_id` each one answers.

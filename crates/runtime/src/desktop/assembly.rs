@@ -4005,6 +4005,7 @@ pub async fn build_with_credential_stack(
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
     });
     let visualization_tool_ctx = cfg.inline_visualization.then(|| tool_ctx.clone());
+    let local_app_tool_ctx = cfg.local_apps.then(|| tool_ctx.clone());
     let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools_with_fusion_recorder(
         &mut tools_inner,
         tool_ctx,
@@ -4028,6 +4029,10 @@ pub async fn build_with_credential_stack(
     if let Some(ctx) = visualization_tool_ctx {
         let store = crate::inline_visualization::shared_store(ctx.fs.clone(), &cfg.lingxi_home);
         crate::inline_visualization::register_tool(&mut tools_inner, ctx, store);
+    }
+    if let Some(ctx) = local_app_tool_ctx {
+        let store = crate::local_apps::shared_store(ctx.fs.clone(), &cfg.lingxi_home);
+        crate::local_apps::register_tool(&mut tools_inner, ctx, store);
     }
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`
@@ -5104,6 +5109,13 @@ pub async fn build_with_credential_stack(
         crate::inline_visualization::register_skill(
             &mut reg,
             &[visualization::TOOL_NAME.to_string(), "Bash".to_string()],
+            "Bash",
+        );
+    }
+    if cfg.local_apps {
+        crate::local_apps::register_skill(
+            &mut reg,
+            &[local_app::TOOL_NAME.to_string(), "Bash".to_string()],
             "Bash",
         );
     }

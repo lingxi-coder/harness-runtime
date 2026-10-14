@@ -307,6 +307,10 @@ pub struct DesktopConfig {
     /// bridge-server). Registers the `Visualization` tool and the `visualize`
     /// skill; CLI and headless hosts leave it off.
     pub inline_visualization: bool,
+    /// The attached client opens local apps (a card under the tool call and
+    /// an Apps page). Registers the `LocalApp` tool and the `local-app`
+    /// skill; CLI and headless hosts leave it off.
+    pub local_apps: bool,
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
@@ -937,6 +941,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("host_workspace_trusted", &self.host_workspace_trusted)
             .field("mod_render_surface", &self.mod_render_surface)
             .field("inline_visualization", &self.inline_visualization)
+            .field("local_apps", &self.local_apps)
             .field(
                 "api_base",
                 &if self.api_base.is_empty() {
@@ -1108,6 +1113,7 @@ impl Default for DesktopConfig {
             host_workspace_trusted: None,
             mod_render_surface: None,
             inline_visualization: false,
+            local_apps: false,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_source: llm_runtime::CredentialSource::Configured,

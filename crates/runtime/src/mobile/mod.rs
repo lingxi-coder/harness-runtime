@@ -56,6 +56,8 @@ mod skill_loader;
 #[cfg(feature = "mobile")]
 mod device_skills;
 #[cfg(feature = "mobile")]
+pub mod local_app_host;
+#[cfg(feature = "mobile")]
 pub mod visualization_host;
 // v3 Phase 1: workflow-on-mobile composition pieces (launcher + deferred
 // invoker), consumed by the `host` build path.
@@ -169,6 +171,7 @@ pub(crate) const MOBILE_CHAT_TOOL_ALLOWLIST: &[&str] = &[
     "Write",
     "Shell",
     "Visualization",
+    "LocalApp",
 ];
 
 /// Chat tools that only ever run behind a per-call permission prompt. A

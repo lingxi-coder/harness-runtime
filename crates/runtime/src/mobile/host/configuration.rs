@@ -53,6 +53,9 @@ pub struct MobileConfig {
     /// The native host renders inline visualizations. Registers the
     /// `Visualization` tool and the `visualize` skill.
     pub inline_visualization: bool,
+    /// The native host opens local apps (a card under the tool call and an
+    /// Apps page). Registers the `LocalApp` tool and the `local-app` skill.
+    pub local_apps: bool,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
     /// `llm_runtime::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
@@ -122,6 +125,7 @@ impl std::fmt::Debug for MobileConfig {
             .field("session_skill_allowlist", &self.session_skill_allowlist)
             .field("workspace_trusted", &self.workspace_trusted)
             .field("inline_visualization", &self.inline_visualization)
+            .field("local_apps", &self.local_apps)
             .field("provider_profiles", &self.provider_profiles)
             .field("routing", &self.routing)
             .field("android_shell", &self.android_shell)
@@ -156,6 +160,7 @@ impl Default for MobileConfig {
             session_skill_allowlist: None,
             workspace_trusted: false,
             inline_visualization: false,
+            local_apps: false,
             provider_profiles: None,
             routing: None,
             android_shell: None,

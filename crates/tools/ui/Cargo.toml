@@ -12,6 +12,7 @@ tool-api = { path = "../../tool-api" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 visualization = { path = "../../visualization" }
+local-app = { path = "../../local-app" }
 uuid = { version = "1.10", features = ["v4"] }
 async-trait.workspace = true
 serde.workspace = true

@@ -1885,11 +1885,15 @@ fn client_state_recovery_skips_other_tools_and_multi_block_lines() {
         json!({"status": "async_launched", "agentId": "7a1c9e0e-0000-4000-8000-00000000abcd"});
 
     let plan = json!({"plan": "1. Ship it", "model_content": "User has approved your plan."});
+    // A published local app: the card reopens it by id after a resume.
+    let app = json!({"action": "publish", "id": "a1b2c3d4e5f", "revision": 2, "name": "Water", "warnings": []});
     let messages = vec![
         call("toolu_spawn", "Agent"),
         line(json!([block("toolu_spawn")]), spawn.clone()),
         call("toolu_plan", "ExitPlanMode"),
         line(json!([block("toolu_plan")]), plan.clone()),
+        call("toolu_app", "LocalApp"),
+        line(json!([block("toolu_app")]), app.clone()),
         // A Bash payload — structured, large, and not a client-state tool.
         call("toolu_bash", "Bash"),
         line(
@@ -1908,6 +1912,7 @@ fn client_state_recovery_skips_other_tools_and_multi_block_lines() {
         std::collections::HashMap::from([
             ("toolu_spawn".to_string(), spawn),
             ("toolu_plan".to_string(), plan),
+            ("toolu_app".to_string(), app),
         ]),
         "only single-block lines answering a client-state tool are recovered",
     );
