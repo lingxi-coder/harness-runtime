@@ -541,7 +541,7 @@ pub(super) fn process_visible_response<'a>(
 
         // Oer only exhausts two consecutive malformed attempts: every other
         // transition replaces `malformed_tool_use_retry` in the oracle state.
-        if response.stop_reason.as_deref() != Some("tool_use") || !tool_uses.is_empty() {
+        if (response.stop_reason.as_deref() != Some("tool_use") && response.provider_metadata.get("tool_input_issues").and_then(serde_json::Value::as_array).is_none_or(Vec::is_empty)) || !tool_uses.is_empty() {
             if let Some(state) = recovery.as_deref_mut() {
                 state.malformed_tool_use_retried = false;
             }
@@ -584,7 +584,7 @@ pub(super) fn process_visible_response<'a>(
                 tool_requested_end: false,
             }
         } else {
-            match response.stop_reason.as_deref() {
+            match if response.provider_metadata.get("tool_input_issues").and_then(serde_json::Value::as_array).is_some_and(|issues| !issues.is_empty()) && matches!(response.stop_reason.as_deref(),Some("end_turn"|"stop_sequence")) { Some("tool_use") } else {response.stop_reason.as_deref()} {
                 // #1 needsFollowUp gate (claude-code `query.ts:554-558`, `832-835`,
                 // `1062`): continuation is keyed on tool-block PRESENCE, NOT the raw
                 // `stop_reason` string — the ref explicitly notes `stop_reason ==
@@ -601,7 +601,21 @@ pub(super) fn process_visible_response<'a>(
                 // to the recovery/terminal arms below unchanged. The common `tool_use`+
                 // tools case (previously handled by the `_ => Continue` fallback) is
                 // unaffected.
-                _ if !tool_uses.is_empty() => TurnStepOutcome::Continue,
+                _ if !tool_uses.is_empty() => {
+                    let issues = response.provider_metadata.get("tool_input_issues").and_then(serde_json::Value::as_array).is_some_and(|items| !items.is_empty());
+                    if issues {
+                        if let Some(state) = recovery.as_deref_mut() {
+                            if state.output_recovery_actions >= MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
+                                return Ok(TurnStepOutcome::Ended { final_message_id: assistant_id, stop_reason:"max_tokens".into(), allow_budget_continuation:false, tool_requested_end:false });
+                            }
+                            state.output_recovery_actions += 1;
+                            let note = ConversationMessage::user_meta(MessageId::new(), crate::output_recovery::INCOMPLETE_TOOL_NUDGE.into());
+                            orch.session.lock().await.history.push(note.clone());
+                            orch.persist_message_to_jsonl(&note).await;
+                        }
+                    }
+                    TurnStepOutcome::Continue
+                },
                 // #77 malformed-tool-use retry (batched twin): `stop_reason ==
                 // "tool_use"` but the response produced ZERO tool_use blocks. Only
                 // the recovery-aware drivers participate (the per-turn guard lives on
@@ -639,7 +653,19 @@ pub(super) fn process_visible_response<'a>(
                 Some("max_tokens") if recovery.is_some() => {
                     // `recovery.is_some()` guarded above — unwrap is infallible.
                     let state = recovery.expect("recovery is Some");
-                    handle_max_output_tokens(orch, assistant_id, state).await?
+                    let malformed_tool = response.provider_metadata.get("tool_input_issues").and_then(serde_json::Value::as_array).is_some_and(|items| !items.is_empty());
+                    let no_hosted_effects = response.content.iter().all(|block| matches!(block, llm_runtime::ContentBlock::Text { .. } | llm_runtime::ContentBlock::TextJsUtf16 { .. } | llm_runtime::ContentBlock::Reasoning { .. }));
+                    if (malformed_tool || !has_visible_text(&assistant_blocks)) && response.provider_metadata.pointer("/llm_client/output_budget/can_repeat_original").and_then(serde_json::Value::as_bool)==Some(true) && no_hosted_effects && !state.max_output_tokens_escalated && state.output_recovery_actions < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
+                        if let Some(frozen) = state.last_generation.as_ref() {
+                            if let Some(next) = orch.api.next_output_budget(&frozen.model, frozen.profile.as_deref(), &response.usage).map_err(OrchestratorError::ApiCall)? {
+                                state.retry_generation = Some(frozen.clone());
+                                state.max_output_tokens_override=Some(next); state.max_output_tokens_escalated=true; state.output_recovery_actions+=1;
+                                orch.discard_retry_attempt(assistant_id).await;
+                                return Ok(TurnStepOutcome::Continue);
+                            }
+                        }
+                    }
+                    handle_max_output_tokens(orch, assistant_id, state, !response.provider_metadata.get("tool_input_issues").and_then(serde_json::Value::as_array).is_none_or(Vec::is_empty)).await?
                 }
                 // Finding #80 (batched twin, claude-code `bin/claude.exe` offset
                 // ~205871579): a `refusal` response swaps to the configured

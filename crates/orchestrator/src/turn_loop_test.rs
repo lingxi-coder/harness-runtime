@@ -567,6 +567,7 @@ mod read_file_state_tests {
                 once_cell::sync::Lazy::new(|| json!({"type":"object"}));
             &SCHEMA
         }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool { true }
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
         }
@@ -1365,7 +1366,7 @@ mod read_file_state_tests {
         fn map_result_text(&self, result: &serde_json::Value) -> Option<String> {
             result
                 .get("mapped")
-                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.as_str())
                 .map(|text| format!("tool-mapped:{text}"))
         }
         fn map_result_is_error(&self, result: &serde_json::Value) -> Option<bool> {
@@ -3331,7 +3332,7 @@ mod read_file_state_tests {
                     .lock()
                     .await
                     .get(uses[0].0.as_str())
-                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| value.as_str())
                     .is_some_and(|raw| raw.starts_with("Error: tool.call step resolved Schemic"))
             );
         }
@@ -3895,7 +3896,7 @@ mod read_file_state_tests {
         assert_eq!(names, vec!["Bash", "Read"], "sorted by name");
         for t in &wire {
             // The base triple, nothing else.
-            assert_eq!(t.as_object().unwrap().len(), 3, "base triple only: {t}");
+            assert_eq!(t.as_object().unwrap().len(), 3, "base triple only: {t:?}");
             assert!(t.get("description").is_some());
             assert_eq!(t["input_schema"]["type"], "object");
         }
@@ -4123,7 +4124,7 @@ mod read_file_state_tests {
         )
     }
 
-    fn wire_tool_names(wire: &[serde_json::Value]) -> Vec<String> {
+    fn wire_tool_names(wire: &[lingxi_core::types::utf16_json::Utf16JsonProjection]) -> Vec<String> {
         wire.iter()
             .map(|t| t["name"].as_str().unwrap().to_string())
             .collect()
@@ -4706,7 +4707,7 @@ mod max_output_tokens_recovery_tests {
         mock_message_response, noop_hook_executor,
     };
     use crate::turn_loop::{
-        ESCALATED_MAX_TOKENS, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+        TEST_RECOVERY_OUTPUT_BUDGET, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
         RecoveryState, TurnStepOutcome, execute_one_turn_with_recovery,
     };
     use lingxi_core::types::{ContentBlock, ConversationMessage};
@@ -4921,6 +4922,7 @@ mod max_output_tokens_recovery_tests {
     async fn max_tokens_at_counts_one_and_two_continue_and_increment() {
         let orch = orch_with_responses(vec![max_tokens_response(), max_tokens_response()]);
         let mut state = RecoveryState {
+            output_recovery_actions: 1,
             max_output_tokens_recovery_count: 1,
             max_output_tokens_override: None,
             max_output_tokens_escalated: false,
@@ -4963,6 +4965,7 @@ mod max_output_tokens_recovery_tests {
     async fn fourth_consecutive_max_tokens_ends_turn() {
         let orch = orch_with_responses(vec![max_tokens_response()]);
         let mut state = RecoveryState {
+            output_recovery_actions: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
             max_output_tokens_recovery_count: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
             max_output_tokens_override: None,
             max_output_tokens_escalated: false,
@@ -5261,7 +5264,6 @@ mod max_output_tokens_recovery_tests {
     fn orch_with_responses_escalating(responses: Vec<HistoryResponse>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig {
-                escalate_max_output_tokens: true,
                 ..OrchestratorConfig::default()
             },
             Arc::new(MockApiClient::new(responses)),
@@ -5279,24 +5281,15 @@ mod max_output_tokens_recovery_tests {
     /// the single-shot retry fires before the multi-turn nudge
     /// (TS `query.ts:1199-1221`).
     #[tokio::test]
-    async fn escalation_arms_override_and_continues_without_nudge() {
+    async fn unknown_budget_never_arms_fixed_escalation() {
         let orch = orch_with_responses_escalating(vec![max_tokens_response()]);
         let mut state = RecoveryState::default();
-
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
-            .await
-            .expect("turn step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
-        assert_eq!(state.max_output_tokens_override, Some(ESCALATED_MAX_TOKENS));
-        assert!(state.max_output_tokens_escalated);
-        // No nudge counted/injected — the escalation precedes the nudge path.
-        assert_eq!(state.max_output_tokens_recovery_count, 0);
-        let h = history(&orch).await;
-        assert!(
-            !matches!(h.last(), Some(ConversationMessage::User { .. })),
-            "escalation must not inject a nudge; got {:?}",
-            h.last()
-        );
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state)).await.unwrap();
+        assert!(matches!(step,TurnStepOutcome::Continue));
+        assert_eq!(state.max_output_tokens_override,None);
+        assert!(!state.max_output_tokens_escalated);
+        assert_eq!(state.output_recovery_actions,1);
+        assert!(matches!(history(&orch).await.last(),Some(ConversationMessage::User {..})));
     }
 
     /// REC.A1: once escalated, a SECOND `max_tokens` TAKEs the armed override
@@ -5308,7 +5301,6 @@ mod max_output_tokens_recovery_tests {
         let api = Arc::new(MockApiClient::new(vec![max_tokens_response()]));
         let orch = ConversationOrchestrator::new(
             OrchestratorConfig {
-                escalate_max_output_tokens: true,
                 ..Default::default()
             },
             api.clone(),
@@ -5320,7 +5312,7 @@ mod max_output_tokens_recovery_tests {
             PathBuf::from("/tmp"),
         );
         let mut state = RecoveryState {
-            max_output_tokens_override: Some(ESCALATED_MAX_TOKENS),
+            max_output_tokens_override: Some(TEST_RECOVERY_OUTPUT_BUDGET),
             max_output_tokens_escalated: true,
             ..Default::default()
         };
@@ -5333,7 +5325,7 @@ mod max_output_tokens_recovery_tests {
         let [crate::OrchestratorApiRequest::Main(request)] = requests.as_slice() else {
             panic!("expected one actual main request");
         };
-        assert_eq!(request.opts.max_output_tokens, Some(ESCALATED_MAX_TOKENS));
+        assert_eq!(request.opts.max_output_tokens, Some(TEST_RECOVERY_OUTPUT_BUDGET));
         // The one-shot override was consumed for this call; the nudge path ran.
         assert_eq!(state.max_output_tokens_override, None);
         assert!(
@@ -10415,7 +10407,7 @@ mod pre_cancel_tests {
             // settlement boundary; ordinary Agent calls remain cancelable.
             if input
                 .get("subagent_type")
-                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.as_str())
                 == Some("fusion")
             {
                 InterruptBehavior::Block
@@ -10815,7 +10807,7 @@ mod pre_cancel_tests {
 // token-budget continuation and the Stop-hook blocking continuation.
 #[cfg(test)]
 mod recovery_state_reset_tests {
-    use crate::turn_loop::{ESCALATED_MAX_TOKENS, RecoveryState};
+    use crate::turn_loop::{TEST_RECOVERY_OUTPUT_BUDGET, RecoveryState};
 
     /// `reset_max_output_tokens_recovery` zeroes the consecutive nudge count,
     /// drops any armed escalation override, and re-arms the 8k→64k single-shot
@@ -10824,8 +10816,9 @@ mod recovery_state_reset_tests {
     #[test]
     fn reset_zeroes_all_three_fields() {
         let mut s = RecoveryState {
+            output_recovery_actions: 2,
             max_output_tokens_recovery_count: 2,
-            max_output_tokens_override: Some(ESCALATED_MAX_TOKENS),
+            max_output_tokens_override: Some(TEST_RECOVERY_OUTPUT_BUDGET),
             max_output_tokens_escalated: true,
             ..Default::default()
         };
@@ -10997,11 +10990,11 @@ mod memdir_index_cap_tests {
         ) -> Result<ToolCallResult, ToolError> {
             let raw = input
                 .get("file_path")
-                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.as_str())
                 .ok_or_else(|| ToolError::InvalidInput("file_path required".into()))?;
             let content = input
                 .get("content")
-                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.as_str())
                 .ok_or_else(|| ToolError::InvalidInput("content required".into()))?;
             let cwd = ctx.cwd.unwrap_or_else(|| PathBuf::from("/tmp"));
             let path = if Path::new(raw).is_absolute() {

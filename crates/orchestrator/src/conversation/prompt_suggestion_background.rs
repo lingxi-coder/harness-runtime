@@ -239,7 +239,7 @@ impl ConversationOrchestrator {
                         tools: Vec::new(),
                         tool_choice: None,
                         output_format: None,
-                        max_tokens: if disable_thinking { 1024 } else { 3072 },
+                        max_tokens: Some(if disable_thinking { 1024 } else { 3072 }),
                         max_retries: 2,
                         temperature: None,
                         thinking: if disable_thinking {

@@ -999,6 +999,10 @@ pub(crate) fn project_model_response(
         upstream_metadata(&mut metadata).insert("http_request_id".into(), request_id.clone().into());
     }
     upstream_metadata(&mut metadata).insert("non_streaming_response".into(), true.into());
+    if !decoded.tool_input_issues.is_empty() {
+        if !metadata.is_object() { metadata=serde_json::json!({}); }
+        metadata["tool_input_issues"] = serde_json::to_value(&decoded.tool_input_issues).map_err(invalid)?;
+    }
     let native_stop_details = decoded.anthropic_stop_details().cloned();
     if let Some(fallback) = decoded.anthropic_fallback() {
         upstream_metadata(&mut metadata).insert(
@@ -1602,4 +1606,8 @@ mod stop_delta_tests {
             .iter()
             .any(|event| matches!(event, HistoryEvent::MessageStop)));
     }
+}
+
+pub(crate) fn attach_output_budget(metadata: &mut Value, observation: Value) {
+    upstream_metadata(metadata).insert("output_budget".into(), observation);
 }

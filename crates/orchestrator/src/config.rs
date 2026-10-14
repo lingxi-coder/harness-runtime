@@ -211,20 +211,6 @@ pub struct OrchestratorConfig {
     #[serde(default)]
     pub resume_session_id: Option<uuid::Uuid>,
 
-    /// A1: gate for the 8k→64k output-token escalation retry (TS gate
-    /// `tengu_otk_slot_v1`, 3P default `false` — not validated on
-    /// Bedrock/Vertex). When `false` (the parity default), the loop performs
-    /// ONLY the multi-turn "resume directly" nudge recovery on a `max_tokens`
-    /// `stop_reason`; the single-shot escalation to
-    /// [`crate::turn_loop::ESCALATED_MAX_TOKENS`] is skipped.
-    ///
-    /// The override is consumed by the next request through
-    /// `messages_create`; a separate recovery latch guarantees a
-    /// single 64k retry per max-token episode before normal continuation
-    /// nudges resume.
-    #[serde(default)]
-    pub escalate_max_output_tokens: bool,
-
     /// A3: feature gate for token-budget auto-continuation (TS `feature('TOKEN_BUDGET')`).
     /// Defaults `false` for parity — TS gates the whole `+500k` continuation
     /// block. When `false` (or [`Self::token_budget`] is `None`), the turn
@@ -508,7 +494,6 @@ impl Default for OrchestratorConfig {
             print: false,
             is_tty: false,
             resume_session_id: None,
-            escalate_max_output_tokens: false,
             enable_token_budget: false,
             token_budget: None,
             is_subscriber: false,
@@ -628,7 +613,6 @@ mod tests {
             print: true,
             is_tty: true,
             resume_session_id: None,
-            escalate_max_output_tokens: true,
             enable_token_budget: true,
             token_budget: Some(500_000),
             is_subscriber: true,
@@ -658,7 +642,9 @@ mod tests {
             ultracode_product_default_cadence: Some(10),
             workflow_keyword_trigger_enabled: true,
             apply_resumed_agent_model: true,
-        };
+
+            ..OrchestratorConfig::default()
+};
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.max_turns, 5);
@@ -671,7 +657,6 @@ mod tests {
         assert!(back.print);
         assert!(back.is_tty);
         assert!(back.resume_session_id.is_none());
-        assert!(back.escalate_max_output_tokens);
         assert!(back.enable_token_budget);
         assert_eq!(back.token_budget, Some(500_000));
         assert!(back.is_subscriber);
@@ -764,8 +749,8 @@ mod tests {
     }
 
     #[test]
-    fn default_escalate_max_output_tokens_is_false() {
-        assert!(!OrchestratorConfig::default().escalate_max_output_tokens);
+    fn no_fixed_output_escalation_setting_is_serialized() {
+        assert!(serde_json::to_value(OrchestratorConfig::default()).unwrap().get("escalate_max_output_tokens").is_none());
     }
 
     #[test]

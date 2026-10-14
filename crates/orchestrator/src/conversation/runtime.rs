@@ -2050,7 +2050,7 @@ mod api_error_metrics_tests {
         orch.begin_turn_metrics();
         let error = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text {
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "API Error: bad request".into(),
                 citations: None,
             }],
@@ -2070,7 +2070,7 @@ mod api_error_metrics_tests {
         }
         let ordinary = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text {
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "recovered".into(),
                 citations: None,
             }],

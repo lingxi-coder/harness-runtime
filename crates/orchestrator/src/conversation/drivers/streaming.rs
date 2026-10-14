@@ -870,8 +870,8 @@ impl StreamingTurnDriver<'_> {
             mut turn_reminders,
             mut guarded_async_hook_reminders,
             context_announcements,
-            wire_tools,
-            skip_global_cache_for_system_prompt,
+            mut wire_tools,
+            mut skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
         } = step;
@@ -880,6 +880,23 @@ impl StreamingTurnDriver<'_> {
             &mut turn_reminders,
             &mut guarded_async_hook_reminders,
         );
+        let mut system_override = None;
+        if let Some(frozen) = loop_state.recovery.retry_generation.take() {
+            let latest_user = |messages: &[ConversationMessage]| messages.iter().rev().find(|m| matches!(m, ConversationMessage::User { is_meta:false, .. })).map(ConversationMessage::id);
+            if latest_user(&snapshot) == latest_user(&frozen.messages) && model == frozen.model && model_profile == frozen.profile {
+                snapshot = frozen.messages;
+                wire_tools = frozen.tools;
+                skip_global_cache_for_system_prompt = frozen.skip_global_cache;
+                system_override = Some(frozen.system);
+            } else { loop_state.recovery.max_output_tokens_override = None; }
+        }
+        let system_prompt = system_override.as_ref().unwrap_or(system_prompt);
+        let max_output_budget = loop_state.recovery.max_output_tokens_override.take();
+        if !orch.hooks.has_hooks_for(&hooks::events::HookEventType::MessageDisplay).await {
+            loop_state.recovery.last_generation = Some(crate::output_recovery::FrozenGeneration {
+                model:model.clone(), profile:model_profile.clone(), system:system_prompt.clone(), messages:snapshot.clone(), tools:wire_tools.clone(), skip_global_cache:skip_global_cache_for_system_prompt,
+            });
+        } else { loop_state.recovery.last_generation = None; }
         let query_history = snapshot.clone();
 
         let mut exec = match &user_cancel {
@@ -944,6 +961,7 @@ impl StreamingTurnDriver<'_> {
             &mut guarded_async_hook_reminders,
         );
         let turn_step_hook_active = mod_host.is_some();
+        if turn_step_hook_active { loop_state.recovery.last_generation = None; }
         let mut mod_model_state = None;
         let stream_result = if let Some(host) = mod_host {
             let mut input = serde_json::json!({
@@ -1021,12 +1039,13 @@ impl StreamingTurnDriver<'_> {
                 .run(
                     orch.model_runtime
                         .prompt_cache_capture
-                        .scope(orch.streaming_api.stream(
+                        .scope(orch.streaming_api.stream_with_output_budget(
                             &model,
                             model_profile.as_deref(),
                             system_prompt.as_ref(),
                             snapshot,
                             wire_tools.clone(),
+                            max_output_budget,
                             crate::config::sanitize_query_source(&orch.config.query_source),
                             skip_global_cache_for_system_prompt,
                             request_dispatch_admission,
@@ -3297,6 +3316,7 @@ impl StreamingTurnDriver<'_> {
                         .max_output_tokens_recovery_count
                         .saturating_add(1);
                     loop_state.recovery.max_output_tokens_override = None;
+                    loop_state.recovery.output_recovery_actions += 1;
                     return Ok(Some(StepExit::Continue));
                 }
                 // A finalized partial is terminal before normal tool-result

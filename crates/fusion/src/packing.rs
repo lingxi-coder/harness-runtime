@@ -226,7 +226,7 @@ fn strict_request(
         system_prompt: Some(system_prompt.to_string()),
         messages: vec![ConversationMessage::user(MessageId::new(), user)],
         schema,
-        max_tokens: output_tokens,
+        max_tokens: Some(output_tokens),
         temperature: Some(0.0),
         query_source: QuerySource::FusionAnalyst,
         skip_system_prompt_prefix: true,

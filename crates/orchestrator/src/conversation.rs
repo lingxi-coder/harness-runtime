@@ -211,6 +211,10 @@ pub trait OrchestratorApiClient: Send + Sync {
         Err(LlmError::ModelUnavailable)
     }
 
+    /// Resolve a bounded retry budget using the exact serving route. Missing
+    /// accounting or route facts prohibit an invented increase.
+    fn next_output_budget(&self, _model: &str, _profile: Option<&str>, _usage: &llm_runtime::ExecutionUsage) -> Result<Option<u32>, LlmError> { Ok(None) }
+
     /// Run the internal vision-delegation side query for a non-vision main route.
     async fn analyze_vision_delegation(
         &self,
@@ -443,6 +447,19 @@ pub trait StreamingApiClient: Send + Sync {
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>;
+
+    /// Explicit budget for one recovery dispatch. Implementations must not
+    /// silently ignore a requested increase.
+    async fn stream_with_output_budget(
+        &self, model: &str, profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>, tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        max_tokens: Option<u32>, query_source: &str, skip_global_cache_for_system_prompt: bool,
+        admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        if max_tokens.is_some() { return Err(LlmError::UnsupportedCapability { capability: "streaming output budget override".into() }); }
+        self.stream(model, profile, system, messages, tools, query_source, skip_global_cache_for_system_prompt, admission).await
+    }
 
     /// A single `turn.step` hook may override effort for just this physical
     /// request. Other callers retain the session effort through `stream`.

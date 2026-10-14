@@ -234,9 +234,9 @@ async fn prompt_snapshot_appends_only_new_inline_tools_after_success() {
         }],
     });
     orch.record_inline_prompt_tools_after_success(&[
-        json!({"name": "Read", "description": "live Read"}),
-        json!({"name": "Deferred", "description": "not inline", "defer_loading": true}),
-        json!({"name": "Write", "description": "new Write"}),
+        json!({"name": "Read", "description": "live Read"}).into(),
+        json!({"name": "Deferred", "description": "not inline", "defer_loading": true}).into(),
+        json!({"name": "Write", "description": "new Write"}).into(),
     ])
     .await;
     let snapshot = orch
@@ -440,7 +440,7 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         // tool update path; both persisted versions must retain the hint.
         warm.record_inline_prompt_tools_after_success(&[json!({
             "name":"LateInline", "description":"new inline description"
-        })])
+        }).into()])
         .await;
         let expected_snapshot = warm
             .prompt_runtime
@@ -611,7 +611,7 @@ async fn prompt_snapshot_writer_omits_absent_rendering_on_legacy_tool_update() {
     });
     orch.record_inline_prompt_tools_after_success(&[json!({
         "name":"Read", "description":"new inline description"
-    })])
+    }).into()])
     .await;
     let rows = JsonlReader::new(path, fs).read_all().await.unwrap();
     let payload = rows

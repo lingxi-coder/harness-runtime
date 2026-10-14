@@ -379,7 +379,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                     false,
                     request.messages,
                     request.tools,
-                    Some(request.max_tokens),
+                    request.max_tokens,
                     convert_tool_choice(request.tool_choice.as_ref()),
                     request.stop_sequences,
                     request.thinking,
@@ -406,7 +406,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                     request.system_prompt.as_deref(),
                     request.messages,
                     request.schema,
-                    Some(request.max_tokens),
+                    request.max_tokens,
                     None,
                     None,
                     temperature,
@@ -459,7 +459,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                 request.tools,
                 // Fork compaction resolves the parent's ordinary output
                 // budget; other side queries carry their explicit cap.
-                Some(request.max_tokens),
+                request.max_tokens,
                 convert_tool_choice(request.tool_choice.as_ref()),
                 request.stop_sequences,
                 if prompt_suggestion { Some(service.thinking()) } else { request.thinking },
@@ -538,7 +538,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             llm_runtime::model::thinking::reasoning_for_request(
                 t,
                 &request.model,
-                Some(request.max_tokens),
+                request.max_tokens,
             )
         });
 
@@ -561,7 +561,7 @@ impl SideQueryClient for ProviderSideQueryClient {
         };
         llm_req.set_tool_choice(convert_tool_choice(request.tool_choice.as_ref()));
         llm_req.input.stop_sequences = request.stop_sequences;
-        llm_req.input.max_tokens = Some(request.max_tokens);
+        llm_req.input.max_tokens = request.max_tokens;
         llm_req.input.temperature = request.temperature;
         llm_req.set_reasoning(reasoning);
         llm_req.set_effort(request.effort)?;
@@ -617,7 +617,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                         request.system_prompt.as_deref(),
                         request.messages,
                         request.schema,
-                        Some(request.max_tokens),
+                        request.max_tokens,
                         None,
                         None,
                         temperature,
@@ -676,7 +676,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                         ..Default::default()
                     },
                 };
-                llm_req.input.max_tokens = Some(request.max_tokens);
+                llm_req.input.max_tokens = request.max_tokens;
                 llm_req.input.temperature = temperature;
                 llm_req.input.output_format =
                     llm_runtime::services::sdk::protocol::OutputFormat::JsonSchema {
@@ -1125,7 +1125,7 @@ mod tests {
             tools: vec![],
             tool_choice: None,
             output_format,
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             max_retries: 2,
             temperature: Some(0.0),
             thinking: None,
@@ -1814,7 +1814,7 @@ mod tests {
                 "required": ["ok"],
                 "additionalProperties": false
             }),
-            max_tokens: 256,
+            max_tokens: Some(256),
             temperature: Some(0.0),
             query_source: QuerySource::FusionAnalyst,
             skip_system_prompt_prefix: false,

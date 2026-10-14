@@ -260,30 +260,6 @@ fn is_internal_account_class() -> bool {
     false
 }
 
-/// Bound `max_tokens` so `input_tokens + output` fit `context_window`: reserve
-/// the estimated input plus provider-formatting headroom. Fixes models whose
-/// advertised max-output equals their context window (models.dev has no distinct
-/// output cap — 64 OpenRouter models + gpt-4) from requesting the ENTIRE window
-/// as output, which the endpoint rejects once any input is present. Never raises
-/// `max_tokens`; leaves it unchanged when it already fits.
-fn bound_output_to_context(max_tokens: u32, context_window: u64, input_tokens: u64) -> u32 {
-    /// Keep bounded headroom unused because OpenAI-compatible routers may add
-    /// model-specific chat/tool templates.
-    const OUTPUT_FIT_MARGIN_MIN: u64 = 1_024;
-    const OUTPUT_FIT_MARGIN_MAX: u64 = 20_000;
-    let raw_fit = context_window.saturating_sub(input_tokens);
-    let margin = (context_window / 20).clamp(OUTPUT_FIT_MARGIN_MIN, OUTPUT_FIT_MARGIN_MAX);
-    let conservative_fit = raw_fit.saturating_sub(margin);
-    // If only the safety margin (rather than the actual input) consumes the
-    // remaining window, allow one token so the wire request remains valid.
-    let fit = if conservative_fit == 0 {
-        raw_fit.min(1)
-    } else {
-        conservative_fit
-    };
-    max_tokens.min(u32::try_from(fit).unwrap_or(u32::MAX))
-}
-
 /// Allow one overflow-driven output reduction per request drive, and only when
 /// it strictly lowers the value already sent on the wire.
 fn guard_max_tokens_adjustment(
@@ -1474,6 +1450,30 @@ impl ApiService {
         self.client.protocol_for_model(model, profile)
     }
 
+    /// A bounded increase based on complete usage and a documented total-token
+    /// contract. Unknown accounting never becomes a guessed retry budget.
+    pub fn next_output_budget(&self, model: &str, profile: Option<&str>, usage: &crate::ExecutionUsage) -> Result<Option<u32>, LlmError> {
+        if std::env::var("LINGXI_MAX_OUTPUT_TOKENS").ok().is_some_and(|raw| {
+            let n = lingxi_core::host::env::parse_int_env(&raw); !n.is_nan() && n > 0.0
+        }) { return Ok(None); }
+        if usage.report.complete().is_none() { return Ok(None); }
+        let observed_profile = usage.provider_metadata.get("stream").unwrap_or(&usage.provider_metadata)
+            .get("llm_client").and_then(|m| m.get("executed_profile")).and_then(serde_json::Value::as_str);
+        let route = self.client.resolve_media_route(model, profile)?.main;
+        let profiles = self.client.provider_service_profiles();
+        let Some(connection) = profiles.iter().find(|p| p.profile_name == route.profile_name) else { return Ok(None); };
+        if observed_profile.is_some_and(|actual| actual != route.profile_name) { return Ok(None); }
+        let observation = usage.provider_metadata.get("stream").unwrap_or(&usage.provider_metadata).get("llm_client").and_then(|v| v.get("output_budget"));
+        // Explicit task/user limits and an overflow-reduced same-route limit
+        // remain hard ceilings. Recovery must not erase their provenance.
+        if observation.and_then(|v| v.get("source")).and_then(serde_json::Value::as_str)==Some("explicit") { return Ok(None); }
+        let issued = observation.and_then(|v| v.get("value")).and_then(serde_json::Value::as_u64)
+            .or_else(|| observation.and_then(|v| v.get("provider_default")).and_then(serde_json::Value::as_u64));
+        let effective_context = crate::model::context_window::is_claude_family(model).then(||
+            crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas));
+        Ok(lingxi_llm_client::client::recovery_output_budget(connection, &route.request_model, &usage.report, issued, effective_context))
+    }
+
     pub fn resolve_media_route(
         &self,
         model: &str,
@@ -2636,39 +2636,14 @@ impl ApiService {
         }
         req.stream = stream;
 
-        // max_tokens (DIV-3): an explicit escalation wins; ordinary turns use a
-        // model-aware request default. Catalog `limit.output` is a hard ceiling,
-        // not a request default (notably OpenRouter GLM Free advertises 230.4k
-        // output inside a 256k total context window).
-        let requested_max_tokens = max_tokens.unwrap_or_else(|| {
-            u32::try_from(crate::model::context_window::default_output_tokens_for_model(model))
-                .unwrap_or(u32::MAX)
+        // Keep the logical request's explicit/automatic intent. The SDK
+        // resolves the effective budget on every selected connection before
+        // validation/encoding; None uses the provider default where optional.
+        let env_budget = std::env::var("LINGXI_MAX_OUTPUT_TOKENS").ok().and_then(|raw| {
+            let value = lingxi_core::host::env::parse_int_env(&raw);
+            (!value.is_nan() && value > 0.0).then(|| value.min(u32::MAX as f64) as u32)
         });
-        req.input.max_tokens = Some(
-            crate::model::context_window::known_output_token_limit_for_model(model)
-                .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX))
-                .map_or(requested_max_tokens, |limit| {
-                    requested_max_tokens.min(limit)
-                }),
-        );
-
-        // Bound max_tokens so input + output fit the model's context window.
-        // Even a safe ordinary output default may not fit beside a long prompt;
-        // reserve the structured input estimate (system + messages + tools)
-        // plus provider-formatting headroom. Claude models (output << context)
-        // are unaffected unless the input is near-full.
-        let context_window =
-            crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas);
-        let input_est = crate::model::count_tokens::approximate_tokens(&req);
-        if let Some(mt) = req.input.max_tokens {
-            let bounded = bound_output_to_context(mt, context_window, input_est);
-            if bounded == 0 {
-                return Err(LlmError::ContextOverflow {
-                    token_gap: input_est.saturating_sub(context_window),
-                });
-            }
-            req.input.max_tokens = Some(bounded);
-        }
+        req.input.max_tokens = max_tokens.or(env_budget);
 
         // thinking (DIV-1) + temperature (DIV-4), mirroring claude.ts:1596-1630
         // and claude.ts:1693. Computed AFTER max_tokens is known (the fixed-
@@ -2698,7 +2673,7 @@ impl ApiService {
             req.set_reasoning(crate::model::thinking::reasoning_for_request(
                 thinking,
                 model,
-                req.input.max_tokens,
+                req.input.max_tokens.or_else(|| lingxi_llm_client::client::claude_application_output_default(model)),
             ));
 
             // temperature:1 ONLY when thinking is disabled AND the model is in the
@@ -4983,6 +4958,9 @@ impl ApiService {
                             provider_resp.clone(),
                             crate::upstream::family(&prepared.route.protocol),
                         )?;
+                        let budget = prepared_output_budget_observation(&prepared, &req.input);
+                        crate::history_projection::attach_output_budget(&mut response.provider_metadata, budget.clone());
+                        crate::history_projection::attach_output_budget(&mut response.usage.provider_metadata, budget);
                         response.set_per_turn_effort(Self::prepared_per_turn_effort(&prepared).as_deref());
                         response.usage.cost_estimate = estimate.clone();
                         if let Some(quote) = &server_fallback_quote {
@@ -6593,6 +6571,7 @@ impl ApiService {
                             &response_headers.iter().map(|(key, value)| (key.clone(), value.clone())).collect::<Vec<_>>(),
                         ),
                     );
+                    crate::history_projection::attach_output_budget(&mut decoder.metadata, prepared_output_budget_observation(&prepared, &req.input));
                     if let Some(binding) = prepared.computer_binding.as_ref() {
                         crate::history_projection::attach_computer_binding(
                             &mut decoder.metadata,
@@ -7257,6 +7236,7 @@ impl ApiService {
         tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         effort: Option<serde_json::Value>,
         speed: Option<String>,
+        max_tokens: Option<u32>,
         skip_global_cache_for_system_prompt: bool,
         query_source: Option<&str>,
         request_dispatch_admission: Option<crate::RequestDispatchAdmission>,
@@ -7268,7 +7248,7 @@ impl ApiService {
             messages,
             tools,
             true,
-            None,
+            max_tokens,
             skip_global_cache_for_system_prompt,
             prompt_cache_query_source(query_source),
         )?;
@@ -7772,3 +7752,32 @@ mod service_hosted_retry_test;
 #[cfg(test)]
 #[path = "buffered_stream_test.rs"]
 mod buffered_stream_test;
+
+/// Prompt-free facts from the final prepared request. Defaults are recorded
+/// only for a documented native endpoint/model; other defaults remain unknown.
+fn prepared_output_budget_observation(prepared: &crate::PreparedLlmCall, request: &lingxi_llm_client::protocol::ChatRequest) -> serde_json::Value {
+    let body = &prepared.provider_request.body_json;
+    let mut field = None;
+    let mut value = None;
+    for key in ["max_tokens","max_completion_tokens","max_output_tokens"] {
+        if let Some(n) = body.get(key).and_then(serde_json::Value::as_u64) { field=Some(key); value=Some(n); }
+    }
+    for (parent,key) in [("generationConfig","maxOutputTokens"),("generation_config","max_output_tokens")] {
+        if let Some(n) = body.get(parent).and_then(|v| v.get(key)).and_then(serde_json::Value::as_u64) { field=Some(key); value=Some(n); }
+    }
+    let model = &prepared.route.resolved_route.request_model;
+    let is_current_deepseek = prepared.route.protocol == crate::ProtocolFamily::OpenAiChat && url::Url::parse(&prepared.provider_request.url).ok().is_some_and(|u| u.host_str()==Some("api.deepseek.com")) && matches!(model.as_str(), "deepseek-flash"|"deepseek-v4-pro");
+    let default = if value.is_none() && is_current_deepseek {
+        Some(if body.get("reasoning_effort").and_then(serde_json::Value::as_str) == Some("none") || body.pointer("/thinking/type").and_then(serde_json::Value::as_str) == Some("disabled") {8192}
+        else if body.get("reasoning_effort").and_then(serde_json::Value::as_str) == Some("max") {131072} else {65536})
+    } else { None };
+    let hosted_wire_tools = body.get("tools").and_then(serde_json::Value::as_array).is_some_and(|tools| tools.iter().any(|tool| {
+        tool.get("type").and_then(serde_json::Value::as_str).is_some_and(|kind| !matches!(kind,"function"|"custom"))
+            || tool.pointer("/function/name").and_then(serde_json::Value::as_str).is_some_and(|name| name.starts_with('$'))
+    }));
+    let native_search = ["enable_search","web_search"].iter().any(|key| body.get(*key).and_then(serde_json::Value::as_bool)==Some(true));
+    serde_json::json!({"field":field,"value":value,"provider_default":default,
+        "can_repeat_original":request.hosted_tools.is_empty() && request.native_options.is_empty() && !hosted_wire_tools && !native_search,
+        "source":if request.max_tokens.is_some() {"explicit"} else if value.is_some() {"application_default"} else {"provider_default"},
+        "profile":prepared.route.resolved_route.profile_name,"model":model})
+}

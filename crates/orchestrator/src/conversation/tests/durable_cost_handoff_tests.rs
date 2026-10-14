@@ -121,7 +121,7 @@ impl crate::conversation::StreamingApiClient for PatchBarrierStream {
         _: Option<&str>,
         _: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _: Vec<ConversationMessage>,
-        _: Vec<serde_json::Value>,
+        _: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         _: &str,
         _skip_global_cache_for_system_prompt: bool,
         _request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,

@@ -446,6 +446,7 @@ pub enum ResponseAccumulatorUpdate {
 pub struct ResponseAccumulator {
     acc: BlockAccumulator,
     malformed_input: Option<LlmError>,
+    tool_input_issues: Vec<Value>,
     content: Vec<ContentBlock>,
     content_indices: Vec<(u32, bool)>,
     id: String,
@@ -462,6 +463,7 @@ impl Default for ResponseAccumulator {
         Self {
             acc: BlockAccumulator::new(),
             malformed_input: None,
+            tool_input_issues: Vec::new(),
             content: Vec::new(),
             content_indices: Vec::new(),
             id: String::new(),
@@ -483,45 +485,6 @@ impl ResponseAccumulator {
         &mut self,
         event: HistoryEvent,
     ) -> Result<ResponseAccumulatorUpdate, (Vec<ContentBlock>, LlmError)> {
-        if self.malformed_input.is_some() {
-            match event {
-                HistoryEvent::ContentBlockStart { content_block, .. }
-                    if matches!(
-                        content_block,
-                        ContentBlock::ToolCall { .. } | ContentBlock::ServerToolUse { .. }
-                    ) =>
-                {
-                    self.acc.tool_calls_started += 1;
-                }
-                HistoryEvent::Completed { .. } => {
-                    return Err((
-                        std::mem::take(&mut self.content),
-                        self.malformed_input
-                            .take()
-                            .expect("pending malformed input"),
-                    ));
-                }
-                HistoryEvent::MessageStop => {
-                    if let Some(LlmError::MalformedToolInput {
-                        has_other_tool_calls,
-                        ..
-                    }) = self.malformed_input.as_mut()
-                    {
-                        *has_other_tool_calls = self.acc.tool_calls_started > 1;
-                    }
-                    return Err((
-                        std::mem::take(&mut self.content),
-                        self.malformed_input
-                            .take()
-                            .expect("pending malformed input"),
-                    ));
-                }
-                _ => {}
-            }
-            return Ok(ResponseAccumulatorUpdate::Continue {
-                completed_block: None,
-            });
-        }
 
         match event {
             HistoryEvent::WebSearch { .. } => {} // Metadata is retained by the terminal snapshot.
@@ -682,7 +645,10 @@ impl ResponseAccumulator {
                         {
                             *has_other_tool_calls = true;
                         }
-                        self.malformed_input = Some(error);
+                        if let LlmError::MalformedToolInput { tool_name, block_index, input_bytes, .. } = &error {
+                            self.tool_input_issues.push(serde_json::json!({"tool_name":tool_name,"block_index":block_index,"input_bytes":input_bytes}));
+                        }
+                        self.malformed_input.get_or_insert(error);
                     }
                     Err(error) => return Err((std::mem::take(&mut self.content), error)),
                 }
@@ -711,6 +677,15 @@ impl ResponseAccumulator {
                 }
             }
             HistoryEvent::MessageStop => {
+                if let Some(mut error) = self.malformed_input.take() {
+                    if let LlmError::MalformedToolInput { has_other_tool_calls, .. } = &mut error {
+                        *has_other_tool_calls = self.acc.tool_calls_started > 1;
+                    }
+                    if matches!(self.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")) {
+                        if !self.provider_metadata.is_object() { self.provider_metadata = serde_json::json!({}); }
+                        self.provider_metadata["tool_input_issues"] = serde_json::json!(self.tool_input_issues);
+                    } else { return Err((std::mem::take(&mut self.content), error)); }
+                }
                 return Ok(ResponseAccumulatorUpdate::Completed(HistoryResponse {
                     id: std::mem::take(&mut self.id),
                     model: std::mem::take(&mut self.model),
@@ -726,7 +701,14 @@ impl ResponseAccumulator {
             // response in the `Completed` event — return it directly.
             // This is the canonical terminal for llm-runtime streams
             // (llm-runtime protocol.rs:302; drops Ping/Error from api-client).
-            HistoryEvent::Completed { response } => {
+            HistoryEvent::Completed { mut response } => {
+                if let Some(error) = self.malformed_input.take() {
+                    if !matches!(response.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")) {
+                        return Err((std::mem::take(&mut self.content), error));
+                    }
+                    if !response.provider_metadata.is_object() { response.provider_metadata = serde_json::json!({}); }
+                    response.provider_metadata["tool_input_issues"] = serde_json::json!(self.tool_input_issues);
+                }
                 return Ok(ResponseAccumulatorUpdate::Completed(*response));
             }
         }
@@ -1993,4 +1975,26 @@ mod tests {
         })
         .await;
     }
+    #[tokio::test]
+    async fn malformed_tool_keeps_later_valid_tool_terminal_and_complete_usage() {
+        let mut events = vec![message_start("m1","deepseek-flash")];
+        for (index,name,args) in [(0,"Write","{\"content\":\"unfinished_secret_html"),(1,"Read","{}") ] {
+            events.extend([
+                HistoryEvent::ContentBlockStart {index,content_block:ContentBlock::ToolCall {input_projection:None,id:format!("call-{index}"),name:name.into(),input:Value::Null}},
+                HistoryEvent::ContentBlockDelta {index,delta:HistoryContentDelta::InputJsonDelta {partial_json:args.into()}},
+                HistoryEvent::ContentBlockStop {index},
+            ]);
+        }
+        events.extend([
+            HistoryEvent::MessageDelta {delta:HistoryMessageDelta {stop_reason:Some("max_tokens".into()),stop_details:None},usage:Some(ExecutionUsage::from_counts(lingxi_llm_client::protocol::Usage {input_tokens:20,output_tokens:65536,..Default::default()}))},
+            HistoryEvent::MessageStop,
+        ]);
+        let response=accumulate_stream(boxed(events)).await.unwrap();
+        assert_eq!(response.stop_reason.as_deref(),Some("max_tokens"));
+        assert_eq!(response.usage.report.complete().unwrap().output_tokens,65536);
+        assert!(matches!(response.content.as_slice(),[ContentBlock::ToolCall {name,..}] if name=="Read"));
+        assert_eq!(response.provider_metadata["tool_input_issues"][0]["tool_name"],"Write");
+        assert!(!serde_json::to_string(&response).unwrap().contains("unfinished_secret_html"));
+    }
+
 }

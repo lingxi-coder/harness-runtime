@@ -241,6 +241,8 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
 
 #[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
+    fn next_output_budget(&self, model: &str, profile: Option<&str>, usage: &llm_runtime::ExecutionUsage) -> Result<Option<u32>, LlmError> { self.service.next_output_budget(model, profile, usage) }
+
     fn is_first_party_route(&self, model: &str, profile: Option<&str>) -> bool {
         self.service
             .is_first_party_route(model, profile)
@@ -998,65 +1000,22 @@ impl StreamingApiClient for ProviderApiAdapter {
     }
 
     async fn stream_with_effort_override(
-        &self,
-        model: &str,
-        profile: Option<&str>,
+        &self, model: &str, profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
-        effort: Option<&str>,
-        query_source: &str,
-        skip_global_cache_for_system_prompt: bool,
+        messages: Vec<ConversationMessage>, tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        effort: Option<&str>, query_source: &str, skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.build_scheduled_request(
-                settings,
-                system,
-                skip_global_cache_for_system_prompt,
-                messages,
-                tools,
-                None,
-            )?;
-            let mut request = request;
-            request
-                .execution
-                .set_request_dispatch_admission(request_dispatch_admission);
-            return self.service.stream_request(request).await;
-        }
-        // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
-        // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
-        // the pre-M4 body byte-identical.
-        // (/fast) When the shared fast-mode flag is set AND the active model
-        // passes the resolved route/environment gate, send `speed:"fast"` — the
-        // service's `beta_context` reads it back to add the fast-mode beta.
-        // `None` (flag off, or an unsupported model) keeps the body unchanged.
-        let speed = if self.fast_mode.load(std::sync::atomic::Ordering::SeqCst)
-            && self
-                .service
-                .fast_model_allowed(model, profile)
-                .unwrap_or(false)
-        {
-            Some("fast".to_string())
-        } else {
-            None
-        };
-        self.service
-            .stream_with_system_prompt(
-                model,
-                profile,
-                system,
-                messages,
-                tools,
-                effort
-                    .map(|effort| serde_json::Value::String(effort.to_owned()))
-                    .or_else(|| self.current_effort()),
-                speed,
-                skip_global_cache_for_system_prompt,
-                Some(query_source),
-                request_dispatch_admission,
-            )
-            .await
+        self.stream_with_options(model, profile, system, messages, tools, effort, None, query_source, skip_global_cache_for_system_prompt, request_dispatch_admission).await
+    }
+    async fn stream_with_output_budget(
+        &self, model: &str, profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>, tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        max_tokens: Option<u32>, query_source: &str, skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        self.stream_with_options(model, profile, system, messages, tools, None, max_tokens, query_source, skip_global_cache_for_system_prompt, request_dispatch_admission).await
     }
 
     fn last_retry_count(&self) -> u32 {
@@ -1706,7 +1665,7 @@ mod tests {
             Some("anthropic"),
             None,
             Vec::new(),
-            vec![tool],
+            vec![tool.into()],
         );
         let main_error = adapter
             .messages_create(crate::OrchestratorApiRequest::Main(main))
@@ -2516,7 +2475,7 @@ mod tests {
                 profile: None,
                 system: None,
                 messages: Vec::new(),
-                tools: vec![serde_json::json!({"name":"StructuredOutput","description":"Return structured output","input_schema":{"type":"object","properties":{}}})],
+                tools: vec![serde_json::json!({"name":"StructuredOutput","description":"Return structured output","input_schema":{"type":"object","properties":{}}}).into()],
                 forced_tool: Some("StructuredOutput".into()),
                 effort: None,
                 opts: agent::api::SubagentApiCallOpts {
@@ -2607,7 +2566,7 @@ mod tests {
                         lingxi_core::types::MessageId::new(),
                         label.into(),
                     )],
-                    tools: tool_names.iter().map(|name| tool(*name)).collect(),
+                    tools: tool_names.iter().map(|name| tool(*name).into()).collect(),
                     forced_tool: forced_tool.map(str::to_string),
                     effort: None,
                     opts: agent::api::SubagentApiCallOpts {
@@ -2662,7 +2621,7 @@ mod tests {
                 lingxi_core::types::MessageId::new(),
                 "main-turn".into(),
             )],
-            vec![tool("Read"), tool("StructuredOutput")],
+            vec![tool("Read").into(), tool("StructuredOutput").into()],
             "sdk", false, None,
         )
         .await
@@ -3665,4 +3624,71 @@ mod hosted_error_tests {
             assert_eq!(mapped.timeout, timeout);
         }
     }
+}
+
+impl ProviderApiAdapter {
+    async fn stream_with_options(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        effort: Option<&str>,
+        max_tokens: Option<u32>,
+        query_source: &str,
+        skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            let request = self.build_scheduled_request(
+                settings,
+                system,
+                skip_global_cache_for_system_prompt,
+                messages,
+                tools,
+                max_tokens,
+            )?;
+            let mut request = request;
+            request
+                .execution
+                .set_request_dispatch_admission(request_dispatch_admission);
+            return self.service.stream_request(request).await;
+        }
+        // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
+        // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
+        // the pre-M4 body byte-identical.
+        // (/fast) When the shared fast-mode flag is set AND the active model
+        // passes the resolved route/environment gate, send `speed:"fast"` — the
+        // service's `beta_context` reads it back to add the fast-mode beta.
+        // `None` (flag off, or an unsupported model) keeps the body unchanged.
+        let speed = if self.fast_mode.load(std::sync::atomic::Ordering::SeqCst)
+            && self
+                .service
+                .fast_model_allowed(model, profile)
+                .unwrap_or(false)
+        {
+            Some("fast".to_string())
+        } else {
+            None
+        };
+        self.service
+            .stream_with_system_prompt(
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                effort
+                    .map(|effort| serde_json::Value::String(effort.to_owned()))
+                    .or_else(|| self.current_effort()),
+                speed,
+                max_tokens,
+                skip_global_cache_for_system_prompt,
+                Some(query_source),
+                request_dispatch_admission,
+            )
+            .await
+    }
+
 }

@@ -738,7 +738,7 @@ fn spawn_query(
                 tools: Vec::new(),
                 tool_choice: None,
                 output_format: Some(serde_json::json!({"type":"json_object"})),
-                max_tokens: 8192,
+                max_tokens: Some(8192),
                 max_retries: 0,
                 temperature: Some(0.0),
                 thinking: None,

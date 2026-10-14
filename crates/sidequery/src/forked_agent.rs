@@ -264,15 +264,9 @@ impl ForkedAgentRunner {
         };
         // cc 2.1.261 PCo supplies no max_tokens override to the compaction
         // fork. The 20k threshold reserve is not a summarization output cap.
-        let max_tokens = req.max_output_tokens.unwrap_or_else(|| {
-            if matches!(req.query_source, QuerySource::Compaction | QuerySource::PromptSuggestion) {
-                u32::try_from(
-                    llm_runtime::model::context_window::default_output_tokens_for_model(&model),
-                )
-                .unwrap_or(u32::MAX)
-            } else {
-                DEFAULT_FORK_MAX_TOKENS
-            }
+        let max_tokens = req.max_output_tokens.or_else(|| {
+            (!matches!(req.query_source, QuerySource::Compaction | QuerySource::PromptSuggestion))
+                .then_some(DEFAULT_FORK_MAX_TOKENS)
         });
 
         let mut request = SideQueryRequest {
@@ -661,7 +655,7 @@ mod tests {
             "the side query must inherit the live parent provider route"
         );
         assert_eq!(sent.system_prompt.as_deref(), Some("PARENT SYSTEM PROMPT"));
-        assert_eq!(sent.max_tokens, 512); // honored override
+        assert_eq!(sent.max_tokens, Some(512)); // honored override
         assert_eq!(sent.max_retries, 0);
         assert_eq!(sent.effort, Some(serde_json::json!("high")));
         assert_eq!(
@@ -789,11 +783,7 @@ mod tests {
                 parent_model
             };
             assert_eq!(sent.model, expected_model);
-            assert_eq!(
-                u64::from(sent.max_tokens),
-                llm_runtime::model::context_window::default_output_tokens_for_model(expected_model),
-                "compaction must inherit the ordinary request budget for {expected_model}"
-            );
+            assert_eq!(sent.max_tokens, None, "compaction must preserve automatic budget for {expected_model}");
         }
     }
 
@@ -826,7 +816,7 @@ mod tests {
         assert_eq!(result.final_text, "");
 
         let sent = client.seen.lock().unwrap().clone().unwrap();
-        assert_eq!(sent.max_tokens, DEFAULT_FORK_MAX_TOKENS);
+        assert_eq!(sent.max_tokens, Some(DEFAULT_FORK_MAX_TOKENS));
         assert_eq!(
             sent.effort,
             Some(serde_json::json!("high")),

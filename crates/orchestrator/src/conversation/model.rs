@@ -705,8 +705,8 @@ impl ConversationOrchestrator {
             tools: Vec::new(),
             tool_choice: None,
             output_format: None,
-            max_tokens: u32::try_from(max_tokens.saturating_add(reserve).min(upper_limit))
-                .unwrap_or(64_000),
+            max_tokens: Some(u32::try_from(max_tokens.saturating_add(reserve).min(upper_limit))
+                .unwrap_or(64_000)),
             max_retries: 2,
             temperature: None,
             thinking,

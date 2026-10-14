@@ -197,6 +197,10 @@ pub struct PumpedTurn {
     /// Tool uses observed during the stream, in observation order
     /// (i.e. order of their `content_block_stop` events).
     pub tool_uses: Vec<ObservedToolUse>,
+    /// Diagnostics only; partial arguments never enter tool execution/history.
+    pub tool_input_issues: Vec<serde_json::Value>,
+    /// Server-hosted work may already have effects before its block closes.
+    pub hosted_tool_observed: bool,
     /// Final `stop_reason` (from `message_delta`). `None` if the stream
     /// ended without a `message_delta` carrying one.
     pub stop_reason: Option<String>,
@@ -1366,6 +1370,9 @@ async fn pump_stream_inner(
     let mut partial_close = PartialStreamClose::default();
     let mut completion = StreamCompletionState::default();
     let mut any_event = false;
+    // Providers close tool blocks before reporting why generation stopped.
+    // Do not abort on incomplete JSON until the terminal reason is available.
+    let mut pending_tool_json_error = None;
 
     loop {
         // Owned dispatches continue independently while the provider waits.
@@ -1408,6 +1415,8 @@ async fn pump_stream_inner(
                 poll_ready_stream_tool_results(&mut pump).await;
                 if completion.message_started
                     && completion.is_complete(&turn)
+                    && (pending_tool_json_error.is_none()
+                        || matches!(turn.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")))
                     && complete_response_error(&e, &turn)
                     && !pump
                         .as_ref()
@@ -1833,11 +1842,15 @@ async fn pump_stream_inner(
             HistoryEvent::ContentBlockStop { index } => Some(*index),
             _ => None,
         };
+        if matches!(&event, HistoryEvent::WebSearch { .. }) { turn.hosted_tool_observed = true; }
         if let HistoryEvent::ContentBlockStart {
             index,
             content_block,
         } = &event
         {
+            if matches!(content_block, llm_runtime::ContentBlock::ServerToolUse { .. } | llm_runtime::ContentBlock::ProviderContent { .. }) {
+                turn.hosted_tool_observed = true;
+            }
             if creates_assistant_row(content_block) {
                 let block_key = next_block_key;
                 next_block_key = next_block_key.saturating_add(1);
@@ -1859,6 +1872,13 @@ async fn pump_stream_inner(
         .await
         {
             Ok(a) => a,
+            Err(e @ crate::sse::StreamingError::ToolUseJsonParse { .. }) => {
+                if let crate::sse::StreamingError::ToolUseJsonParse { index, buffer, .. } = &e {
+                    turn.tool_input_issues.push(serde_json::json!({"block_index":index,"input_bytes":buffer.len()}));
+                }
+                pending_tool_json_error.get_or_insert(e);
+                RouterAction::Continue
+            }
             Err(e) => {
                 poll_ready_stream_tool_results(&mut pump).await;
                 return Err(build_failure(
@@ -2149,6 +2169,20 @@ async fn pump_stream_inner(
                 .await;
             }
             RouterAction::EndOfStream => {
+                if !matches!(turn.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")) {
+                    if let Some(error) = pending_tool_json_error.take() {
+                        poll_ready_stream_tool_results(&mut pump).await;
+                        return Err(build_failure(
+                            turn,
+                            &acc,
+                            &message_start_usage,
+                            OrchestratorError::StreamingProtocol(error.to_string()),
+                            real_content_started,
+                            partial_close,
+                            any_event,
+                        ));
+                    }
+                }
                 finish_pending_server_stitch(
                     &mut turn,
                     output,
@@ -2168,6 +2202,8 @@ async fn pump_stream_inner(
     // A terminal message_delta completes the response even when the final
     // message_stop is lost. Later block events invalidate that terminal state.
     if completion.is_complete_at_eof(&turn)
+        && (pending_tool_json_error.is_none()
+            || matches!(turn.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")))
         && !pump
             .as_ref()
             .is_some_and(|p| p.user_cancel.is_some_and(CancellationToken::is_cancelled))
@@ -2185,12 +2221,17 @@ async fn pump_stream_inner(
         partial_close.close(output.as_ref()).await;
         return Ok((turn, stream));
     }
-    // Stream ended without either a real stop or a complete terminal delta.
+    // A non-recoverable JSON failure still applies if the final message_stop
+    // was lost. Preserve its bounded diagnostic instead of masking it as EOF.
+    let error = pending_tool_json_error.map_or(
+        OrchestratorError::StreamEndedWithoutStop,
+        |error| OrchestratorError::StreamingProtocol(error.to_string()),
+    );
     Err(build_failure(
         turn,
         &acc,
         &message_start_usage,
-        OrchestratorError::StreamEndedWithoutStop,
+        error,
         real_content_started,
         partial_close,
         any_event,

@@ -233,9 +233,10 @@ fn live_audio_orchestrator() -> (
     (orchestrator, registry, supported_actions, schema_revision)
 }
 
-fn wire_tool<'a>(wire: &'a [Value], name: &str) -> Option<&'a Value> {
+fn wire_tool<'a>(wire: &'a [lingxi_core::types::utf16_json::Utf16JsonProjection], name: &str) -> Option<&'a Value> {
     wire.iter()
         .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+        .map(|tool| &tool.value)
 }
 
 #[tokio::test]

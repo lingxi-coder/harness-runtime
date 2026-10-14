@@ -453,7 +453,7 @@ mod tests {
             "description": "Read a file",
             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
         })];
-        let result = to_tool_declarations(tools).unwrap();
+        let result = to_tool_declarations(tools.into_iter().map(Into::into).collect()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "Read");
         assert_eq!(result[0].description, "Read a file");
@@ -466,7 +466,7 @@ mod tests {
             "description": "Read a file",
             "input_schema": {"type": "object"}
         })];
-        let err = to_tool_declarations(tools).unwrap_err();
+        let err = to_tool_declarations(tools.into_iter().map(Into::into).collect()).unwrap_err();
         assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("name")));
     }
 
@@ -476,7 +476,7 @@ mod tests {
             "name": "Read",
             "input_schema": {"type": "object"}
         })];
-        let err = to_tool_declarations(tools).unwrap_err();
+        let err = to_tool_declarations(tools.into_iter().map(Into::into).collect()).unwrap_err();
         assert!(
             matches!(err, LlmError::InvalidRequest { message } if message.contains("description"))
         );
@@ -488,7 +488,7 @@ mod tests {
             "name": "Read",
             "description": "Read a file"
         })];
-        let err = to_tool_declarations(tools).unwrap_err();
+        let err = to_tool_declarations(tools.into_iter().map(Into::into).collect()).unwrap_err();
         assert!(
             matches!(err, LlmError::InvalidRequest { message } if message.contains("input_schema"))
         );
@@ -501,7 +501,7 @@ mod tests {
             "description": "Read a file",
             "input_schema": null
         })];
-        let err = to_tool_declarations(tools).unwrap_err();
+        let err = to_tool_declarations(tools.into_iter().map(Into::into).collect()).unwrap_err();
         assert!(
             matches!(err, LlmError::InvalidRequest { message } if message.contains("input_schema"))
         );

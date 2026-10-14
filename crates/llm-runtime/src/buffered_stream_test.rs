@@ -92,7 +92,7 @@ fn fixture(terminal: bool) -> (ApiService, Arc<BufferedTransport>, MessagesCreat
             "test".into(),
         )],
         vec![
-            json!({"name":"Read","description":"Read","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}),
+            json!({"name":"Read","description":"Read","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}).into(),
         ],
     );
     request.opts.max_output_tokens = Some(64);

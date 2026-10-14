@@ -44,7 +44,8 @@ pub struct SideQueryRequest {
     /// Structured-output schema (e.g. JSON Schema for `response_format`).
     pub output_format: Option<Value>,
     /// Output cap.
-    pub max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     /// Caller-side retry budget for transient API errors.
     pub max_retries: u32,
     /// Sampling temperature; defaults to provider default when `None`.
@@ -160,7 +161,8 @@ pub struct StrictStructuredQueryRequest {
     /// JSON Schema the response must satisfy.
     pub schema: Value,
     /// Output cap.
-    pub max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     /// Temperature. Analyst should pass `Some(0.0)`.
     pub temperature: Option<f32>,
     /// COGS tag.
