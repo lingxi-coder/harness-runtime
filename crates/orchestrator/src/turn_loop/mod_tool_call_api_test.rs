@@ -871,6 +871,7 @@ async fn dispatch_preflight_case(
         .get(outer_id.as_str())
         .cloned()
         .expect("outer result should be recorded")
+        .value
 }
 
 #[tokio::test]

@@ -477,6 +477,7 @@ fn mod_turn_step_stream(
                             system_prompt.as_ref(),
                             snapshot,
                             tools,
+                            None,
                             effort_override,
                             tool_result_reminder_suffixes,
                             &query_source,
@@ -655,6 +656,7 @@ fn mod_turn_step_stream(
                                     fallback_system.as_ref(),
                                     fallback_snapshot,
                                     fallback_tools,
+                                    None,
                                     None,
                                     fallback_tool_result_reminder_suffixes,
                                     &fallback_query_source,
@@ -1009,19 +1011,46 @@ impl StreamingTurnDriver<'_> {
             native_anthropic_request_context,
             mut guarded_async_hook_reminders,
             context_announcements,
-            wire_tools,
-            skip_global_cache_for_system_prompt,
+            mut wire_tools,
+            mut skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
             ..
         } = step;
-        let tool_declarations = llm_runtime::convert::to_tool_declarations(wire_tools.clone())
-            .map_err(OrchestratorError::ApiCall)?;
         crate::prompt::async_hook_response::retain_current_async_hook_reminders(
             &mut snapshot,
             &mut turn_reminders,
             &mut guarded_async_hook_reminders,
         );
+        let mut system_override = None;
+        if let Some(frozen) = loop_state.recovery.retry_generation.take() {
+            let latest_user = |messages: &[ConversationMessage]| {
+                messages
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m, ConversationMessage::User { is_meta: false, .. }))
+                    .map(ConversationMessage::id)
+            };
+            if latest_user(&snapshot) == latest_user(&frozen.messages)
+                && model == frozen.model
+                && model_profile == frozen.profile
+            {
+                snapshot = frozen.messages;
+                wire_tools = frozen.tools;
+                skip_global_cache_for_system_prompt = frozen.skip_global_cache;
+                system_override = Some(frozen.system);
+            } else {
+                loop_state.recovery.max_output_tokens_override = None;
+            }
+        }
+        let system_prompt = system_override.as_ref().unwrap_or(system_prompt);
+        let max_output_budget = loop_state.recovery.max_output_tokens_override.take();
+        let retry_generation_allowed = !orch
+            .hooks
+            .has_hooks_for(&hooks::events::HookEventType::MessageDisplay)
+            .await;
+        let tool_declarations = llm_runtime::convert::to_tool_declarations(wire_tools.clone())
+            .map_err(OrchestratorError::ApiCall)?;
         let mut query_history = snapshot.clone();
 
         let mut exec = match &user_cancel {
@@ -1094,6 +1123,21 @@ impl StreamingTurnDriver<'_> {
         let typed_attachment_ids = orch.typed_attachment_ids_for_snapshot(&snapshot);
         let task_deliveries = orch.task_deliveries_for_snapshot(&snapshot).await;
         let turn_step_hook_active = mod_host.is_some();
+        if turn_step_hook_active || !retry_generation_allowed {
+            loop_state.recovery.last_generation = None;
+        } else {
+            // Freeze the exact post-hook generation that will be dispatched.
+            // This keeps source attachments, request permissions and UPE rows
+            // aligned with a budget retry instead of capturing a pre-hook view.
+            loop_state.recovery.last_generation = Some(crate::output_recovery::FrozenGeneration {
+                model: model.clone(),
+                profile: model_profile.clone(),
+                system: system_prompt.clone(),
+                messages: snapshot.clone(),
+                tools: wire_tools.clone(),
+                skip_global_cache: skip_global_cache_for_system_prompt,
+            });
+        }
         let mut mod_model_state = None;
         let stream_result = if let Some(host) = mod_host {
             let mut input = serde_json::json!({
@@ -1184,6 +1228,7 @@ impl StreamingTurnDriver<'_> {
                             system_prompt.as_ref(),
                             snapshot,
                             tool_declarations.clone(),
+                            max_output_budget,
                             None,
                             tool_result_reminder_suffixes.clone(),
                             crate::config::sanitize_query_source(&orch.config.query_source),
@@ -2324,6 +2369,7 @@ impl StreamingTurnDriver<'_> {
                                                 wire_tools.clone(),
                                             )
                                             .map_err(OrchestratorError::ApiCall)?,
+                                            None,
                                             None,
                                             tool_result_reminder_suffixes.clone(),
                                             crate::config::sanitize_query_source(
@@ -3663,6 +3709,7 @@ impl StreamingTurnDriver<'_> {
                         .max_output_tokens_recovery_count
                         .saturating_add(1);
                     loop_state.recovery.max_output_tokens_override = None;
+                    loop_state.recovery.output_recovery_actions += 1;
                     return Ok(Some(StepExit::Continue));
                 }
                 // A finalized partial is terminal before normal tool-result

@@ -2496,6 +2496,7 @@ dependencies = [
  "jsonrpc",
  "lingxi-llm-client",
  "llm-runtime",
+ "local-app",
  "lsp",
  "lsp-types",
  "mcp",
@@ -3626,6 +3627,21 @@ dependencies = [
  "tracing",
  "url",
  "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "local-app"
+version = "0.1.0"
+dependencies = [
+ "branding",
+ "core",
+ "platform-posix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 
@@ -7631,6 +7647,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "core",
+ "local-app",
  "mobile-linux-api",
  "once_cell",
  "permission",

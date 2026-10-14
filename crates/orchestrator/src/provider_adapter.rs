@@ -376,6 +376,15 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             .native_mid_conversation_tool_change_supported(model, profile)
     }
 
+    fn next_output_budget(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        usage: &llm_runtime::ExecutionUsage,
+    ) -> Result<Option<u32>, LlmError> {
+        self.service.next_output_budget(model, profile, usage)
+    }
+
     fn is_first_party_route(&self, model: &str, profile: Option<&str>) -> bool {
         self.service
             .is_first_party_route(model, profile)
@@ -1212,6 +1221,7 @@ impl StreamingApiClient for ProviderApiAdapter {
             messages,
             tools,
             None,
+            None,
             Vec::new(),
             query_source,
             skip_global_cache_for_system_prompt,
@@ -1232,6 +1242,7 @@ impl StreamingApiClient for ProviderApiAdapter {
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
         tools: Vec<llm_runtime::ToolDeclaration>,
+        max_tokens: Option<u32>,
         effort: Option<&str>,
         tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
         query_source: &str,
@@ -1253,7 +1264,7 @@ impl StreamingApiClient for ProviderApiAdapter {
                 skip_global_cache_for_system_prompt,
                 messages,
                 tools,
-                None,
+                max_tokens,
                 tool_result_reminder_suffixes,
                 typed_attachment_ids,
                 task_deliveries,
@@ -1288,6 +1299,7 @@ impl StreamingApiClient for ProviderApiAdapter {
                 system,
                 messages,
                 tools,
+                max_tokens,
                 effort
                     .map(|effort| serde_json::Value::String(effort.to_owned()))
                     .or_else(|| self.current_effort()),
@@ -2179,6 +2191,7 @@ mod tests {
                     None,
                     Vec::new(),
                     Vec::new(),
+                    None,
                     None,
                     Vec::new(),
                     "sdk",
@@ -3221,7 +3234,7 @@ mod tests {
                 lingxi_core::types::MessageId::new(),
                 "main-turn".into(),
             )],
-            vec![tool("Read"), tool("StructuredOutput")],
+            vec![tool("Read").into(), tool("StructuredOutput").into()],
             "sdk", false, None,
         )
         .await

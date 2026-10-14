@@ -2109,6 +2109,10 @@ pub(super) async fn build_mobile_inner_with_ask(
             crate::inline_visualization::shared_store(tool_ctx.fs.clone(), &cfg.lingxi_home);
         crate::inline_visualization::register_tool(&mut tools, tool_ctx.clone(), store);
     }
+    if cfg.local_apps {
+        let store = crate::local_apps::shared_store(tool_ctx.fs.clone(), &cfg.lingxi_home);
+        crate::local_apps::register_tool(&mut tools, tool_ctx.clone(), store);
+    }
     crate::mobile::apply_mobile_session_tool_policy(&mut tools, cfg.session_mode);
     let device_skill_tools = tools
         .available_tools(&tool_api::tool_trait::ToolStaticContext::default())

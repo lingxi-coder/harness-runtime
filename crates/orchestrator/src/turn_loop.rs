@@ -199,11 +199,8 @@ mod turn_loop_test;
 /// `query.ts:164` `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3`.
 pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
 
-/// Escalated output-token cap for the single-shot 8k→64k retry. 1:1 with TS
-/// `utils/context.ts:25` `ESCALATED_MAX_TOKENS = 64_000`.
-/// [`RecoveryState::max_output_tokens_override`] carries this value into the
-/// next `messages_create` request.
-pub(crate) const ESCALATED_MAX_TOKENS: u32 = 64_000;
+#[cfg(test)]
+pub(crate) const TEST_RECOVERY_OUTPUT_BUDGET: u32 = 77_777;
 
 fn select_visible_response_request_history<'a>(
     visible_response_id: &str,
@@ -332,6 +329,10 @@ pub(crate) struct RecoveryState {
     /// conversation. Capped at [`MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`]; once it
     /// reaches the limit the next `max_tokens` ends the turn.
     pub(crate) max_output_tokens_recovery_count: u32,
+    /// Shared quota/format recovery allowance for the entire user turn.
+    pub(crate) output_recovery_actions: u32,
+    pub(crate) last_generation: Option<crate::output_recovery::FrozenGeneration>,
+    pub(crate) retry_generation: Option<crate::output_recovery::FrozenGeneration>,
     /// When `Some(n)`, the NEXT API call uses `n` as its output-token cap
     /// (REC.A1 escalated retry). The turn loop TAKEs it (one-shot) before each
     /// call via [`crate::OrchestratorApiClient::messages_create`], so
@@ -536,7 +537,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     {
         orch.persist_prepared_turn_attachments(&mut prepared).await;
     }
-    let skip_global_cache_for_system_prompt = prepared.skip_global_cache_for_system_prompt;
+    let mut skip_global_cache_for_system_prompt = prepared.skip_global_cache_for_system_prompt;
     let mut history_snapshot = prepared.snapshot;
     let mut model = prepared.model;
     let mut model_profile = prepared.model_profile;
@@ -548,10 +549,34 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     let mut turn_reminders = prepared.turn_reminders;
     let mut guarded_async_hook_reminders = prepared.guarded_async_hook_reminders;
     let context_announcements = prepared.context_announcements;
-    let tools = prepared.wire_tools;
+    let mut tools = prepared.wire_tools;
     let deferred_tools_reminder = prepared.deferred_reminder;
     let date_change_reminder = prepared.date_change_reminder;
 
+    let mut system_override = None;
+    if let Some(state) = recovery.as_deref_mut() {
+        if let Some(frozen) = state.retry_generation.take() {
+            let latest_user = |messages: &[ConversationMessage]| {
+                messages
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m, ConversationMessage::User { is_meta: false, .. }))
+                    .map(ConversationMessage::id)
+            };
+            if latest_user(&history_snapshot) == latest_user(&frozen.messages)
+                && model == frozen.model
+                && model_profile == frozen.profile
+            {
+                history_snapshot = frozen.messages;
+                tools = frozen.tools;
+                skip_global_cache_for_system_prompt = frozen.skip_global_cache;
+                system_override = Some(frozen.system);
+            } else {
+                state.max_output_tokens_override = None;
+            }
+        }
+    }
+    let system = system_override.as_ref().map_or(system, Option::as_ref);
     // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
     // prior `max_tokens` recovery via `handle_max_output_tokens`). TAKE it so it
     // applies to EXACTLY this call and never leaks to the next turn.
@@ -606,6 +631,20 @@ async fn execute_one_turn_with_recovery_tracked_impl(
         &mut turn_reminders,
         &mut guarded_async_hook_reminders,
     );
+    if let Some(state) = recovery.as_deref_mut() {
+        state.last_generation = if mod_host.is_none() {
+            Some(crate::output_recovery::FrozenGeneration {
+                model: model.clone(),
+                profile: model_profile.clone(),
+                system: system.cloned(),
+                messages: history_snapshot.clone(),
+                tools: tools.clone(),
+                skip_global_cache: skip_global_cache_for_system_prompt,
+            })
+        } else {
+            None
+        };
+    }
     let turn_step_input_history = history_snapshot.clone();
     let computer_projection =
         crate::native_computer::prepare_projection(orch, &model, model_profile.as_deref(), &tools)

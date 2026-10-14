@@ -1616,7 +1616,9 @@ mod synthetic_denial_kind_tests {
                         is_error: false,
                         subagent_hooks_fired: false,
                         mcp_meta: None,
-                    })
+
+            data_projection:None,model_content_projection:None,mcp_meta_projection:None,
+})
                 }
                 () = async { match token { Some(t) => t.cancelled().await, None => std::future::pending().await } } => {
                     Err(ToolError::Aborted)

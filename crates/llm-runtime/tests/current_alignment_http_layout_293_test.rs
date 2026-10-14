@@ -323,6 +323,7 @@ async fn capture_anthropic(
                 USER_TEXT.to_owned(),
             )],
             Vec::new(),
+            None,
             Some(json!("medium")),
             None,
             false,

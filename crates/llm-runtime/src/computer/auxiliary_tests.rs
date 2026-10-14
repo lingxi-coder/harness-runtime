@@ -145,7 +145,7 @@ async fn auxiliary_builders_and_dispatch_never_submit_parent_receipts() {
         submission: Some(submission.clone()),
     };
     scope_computer_request(Some(projection), async {
-        for tools in [vec![], vec![computer_tool()]] {
+        for tools in [vec![], vec![computer_tool().into()]] {
             let request = auxiliary(&service, vec![user("summarize")], tools.clone());
             assert_independent(&request);
             assert_eq!(request.input.tools.len(), tools.len());
@@ -177,7 +177,7 @@ async fn auxiliary_builders_and_dispatch_never_submit_parent_receipts() {
             Some("test"),
             None,
             vec![user("continue")],
-            vec![computer_tool()],
+            vec![computer_tool().into()],
         );
         service.messages_create(main).await.unwrap();
         let submitted = journal.receipt("receipt-1").await.unwrap().unwrap();
@@ -228,7 +228,7 @@ async fn scheduled_main_request_keeps_its_native_projection_and_receipt_authorit
                 Some("test"),
                 None,
                 vec![user("scheduled desktop task")],
-                vec![computer_tool()],
+                vec![computer_tool().into()],
             );
             request.opts.query_source = Some("scheduled_task".into());
             let request = service
@@ -393,6 +393,7 @@ fn gemini_native_history() -> (Vec<ConversationMessage>, wire::ContinuationRef) 
             },
             history_user(vec![
                 ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: "synthetic".into(),
                     content: "Observed desktop".into(),
                     is_error: Some(false),

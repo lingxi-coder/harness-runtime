@@ -426,6 +426,9 @@ async fn nonempty_session_context_reaches_the_model_request_with_source_units() 
     let _after_user_turn = crate::request_context::staging_tests::TotalTokenTestEnv::enabled();
     let dir = tempfile::tempdir().unwrap();
     let email = "source-🧭@example.test";
+    let expected_user_email_context = format!(
+        "The user's email address is {email}. Use it only to identify the user, such as for authorship, attribution, or filtering their own work. Never send it to an unrelated service, such as in a request header, URL, or payload, unless the user explicitly asks."
+    );
     let mut config = crate::OrchestratorConfig::default();
     config.user_email = Some(email.to_owned());
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -472,8 +475,8 @@ async fn nonempty_session_context_reaches_the_model_request_with_source_units() 
         .expect("the durable context contains the configured email");
     assert_eq!(
         source_email_units,
-        email.encode_utf16().collect::<Vec<_>>(),
-        "the durable source attachment retains the exact JavaScript UTF-16 field"
+        expected_user_email_context.encode_utf16().collect::<Vec<_>>(),
+        "the durable source attachment retains the exact Native instruction and JavaScript UTF-16 field"
     );
 
     let matching_rows = request

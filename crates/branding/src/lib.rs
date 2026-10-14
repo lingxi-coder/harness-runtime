@@ -194,6 +194,10 @@ pub const VISUALIZATION_REFERENCE_PREFIX: &str = "::lingxi-visualization{";
 /// (`<config-home>/visualizations/<root-session-uuid>/`).
 pub const VISUALIZATIONS_DIR: &str = "visualizations";
 
+/// Directory under the config home that holds the device's app library
+/// (`<config-home>/local-apps/`).
+pub const LOCAL_APPS_DIR: &str = "local-apps";
+
 /// Current product namespace inventory, audited by the brand gate. Native
 /// protocol identifiers and the unbranded global-config filename are separate.
 pub const NAMESPACE_VALUES: &[&str] = &[
@@ -256,6 +260,7 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     MANAGED_DIR_UNIX,
     VISUALIZATION_REFERENCE_PREFIX,
     VISUALIZATIONS_DIR,
+    LOCAL_APPS_DIR,
 ];
 
 /// Resolve the user config-home: `$LINGXI_CONFIG_DIR` when the env value is

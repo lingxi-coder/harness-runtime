@@ -175,6 +175,13 @@ pub use lingxi_llm_client::websocket::ResponsesWebSocketRequestSnapshot;
 pub use lingxi_llm_client::ResponsesSession;
 
 impl ModelRuntime {
+    pub(crate) fn output_token_limits_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<lingxi_llm_client::client::OutputTokenLimits, LlmError> {
+        self.registry.output_token_limits_in(model, profile)
+    }
     /// Resolve the SDK wire family before adapting durable history. Per-model
     /// protocol selection is provider-owned, while the host selects the route.
     pub fn protocol_for_model(

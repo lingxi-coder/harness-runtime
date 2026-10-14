@@ -326,6 +326,10 @@ pub struct DesktopConfig {
     /// `Subagent { is_main_session: true }` only for an explicit background
     /// `/fork` launch whose transcript was copied from a main session.
     pub native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext,
+    /// The attached client opens local apps (a card under the tool call and
+    /// an Apps page). Registers the `LocalApp` tool and the `local-app`
+    /// skill; CLI and headless hosts leave it off.
+    pub local_apps: bool,
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
@@ -972,6 +976,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("insights_policy_gate", &self.insights_policy_gate)
             .field("mod_render_surface", &self.mod_render_surface)
             .field("inline_visualization", &self.inline_visualization)
+            .field("local_apps", &self.local_apps)
             .field(
                 "native_settings_agent_context",
                 &self.native_settings_agent_context,
@@ -1159,6 +1164,7 @@ impl Default for DesktopConfig {
             mod_render_surface: None,
             inline_visualization: false,
             native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,
+            local_apps: false,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_source: llm_runtime::CredentialSource::Configured,

@@ -1,6 +1,6 @@
 use super::error_reporting::surface_terminal_api_error;
 use super::{
-    RecoveryState, TurnStepOutcome, ESCALATED_MAX_TOKENS, MALFORMED_TOOL_USE_RETRY_FAILED,
+    RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
     MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
     MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
 };
@@ -23,48 +23,34 @@ fn citations_to_core(
     citations.map(|citation| citation.map(|payload| core_projection_from_payload(&payload)))
 }
 
-/// A1 `max_tokens` recovery decision (TS `query.ts:1223-1255`).
-///
-/// While `count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`: append the byte-exact
-/// meta nudge user message to history, increment the counter, and Continue.
-/// On exhaustion (count has reached the limit): end the turn with
-/// `stop_reason = "max_tokens"` (current behavior — surface the cap).
-///
-/// The 8k→64k escalation (TS `query.ts:1199-1221`) fires FIRST when
-/// [`crate::OrchestratorConfig::escalate_max_output_tokens`] is on and it has
-/// not yet fired this episode: it arms the override and returns `Continue` so
-/// the SAME step re-issues once at [`ESCALATED_MAX_TOKENS`] with no nudge.
+/// Semantic continuation after a confirmed output limit. No universal fixed
+/// escalation: budget changes require selected-route accounting facts.
 pub(super) async fn handle_max_output_tokens(
     orch: &ConversationOrchestrator,
     assistant_id: MessageId,
     state: &mut RecoveryState,
+    malformed_tool: bool,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
-    // REC.A1 escalation (8k→64k). TS (`query.ts:1199-1221`) does a single-shot
-    // retry at the escalated cap BEFORE the multi-turn nudge, gated on
-    // `tengu_otk_slot_v1` (here `escalate_max_output_tokens`) and "not already
-    // escalated". We arm `max_output_tokens_override` — which the next
-    // `execute_one_turn_with_recovery_tracked` TAKEs and passes to
-    // `messages_create` — and return `Continue` so the same step
-    // re-issues at 64k with NO nudge injected. The override is taken per call,
-    // so a separate `max_output_tokens_escalated` flag (reset alongside the
-    // recovery count) gates this to once per episode and prevents an
-    // escalate-forever loop when 64k also overflows.
-    if orch.config.escalate_max_output_tokens && !state.max_output_tokens_escalated {
-        state.max_output_tokens_override = Some(ESCALATED_MAX_TOKENS);
-        state.max_output_tokens_escalated = true;
-        return Ok(TurnStepOutcome::Continue(
-            super::NativeQueryTransition::InPlaceRetry,
-        ));
-    }
-
-    if state.max_output_tokens_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
+    if state.output_recovery_actions < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
         // Inject the "resume directly" nudge as a META user message. CC 2.1.207
         // builds it via `createUserMessage({…, isMeta:!0})`, so it persists with
         // top-level `isMeta:true` and is skipped by title / first-prompt /
         // visible-count extraction.
         let nudge_msg = ConversationMessage::user_meta(
             MessageId::new(),
-            MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.to_string(),
+            if crate::output_recovery::decide_output_recovery(
+                crate::output_recovery::CompletionFacts {
+                    stop_reason: Some("max_tokens"),
+                    malformed_tool,
+                    accepted_tools: false,
+                    actions_used: state.output_recovery_actions,
+                },
+            ) == crate::output_recovery::OutputRecoveryAction::RegenerateIncompleteTool
+            {
+                crate::output_recovery::INCOMPLETE_TOOL_NUDGE.to_string()
+            } else {
+                MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.to_string()
+            },
         );
         {
             let mut s = orch.session.lock().await;
@@ -77,6 +63,7 @@ pub(super) async fn handle_max_output_tokens(
         // A clean nudge retry never carries an escalated override forward
         // (TS sets `maxOutputTokensOverride: undefined` here).
         state.max_output_tokens_override = None;
+        state.output_recovery_actions += 1;
         return Ok(TurnStepOutcome::Continue(
             super::NativeQueryTransition::InPlaceRetry,
         ));
@@ -163,7 +150,9 @@ pub(super) async fn handle_malformed_tool_use(
     assistant_id: MessageId,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
-    if state.malformed_tool_use_retried {
+    if state.malformed_tool_use_retried
+        || state.output_recovery_actions >= MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+    {
         // Second failure → terminal NON-meta message, complete the turn. The
         // binary builds this via `ql(...)`→`mcc({isApiErrorMessage:!0})`, i.e. an
         // ASSISTANT api-error message (`role:"assistant", stop_reason:
@@ -212,7 +201,7 @@ pub(super) async fn handle_malformed_tool_use(
     }
     orch.persist_message_to_jsonl(&nudge_msg).await;
     // TS resets the recovery counters on the retry transition.
-    state.reset_max_output_tokens_recovery();
+    state.output_recovery_actions += 1;
     state.malformed_tool_use_retried = true;
     Ok(TurnStepOutcome::Continue(
         super::NativeQueryTransition::InPlaceRetry,

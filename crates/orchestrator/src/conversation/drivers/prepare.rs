@@ -294,10 +294,9 @@ impl ConversationOrchestrator {
             .prepare_model_call_snapshot(path, system, user_cancel)
             .await?;
         let mut snapshot = prepared_call.history_snapshot;
-        // Prompt-ingress rows are already durable. On the initial user step,
-        // the collector reuses their identities in Native's outgoing order.
-        // Do not resurrect rows removed by compaction or move them again on a
-        // later tool step.
+        // The current Native NAr batch remains task-local until accepted request
+        // assembly. Keep its identities out of this earlier history snapshot;
+        // the accepted finalizer below re-reads only committed rows.
         if native_nar_ingress {
             if let Some(rows) = crate::request_context::staged_prompt_ingress_attachments() {
                 let ingress_ids = rows
@@ -676,6 +675,57 @@ impl ConversationOrchestrator {
             crate::request_context::mark_native_request_assembly_accepted();
             crate::request_context::finalize_prompt_ingress_batch(self, user_cancel).await?;
 
+            // The request history snapshot predates accepted NAr publication.
+            // Rebuild its current batch from the task-local identities that the
+            // finalizer actually committed, so no pre-acceptance row can leak
+            // into the request and no accepted row is lost from this request.
+            let accepted_ingress =
+                crate::request_context::staged_prompt_ingress_attachments().unwrap_or_default();
+            let staged_ingress_ids = accepted_ingress
+                .iter()
+                .map(|row| row.message.id())
+                .collect::<std::collections::HashSet<_>>();
+            snapshot.retain(|row| !staged_ingress_ids.contains(&row.id()));
+            if crate::request_context::prompt_ingress_batch_finalized() {
+                let model_visible_ingress_ids = accepted_ingress
+                    .iter()
+                    .filter(|row| row.rendered.array_len("").is_some_and(|length| length > 0))
+                    .map(|row| row.message.id())
+                    .collect::<std::collections::HashSet<_>>();
+                let accepted_history = {
+                    let session = self.session.lock().await;
+                    session
+                        .model_context_history()
+                        .into_iter()
+                        .filter(|row| model_visible_ingress_ids.contains(&row.id()))
+                        .map(|row| (row.id(), row))
+                        .collect::<std::collections::HashMap<_, _>>()
+                };
+                let accepted_ids = accepted_history
+                    .keys()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>();
+                turn_reminders.retain(|row| {
+                    !staged_ingress_ids.contains(&row.id()) || accepted_ids.contains(&row.id())
+                });
+                let mut accepted_history = accepted_history;
+                for attachment in accepted_ingress {
+                    if attachment
+                        .rendered
+                        .array_len("")
+                        .is_some_and(|length| length > 0)
+                    {
+                        if let Some(message) = accepted_history.remove(&attachment.message.id()) {
+                            snapshot.push(message);
+                        }
+                    }
+                }
+            } else {
+                // A cancellation at the commit boundary leaves the cached NAr
+                // batch retryable, but this prepared step must not retain it.
+                turn_reminders.retain(|row| !staged_ingress_ids.contains(&row.id()));
+            }
+
             // This snapshot predates the NAr finalizer, which flushes the
             // current UPE and following prompt.submit rows into live history.
             // Copy only those exact buffered IDs from model-visible history so
@@ -974,25 +1024,27 @@ impl ConversationOrchestrator {
             let mut transient = Vec::new();
             let mut model_reminders = Vec::new();
             let mut guarded_async_hook_reminders = Vec::new();
-            let staged_ingress = if native_nar_ingress {
+            // Pending NAr rows are request-local until the finalizer accepts
+            // them. Once finalized, keep the historical live-ID filter so a
+            // later re-snapshot does not resurrect rows removed by compaction.
+            let mut staged_ingress = if native_nar_ingress {
                 crate::request_context::staged_prompt_ingress_attachments()
             } else {
                 None
             };
-            let staged_ingress = if let Some(mut rows) = staged_ingress {
-                let live_ids = self
-                    .session
-                    .lock()
-                    .await
-                    .model_context_history()
-                    .iter()
-                    .map(ConversationMessage::id)
-                    .collect::<std::collections::HashSet<_>>();
-                rows.retain(|row| live_ids.contains(&row.message.id()));
-                Some(rows)
-            } else {
-                None
-            };
+            if crate::request_context::prompt_ingress_batch_finalized() {
+                if let Some(rows) = staged_ingress.as_mut() {
+                    let live_ids = self
+                        .session
+                        .lock()
+                        .await
+                        .model_context_history()
+                        .iter()
+                        .map(ConversationMessage::id)
+                        .collect::<std::collections::HashSet<_>>();
+                    rows.retain(|row| live_ids.contains(&row.message.id()));
+                }
+            }
             let staged = |kind| {
                 staged_ingress
                     .as_ref()

@@ -283,6 +283,17 @@ pub trait OrchestratorApiClient: Send + Sync {
         Err(LlmError::ModelUnavailable)
     }
 
+    /// Resolve a bounded retry budget using the exact serving route. Missing
+    /// accounting or route facts prohibit an invented increase.
+    fn next_output_budget(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _usage: &llm_runtime::ExecutionUsage,
+    ) -> Result<Option<u32>, LlmError> {
+        Ok(None)
+    }
+
     /// Run the internal vision-delegation side query for a non-vision main route.
     async fn analyze_vision_delegation(
         &self,
@@ -526,6 +537,7 @@ pub trait StreamingApiClient: Send + Sync {
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
         tools: Vec<llm_runtime::ToolDeclaration>,
+        max_tokens: Option<u32>,
         effort: Option<&str>,
         tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
         query_source: &str,
@@ -540,6 +552,11 @@ pub trait StreamingApiClient: Send + Sync {
         >,
         model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        if max_tokens.is_some() {
+            return Err(LlmError::UnsupportedCapability {
+                capability: "streaming output budget override".into(),
+            });
+        }
         let _ = effort;
         let _ = tool_result_reminder_suffixes;
         let _ = request_dispatch_observer;

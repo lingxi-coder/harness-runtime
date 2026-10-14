@@ -26,7 +26,8 @@ LEAF_LIBRARIES = {"device-api", "json-projection", "mcp-wire", "rooted-fs"}
 
 # The crates that implemented Local App when it was a host feature, matched by NAME because an old git revision of
 # the local-app-builder repository still resolves. That repository now ships only a plugin (skills and templates);
-# nothing here may bring one of these crates back.
+# nothing here may bring one of these crates back. The built-in single-document tier is `crates/local-app`, which is
+# not one of them.
 LOCAL_APP_CRATES = {"local-app-builder-contracts", "local-app-builder-plugin", "local-app-builder-service", "local-apps"}
 
 # The SDK assembles existing components; components must never reach back into

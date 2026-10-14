@@ -92,7 +92,7 @@ impl MemorySelector {
                     }
                 }
             })),
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             max_retries: 2,
             temperature: Some(0.0),
             thinking: None,

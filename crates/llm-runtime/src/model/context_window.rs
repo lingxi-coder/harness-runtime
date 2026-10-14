@@ -344,21 +344,13 @@ pub fn known_output_token_limit_for_model(model: &str) -> Option<u64> {
 
 /// Returns the ordinary per-request output budget for `model`.
 ///
-/// Catalog `limit.output` values are hard provider ceilings, not sensible
-/// defaults for every turn.  Most coding-agent turns need far less output, and
-/// using a ceiling that nearly equals the context window leaves no reliable
-/// room for provider-side prompt/tool formatting.  Keep Claude's model-specific
-/// defaults, but cap the implicit default for catalog-backed non-Claude models
-/// at the same 32k budget used by the generic fallback.  An explicit
-/// `LINGXI_MAX_OUTPUT_TOKENS` value may still opt in up to the model ceiling.
+/// Forks without a route handle use the known model ceiling. Main requests use
+/// the SDK's selected-route limits and reserve input/context headroom before
+/// dispatch. Never impose a shared 32k ceiling on catalog-backed models.
 #[must_use]
 pub fn default_output_tokens_for_model(model: &str) -> u64 {
     let (model_default, upper_limit) = model_max_output_tokens(model);
-    let default_tokens = if is_claude_family(model) {
-        model_default
-    } else {
-        upper_limit.min(MAX_OUTPUT_TOKENS_DEFAULT)
-    };
+    let default_tokens = model_default;
     configured_output_tokens(default_tokens, upper_limit)
 }
 
@@ -624,7 +616,7 @@ mod tests {
         assert_eq!(context_window_for_model(id, &[]), 1_050_000);
         assert_eq!(output_token_limit_for_model(id), 128_000);
         assert_eq!(max_output_tokens_for_model(id), 128_000);
-        assert_eq!(default_output_tokens_for_model(id), 32_000);
+        assert_eq!(default_output_tokens_for_model(id), 128_000);
         // Thinking ceiling follows the real output, not the Claude 128k-1.
         assert_eq!(max_thinking_tokens_for_model(id), 127_999);
 
@@ -650,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_glm_free_does_not_use_hard_output_limit_as_default() {
+    fn openrouter_glm_free_uses_published_ceiling_before_request_context_bounding() {
         use crate::model::model_limits::{register, ModelLimits};
 
         let id = "z-ai/glm-5.2:free-test";
@@ -665,7 +657,7 @@ mod tests {
         assert_eq!(context_window_for_model(id, &[]), 256_000);
         assert_eq!(output_token_limit_for_model(id), 230_400);
         assert_eq!(max_output_tokens_for_model(id), 230_400);
-        assert_eq!(default_output_tokens_for_model(id), 32_000);
+        assert_eq!(default_output_tokens_for_model(id), 230_400);
         assert_eq!(max_thinking_tokens_for_model(id), 230_399);
         assert_eq!(
             known_output_token_limit_for_model("unknown-custom-model"),

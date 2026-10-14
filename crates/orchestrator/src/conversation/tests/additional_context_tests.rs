@@ -610,6 +610,7 @@ impl crate::conversation::StreamingApiClient for ConfiguredModelSourceStreamingA
         _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<llm_runtime::ToolDeclaration>,
+        _max_tokens: Option<u32>,
         _effort: Option<&str>,
         _tool_result_reminder_suffixes: Vec<
             llm_runtime::convert::AnthropicToolResultReminderSuffix,

@@ -79,6 +79,7 @@ desktop = [
     "dep:tool-cron",
     "dep:tool-ui",
     "dep:visualization",
+    "dep:local-app",
     "dep:tool-skill",
     "dep:tool-agent",
     "dep:tool-workflow",
@@ -142,6 +143,7 @@ mobile = [
     "dep:cron",
     "dep:tool-ui",
     "dep:visualization",
+    "dep:local-app",
     "dep:tool-skill",
     "dep:tool-mobile",
     "dep:tool-shell-mobile",
@@ -254,6 +256,7 @@ tool-skill = { path = "../tools/skill", optional = true }
 tool-task = { path = "../tools/task", optional = true }
 tool-ui = { path = "../tools/ui", optional = true }
 visualization = { path = "../visualization", optional = true }
+local-app = { path = "../local-app", optional = true }
 tool-web = { path = "../tools/web", optional = true }
 tool-workflow = { path = "../tools/workflow", optional = true }
 tool-worktree = { path = "../tools/worktree", optional = true }
@@ -305,6 +308,11 @@ required-features = ["mobile", "desktop"]
 name = "inline_visualization"
 path = "tests/inline_visualization.rs"
 required-features = ["desktop"]
+
+[[test]]
+name = "local_app"
+path = "tests/local_app.rs"
+required-features = ["mobile", "desktop"]
 
 [[test]]
 name = "decision_contract"

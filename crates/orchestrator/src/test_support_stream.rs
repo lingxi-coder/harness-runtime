@@ -37,6 +37,7 @@ pub struct CapturedStreamCall {
     pub profile: Option<String>,
     /// Per-request override supplied by a `turn.step` hook, if any.
     pub effort_override: Option<String>,
+    pub output_budget: Option<u32>,
     /// Assembled system prompt (`None` if omitted).
     pub system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     /// Conversation history snapshot at the time of the call.
@@ -137,6 +138,7 @@ impl StreamingApiClient for MockStreamingApiClient {
             model: model.to_string(),
             profile: profile.map(str::to_string),
             effort_override: None,
+            output_budget: None,
             system: system.cloned(),
             messages,
             tools,
@@ -162,6 +164,7 @@ impl StreamingApiClient for MockStreamingApiClient {
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
         tools: Vec<llm_runtime::ToolDeclaration>,
+        max_tokens: Option<u32>,
         effort: Option<&str>,
         tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
         query_source: &str,
@@ -195,6 +198,7 @@ impl StreamingApiClient for MockStreamingApiClient {
             .await?;
         if let Some(last) = self.captured.lock().await.last_mut() {
             last.effort_override = effort.map(str::to_owned);
+            last.output_budget = max_tokens;
         }
         Ok(stream)
     }

@@ -2467,7 +2467,7 @@ mod api_error_metrics_tests {
             per_turn_effort: None,
             resumable: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text {
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "API Error: bad request".into(),
                 citations: None,
             }],
@@ -2489,7 +2489,7 @@ mod api_error_metrics_tests {
             per_turn_effort: None,
             resumable: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text {
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "recovered".into(),
                 citations: None,
             }],

@@ -100,6 +100,7 @@ pub struct MockApiClient {
     model_listings: std::sync::Mutex<Vec<lingxi_core::host::ModelListing>>,
     effort_snapshot: std::sync::Mutex<Option<lingxi_core::host::effort::EffortCommandSnapshot>>,
     native_mid_system_supported: std::sync::Mutex<bool>,
+    recovery_budget: Option<u32>,
 }
 
 /// Captured startup Responses WebSocket prewarm call.
@@ -120,6 +121,11 @@ pub struct MockPrewarmCall {
 }
 
 impl MockApiClient {
+    pub fn with_recovery_budget(mut self, budget: u32) -> Self {
+        self.recovery_budget = Some(budget);
+        self
+    }
+
     /// Supply authoritative native selected-route state. Synthetic mock routes
     /// otherwise use the caller's explicit model identity, without native settings.
     pub fn set_effort_command_snapshot(
@@ -149,6 +155,7 @@ impl MockApiClient {
             model_listings: std::sync::Mutex::new(Vec::new()),
             effort_snapshot: std::sync::Mutex::new(None),
             native_mid_system_supported: std::sync::Mutex::new(false),
+            recovery_budget: None,
         }
     }
 
@@ -253,6 +260,14 @@ impl OrchestratorApiClient for MockApiClient {
         _profile: Option<&str>,
     ) -> bool {
         *self.native_mid_system_supported.lock().unwrap()
+    }
+    fn next_output_budget(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: &llm_runtime::ExecutionUsage,
+    ) -> Result<Option<u32>, LlmError> {
+        Ok(self.recovery_budget)
     }
 
     fn effort_command_snapshot(

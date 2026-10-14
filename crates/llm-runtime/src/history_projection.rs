@@ -1184,6 +1184,13 @@ pub(crate) fn project_model_response(
         "non_streaming_response",
         &serialized_payload(&true)?,
     )?;
+    if !decoded.tool_input_issues.is_empty() {
+        set_upstream_metadata_field(
+            &mut metadata,
+            "tool_input_issues",
+            &serialized_payload(&decoded.tool_input_issues)?,
+        )?;
+    }
     let native_stop_details = decoded
         .anthropic_stop_details()
         .map(stop_details)
@@ -1910,4 +1917,15 @@ mod stop_delta_tests {
             .iter()
             .any(|event| matches!(event, HistoryEvent::MessageStop)));
     }
+}
+
+pub(crate) fn attach_output_budget(
+    metadata: &mut wire::JsonPayload,
+    observation: Value,
+) -> Result<(), LlmError> {
+    set_upstream_metadata_field(
+        metadata,
+        "output_budget",
+        &serialized_payload(&observation)?,
+    )
 }

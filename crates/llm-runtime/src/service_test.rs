@@ -4410,6 +4410,7 @@ mod tests {
                     api_message_override: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolResult {
+                        content_projection: None,
                         tool_use_id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         content: String::new().into(),
                         is_error: Some(false),
@@ -5465,22 +5466,21 @@ mod tests {
     }
 
     #[test]
-    fn build_request_adaptive_models_get_adaptive_no_temperature_model_max_tokens() {
+    fn build_request_adaptive_models_preserve_automatic_output_budget() {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_thinking_env();
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport); // default ThinkingConfig::Adaptive
 
-        // (model, expected model-max-output-tokens). Existing 4.x defaults stay
-        // unchanged; the current 5-series lineup exposes 128k output.
-        for (model, expected_max) in [
-            ("claude-opus-4-6", 64_000u32),
-            ("claude-opus-4-8", 64_000),
-            ("claude-opus-5", 128_000),
-            ("claude-sonnet-4-6", 32_000),
-            ("claude-sonnet-5", 128_000),
-            ("claude-fable-5-1", 128_000),
-            ("claude-mythos-5-1", 128_000),
+        // Runtime preserves automatic intent; the SDK resolves each route budget.
+        for model in [
+            "claude-opus-4-6",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
         ] {
             let req = adapter
                 .build_request(
@@ -5508,9 +5508,8 @@ mod tests {
                 "{model} → no temperature when thinking on"
             );
             assert_eq!(
-                req.input.max_tokens,
-                Some(expected_max),
-                "{model} → model max_tokens"
+                req.input.max_tokens, None,
+                "{model} → preserve automatic budget intent"
             );
         }
         clear_thinking_env();
@@ -5524,8 +5523,7 @@ mod tests {
         let adapter = make_adapter(transport); // default Adaptive intent, but model disallows adaptive
 
         // haiku-4-5 supports thinking but NOT adaptive → Enabled{upperLimit-1}.
-        // compaction max output for haiku-4-5 = (32_000, 64_000) → budget 63_999,
-        // clamped to max_tokens(32_000)-1 = 31_999.
+        // The 64k output ceiling also permits the model's 63_999 thinking cap.
         let req = adapter
             .build_request(
                 "claude-haiku-4-5",
@@ -5539,7 +5537,7 @@ mod tests {
                 PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
-        assert_eq!(req.input.max_tokens, Some(32_000));
+        assert_eq!(req.input.max_tokens, None);
         assert_eq!(
             req.input
                 .thinking
@@ -5735,7 +5733,7 @@ mod tests {
             "opus-4-8 thinking-disabled → no temperature (not in rhn set)"
         );
         // max_tokens still uses the model limit even when thinking is disabled.
-        assert_eq!(req.input.max_tokens, Some(64_000));
+        assert_eq!(req.input.max_tokens, None);
         clear_thinking_env();
     }
 
@@ -5764,19 +5762,30 @@ mod tests {
     }
 
     #[test]
-    fn build_request_uses_safe_glm_default_and_enforces_hard_output_limit() {
-        use crate::model::model_limits::{register, ModelLimits};
-
+    fn build_request_uses_selected_glm_ceiling_and_enforces_hard_output_limit() {
         let model = "z-ai/glm-5.2:free-build-request-test";
-        register(
-            model,
-            ModelLimits {
-                context_window: 256_000,
-                max_output_tokens: 230_400,
-            },
-        );
+        let mut provider = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|provider| provider.profile_name == "openrouter")
+            .unwrap();
+        provider.wire_profile = None;
+        provider.connection = Default::default();
+        provider.models.truncate(1);
+        let entry = &mut provider.models[0];
+        entry.display_model = model.into();
+        entry.request_model = model.into();
+        entry.billing_model = model.into();
+        entry.metadata.context_window_tokens = Some(256_000);
+        entry.metadata.max_output_tokens = Some(230_400);
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
-        let adapter = make_adapter(transport);
+        let mut adapter = make_adapter(transport);
+        adapter.client = Arc::new(
+            ModelRuntime::from_config(ClientConfig {
+                providers: vec![provider],
+            })
+            .unwrap(),
+        );
 
         let ordinary = adapter
             .build_request(
@@ -5791,7 +5800,7 @@ mod tests {
                 PromptCacheQuerySource::Unspecified,
             )
             .expect("ordinary GLM request");
-        assert_eq!(ordinary.input.max_tokens, Some(32_000));
+        assert_eq!(ordinary.input.max_tokens, None);
 
         let oversized_override = adapter
             .build_request(
@@ -5806,7 +5815,7 @@ mod tests {
                 PromptCacheQuerySource::Unspecified,
             )
             .expect("explicit GLM request");
-        assert_eq!(oversized_override.input.max_tokens, Some(230_400));
+        assert_eq!(oversized_override.input.max_tokens, Some(u32::MAX));
     }
 
     #[test]
@@ -5828,6 +5837,53 @@ mod tests {
             .expect("custom model request");
 
         assert_eq!(request.input.max_tokens, Some(150_000));
+    }
+
+    #[test]
+    fn build_request_catalog_routes_preserve_automatic_budget_intent() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let mut adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        adapter.client = Arc::new(
+            ModelRuntime::from_config(ClientConfig {
+                providers: crate::builtin_presets().providers,
+            })
+            .unwrap(),
+        );
+        let mut checked = 0;
+        for listing in adapter.client.available_models() {
+            let limits = adapter
+                .client
+                .output_token_limits_in(&listing.display_model, Some(&listing.profile_name))
+                .unwrap();
+            if limits.max_output_tokens.is_none() {
+                continue;
+            }
+            let req = adapter
+                .build_request(
+                    &listing.display_model,
+                    Some(&listing.profile_name),
+                    None,
+                    vec![text_user_msg("hello")],
+                    vec![],
+                    true,
+                    None,
+                    false,
+                    PromptCacheQuerySource::Unspecified,
+                )
+                .unwrap();
+            assert_eq!(
+                req.input.max_tokens, None,
+                "{}/{}",
+                listing.profile_name, listing.request_model
+            );
+            checked += 1;
+        }
+        assert!(checked > 100, "checked {checked} routes");
+        clear_thinking_env();
     }
 
     #[test]
@@ -6777,7 +6833,7 @@ mod tests {
                 None,
                 custom_system_prompt(Some("sys")),
                 Vec::new(),
-                tools,
+                tools.into_iter().map(Into::into).collect(),
             ))
             .await
             .expect("ok");
@@ -6799,7 +6855,7 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
-                tools,
+                tools.into_iter().map(Into::into).collect(),
             ))
             .await;
         assert!(result.is_ok(), "tool-capable model should accept tools");
@@ -8369,6 +8425,7 @@ mod tests {
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: lingxi_core::types::ToolUseId::new(),
                     content: "lots of text, no media".to_string().into(),
                     is_error: Some(false),
@@ -8397,6 +8454,7 @@ mod tests {
             api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see images".to_string().into(),
                 is_error: Some(false),
@@ -8424,6 +8482,7 @@ mod tests {
             api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see image".to_string().into(),
                 is_error: Some(false),
@@ -8452,6 +8511,7 @@ mod tests {
             api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "imgs".to_string().into(),
                 is_error: Some(false),
@@ -10654,6 +10714,8 @@ mod tests {
                 Vec::new(),
                 None,
                 None,
+                None,
+                None,
                 false,
                 Some("main"),
                 Some(crate::RequestDispatchAdmission::new(|| false)),
@@ -10699,6 +10761,8 @@ mod tests {
                 None,
                 Vec::new(),
                 Vec::new(),
+                None,
+                None,
                 None,
                 None,
                 false,
@@ -10750,6 +10814,8 @@ mod tests {
                     "hello".into(),
                 )],
                 Vec::new(),
+                None,
+                None,
                 None,
                 None,
                 false,
@@ -12577,42 +12643,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_output_to_context_caps_output_to_leave_room_for_input() {
-        // Model whose output == context (e.g. qwen3-coder:free at 262000/262000).
-        // With ~21k input (3.4k text + 17.7k tool schemas) the requested output
-        // must shrink so input + output <= context — previously it stayed 262000
-        // and the endpoint rejected the whole turn ("requested about 283076
-        // tokens … 262000 in the output").
-        let context = 262_000u64;
-        let input = 21_076u64;
-        let capped = bound_output_to_context(262_000, context, input);
-        assert!(
-            u64::from(capped) + input <= context,
-            "input + output must fit the window: {capped} + {input}"
-        );
-        assert!(capped < 262_000, "must be capped below the full window");
-
-        // A model whose output already fits (Claude: 64k output, 200k context,
-        // small input) is left UNCHANGED.
-        assert_eq!(bound_output_to_context(64_000, 200_000, 5_000), 64_000);
-
-        // Near-full input must still produce a valid request rather than forcing
-        // an output floor that makes input + output exceed the hard context cap.
-        assert_eq!(bound_output_to_context(64_000, 200_000, 199_000), 1);
-
-        // Input that already fills the window cannot produce a valid output.
-        assert_eq!(bound_output_to_context(64_000, 200_000, 200_001), 0);
-
-        // A percentage-only margin must not consume all 40k of otherwise valid
-        // output space on a 1M-class model.
-        assert_eq!(
-            bound_output_to_context(32_000, 1_050_000, 1_010_000),
-            20_000
-        );
-    }
-
-    #[test]
-    fn custom_context_beta_controls_request_output_bound() {
+    fn custom_context_beta_preserves_automatic_output_budget_intent() {
         // 520k ASCII bytes are below the default 200k input window under the
         // conservative request estimator, but leave too little headroom for a
         // full 32k output. With the 1M beta the full output allowance fits.
@@ -12634,7 +12665,7 @@ mod tests {
                 PromptCacheQuerySource::Unspecified,
             )
             .expect("default request");
-        assert!(default_req.input.max_tokens.expect("max tokens") < 32_000);
+        assert_eq!(default_req.input.max_tokens, None);
 
         let with_beta = make_adapter(FakeTransport::always(ProviderResponse::json(
             200,
@@ -12660,7 +12691,7 @@ mod tests {
                 PromptCacheQuerySource::Unspecified,
             )
             .expect("1m request");
-        assert_eq!(beta_req.input.max_tokens, Some(32_000));
+        assert_eq!(beta_req.input.max_tokens, None);
     }
 
     mod request_session_capture_tests {
@@ -13708,33 +13739,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod subscription_rate_limit_tests {
-    /// REGRESSION: a ChatGPT-login 429 burned the full retry ladder.
-    ///
-    /// The rule "a subscription's 429 is terminal" already existed, but only in
-    /// Claude.ai vocabulary (`RetryState::is_subscriber`, fed from a snapshot
-    /// whose `subscription_type` is an Anthropic concept). An OpenAI plan can
-    /// never set it, so the ChatGPT profile fell through to the API-key path and
-    /// retried a quota that resets on the plan's clock, not ours.
-    #[test]
-    fn a_subscription_profile_fails_fast_while_an_api_key_retries() {
-        use super::super::rate_limit_cannot_clear as cannot_clear;
-        // The credential that motivated this: ChatGPT OAuth, a plan quota.
-        assert!(cannot_clear(Some("openai-chatgpt"), "gpt-6-astra"));
-        // The same MODEL on an API key keeps the ladder — the model is not the
-        // discriminator, the credential is.
-        assert!(!cannot_clear(Some("openai"), "gpt-6-astra"));
-        // Unchanged: OpenRouter's free tier, matched on the model suffix.
-        assert!(cannot_clear(Some("openrouter"), "z-ai/glm-4.6:free"));
-        assert!(!cannot_clear(Some("openrouter"), "z-ai/glm-4.6"));
-        // Anthropic is untouched here on purpose: its subscription is already
-        // handled by the parity subscriber gate.
-        assert!(!cannot_clear(Some("anthropic"), "claude-opus-5"));
-        assert!(!cannot_clear(None, "claude-opus-5"));
-    }
-}
-
-#[cfg(test)]
 mod tool_result_reminder_suffix_tests {
     use super::*;
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -13811,5 +13815,32 @@ mod tool_result_reminder_suffix_tests {
             content.string_at(""),
             Some("tool output\n\n<system-reminder>tokens</system-reminder>")
         );
+    }
+}
+
+#[cfg(test)]
+mod subscription_rate_limit_tests {
+    /// REGRESSION: a ChatGPT-login 429 burned the full retry ladder.
+    ///
+    /// The rule "a subscription's 429 is terminal" already existed, but only in
+    /// Claude.ai vocabulary (`RetryState::is_subscriber`, fed from a snapshot
+    /// whose `subscription_type` is an Anthropic concept). An OpenAI plan can
+    /// never set it, so the ChatGPT profile fell through to the API-key path and
+    /// retried a quota that resets on the plan's clock, not ours.
+    #[test]
+    fn a_subscription_profile_fails_fast_while_an_api_key_retries() {
+        use super::super::rate_limit_cannot_clear as cannot_clear;
+        // The credential that motivated this: ChatGPT OAuth, a plan quota.
+        assert!(cannot_clear(Some("openai-chatgpt"), "gpt-6-astra"));
+        // The same MODEL on an API key keeps the ladder — the model is not the
+        // discriminator, the credential is.
+        assert!(!cannot_clear(Some("openai"), "gpt-6-astra"));
+        // Unchanged: OpenRouter's free tier, matched on the model suffix.
+        assert!(cannot_clear(Some("openrouter"), "z-ai/glm-4.6:free"));
+        assert!(!cannot_clear(Some("openrouter"), "z-ai/glm-4.6"));
+        // Anthropic is untouched here on purpose: its subscription is already
+        // handled by the parity subscriber gate.
+        assert!(!cannot_clear(Some("anthropic"), "claude-opus-5"));
+        assert!(!cannot_clear(None, "claude-opus-5"));
     }
 }

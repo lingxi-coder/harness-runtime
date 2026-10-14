@@ -23,7 +23,7 @@ use thiserror::Error;
 ///
 /// Converted into [`crate::error::OrchestratorError::StreamingProtocol`]
 /// at the consumer boundary (`streaming_loop::pump_stream`).
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Error, Clone, PartialEq, Eq)]
 pub enum StreamingError {
     /// A delta arrived for an `index` that has no corresponding `start`.
     #[error("streaming: delta for block index {index} without prior start")]
@@ -51,7 +51,7 @@ pub enum StreamingError {
     /// `input_json_delta` accumulation could not be JSON-parsed at
     /// `content_block_stop`. The buffer is preserved in the error for
     /// debugging.
-    #[error("streaming: tool_use input failed to parse as JSON: {reason}: buffer={buffer:?}")]
+    #[error("streaming: tool_use input for block {index} failed to parse as JSON: {reason}")]
     ToolUseJsonParse {
         /// Block index reported by the API.
         index: u32,
@@ -64,4 +64,9 @@ pub enum StreamingError {
     /// its validated JSON representation.
     #[error("streaming: invalid provider JSON source: {0}")]
     JsonPayload(String),
+}
+
+// Diagnostic formatting must not expose partial source or credentials.
+impl std::fmt::Debug for StreamingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { std::fmt::Display::fmt(self, f) }
 }

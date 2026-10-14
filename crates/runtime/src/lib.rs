@@ -34,6 +34,9 @@ mod skill_prompt;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 pub mod inline_visualization;
 
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod local_apps;
+
 #[cfg(feature = "desktop")]
 pub mod desktop_visualization;
 
