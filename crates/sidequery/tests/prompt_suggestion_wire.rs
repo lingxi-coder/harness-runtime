@@ -98,7 +98,7 @@ async fn session_prompt_suggestion_streams_with_parent_prefix_candidates_and_htt
             lingxi_core::types::ConversationMessage::user(lingxi_core::types::MessageId::new(),"predict my next prompt".into())
         ],
         tools:vec![json!({"name":"Read","description":"parent tool","input_schema":{"type":"object","properties":{}}}).into()],
-        tool_choice:None,output_format:None,max_tokens:128,max_retries:0,temperature:None,thinking:None,effort:None,
+        tool_choice:None,output_format:None,max_tokens:Some(128),max_retries:0,temperature:None,thinking:None,effort:None,
         stop_sequences:vec![],query_source:QuerySource::PromptSuggestion,skip_system_prompt_prefix:true,
     }, sidequery::ForkedSideQueryOptions { fork_point_message_id: Some(parent_id), ..Default::default() }).await.unwrap();
         assert_eq!(result.response.text.as_deref(), Some("run tests"));

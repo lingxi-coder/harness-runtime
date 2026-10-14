@@ -126,7 +126,7 @@ async fn classifier_keeps_each_system_cache_control_without_implicit_prompt_rewr
                     tools: vec![],
                     tool_choice: None,
                     output_format: None,
-                    max_tokens: 1024,
+                    max_tokens: Some(1024),
                     max_retries: 0,
                     temperature: None,
                     thinking: Some(llm_runtime::model::thinking::ThinkingConfig::Disabled),
