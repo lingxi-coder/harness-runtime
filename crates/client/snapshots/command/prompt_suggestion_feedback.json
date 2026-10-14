@@ -2,5 +2,5 @@
   "type": "prompt_suggestion_feedback",
   "session_id": "session-1",
   "uuid": "suggestion-1",
-  "action": "accept"
+  "action": "accepted"
 }
