@@ -1555,6 +1555,7 @@ mod model_source_projection_tests {
             settings: SettingsJson::default(),
             trace: Default::default(),
             effort_layers: Vec::new(),
+            fusion_layers: Vec::new(),
             source_projection: Some(projection.clone()),
             source_layers: sources
                 .iter()

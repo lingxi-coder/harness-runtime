@@ -210,7 +210,7 @@ fn remove_settings_source_field(
 }
 
 /// A process-local lock per resolved settings path, matching the upstream
-/// promise queue. It deliberately does not claim cross-process exclusion.
+/// promise queue. Publication also holds the adjacent process-wide file lock.
 static SETTINGS_PATH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 #[cfg(test)]
@@ -269,28 +269,74 @@ where
     A: FnOnce(),
     B: FnOnce(),
 {
+    transform_settings_with_before_publish(
+        path,
+        |map| {
+            after_read();
+            for (key, value) in updates {
+                match value {
+                    Some(value) => {
+                        map.insert(key, value);
+                    }
+                    None => {
+                        map.remove(&key);
+                    }
+                }
+            }
+            Ok(())
+        },
+        before_publish,
+    )
+}
+
+/// Mutate the latest raw settings map while holding the shared path lock.
+/// Revision checks belong inside `transform`, so another writer cannot pass
+/// the same expected revision and overwrite a completed update.
+pub fn transform_settings_with_before_publish<T, B>(
+    path: &Path,
+    transform: T,
+    before_publish: B,
+) -> Result<(), String>
+where
+    T: FnOnce(&mut Map<String, Value>) -> Result<(), String>,
+    B: FnOnce(),
+{
     let target = crate::global_config::resolve_write_target(path);
     let path_lock = settings_path_lock(&target);
     let _guard = path_lock
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
     }
+    // Share the permission writer's stable `.settings.json.lock` sibling.
+    // Locking the settings inode would stop protecting it when atomic
+    // publication replaces it; a different sibling would let the two writers
+    // race and overwrite unrelated keys from their read-modify-write snapshots.
+    let mut lock_name = std::ffi::OsString::from(".");
+    lock_name.push(
+        target
+            .file_name()
+            .ok_or("Settings path needs a file name")?,
+    );
+    lock_name.push(".lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(target.with_file_name(lock_name))
+        .map_err(|error| {
+            format!(
+                "Failed to open settings lock for {}: {error}",
+                target.display()
+            )
+        })?;
+    fs2::FileExt::lock_exclusive(&lock_file)
+        .map_err(|error| format!("Failed to lock settings {}: {error}", target.display()))?;
     let mut map = read_settings_map(&target)?;
-    after_read();
-    for (key, value) in updates {
-        match value {
-            Some(v) => {
-                map.insert(key, v);
-            }
-            None => {
-                map.remove(&key);
-            }
-        }
-    }
+    transform(&mut map)?;
     let serialized = serde_json::to_string_pretty(&Value::Object(map))
         .map_err(|e| format!("Failed to serialize settings for {}: {e}", target.display()))?;
     // NO explicit mode: the TS settings write (`settings.ts:500-503`) passes
@@ -653,6 +699,48 @@ mod tests {
         let map = read_settings_map(&path).unwrap();
         assert!(map.get("model").is_none());
         assert_eq!(map["other"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn settings_writer_shares_the_permission_writers_lock_and_reads_after_unlock() {
+        let t = temp_config();
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
+        std::fs::create_dir_all(&t.home).unwrap();
+        std::fs::write(&path, "{}").unwrap();
+        let permission_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(t.home.join(".settings.json.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&permission_lock).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (read_tx, read_rx) = mpsc::channel();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            transform_settings_with_before_publish(
+                &writer_path,
+                |map| {
+                    read_tx.send(()).unwrap();
+                    map.insert("fusion".into(), serde_json::json!({"strategies":[]}));
+                    Ok(())
+                },
+                || {},
+            )
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(read_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        // The permission writer publishes while its lock is held. Fusion must
+        // see and preserve this value after obtaining the same lock.
+        std::fs::write(&path, r#"{"permissions":{"allow":["Read"]}}"#).unwrap();
+        fs2::FileExt::unlock(&permission_lock).unwrap();
+        read_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        writer.join().unwrap().unwrap();
+        let map = read_settings_map(&path).unwrap();
+        assert_eq!(map["permissions"], serde_json::json!({"allow":["Read"]}));
+        assert_eq!(map["fusion"], serde_json::json!({"strategies":[]}));
     }
 
     #[test]

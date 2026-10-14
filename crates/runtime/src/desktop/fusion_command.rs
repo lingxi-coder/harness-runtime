@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::Mutex;
 
-const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] [--verify-claims] [--implement [--verify \"COMMAND\"]...] PROMPT | setup | clean | --retry-publication fu_RUN_ID";
+const FUSION_ARGUMENT_HINT: &str = "[--strategy scope:id] [--quality|--fast] [--same-provider|--cross-provider] [--verify-claims] [--implement [--verify \"COMMAND\"]...] PROMPT | setup | clean | --retry-publication fu_RUN_ID";
 
 /// What `/fusion setup` reports when it reaches THIS handler.
 ///
@@ -27,8 +27,39 @@ const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-
 /// taken as the PROMPT — a real multi-model deliberation, billed, on the word
 /// "setup". Naming the surfaces that can actually configure it is the only
 /// honest answer a handler with no UI of its own can give.
-const FUSION_SETUP_ELSEWHERE: &str = "`/fusion setup` opens an interactive wizard, which this surface cannot show.\n     In the terminal UI run `/fusion setup`; on the desktop open Settings → Fusion 多模型合议.\n     Either way it writes fusion.panelModels / fusion.analystModel to settings.json, which you can also edit by hand.";
+const FUSION_SETUP_ELSEWHERE: &str = "`/fusion setup` opens an interactive wizard, which this surface cannot show.\n     In the terminal UI run `/fusion setup`; on the desktop open Settings → Fusion 多模型合议.\n     Create a named strategy with Panel models and an Analyst, choose user/project/local scope, and set a default or select it with --strategy <scope>:<id>.";
 const FUSION_PERSISTENCE_REQUIRED: &str = "durable session storage is disabled; /fusion requires session persistence (remove --no-session-persistence)";
+
+/// Record a host-side preparation failure without resolving or running Fusion.
+/// The selected strategy can change while credentials are loading, so replaying
+/// the slash command to record its error could accidentally start a new run.
+pub async fn record_fusion_command_failure(
+    handle: &dyn OrchestratorHandle,
+    raw: &str,
+    error: &str,
+) -> Result<String, String> {
+    if !raw
+        .split_whitespace()
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("/fusion"))
+    {
+        return Err("Only Fusion preparation failures can be recorded here".into());
+    }
+    if error.trim().is_empty() {
+        return Err("Fusion preparation error is required".into());
+    }
+    let target = handle.current_session_id().await.to_string();
+    let display = format!("fusion failed to start: {error}");
+    handle
+        .append_fusion_command_message(&target, raw, true)
+        .await
+        .map_err(|error| error.to_string())?;
+    handle
+        .append_fusion_command_message(&target, &display, false)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(display)
+}
 
 /// Idempotent parent-history sink for Fusion results.
 pub struct DesktopFusionCompletionSink {
@@ -465,12 +496,36 @@ impl DesktopFusionCommandHandler {
         };
         let snapshot = self.handle.get_status_snapshot().await;
         let conversation_id = session_id.to_string();
-        let surface = self.executor.agent_surface();
+        let strategy = match self.executor.capture_strategy(parsed.strategy.as_ref()) {
+            Ok(strategy) => strategy,
+            Err(error) => {
+                return CommandResult::Done {
+                    display: Some(format!("fusion failed to start: {error}")),
+                }
+            }
+        };
+        if parsed.strategy_revision.as_ref().is_some_and(|revision| {
+            strategy
+                .as_ref()
+                .is_none_or(|selected| &selected.revision != revision)
+        }) {
+            return CommandResult::Done {
+                display: Some("fusion failed to start: strategy changed since credential preparation; select the strategy again".into()),
+            };
+        }
+        let surface = match self.executor.agent_surface_for_strategy(strategy.as_ref()) {
+            Ok(surface) => surface,
+            Err(error) => {
+                return CommandResult::Done {
+                    display: Some(format!("fusion failed to start: {error}")),
+                }
+            }
+        };
         let preset = parsed.preset.unwrap_or(surface.default_preset);
         let cross = parsed
             .cross_provider
             .unwrap_or(surface.slash_cross_provider_default);
-        let request = fusion_request_from_slash(
+        let mut request = fusion_request_from_slash(
             parsed,
             snapshot.model_profile.clone().unwrap_or_else(|| {
                 self.parent_profiles
@@ -483,6 +538,7 @@ impl DesktopFusionCommandHandler {
             surface.default_preset,
             surface.default_partial_ok,
         );
+        request.capture_strategy(strategy);
         let preset_word = match preset {
             lingxi_core::host::FusionPreset::Quality => "quality",
             lingxi_core::host::FusionPreset::Fast => "fast",
@@ -497,8 +553,12 @@ impl DesktopFusionCommandHandler {
         } else {
             preset_word
         };
-        let description: Utf16JsonProjection =
+        let mut description: Utf16JsonProjection =
             fusion_task_description(preset_word, scope_word, &request.prompt).into();
+        if let Some(strategy) = request.strategy_metadata() {
+            let prefix = format!("{} [{:?}] · ", strategy.name, strategy.reference.scope);
+            description = prepend_generated_text(&prefix, &description);
+        }
         let display = match self
             .registry
             .spawn(
@@ -534,12 +594,13 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
         }
         let session_id = self.handle.current_session_id().await;
         let conversation_id = session_id.to_string();
-        let raw_args = args.raw_args.string_units("").unwrap_or_default();
-        let raw_request = if raw_args.is_empty() {
+        let visible_args = fusion_visible_args(&args.raw_args);
+        let visible_units = visible_args.string_units("").unwrap_or_default();
+        let raw_request = if visible_units.is_empty() {
             Utf16JsonProjection::from("/fusion")
         } else {
             let mut units = "/fusion ".encode_utf16().collect::<Vec<_>>();
-            units.extend_from_slice(&raw_args);
+            units.extend_from_slice(&visible_units);
             Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
                 .expect("Fusion command source is a root string")
         };
@@ -596,12 +657,156 @@ fn append_generated_text(source: &Utf16JsonProjection, suffix: &str) -> Utf16Jso
         .expect("appended command display is a root string")
 }
 
+fn prepend_generated_text(prefix: &str, source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(source.string_units("").unwrap_or_default());
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("prepended command description is a root string")
+}
+
+/// The desktop prepends this internal fence after credentials are ready.
+/// Remove only that prefix so the transcript retains the exact user input.
+fn fusion_visible_args(raw: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let Some(raw_units) = raw.string_units("") else {
+        return raw.clone();
+    };
+    let prefix = "--strategy-revision ".encode_utf16().collect::<Vec<_>>();
+    let Some(revision_and_prompt) = raw_units.strip_prefix(&prefix) else {
+        return raw.clone();
+    };
+    let mut unit_offset = 0usize;
+    for decoded in char::decode_utf16(revision_and_prompt.iter().copied()) {
+        match decoded {
+            Ok(character) => {
+                let character_units = character.len_utf16();
+                if lingxi_core::host::effort::javascript_whitespace(character) {
+                    let suffix = revision_and_prompt[unit_offset + character_units..].to_vec();
+                    return Utf16JsonProjection::root_string(
+                        String::from_utf16_lossy(&suffix),
+                        suffix,
+                    )
+                    .expect("visible Fusion arguments are a root string");
+                }
+                unit_offset += character_units;
+            }
+            Err(_) => unit_offset += 1,
+        }
+    }
+    raw.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use command_api::parse_slash_command;
     use lingxi_core::host::{FusionStatus, FusionTiming, FusionUsage};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn hidden_revision_prefix_is_absent_from_the_transcript_without_losing_source_units() {
+        let original = Utf16JsonProjection::from("--strategy project:code  explain  this\nexactly");
+        let pinned = Utf16JsonProjection::from(format!(
+            "--strategy-revision abc123 {}",
+            original.string_at("").unwrap()
+        ));
+        assert_eq!(
+            fusion_visible_args(&pinned).string_units("").unwrap(),
+            original.string_units("").unwrap()
+        );
+        assert_eq!(
+            fusion_visible_args(&original).string_units("").unwrap(),
+            original.string_units("").unwrap()
+        );
+        for separator in [
+            "\n", "\t", "\r\n", "\u{FEFF}", "\u{00A0}", "\u{2003}", "\u{2028}",
+        ] {
+            let pinned = Utf16JsonProjection::from(format!(
+                "--strategy-revision abc123{separator}Analyze this\nexactly"
+            ));
+            let expected = if separator == "\r\n" {
+                "\nAnalyze this\nexactly"
+            } else {
+                "Analyze this\nexactly"
+            };
+            assert_eq!(
+                fusion_visible_args(&pinned).string_at("").as_deref(),
+                Some(expected)
+            );
+        }
+        let unrelated = Utf16JsonProjection::from("explain --strategy-revision abc123");
+        assert_eq!(
+            fusion_visible_args(&unrelated).string_units("").unwrap(),
+            unrelated.string_units("").unwrap()
+        );
+
+        let mut lone_units = "--strategy-revision abc123 "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        lone_units.extend([0xD800, b'x' as u16]);
+        let lone_source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&lone_units), lone_units)
+                .unwrap();
+        assert_eq!(
+            fusion_visible_args(&lone_source).string_units("").unwrap(),
+            vec![0xD800, b'x' as u16]
+        );
+    }
+
+    #[tokio::test]
+    async fn host_preparation_failures_are_durable_without_a_fusion_executor() {
+        use orchestrator::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_path = dir.path().join("session.jsonl");
+        let fs = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
+        let handle = orchestrator::ConversationOrchestrator::new(
+            orchestrator::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(Arc::new(session::jsonl::writer::JsonlWriter::new(
+            transcript_path.clone(),
+            fs,
+        )));
+        let raw = "/fusion --strategy project:removed  compare\nthese approaches";
+        let display =
+            record_fusion_command_failure(&handle, raw, "Selected strategy is unavailable")
+                .await
+                .unwrap();
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&transcript_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["message"]["content"][0]["text"], raw);
+        assert_eq!(rows[1]["message"]["content"][0]["text"], display);
+        assert_eq!(handle.get_status_snapshot().await.n_messages, 2);
+        assert!(
+            record_fusion_command_failure(&handle, "/other run", "error")
+                .await
+                .is_err()
+        );
+        assert_eq!(handle.get_status_snapshot().await.n_messages, 2);
+        // Storage errors remain visible; no strategy/executor is consulted.
+        std::fs::remove_file(&transcript_path).unwrap();
+        std::fs::create_dir(&transcript_path).unwrap();
+        assert!(
+            record_fusion_command_failure(&handle, raw, "OAuth unavailable")
+                .await
+                .is_err()
+        );
+        assert_eq!(handle.get_status_snapshot().await.n_messages, 2);
+    }
 
     fn dummy_result(run_id: &str) -> FusionResult {
         FusionResult {

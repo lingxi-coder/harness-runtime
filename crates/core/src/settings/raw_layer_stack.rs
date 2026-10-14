@@ -273,6 +273,7 @@ impl SettingsRawLayerStack {
         let mut settings = SettingsJson::default();
         let mut trace = tracer::ProvenanceTrace::default();
         let mut effort_layers = Vec::new();
+        let mut fusion_layers = Vec::new();
         let mut typed_view_unrepresented_fields = Vec::new();
         let mut managed_typed_view_is_partial = false;
 
@@ -315,6 +316,13 @@ impl SettingsRawLayerStack {
                 layer.source,
                 &layer.settings,
             ));
+            if let Some(mut fusion_layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+                layer.source,
+                &layer.settings,
+            ) {
+                fusion_layer.path = layer.path.clone();
+                fusion_layers.push(fusion_layer);
+            }
             settings = merger::merge(settings, layer.settings.clone())?;
             if layer.source == tracer::Source::Managed {
                 managed_typed_view_is_partial = layer.native_policy_projection;
@@ -327,6 +335,7 @@ impl SettingsRawLayerStack {
             settings,
             trace,
             effort_layers,
+            fusion_layers,
             source_projection: Some(self.admitted_merged.clone()),
             source_layers: self.admitted_raw_layers.clone(),
             typed_view_unrepresented_fields,

@@ -4,7 +4,7 @@ use lingxi_core::host::FusionPublicationStatus;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Extract a `local_fusion` task id from `/fusion`'s `Handled` display text
-/// (`"{task_id}  {preset}  {scope}"`, `harness-runtime/src/desktop/
+/// (`"Fusion started: {task_id}  {preset}  {scope}"`, `harness-runtime/src/desktop/
 /// fusion_command.rs`), if the display looks like one. `local_fusion` ids
 /// are `'f'` + 8 lowercase-base36 chars (`tasks::id::TaskType::id_prefix`) —
 /// unique among every other task-id prefix in the workspace.
@@ -17,7 +17,10 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 /// [`local_fusion_task_id_to_await`] is that combined, safe-to-call form;
 /// this function stays a private shape-matcher only.
 pub(super) fn pending_local_fusion_task_id(display: &str) -> Option<&str> {
-    let first = display.split_whitespace().next()?;
+    let first = display
+        .strip_prefix("Fusion started: ")?
+        .split_whitespace()
+        .next()?;
     let suffix = first.strip_prefix('f')?;
     (suffix.len() == 8
         && suffix

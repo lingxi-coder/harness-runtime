@@ -2788,6 +2788,7 @@ impl TaskRegistry {
             fusion.run_id = Some(summary.identity.run_id.to_string());
             fusion.effective_timeout_ms = Some(summary.duration_ms);
             fusion.planned_panels = summary.planned_panels;
+            fusion.strategy = summary.strategy.clone();
         }
         // 4. Publish every registry artifact as one transaction from the point
         //    of view of task readers. Holding the task write lock while the
@@ -6316,6 +6317,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             request,
             conversation_id,
         } => TaskState::LocalFusion(crate::state::LocalFusionTaskState {
+            strategy: request.strategy_metadata(),
             base,
             conversation_id: conversation_id.clone(),
             prompt: request.prompt.clone(),

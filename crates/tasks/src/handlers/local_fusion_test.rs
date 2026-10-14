@@ -1020,6 +1020,9 @@ impl TaskStatusSink for BlockingStageSink {
 
 fn dummy_request() -> FusionRequest {
     FusionRequest {
+        strategy: None,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: 1,
         origin: FusionOrigin::Slash,

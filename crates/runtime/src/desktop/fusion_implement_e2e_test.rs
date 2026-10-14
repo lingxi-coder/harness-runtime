@@ -364,6 +364,9 @@ fn config() -> FusionRuntimeConfig {
 
 fn request() -> FusionRequest {
     FusionRequest {
+        strategy: None,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Slash,

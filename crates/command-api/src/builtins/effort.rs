@@ -417,23 +417,6 @@ pub fn persist_reasoning_default_selection_at(
     path: &Path,
     selection: Option<&lingxi_core::host::ReasoningSelection>,
 ) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to read raw settings from {}: {e}", path.display()))?;
-    }
-    let mut map: serde_json::Map<String, Value> = match std::fs::read_to_string(path) {
-        Ok(content) if content.trim().is_empty() => serde_json::Map::new(),
-        Ok(content) => serde_json::from_str(&content)
-            .map_err(|_| format!("Invalid JSON syntax in settings file at {}", path.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
-        Err(e) => {
-            return Err(format!(
-                "Failed to read raw settings from {}: {e}",
-                path.display()
-            ));
-        }
-    };
-
     let default_selection = selection.and_then(|selection| match selection {
         lingxi_core::host::ReasoningSelection::Level { id }
             if matches!(id.as_str(), "low" | "medium" | "high" | "xhigh") =>
@@ -449,36 +432,37 @@ pub fn persist_reasoning_default_selection_at(
         | lingxi_core::host::ReasoningSelection::Level { .. } => None,
     });
 
-    match default_selection {
-        Some(value) => {
-            let reasoning = map
-                .entry("reasoning".to_string())
-                .or_insert_with(|| Value::Object(serde_json::Map::new()));
-            if !reasoning.is_object() {
-                *reasoning = Value::Object(serde_json::Map::new());
+    migrations::settings_update::transform_settings_with_before_publish(
+        path,
+        |map| {
+            match default_selection {
+                Some(value) => {
+                    let reasoning = map
+                        .entry("reasoning".to_string())
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    if !reasoning.is_object() {
+                        *reasoning = Value::Object(serde_json::Map::new());
+                    }
+                    reasoning
+                        .as_object_mut()
+                        .expect("reasoning object normalized")
+                        .insert("defaultSelection".to_string(), value);
+                }
+                None => {
+                    let mut remove_reasoning = false;
+                    if let Some(Value::Object(reasoning)) = map.get_mut("reasoning") {
+                        reasoning.remove("defaultSelection");
+                        remove_reasoning = reasoning.is_empty();
+                    }
+                    if remove_reasoning {
+                        map.remove("reasoning");
+                    }
+                }
             }
-            reasoning
-                .as_object_mut()
-                .expect("reasoning object normalized")
-                .insert("defaultSelection".to_string(), value);
-        }
-        None => {
-            let mut remove_reasoning = false;
-            if let Some(Value::Object(reasoning)) = map.get_mut("reasoning") {
-                reasoning.remove("defaultSelection");
-                remove_reasoning = reasoning.is_empty();
-            }
-            if remove_reasoning {
-                map.remove("reasoning");
-            }
-        }
-    }
-
-    let serialized = serde_json::to_string_pretty(&map)
-        .map_err(|e| format!("Failed to read raw settings from {}: {e}", path.display()))?;
-    std::fs::write(path, serialized + "\n")
-        .map_err(|e| format!("Failed to read raw settings from {}: {e}", path.display()))?;
-    Ok(())
+            Ok(())
+        },
+        || {},
+    )
 }
 
 /// Native be/_e/w3: the host supplies the canonical current model key and an
@@ -488,57 +472,37 @@ pub fn persist_model_effort_at(path: &Path, key: &str, level: Option<&str>) -> R
     if level.is_some_and(|level| !matches!(level, "low" | "medium" | "high" | "xhigh")) {
         return Ok(());
     }
-    let mut map: serde_json::Map<String, Value> = match std::fs::read_to_string(path) {
-        Ok(content) if content.trim().is_empty() => serde_json::Map::new(),
-        Ok(content) => serde_json::from_str(&content)
-            .map_err(|_| format!("Invalid JSON syntax in settings file at {}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
-        Err(error) => {
-            return Err(format!(
-                "Failed to read raw settings from {}: {error}",
-                path.display()
-            ));
-        }
-    };
-    let target = if lingxi_core::host::effort_table::object_prototype_key(key) {
-        &mut map
-    } else {
-        let settings = map
-            .entry("modelSettings".to_owned())
-            .or_insert_with(|| json!({}));
-        if !settings.is_object() {
-            *settings = json!({});
-        }
-        let model = settings
-            .as_object_mut()
-            .expect("model settings normalized")
-            .entry(key.to_owned())
-            .or_insert_with(|| json!({}));
-        if !model.is_object() {
-            *model = json!({});
-        }
-        model.as_object_mut().expect("model entry normalized")
-    };
-    if let Some(level) = level {
-        target.insert("effortLevel".into(), json!(level));
-    } else {
-        target.remove("effortLevel");
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "Failed to read raw settings from {}: {error}",
-                path.display()
-            )
-        })?;
-    }
-    let bytes = serde_json::to_string_pretty(&map).map_err(|error| error.to_string())? + "\n";
-    std::fs::write(path, bytes).map_err(|error| {
-        format!(
-            "Failed to read raw settings from {}: {error}",
-            path.display()
-        )
-    })
+    migrations::settings_update::transform_settings_with_before_publish(
+        path,
+        |map| {
+            let target = if lingxi_core::host::effort_table::object_prototype_key(key) {
+                map
+            } else {
+                let settings = map
+                    .entry("modelSettings".to_owned())
+                    .or_insert_with(|| json!({}));
+                if !settings.is_object() {
+                    *settings = json!({});
+                }
+                let model = settings
+                    .as_object_mut()
+                    .expect("model settings normalized")
+                    .entry(key.to_owned())
+                    .or_insert_with(|| json!({}));
+                if !model.is_object() {
+                    *model = json!({});
+                }
+                model.as_object_mut().expect("model entry normalized")
+            };
+            if let Some(level) = level {
+                target.insert("effortLevel".into(), json!(level));
+            } else {
+                target.remove("effortLevel");
+            }
+            Ok(())
+        },
+        || {},
+    )
 }
 
 /// Read the provider-neutral structured default. Native effortLevel and
@@ -763,6 +727,81 @@ mod tests {
                 assert!(load_reasoning_default_selection_at(&path).is_none());
             } else {
                 assert_eq!(load_reasoning_default_selection_at(&path), Some(selection));
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effort_persistence_waits_for_fusion_writes_and_preserves_the_latest_registry() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root =
+            std::env::temp_dir().join(format!("harness-effort-fusion-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for native in [false, true] {
+            let path = root.join(if native {
+                "native.json"
+            } else {
+                "reasoning.json"
+            });
+            std::fs::write(&path, r#"{"fusion":{"strategies":[]},"other":7}"#).unwrap();
+            let expected_fusion = json!({
+                "strategies":[{"id":"review","name":"Review","config":{}}],
+                "defaultStrategyId":"review"
+            });
+            let (locked_tx, locked_rx) = mpsc::channel();
+            let (publish_tx, publish_rx) = mpsc::channel();
+            let fusion_path = path.clone();
+            let fusion = expected_fusion.clone();
+            let fusion_writer = std::thread::spawn(move || {
+                migrations::settings_update::transform_settings_with_before_publish(
+                    &fusion_path,
+                    |map| {
+                        locked_tx.send(()).unwrap();
+                        publish_rx.recv().unwrap();
+                        map.insert("fusion".into(), fusion);
+                        Ok(())
+                    },
+                    || {},
+                )
+            });
+            locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (completed_tx, completed_rx) = mpsc::channel();
+            let effort_path = path.clone();
+            let effort_writer = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let result = if native {
+                    persist_model_effort_at(&effort_path, "model", Some("high"))
+                } else {
+                    persist_reasoning_default_selection_at(
+                        &effort_path,
+                        Some(&ReasoningSelection::Level { id: "high".into() }),
+                    )
+                };
+                completed_tx.send(()).unwrap();
+                result
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let blocked = completed_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err();
+            publish_tx.send(()).unwrap();
+            fusion_writer.join().unwrap().unwrap();
+            effort_writer.join().unwrap().unwrap();
+            assert!(blocked, "effort must wait for the Fusion transaction");
+            let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["fusion"], expected_fusion);
+            assert_eq!(saved["other"], 7);
+            if native {
+                assert_eq!(saved["modelSettings"]["model"]["effortLevel"], "high");
+            } else {
+                assert_eq!(
+                    saved["reasoning"]["defaultSelection"],
+                    json!({"type":"level","id":"high"})
+                );
             }
         }
         std::fs::remove_dir_all(root).unwrap();

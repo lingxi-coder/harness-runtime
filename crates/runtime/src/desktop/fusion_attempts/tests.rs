@@ -1061,6 +1061,9 @@ async fn authority() -> Arc<RunAuthority> {
             tokio_util::sync::CancellationToken::new(),
         ),
         request: lingxi_core::host::FusionRequest {
+            strategy: None,
+            strategy_revision: None,
+            strategy_snapshot: None,
             verify_claims: false,
             schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
             origin: lingxi_core::host::FusionOrigin::Slash,

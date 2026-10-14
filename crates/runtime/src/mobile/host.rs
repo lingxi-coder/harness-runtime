@@ -8149,6 +8149,21 @@ impl MobileEngineHandle {
                     client::protocol::text::ClientTextDto::from_projection(hint)
                         .expect("command hint is text")
                 }),
+                argument_names: if matches!(
+                    &command.kind,
+                    command_api::SlashCommandKind::Builtin { .. }
+                ) {
+                    Vec::new()
+                } else {
+                    command
+                        .argument_names
+                        .iter()
+                        .map(|argument| {
+                            client::protocol::text::ClientTextDto::from_projection(argument)
+                                .expect("command argument name is text")
+                        })
+                        .collect()
+                },
                 menu_description: command.menu_description,
             })
             .collect();

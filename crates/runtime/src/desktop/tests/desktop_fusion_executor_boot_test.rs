@@ -120,7 +120,7 @@ async fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
     // > 500_000.
     std::fs::write(
         lingxi_home.join("settings.json"),
-        r#"{"fusion":{"totalTimeoutMs":500000}}"#,
+        r#"{"fusion":{"defaultStrategyId":"test","strategies":[{"id":"test","name":"Test","config":{"totalTimeoutMs":500000}}]}}"#,
     )
     .unwrap();
     let managed_dir = tmp.path().join("managed");
@@ -144,9 +144,10 @@ async fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
         None,
     );
 
+    let selected = executor.capture_strategy(None).unwrap();
     let boot_error = executor
-        .preflight_error()
-        .expect("the invalid merged config must surface as a preflight error");
+        .agent_surface_for_strategy(selected.as_ref())
+        .expect_err("the invalid strategy config must surface before defaults");
     let lingxi_core::host::FusionError::InvalidConfiguration(msg) = boot_error else {
         panic!("expected InvalidConfiguration, got {boot_error:?}");
     };
@@ -159,12 +160,15 @@ async fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
     // `executor` instance — no restart, no re-construction.
     std::fs::write(
         cfg.lingxi_home.join("settings.json"),
-        r#"{"fusion":{"totalTimeoutMs":1500000}}"#,
+        r#"{"fusion":{"defaultStrategyId":"test","strategies":[{"id":"test","name":"Test","config":{"totalTimeoutMs":1500000}}]}}"#,
     )
     .unwrap();
 
     assert_eq!(
-        executor.preflight_error(),
+        executor
+            .capture_strategy(None)
+            .and_then(|selected| executor.agent_surface_for_strategy(selected.as_ref()))
+            .err(),
         None,
         "a fixed-then-saved settings file must recover within the same \
          session, not only after a process restart"
@@ -176,8 +180,11 @@ async fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
     let _env_guard = crate::desktop::tests::MANAGED_ENV_LOCK.lock().unwrap();
     let tmp = tempfile::tempdir().expect("tempdir");
     let managed = tmp.path().join("managed-settings.json");
-    std::fs::write(&managed, r#"{"fusion":{"totalTimeoutMs":500000}}"#)
-        .expect("write managed settings");
+    std::fs::write(
+        &managed,
+        r#"{"fusion":{"overrides":{"totalTimeoutMs":500000}}}"#,
+    )
+    .expect("write managed settings");
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
     let cfg = DesktopConfig {
@@ -187,6 +194,12 @@ async fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
     };
     cfg.managed_policy_snapshot_cache
         .replace(settings_watch::read_managed_settings_snapshot(tmp.path()).await);
+    std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
+    std::fs::write(
+        cfg.lingxi_home.join("settings.json"),
+        r#"{"fusion":{"defaultStrategyId":"test","strategies":[{"id":"test","name":"Test","config":{}}]}}"#,
+    )
+    .unwrap();
     let executor = desktop_fusion_executor(
         Arc::new(UnreachableSpawner),
         Arc::new(UnreachableSideQuery),
@@ -197,19 +210,63 @@ async fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
         Arc::new(cost::PricingCatalog::builtin_reference()),
         None,
     );
-    assert!(executor.preflight_error().is_some());
+    let selected = executor.capture_strategy(None).unwrap();
+    assert!(executor
+        .agent_surface_for_strategy(selected.as_ref())
+        .is_err());
 
-    std::fs::write(&managed, r#"{"fusion":{"totalTimeoutMs":1500000}}"#)
-        .expect("replace managed settings");
-    // The synchronous Fusion config reader consumes the session snapshot. In
-    // production the managed-settings watcher replaces it after the file
-    // event; mirror that producer here rather than bypassing the cache.
+    std::fs::write(
+        &managed,
+        r#"{"fusion":{"overrides":{"totalTimeoutMs":1500000}}}"#,
+    )
+    .expect("replace managed settings");
     cfg.managed_policy_snapshot_cache
         .replace(settings_watch::read_managed_settings_snapshot(tmp.path()).await);
     assert_eq!(
-        executor.preflight_error(),
+        executor
+            .capture_strategy(None)
+            .and_then(|selected| executor.agent_surface_for_strategy(selected.as_ref()))
+            .err(),
         None,
         "preflight must use the same fresh managed snapshot as config load"
     );
     std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+}
+
+#[test]
+fn administration_and_execution_share_admitted_layers_and_cli_revision() {
+    let _guard = crate::desktop::tests::MANAGED_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = DesktopConfig {
+        cwd: tmp.path().join("project"),
+        lingxi_home: tmp.path().join("home"),
+        setting_source_scope: (true, false),
+        flag_settings: Some(
+            serde_json::from_value(serde_json::json!({
+                "fusion": {"overrides": {"preset": "fast"}}
+            }))
+            .unwrap(),
+        ),
+        ..DesktopConfig::default()
+    };
+    std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
+    std::fs::create_dir_all(cfg.cwd.join(".lingxi")).unwrap();
+    std::fs::write(cfg.lingxi_home.join("settings.json"),
+        r#"{"fusion":{"defaultStrategyId":"review","strategies":[{"id":"review","name":"User review","config":{"preset":"quality"}}]}}"#).unwrap();
+    std::fs::write(cfg.cwd.join(".lingxi/settings.json"),
+        r#"{"fusion":{"defaultStrategyId":"excluded","strategies":[{"id":"excluded","name":"Excluded project","config":{}}]}}"#).unwrap();
+    let layers = fusion_settings_layers_for_config(&cfg).unwrap();
+    let admin_selection = lingxi_core::host::resolve_fusion_strategy(&layers, None).unwrap();
+    let runtime_selection =
+        fusion::FusionConfigSource::capture_strategy(&DesktopFusionConfigSource { cfg }, None)
+            .unwrap()
+            .unwrap();
+    assert_eq!(admin_selection, runtime_selection);
+    assert_eq!(admin_selection.reference.to_string(), "user:review");
+    assert_eq!(admin_selection.config.preset.as_deref(), Some("fast"));
+    assert!(!layers
+        .iter()
+        .any(|layer| layer.source == lingxi_core::settings::tracer::Source::Project));
 }

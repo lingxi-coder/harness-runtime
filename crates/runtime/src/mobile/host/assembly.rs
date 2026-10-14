@@ -3649,6 +3649,7 @@ pub fn build_mobile_engine_inner(
         project_dir: std::path::PathBuf::from(&session_cwd),
     };
     let settings = Some(::configuration_admin::settings_bridge::SettingsContext {
+        fusion_layers: None,
         paths: settings_paths,
         active: inner.settings_active.clone(),
         managed: inner.settings_managed.clone(),

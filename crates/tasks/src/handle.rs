@@ -548,6 +548,9 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         },
         TaskType::LocalFusion => TaskSpawnInput::LocalFusion {
             request: lingxi_core::host::FusionRequest {
+                strategy: None,
+                strategy_revision: None,
+                strategy_snapshot: None,
                 verify_claims: false,
                 schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
                 origin: lingxi_core::host::FusionOrigin::Slash,
@@ -2669,6 +2672,7 @@ mod tests {
             creator_agent_id: None,
         };
         let state = TaskState::LocalFusion(crate::state::LocalFusionTaskState {
+            strategy: None,
             base,
             conversation_id: "conv1".into(),
             prompt: "compare two approaches".into(),
@@ -2740,6 +2744,7 @@ mod tests {
         };
         registry
             .insert_state_for_test(TaskState::LocalFusion(crate::state::LocalFusionTaskState {
+                strategy: None,
                 base,
                 conversation_id: "conv1".into(),
                 prompt: "compare two approaches".into(),

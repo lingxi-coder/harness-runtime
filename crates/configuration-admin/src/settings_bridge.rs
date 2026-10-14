@@ -413,6 +413,8 @@ pub fn writable_path(paths: &SettingsPaths, layer: SettingsLayer) -> Result<Path
 /// et al. — see the `permission_*` functions below); allowing the generic
 /// path to also touch `permissions` would give the key two write paths, which
 /// is exactly the defect this list exists to prevent.
+/// Fusion likewise requires its revision-checked administration writer;
+/// a whole-registry patch would bypass conflict and legacy-format safeguards.
 ///
 /// The hint names all three replacement commands rather than one: the patch
 /// is a SHALLOW, top-level replace of the whole `permissions` object, so at
@@ -422,11 +424,14 @@ pub fn writable_path(paths: &SettingsPaths, layer: SettingsLayer) -> Result<Path
 /// `permissions.additionalDirectories` (→ `UpdateWorkspaceDirectories`).
 /// Naming only one would point a caller of the other two at the wrong
 /// command.
-const RESERVED_KEYS: [(&str, &str); 1] = [(
-    "permissions",
-    "update_permission_rules, set_default_permission_mode, or update_workspace_directories \
-     (depending on what you're changing)",
-)];
+const RESERVED_KEYS: [(&str, &str); 2] = [
+    (
+        "permissions",
+        "update_permission_rules, set_default_permission_mode, or update_workspace_directories \
+         (depending on what you're changing)",
+    ),
+    ("fusion", "fusion_admin with the current scope revision"),
+];
 
 /// Map a wire-writable destination to its file layer. Narrower than
 /// [`SettingsLayer`]'s full set by construction (`WritableScopeDto` has
@@ -703,6 +708,15 @@ pub fn layer_wire_name(layer: SettingsLayer) -> &'static str {
 /// root already loads (`harness_runtime::desktop::managed_settings_overlay`).
 /// bridge-server deliberately does not re-implement managed-layer loading.
 pub struct SettingsContext {
+    /// Reload the exact runtime-admitted Fusion sources and CLI overrides.
+    /// Standalone configuration tools omit this and read writable files.
+    pub fusion_layers: Option<
+        Arc<
+            dyn Fn() -> Result<Vec<lingxi_core::host::fusion_strategy::FusionSettingsLayer>, String>
+                + Send
+                + Sync,
+        >,
+    >,
     /// The two roots every file layer's path is resolved from.
     pub paths: SettingsPaths,
     /// The values this session had loaded at session start — the three file
@@ -1940,6 +1954,41 @@ mod tests {
             err.contains("update_workspace_directories"),
             "error must name the workspace-directories replacement command, got: {err}"
         );
+    }
+
+    #[test]
+    fn generic_patch_cannot_replace_or_delete_the_fusion_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: dir.path().join("home"),
+            project_dir: dir.path().join("repo"),
+        };
+        let path = paths.lingxi_home.join("settings.json");
+        let original = serde_json::json!({
+            "fusion": {
+                "strategies": [{"id":"review", "name":"Review", "config":{}}],
+                "defaultStrategyId":"review"
+            },
+            "theme":"dark"
+        });
+        std::fs::create_dir_all(&paths.lingxi_home).unwrap();
+        std::fs::write(&path, original.to_string()).unwrap();
+        for value in [Some(serde_json::json!({"strategies":[]})), None] {
+            let err = apply_patch(
+                &paths,
+                WritableScopeDto::User,
+                vec![
+                    ("theme".into(), Some(serde_json::json!("light"))),
+                    ("fusion".into(), value),
+                ],
+            )
+            .unwrap_err();
+            assert!(err.contains("fusion_admin"), "{err}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+                original
+            );
+        }
     }
 
     /// I2: a write must leave an internal-write mark, or the desktop's own

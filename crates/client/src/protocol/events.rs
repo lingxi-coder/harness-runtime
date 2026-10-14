@@ -809,6 +809,18 @@ define_client_event! {
         enabled: bool,
         notice: Option<String>,
     },
+    /// Scoped Fusion strategy catalog, including optimistic write revisions.
+    FusionCatalog {
+        catalog_json: String,
+    },
+    /// Authoritative selection captured before credential preparation.
+    FusionStrategyResolved {
+        operation_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection_json: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 impl From<ClientEventWire> for ClientEvent {

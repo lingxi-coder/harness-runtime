@@ -330,6 +330,8 @@ pub struct EffectiveSettings {
     /// Primary Native source message and full source diagnostics, if present.
     pub source_message: Option<crate::types::utf16_json::Utf16JsonProjection>,
     pub source_diagnostics: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Original admitted Fusion registries; strategy records are never deep-merged.
+    pub fusion_layers: Vec<crate::host::fusion_strategy::FusionSettingsLayer>,
 }
 
 impl EffectiveSettings {
@@ -451,9 +453,16 @@ impl Settings {
 
         let mut trace = tracer::ProvenanceTrace::default();
         let mut effort_layers = Vec::new();
+        let mut fusion_layers = Vec::new();
 
         // Layer 1 (lowest): defaults
         trace.record_layer(tracer::Source::Defaults, &defaults);
+        if let Some(layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+            tracer::Source::Defaults,
+            &defaults,
+        ) {
+            fusion_layers.push(layer);
+        }
         effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
             tracer::Source::Defaults,
             &defaults,
@@ -469,6 +478,13 @@ impl Settings {
             if let Some(user_path) = user_settings_path {
                 if let Some(usr) = read_layer_or_skip(user_path) {
                     trace.record_layer(tracer::Source::User, &usr);
+                    if let Some(mut layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+                        tracer::Source::User,
+                        &usr,
+                    ) {
+                        layer.path = user_settings_path.map(std::path::Path::to_path_buf);
+                        fusion_layers.push(layer);
+                    }
                     effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                         tracer::Source::User,
                         &usr,
@@ -485,6 +501,13 @@ impl Settings {
             let project_path = loader::project_settings_path(project_dir);
             if let Some(proj) = read_layer_or_skip(&project_path) {
                 trace.record_layer(tracer::Source::Project, &proj);
+                if let Some(mut layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+                    tracer::Source::Project,
+                    &proj,
+                ) {
+                    layer.path = Some(project_path.clone());
+                    fusion_layers.push(layer);
+                }
                 effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                     tracer::Source::Project,
                     &proj,
@@ -500,6 +523,13 @@ impl Settings {
             let local_path = loader::local_settings_path(project_dir);
             if let Some(local) = read_layer_or_skip(&local_path) {
                 trace.record_layer(tracer::Source::Local, &local);
+                if let Some(mut layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+                    tracer::Source::Local,
+                    &local,
+                ) {
+                    layer.path = Some(local_path.clone());
+                    fusion_layers.push(layer);
+                }
                 effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                     tracer::Source::Local,
                     &local,
@@ -514,6 +544,11 @@ impl Settings {
         if let Some(cli) = supplemental.cli_layer {
             if *cli != SettingsJson::default() {
                 trace.record_layer(tracer::Source::Cli, cli);
+                if let Some(layer) =
+                    crate::host::fusion_strategy::FusionSettingsLayer::new(tracer::Source::Cli, cli)
+                {
+                    fusion_layers.push(layer);
+                }
                 effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                     tracer::Source::Cli,
                     cli,
@@ -526,6 +561,12 @@ impl Settings {
         for managed in supplemental.managed_layers {
             if *managed != SettingsJson::default() {
                 trace.record_layer(tracer::Source::Managed, managed);
+                if let Some(layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+                    tracer::Source::Managed,
+                    managed,
+                ) {
+                    fusion_layers.push(layer);
+                }
                 effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                     tracer::Source::Managed,
                     managed,
@@ -537,6 +578,11 @@ impl Settings {
         // Layer 7 (highest): env
         let (env_layer, _invalid_env) = env_parser::parse_env(env)?;
         trace.record_layer(tracer::Source::Env, &env_layer);
+        if let Some(layer) =
+            crate::host::fusion_strategy::FusionSettingsLayer::new(tracer::Source::Env, &env_layer)
+        {
+            fusion_layers.push(layer);
+        }
         effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
             tracer::Source::Env,
             &env_layer,
@@ -554,6 +600,7 @@ impl Settings {
             source_incomplete: false,
             source_message: None,
             source_diagnostics: None,
+            fusion_layers,
         })
     }
 
@@ -626,12 +673,19 @@ impl Settings {
         } = inputs;
         let mut trace = tracer::ProvenanceTrace::default();
         let mut effort_layers = Vec::new();
+        let mut fusion_layers = Vec::new();
         let mut layers_present: i64 = 0;
         let user_path = loader::user_settings_path();
         let mut had_env_override = false;
 
         // Layer 1 (lowest): defaults
         trace.record_layer(tracer::Source::Defaults, &defaults);
+        if let Some(layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+            tracer::Source::Defaults,
+            &defaults,
+        ) {
+            fusion_layers.push(layer);
+        }
         effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
             tracer::Source::Defaults,
             &defaults,
@@ -645,6 +699,15 @@ impl Settings {
                 match loader::read_settings_file(up) {
                     Ok(Some(usr)) => {
                         trace.record_layer(tracer::Source::User, &usr);
+                        if let Some(mut layer) =
+                            crate::host::fusion_strategy::FusionSettingsLayer::new(
+                                tracer::Source::User,
+                                &usr,
+                            )
+                        {
+                            layer.path = Some(up.clone());
+                            fusion_layers.push(layer);
+                        }
                         effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                             tracer::Source::User,
                             &usr,
@@ -672,6 +735,13 @@ impl Settings {
             match loader::read_settings_file(&project_path) {
                 Ok(Some(proj)) => {
                     trace.record_layer(tracer::Source::Project, &proj);
+                    if let Some(mut layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+                        tracer::Source::Project,
+                        &proj,
+                    ) {
+                        layer.path = Some(project_path.clone());
+                        fusion_layers.push(layer);
+                    }
                     effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                         tracer::Source::Project,
                         &proj,
@@ -694,6 +764,13 @@ impl Settings {
             match loader::read_settings_file(&local_path) {
                 Ok(Some(local)) => {
                     trace.record_layer(tracer::Source::Local, &local);
+                    if let Some(mut layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+                        tracer::Source::Local,
+                        &local,
+                    ) {
+                        layer.path = Some(local_path.clone());
+                        fusion_layers.push(layer);
+                    }
                     effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                         tracer::Source::Local,
                         &local,
@@ -714,6 +791,11 @@ impl Settings {
         if let Some(cli) = supplemental.cli_layer {
             if *cli != SettingsJson::default() {
                 trace.record_layer(tracer::Source::Cli, cli);
+                if let Some(layer) =
+                    crate::host::fusion_strategy::FusionSettingsLayer::new(tracer::Source::Cli, cli)
+                {
+                    fusion_layers.push(layer);
+                }
                 effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                     tracer::Source::Cli,
                     cli,
@@ -727,6 +809,12 @@ impl Settings {
         for managed in supplemental.managed_layers {
             if *managed != SettingsJson::default() {
                 trace.record_layer(tracer::Source::Managed, managed);
+                if let Some(layer) = crate::host::fusion_strategy::FusionSettingsLayer::new(
+                    tracer::Source::Managed,
+                    managed,
+                ) {
+                    fusion_layers.push(layer);
+                }
                 effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
                     tracer::Source::Managed,
                     managed,
@@ -744,6 +832,11 @@ impl Settings {
             layers_present += 1;
         }
         trace.record_layer(tracer::Source::Env, &env_layer);
+        if let Some(layer) =
+            crate::host::fusion_strategy::FusionSettingsLayer::new(tracer::Source::Env, &env_layer)
+        {
+            fusion_layers.push(layer);
+        }
         effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
             tracer::Source::Env,
             &env_layer,
@@ -775,6 +868,7 @@ impl Settings {
             source_incomplete: false,
             source_message: None,
             source_diagnostics: None,
+            fusion_layers,
         })
     }
 }

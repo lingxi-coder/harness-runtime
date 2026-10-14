@@ -1314,6 +1314,9 @@ mod tests {
     async fn retried_attempts_usage_is_accumulated_not_dropped() {
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
+            strategy: None,
+            strategy_revision: None,
+            strategy_snapshot: None,
             verify_claims: false,
             schema_version: 1,
             origin: lingxi_core::host::FusionOrigin::Slash,
@@ -1371,6 +1374,9 @@ attempt's real usage — the total is not incomplete"
     async fn a_failing_final_attempt_still_returns_the_earlier_attempts_real_usage() {
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
+            strategy: None,
+            strategy_revision: None,
+            strategy_snapshot: None,
             verify_claims: false,
             schema_version: 1,
             origin: lingxi_core::host::FusionOrigin::Slash,
@@ -1475,6 +1481,9 @@ error exit — before this fix every AnalystError arm dropped usage_acc entirely
     async fn an_invalid_response_retry_marks_the_accumulator_incomplete_even_on_success() {
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
+            strategy: None,
+            strategy_revision: None,
+            strategy_snapshot: None,
             verify_claims: false,
             schema_version: 1,
             origin: lingxi_core::host::FusionOrigin::Slash,
@@ -1581,6 +1590,9 @@ must force the accumulator incomplete, even though the run went on to succeed"
         let value = Value::String(injected.clone());
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
+            strategy: None,
+            strategy_revision: None,
+            strategy_snapshot: None,
             verify_claims: false,
             schema_version: 1,
             origin: lingxi_core::host::FusionOrigin::Slash,
@@ -1671,6 +1683,9 @@ length: user_message.len()={} decode_err.len()={}",
     async fn a_partial_failure_still_returns_the_provider_reported_usage() {
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
+            strategy: None,
+            strategy_revision: None,
+            strategy_snapshot: None,
             verify_claims: false,
             schema_version: 1,
             origin: lingxi_core::host::FusionOrigin::Slash,

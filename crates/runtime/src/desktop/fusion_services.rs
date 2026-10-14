@@ -1476,8 +1476,30 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
 pub(super) fn desktop_fusion_runtime_config(
     cfg: &DesktopConfig,
 ) -> Result<fusion::FusionRuntimeConfig, lingxi_core::host::FusionError> {
-    // The session cache is updated by the actual policy watcher; sync config
-    // reads never run an independent filesystem fold or nested event loop.
+    let selection = desktop_fusion_strategy(cfg, None)?;
+    fusion::FusionRuntimeConfig::from_settings(&selection.config)
+}
+
+fn desktop_fusion_strategy(
+    cfg: &DesktopConfig,
+    requested: Option<&lingxi_core::host::fusion_strategy::FusionStrategyRef>,
+) -> Result<
+    lingxi_core::host::fusion_strategy::FusionStrategySelection,
+    lingxi_core::host::FusionError,
+> {
+    lingxi_core::host::fusion_strategy::resolve_fusion_strategy(
+        &desktop_fusion_layers(cfg)?,
+        requested,
+    )
+    .map_err(|error| lingxi_core::host::FusionError::InvalidConfiguration(error.to_string()))
+}
+
+pub(super) fn desktop_fusion_layers(
+    cfg: &DesktopConfig,
+) -> Result<
+    Vec<lingxi_core::host::fusion_strategy::FusionSettingsLayer>,
+    lingxi_core::host::FusionError,
+> {
     let snapshot = settings_watch::managed_settings_snapshot_sync(cfg).ok_or_else(|| {
         lingxi_core::host::FusionError::InvalidConfiguration(
             "managed policy snapshot is not initialized".into(),
@@ -1491,10 +1513,7 @@ pub(super) fn desktop_fusion_runtime_config(
         tracing::warn!(diagnostic = %diagnostic, "settings merge failed for Fusion settings");
         lingxi_core::host::FusionError::InvalidConfiguration(diagnostic)
     })?;
-    match effective.settings.fusion {
-        Some(settings) => fusion::FusionRuntimeConfig::from_settings(&settings),
-        None => Ok(fusion::FusionRuntimeConfig::defaults()),
-    }
+    Ok(effective.fusion_layers)
 }
 
 /// F007: reload point handed to `FusionOrchestrator` — `load()` re-resolves
@@ -1507,6 +1526,15 @@ pub(super) struct DesktopFusionConfigSource {
 }
 
 impl fusion::FusionConfigSource for DesktopFusionConfigSource {
+    fn capture_strategy(
+        &self,
+        requested: Option<&lingxi_core::host::fusion_strategy::FusionStrategyRef>,
+    ) -> Result<
+        Option<lingxi_core::host::fusion_strategy::FusionStrategySelection>,
+        lingxi_core::host::FusionError,
+    > {
+        desktop_fusion_strategy(&self.cfg, requested).map(Some)
+    }
     fn load(&self) -> Result<fusion::FusionRuntimeConfig, lingxi_core::host::FusionError> {
         desktop_fusion_runtime_config(&self.cfg)
     }
@@ -1528,6 +1556,29 @@ pub(super) struct DesktopFusionExecutor {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::FusionExecutor for DesktopFusionExecutor {
+    fn capture_strategy(
+        &self,
+        requested: Option<&lingxi_core::host::fusion_strategy::FusionStrategyRef>,
+    ) -> Result<
+        Option<lingxi_core::host::fusion_strategy::FusionStrategySelection>,
+        lingxi_core::host::FusionError,
+    > {
+        self.inner.capture_strategy(requested)
+    }
+
+    fn agent_surface_for_strategy(
+        &self,
+        selection: Option<&lingxi_core::host::fusion_strategy::FusionStrategySelection>,
+    ) -> Result<lingxi_core::host::FusionAgentSurface, lingxi_core::host::FusionError> {
+        self.inner.agent_surface_for_strategy(selection)
+    }
+
+    fn implement_confirmation(
+        &self,
+        request: &lingxi_core::host::FusionRequest,
+    ) -> lingxi_core::host::ImplementConfirmation {
+        self.inner.implement_confirmation(request)
+    }
     fn prepare(
         self: Arc<Self>,
         submission: lingxi_core::host::FusionSubmission,
@@ -1544,7 +1595,17 @@ impl lingxi_core::host::FusionExecutor for DesktopFusionExecutor {
     }
 
     fn preflight_error(&self) -> Option<lingxi_core::host::FusionError> {
-        desktop_fusion_runtime_config(&self.cfg).err()
+        // Selection-specific validation belongs to capture_strategy. In
+        // particular, a missing default must not block an explicit strategy.
+        desktop_fusion_layers(&self.cfg)
+            .and_then(|layers| {
+                lingxi_core::host::fusion_strategy::fusion_global_settings(&layers)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        lingxi_core::host::FusionError::InvalidConfiguration(error.to_string())
+                    })
+            })
+            .err()
     }
 
     fn resolve_parent_profile(

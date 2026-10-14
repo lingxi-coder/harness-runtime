@@ -244,6 +244,7 @@ mod tests {
         fs::create_dir_all(&project).expect("project");
         (
             SettingsContext {
+                fusion_layers: None,
                 paths: SettingsPaths {
                     lingxi_home: home,
                     project_dir: project,

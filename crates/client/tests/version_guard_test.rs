@@ -273,6 +273,21 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::SkillAdmin", "skill_admin");
     put("ClientCommand::SkillAdmin.command", "SkillAdminCommandDto");
+    put("ClientCommand::FusionAdmin", "fusion_admin");
+    put("ClientCommand::FusionAdmin.command", "FusionAdminCommandDto");
+    put("FusionAdminCommandDto.action", "String");
+    put("FusionAdminCommandDto.operation_id", "Option<u64>");
+    put("FusionAdminCommandDto.target", "Option<String>");
+    put("FusionAdminCommandDto.scope", "Option<String>");
+    put("FusionAdminCommandDto.revision", "Option<String>");
+    put("FusionAdminCommandDto.payload_json", "Option<String>");
+    put("ConfigurationDomainDto::Fusion", "fusion");
+    put("ClientEvent::FusionCatalog", "fusion_catalog");
+    put("ClientEvent::FusionCatalog.catalog_json", "String");
+    put("ClientEvent::FusionStrategyResolved", "fusion_strategy_resolved");
+    put("ClientEvent::FusionStrategyResolved.operation_id", "u64");
+    put("ClientEvent::FusionStrategyResolved.selection_json", "Option<String>");
+    put("ClientEvent::FusionStrategyResolved.error", "Option<String>");
 
     // ── ClientEvent (events.rs) ───────────────────────────────────────────
     put("ClientEvent::Error", "error");
@@ -1852,6 +1867,7 @@ fn current_contract_index() -> ContractIndex {
     put("SlashCommandDto.source", "String");
     put("SlashCommandDto.aliases", "Vec<ClientTextDto>");
     put("SlashCommandDto.argument_hint", "Option<ClientTextDto>");
+    put("SlashCommandDto.argument_names", "Vec<ClientTextDto>");
     put("SlashCommandDto.menu_description", "Option<String>");
     put("SlashCommandDto.hidden", "bool");
 
@@ -2980,6 +2996,7 @@ fn contract_index_covers_every_dto() {
             source: String::new(),
             aliases: vec![],
             argument_hint: None,
+            argument_names: Vec::new(),
             menu_description: None,
             hidden: false,
         },

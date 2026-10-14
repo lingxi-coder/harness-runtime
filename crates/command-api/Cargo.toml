@@ -22,6 +22,7 @@ cron = { path = "../cron", optional = true }
 permission = { path = "../permission", optional = true }
 telemetry = { path = "../telemetry" }
 cost = { path = "../cost", optional = true }
+migrations = { path = "../migrations", optional = true }
 indexmap = { version = "2", optional = true }
 regex = { version = "1", optional = true }
 branding.workspace = true
@@ -54,6 +55,7 @@ builtin-handlers = [
     "dep:cron",
     "dep:permission",
     "dep:cost",
+    "dep:migrations",
     "dep:indexmap",
     "dep:regex",
 ]

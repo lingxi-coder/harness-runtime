@@ -7,16 +7,20 @@
 use crate::parser::ParsedSlashCommand;
 use lingxi_core::host::{
     normalize_dimensions, normalize_dimensions_for, validate_verify_commands, FusionModelRef,
-    FusionOrigin, FusionPanelMode, FusionPreset, FusionRequest, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
-    FUSION_SCHEMA_VERSION,
+    FusionOrigin, FusionPanelMode, FusionPreset, FusionRequest, FusionStrategyRef,
+    FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_SCHEMA_VERSION,
 };
 
 /// Usage line for empty / invalid invocations.
-pub const FUSION_SLASH_USAGE: &str = "Usage: /fusion [--quality|--fast] [--same-provider|--cross-provider] [--models profile:model,...] [--dimensions dim,...] [--partial-ok|--no-partial] [--max-panel N] [--verify-claims] [--implement [--verify \"COMMAND\"]...] PROMPT\n   or: /fusion setup\n   or: /fusion clean\n   or: /fusion --retry-publication fu_RUN_ID";
+pub const FUSION_SLASH_USAGE: &str = "Usage: /fusion [--strategy scope:id] [--quality|--fast] [--same-provider|--cross-provider] [--models profile:model,...] [--dimensions dim,...] [--partial-ok|--no-partial] [--max-panel N] [--verify-claims] [--implement [--verify \"COMMAND\"]...] PROMPT\n   or: /fusion setup\n   or: /fusion clean\n   or: /fusion --retry-publication fu_RUN_ID";
 
 /// Parsed `/fusion` flags plus the remaining prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FusionSlashArgs {
+    /// Stable user/project/local strategy reference.
+    pub strategy: Option<FusionStrategyRef>,
+    /// Prepared credential configuration revision (host supplied).
+    pub strategy_revision: Option<String>,
     /// Explicit panel preset. `None` = use the runtime Fusion default.
     pub preset: Option<FusionPreset>,
     /// `None` = use `slashCrossProviderDefault`.
@@ -49,6 +53,8 @@ pub struct FusionSlashArgs {
 /// lint instead of taking six separate `&mut Option<_>`.
 #[derive(Default)]
 struct FusionFlagAccum {
+    strategy: Option<FusionStrategyRef>,
+    strategy_revision: Option<String>,
     preset: Option<FusionPreset>,
     cross_provider: Option<bool>,
     partial_ok: Option<bool>,
@@ -86,6 +92,36 @@ fn consume_fusion_flag(
         next_cursor: advance_past_token(raw, cursor, tok),
     };
     match tok {
+        flag if flag.starts_with("--strategy=") => {
+            let reference = flag["--strategy=".len()..]
+                .parse::<FusionStrategyRef>()
+                .map_err(|e| e.to_string())?;
+            set_once(&mut acc.strategy, reference, "--strategy")?;
+            Ok(consumed_one(cursor))
+        }
+        "--strategy" | "--strategy-revision" => {
+            let next_cursor = advance_past_token(raw, cursor, tok);
+            let value = tokens
+                .get(i + 1)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| format!("{tok} requires a value"))?;
+            if tok == "--strategy" {
+                set_once(
+                    &mut acc.strategy,
+                    value
+                        .parse::<FusionStrategyRef>()
+                        .map_err(|e| e.to_string())?,
+                    tok,
+                )?;
+            } else {
+                set_once(&mut acc.strategy_revision, value.clone(), tok)?;
+            }
+            Ok(FlagStep::Consumed {
+                next_i: i + 2,
+                next_cursor: advance_past_token(raw, next_cursor, value),
+            })
+        }
+
         "--quality" => {
             set_preset(&mut acc.preset, FusionPreset::Quality)?;
             Ok(consumed_one(cursor))
@@ -223,25 +259,20 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     let raw = args.raw_args_utf8().ok_or_else(|| {
         format!("Fusion arguments must be valid Unicode text.\n{FUSION_SLASH_USAGE}")
     })?;
-    let tokens = (0..args.positional_args.len())
-        .map(|index| {
-            args.positional_arg_utf8(index)
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    format!("Fusion arguments must be valid Unicode text.\n{FUSION_SLASH_USAGE}")
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    // `tokens` is shell-quote output: unquoted `*`/`?` globs are dropped,
-    // `#` truncates the remainder as a comment, `( ) | & ; < >` are operators.
-    // That is fine for recognising leading `--flag` words (always plain
-    // ASCII), but the prompt itself must come back from `raw_args` verbatim
-    // — so we only use `tokens` to find where the flags end, then recover
-    // everything after that point directly from the untokenized string,
-    // preserving punctuation and newlines the tokenizer would have mangled.
+    // The shared slash tokenizer drops globs/operators/comments. A dropped
+    // first prompt word could therefore promote later prompt text such as
+    // `--strategy` into a leading flag. Keep every raw word while decoding
+    // quoting only for flag values; the first positional word ends parsing.
+    let tokens = fusion_prefix_tokens(raw);
     let mut cursor = 0usize;
     let mut i = 0;
     while i < tokens.len() {
+        // Option names are literal source text. A quoted or escaped word such
+        // as `'--fast'`, `--"fast"`, or `--fa\\st` begins the prompt even when
+        // its decoded shell value happens to equal a recognized option.
+        if literal_fusion_flag_prefix(&raw[cursor..]).is_none() {
+            break;
+        }
         match consume_fusion_flag(&tokens, raw, i, cursor, &mut acc)? {
             FlagStep::Consumed {
                 next_i,
@@ -253,7 +284,9 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
             FlagStep::Stop => break,
         }
     }
-    let prompt = raw[cursor.min(raw.len())..].trim().to_string();
+    let prompt = raw[cursor.min(raw.len())..]
+        .trim_matches(lingxi_core::host::effort::javascript_whitespace)
+        .to_string();
     if prompt.is_empty() {
         return Err(FUSION_SLASH_USAGE.to_string());
     }
@@ -274,6 +307,8 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     let verify_commands =
         validate_verify_commands(mode, acc.verify_commands).map_err(|error| error.to_string())?;
     Ok(FusionSlashArgs {
+        strategy: acc.strategy,
+        strategy_revision: acc.strategy_revision,
         preset: acc.preset,
         cross_provider: acc.cross_provider,
         models: acc.models,
@@ -287,51 +322,56 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     })
 }
 
-/// Advance `cursor` past the next occurrence of `token` in `raw`, searching
-/// from `cursor` onward.
-///
-/// `token` is a value pulled from the shell-quote tokenizer's output. In the
-/// common case it is a literal substring of the raw text at this position
-/// (surrounded by whatever quotes/backslashes the tokenizer stripped, but
-/// not split by them), so a plain [`str::find`] locates it and we additionally
-/// skip one trailing closing quote so it doesn't leak into the recovered
-/// prompt. That `find` is also what lets an unquoted `*`/`?` glob the
-/// tokenizer drops, or a standalone operator character (`| & ; ( ) < >`)
-/// that produces no token at all, re-synchronise on the FOLLOWING token
-/// instead of desyncing the cursor.
-///
-/// `find` misses only when the token text itself is no longer a literal
-/// substring at this position — e.g. `--models="a, b"` (the `=`-form embeds
-/// whitespace inside a quoted span that a raw `find` for the whole token
-/// can't match around) or a backslash-escaped space (`a,\ b`). For exactly
-/// that case we fall back to [`advance_past_quoted_word`], which walks the
-/// RAW text honoring `'`/`"` quoting and `\` escapes the same way
-/// [`crate::parser`]'s tokenizer does, so a quoted or escaped span is
-/// skipped in full rather than stopping at the first whitespace inside it.
-fn advance_past_token(raw: &str, cursor: usize, token: &str) -> usize {
-    let cursor = cursor.min(raw.len());
-    let rest = &raw[cursor..];
-    if let Some(rel) = rest.find(token) {
-        let mut end = cursor + rel + token.len();
-        // If the raw text quoted this token (e.g. `--models "a,b"`), the
-        // shell-quote tokenizer already stripped the surrounding quotes from
-        // `token` before handing it to us, so `token` matches only the
-        // INSIDE of the raw quoted span — skip the closing quote too, or it
-        // leaks as the first character of the recovered prompt.
-        let opened_with_quote =
-            rel > 0 && matches!(rest.as_bytes().get(rel - 1), Some(b'"' | b'\''));
-        if opened_with_quote {
-            let opening = rest.as_bytes()[rel - 1];
-            if raw.as_bytes().get(end) == Some(&opening) {
-                end += 1;
-            }
-        }
-        return end;
+/// The same literal `--[a-z-]+` prefix and boundary used by Desktop's scanner.
+fn literal_fusion_flag_prefix(raw: &str) -> Option<&str> {
+    let raw = raw.trim_start_matches(lingxi_core::host::effort::javascript_whitespace);
+    let rest = raw.strip_prefix("--")?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_lowercase() && c != '-')
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
     }
+    let boundary = rest[end..].chars().next();
+    if boundary.is_some_and(|c| c != '=' && !lingxi_core::host::effort::javascript_whitespace(c)) {
+        return None;
+    }
+    Some(&raw[..end + 2])
+}
+
+/// Preserve one token for every raw word, including shell glob/operator words.
+/// A prompt is never reconstructed from the decoded words.
+fn fusion_prefix_tokens(raw: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while cursor < raw.len() {
+        let rest = &raw[cursor..];
+        let start = cursor
+            + rest
+                .find(|c: char| !lingxi_core::host::effort::javascript_whitespace(c))
+                .unwrap_or(rest.len());
+        if start == raw.len() {
+            break;
+        }
+        let end = advance_past_quoted_word(raw, start);
+        let word = &raw[start..end];
+        let decoded = crate::parser::tokenize_args(word);
+        tokens.push(if decoded.len() == 1 {
+            decoded.into_iter().next().expect("one decoded word")
+        } else {
+            word.to_string()
+        });
+        cursor = end;
+    }
+    tokens
+}
+
+/// Advance exactly one raw word, matching the prefix tokenizer's boundaries.
+fn advance_past_token(raw: &str, cursor: usize, _token: &str) -> usize {
     advance_past_quoted_word(raw, cursor)
 }
 
-/// Fallback for [`advance_past_token`]: advance `cursor` past the next shell
+/// Advance `cursor` past the next shell
 /// word in `raw`, starting from `cursor` (leading whitespace is skipped
 /// first), honoring `'`/`"` quoting and `\` escapes so a whitespace-bearing
 /// quoted or escaped span is skipped in full instead of splicing its tail
@@ -340,7 +380,7 @@ fn advance_past_quoted_word(raw: &str, cursor: usize) -> usize {
     let cursor = cursor.min(raw.len());
     let rest = &raw[cursor..];
     let trimmed_start = rest
-        .find(|c: char| !c.is_whitespace())
+        .find(|c: char| !lingxi_core::host::effort::javascript_whitespace(c))
         .unwrap_or(rest.len());
     let start = cursor + trimmed_start;
 
@@ -372,7 +412,7 @@ fn advance_past_quoted_word(raw: &str, cursor: usize) -> usize {
             end += c.len_utf8();
             continue;
         }
-        if c.is_whitespace() {
+        if lingxi_core::host::effort::javascript_whitespace(c) {
             break;
         }
         end += c.len_utf8();
@@ -400,6 +440,9 @@ pub fn fusion_request_from_slash(
         normalize_dimensions_for(mode, Vec::new()).unwrap_or_default()
     });
     FusionRequest {
+        strategy: parsed.strategy,
+        strategy_revision: parsed.strategy_revision,
+        strategy_snapshot: None,
         verify_claims: parsed.verify_claims,
         schema_version: FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Slash,
@@ -511,6 +554,30 @@ mod tests {
     fn parse(line: &str) -> Result<FusionSlashArgs, String> {
         let parsed = parse_slash_command(&line.into()).expect("slash");
         parse_fusion_slash(&parsed)
+    }
+
+    #[test]
+    fn strategy_reference_and_revision_are_preserved() {
+        let parsed =
+            parse("/fusion --strategy project:review --strategy-revision abc do it").unwrap();
+        assert_eq!(parsed.strategy.unwrap().to_string(), "project:review");
+        assert_eq!(parsed.strategy_revision.as_deref(), Some("abc"));
+        assert_eq!(
+            parse("/fusion --strategy=user:deep do it")
+                .unwrap()
+                .strategy
+                .unwrap()
+                .to_string(),
+            "user:deep"
+        );
+        for line in [
+            "/fusion --strategy team:x do it",
+            "/fusion --strategy project: do it",
+            "/fusion --strategy user:a --strategy user:b do it",
+            "/fusion --strategy --fast do it",
+        ] {
+            assert!(parse(line).is_err(), "{line}");
+        }
     }
 
     #[test]
@@ -730,32 +797,77 @@ mod tests {
     }
 
     #[test]
-    fn unquoted_glob_word_between_flags_does_not_desync_the_cursor() {
-        // `*.rs` is an unquoted glob: `crate::parser`'s tokenizer
-        // drops it entirely (it never becomes a `positional_args` token,
-        // per `flush_word`), so the flag loop's token list skips straight
-        // from `--fast` to `--max-panel`. A cursor-advance strategy that
-        // walks exactly one raw shell word per consumed token desyncs here
-        // — it lands on `*.rs` instead of `--max-panel` and never recovers.
-        // `advance_past_token`'s literal `find` for the LITERAL flag text
-        // scans forward past the dropped glob and resynchronises.
+    fn an_unquoted_glob_word_starts_the_verbatim_prompt() {
         let args = parse("/fusion --fast *.rs --max-panel 4 review the plan").unwrap();
-        assert_eq!(args.prompt, "review the plan");
+        assert_eq!(args.prompt, "*.rs --max-panel 4 review the plan");
         assert_eq!(args.preset, Some(FusionPreset::Fast));
-        assert_eq!(args.max_panel, Some(4));
+        assert_eq!(args.max_panel, None);
     }
 
     #[test]
-    fn standalone_shell_operator_between_flags_does_not_desync_the_cursor() {
-        // A bare `|` is a shell operator: the tokenizer emits no token at
-        // all for it (parser.rs's operator handling), so — like the glob
-        // case above — the token list skips straight from `--fast` to
-        // `--max-panel` while the raw text still has the operator sitting
-        // between them.
+    fn a_standalone_shell_operator_starts_the_verbatim_prompt() {
         let args = parse("/fusion --fast | --max-panel 4 review the plan").unwrap();
-        assert_eq!(args.prompt, "review the plan");
+        assert_eq!(args.prompt, "| --max-panel 4 review the plan");
         assert_eq!(args.preset, Some(FusionPreset::Fast));
-        assert_eq!(args.max_panel, Some(4));
+        assert_eq!(args.max_panel, None);
+    }
+
+    #[test]
+    fn punctuation_prompt_text_cannot_select_another_strategy_or_preset() {
+        for prompt in [
+            "Review? --fast this",
+            "*.rs --strategy user:other review",
+            "| --strategy user:other review",
+            "# --strategy user:other review",
+            "What's the --strategy flag?",
+            "Don't trim this prompt's unmatched apostrophe",
+        ] {
+            let args = parse(&format!("/fusion --strategy user:chosen {prompt}")).unwrap();
+            assert_eq!(args.strategy.unwrap().to_string(), "user:chosen");
+            assert_eq!(args.preset, None);
+            assert_eq!(args.prompt, prompt);
+        }
+    }
+
+    #[test]
+    fn quoted_and_escaped_option_names_are_prompt_text() {
+        for prompt in [
+            "'--fast' explain",
+            "\"--quality\" explain",
+            "\\--fast explain",
+            "--\"fast\" explain",
+            "--fa\\st explain",
+            "'--strategy' user:other explain",
+        ] {
+            let plain = parse(&format!("/fusion {prompt}")).unwrap();
+            assert_eq!(plain.prompt, prompt);
+            assert_eq!(plain.preset, None);
+            assert_eq!(plain.strategy, None);
+            let chosen = parse(&format!("/fusion --strategy user:chosen {prompt}")).unwrap();
+            assert_eq!(chosen.prompt, prompt);
+            assert_eq!(chosen.preset, None);
+            assert_eq!(chosen.strategy.unwrap().to_string(), "user:chosen");
+        }
+        let args =
+            parse("/fusion --strategy 'user:chosen' --models \"openai:a, anthropic:b\" explain")
+                .unwrap();
+        assert_eq!(args.strategy.unwrap().to_string(), "user:chosen");
+        assert_eq!(args.models.unwrap().len(), 2);
+        assert_eq!(args.prompt, "explain");
+    }
+
+    #[test]
+    fn flag_prefix_whitespace_matches_desktop_ecmascript_rules() {
+        for whitespace in ["\u{FEFF}", "\u{00A0}", "\u{2003}", "\u{2028}"] {
+            let args = parse(&format!("/fusion{whitespace}--strategy{whitespace}user:chosen{whitespace}--fast{whitespace}explain")).unwrap();
+            assert_eq!(args.strategy.unwrap().to_string(), "user:chosen");
+            assert_eq!(args.preset, Some(FusionPreset::Fast));
+            assert_eq!(args.prompt, "explain");
+        }
+        // Rust's Unicode whitespace set includes NEL; JavaScript's does not.
+        let args = parse("/fusion --fast \u{0085}--strategy user:other explain").unwrap();
+        assert_eq!(args.strategy, None);
+        assert_eq!(args.prompt, "\u{0085}--strategy user:other explain");
     }
 
     #[test]

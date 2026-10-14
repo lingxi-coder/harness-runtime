@@ -163,6 +163,8 @@ impl ModelSource for CatalogSnapshot {
 /// Complete immutable runtime input captured before activation.
 #[derive(Clone, Debug)]
 pub struct FusionRuntimeSnapshot {
+    /// Strategy identity captured before defaults and route preparation.
+    pub strategy: Option<lingxi_core::host::FusionStrategyMetadata>,
     /// Resolved Fusion settings.
     pub config: FusionRuntimeConfig,
     /// Catalog and route capacities.
@@ -183,6 +185,7 @@ impl FusionRuntimeSnapshot {
     ) -> Self {
         let config_content = debug_digest(&config);
         Self {
+            strategy: None,
             config,
             catalog,
             prices,

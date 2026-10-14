@@ -471,6 +471,31 @@ impl Default for FusionRuntimeConfig {
 /// `agent_surface()` call instead, so the next
 /// call — not the next restart — sees a settings change.
 pub trait FusionConfigSource: Send + Sync {
+    /// Resolve a scoped strategy from the current registry. Fixed sources have none.
+    fn capture_strategy(
+        &self,
+        requested: Option<&lingxi_core::host::fusion_strategy::FusionStrategyRef>,
+    ) -> Result<Option<lingxi_core::host::fusion_strategy::FusionStrategySelection>, FusionError>
+    {
+        if requested.is_some() {
+            return Err(FusionError::InvalidConfiguration(
+                "fusion strategy selection is unavailable".into(),
+            ));
+        }
+        Ok(None)
+    }
+
+    /// Revalidate the exact captured strategy, without consulting a new default.
+    fn load_strategy(
+        &self,
+        requested: Option<&lingxi_core::host::fusion_strategy::FusionStrategyRef>,
+    ) -> Result<FusionRuntimeConfig, FusionError> {
+        match self.capture_strategy(requested)? {
+            Some(selection) => FusionRuntimeConfig::from_settings(&selection.config),
+            None => self.load(),
+        }
+    }
+
     /// Reload the current effective config.
     ///
     /// # Errors
@@ -782,23 +807,14 @@ mod tests {
             ],
             analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
         };
-        let mut written = serde_json::json!({});
-        roles.write_settings_json(&mut written);
+        let mut written = FusionSettingsJson::default();
+        roles.write_strategy_config(&mut written);
 
-        // Read what the wizard wrote back through the ENGINE's own typed path,
-        // exactly as a settings load would.
-        let settings: lingxi_core::settings::schema::SettingsJson =
-            serde_json::from_value(written.clone()).expect("the written file parses");
-        settings
+        written
             .validate()
-            .expect("what the wizard writes must pass the engine's validator");
-        let cfg = FusionRuntimeConfig::from_settings(
-            settings
-                .fusion
-                .as_ref()
-                .expect("the writer produced a `fusion` block"),
-        )
-        .expect("the written roles build a runtime config");
+            .expect("the written strategy passes validation");
+        let cfg = FusionRuntimeConfig::from_settings(&written)
+            .expect("the written roles build a runtime config");
 
         assert_eq!(cfg.panel_models, roles.panels);
         assert_eq!(cfg.analyst_model, roles.analyst);
@@ -809,14 +825,17 @@ mod tests {
 
         // And the reverse direction: what the engine considers configured is
         // what the wizard will show as configured.
-        assert!(FusionModelRoles::from_settings_json(&written).is_configured());
+        assert!(FusionModelRoles::from_strategy_config(&written).is_configured());
     }
 
     #[test]
     fn the_enabled_switch_and_the_roles_are_independent_settings() {
         use lingxi_core::host::fusion_setup;
 
-        let mut written = serde_json::json!({"fusion": {"enabled": true}});
+        let mut written = FusionSettingsJson {
+            enabled: Some(true),
+            ..Default::default()
+        };
         fusion_setup::FusionModelRoles {
             panels: vec![
                 FusionModelChoice::new("anthropic", "claude-opus-5"),
@@ -824,10 +843,8 @@ mod tests {
             ],
             analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
         }
-        .write_settings_json(&mut written);
-        let settings: lingxi_core::settings::schema::SettingsJson =
-            serde_json::from_value(written).unwrap();
-        let cfg = FusionRuntimeConfig::from_settings(settings.fusion.as_ref().unwrap()).unwrap();
+        .write_strategy_config(&mut written);
+        let cfg = FusionRuntimeConfig::from_settings(&written).unwrap();
         assert!(cfg.enabled, "configuring models must not clear the switch");
     }
 }

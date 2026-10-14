@@ -1,8 +1,8 @@
 {
   "type": "update_prompt_suggestion_context",
   "session_id": "session-1",
-  "focus": "composer",
-  "input_empty": false,
+  "focus": "focused",
+  "input_empty": true,
   "pending_permission": false,
   "elicitation_active": false
 }

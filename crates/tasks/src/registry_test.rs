@@ -1158,6 +1158,7 @@ impl Task for RecordingHandler {
         Ok(match self.fusion_duration_ms {
             Some(duration_ms) => {
                 handle.with_fusion_prepared_summary(lingxi_core::host::FusionPreparedSummary {
+                    strategy: None,
                     identity: lingxi_core::host::FusionRunIdentity::new(
                         lingxi_core::host::FusionRunId::generated(),
                         None,
@@ -2321,6 +2322,9 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
         RecordingHandler::new(TaskType::LocalFusion, "fsweep1"),
     );
     let request = lingxi_core::host::FusionRequest {
+        strategy: None,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: 1,
         origin: lingxi_core::host::FusionOrigin::Slash,
@@ -2424,6 +2428,9 @@ async fn a_finished_fusion_run_wakes_an_idle_host_with_the_material_as_result() 
         RecordingHandler::new(TaskType::LocalFusion, "fwake1"),
     );
     let request = lingxi_core::host::FusionRequest {
+        strategy: None,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: 1,
         origin: lingxi_core::host::FusionOrigin::Slash,
@@ -2503,6 +2510,9 @@ async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state(
         RecordingHandler::with_fusion_timeout("ftimeout1", TIMEOUT_MS),
     );
     let request = lingxi_core::host::FusionRequest {
+        strategy: None,
+        strategy_revision: None,
+        strategy_snapshot: None,
         verify_claims: false,
         schema_version: 1,
         origin: lingxi_core::host::FusionOrigin::Slash,
@@ -3541,6 +3551,14 @@ impl Task for FusionActivationTimestampHandler {
             Some(task_id.clone()),
         );
         let summary = lingxi_core::host::FusionPreparedSummary {
+            strategy: Some(lingxi_core::host::FusionStrategyMetadata {
+                reference: lingxi_core::host::FusionStrategyRef {
+                    scope: lingxi_core::types::WritableScope::Project,
+                    id: "review".into(),
+                },
+                name: "Review".into(),
+                revision: "captured".into(),
+            }),
             identity,
             duration_ms: 1_000,
             planned_panels: Some(3),
@@ -3788,6 +3806,9 @@ async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
                 TaskType::LocalFusion,
                 TaskSpawnInput::LocalFusion {
                     request: lingxi_core::host::FusionRequest {
+                        strategy: None,
+                        strategy_revision: None,
+                        strategy_snapshot: None,
                         verify_claims: false,
                         schema_version: 1,
                         origin: lingxi_core::host::FusionOrigin::Slash,
@@ -3836,6 +3857,11 @@ async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
     let TaskState::LocalFusion(fusion) = state else {
         panic!("expected LocalFusion state");
     };
+    let strategy = fusion.strategy.as_ref().expect("captured strategy is published with task");
+    assert_eq!(strategy.name, "Review");
+    assert_eq!(strategy.reference.scope, lingxi_core::types::WritableScope::Project);
+    let persisted = serde_json::to_value(&fusion).expect("task serializes");
+    assert_eq!(persisted["strategy"]["reference"]["id"], "review");
     assert!(
         fusion.base.start_time <= SystemTime::now(),
         "activation wall time is published before spawn returns"
@@ -4588,6 +4614,7 @@ async fn take_pending_drains_terminal_bash_once_with_exit_code() {
 
 fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskState {
     TaskState::LocalFusion(crate::state::LocalFusionTaskState {
+        strategy: None,
         base: TaskStateBase {
             id: id.to_string(),
             task_type: TaskType::LocalFusion,

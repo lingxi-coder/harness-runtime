@@ -46,6 +46,7 @@ pub mod fork_resume;
 mod fusion_attempt_composition_test;
 mod fusion_attempts;
 mod fusion_command;
+pub use fusion_command::record_fusion_command_failure;
 mod fusion_implement;
 #[cfg(test)]
 mod fusion_implement_e2e_test;
@@ -3670,6 +3671,15 @@ fn load_effective_settings_with_inputs(
         }
     }
     Ok(effective)
+}
+
+/// Read the exact admitted Fusion layers used by runtime strategy selection.
+/// Configuration administration uses this hook before credential preparation,
+/// including fresh managed policy and this host's CLI and trust restrictions.
+pub fn fusion_settings_layers_for_config(
+    cfg: &DesktopConfig,
+) -> Result<Vec<lingxi_core::host::FusionSettingsLayer>, String> {
+    fusion_services::desktop_fusion_layers(cfg).map_err(|error| error.to_string())
 }
 
 /// Sample the current merged main/subagent prompt-cache settings for an API

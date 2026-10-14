@@ -235,16 +235,48 @@ impl FusionOrchestrator {
 
     fn prepared_config(
         &self,
-        mode: lingxi_core::host::FusionPanelMode,
+        request: &FusionRequest,
         effective_timeout_ms: Option<u64>,
     ) -> Result<FusionRuntimeConfig, FusionError> {
-        let mut config = self.config_source.load()?.for_mode(mode);
+        let mut config = match request.strategy_snapshot.as_deref() {
+            Some(selection) => FusionRuntimeConfig::from_settings(&selection.config)?,
+            None => self
+                .config_source
+                .load_strategy(request.strategy.as_ref())?,
+        }
+        .for_mode(request.mode);
         if let Some(captured_total) =
             effective_timeout_ms.map(|timeout_ms| timeout_ms.saturating_sub(FINALIZE_GRACE_MS))
         {
             config.total_timeout_ms = captured_total;
         }
         Ok(config)
+    }
+
+    fn capture_request(&self, mut request: FusionRequest) -> Result<FusionRequest, FusionError> {
+        let expected_revision = request.strategy_revision.clone();
+        if request.strategy_snapshot.is_none() {
+            let selection = self
+                .config_source
+                .capture_strategy(request.strategy.as_ref())?;
+            request.capture_strategy(selection);
+        }
+        if let Some(selection) = request.strategy_snapshot.as_deref() {
+            if request.strategy.as_ref() != Some(&selection.reference)
+                || expected_revision
+                    .as_ref()
+                    .is_some_and(|revision| revision != &selection.revision)
+            {
+                return Err(FusionError::InvalidConfiguration(
+                    "fusion strategy changed since preparation; select the strategy again".into(),
+                ));
+            }
+        } else if expected_revision.is_some() {
+            return Err(FusionError::InvalidConfiguration(
+                "fusion strategy revision cannot be verified".into(),
+            ));
+        }
+        Ok(request)
     }
 
     /// Capture one coherent immutable view across effective settings, route
@@ -257,25 +289,25 @@ impl FusionOrchestrator {
         request: &FusionRequest,
         effective_timeout_ms: Option<u64>,
     ) -> Result<FusionRuntimeSnapshot, FusionError> {
+        let request = self.capture_request(request.clone())?;
         let extra_routes = [(request.parent_profile.clone(), request.parent_model.clone())];
         for _ in 0..SNAPSHOT_CAPTURE_ATTEMPTS {
-            let config_before = self.prepared_config(request.mode, effective_timeout_ms)?;
+            let config_before = self.prepared_config(&request, effective_timeout_ms)?;
             let catalog_before = CatalogSnapshot::capture(self.catalog.as_ref())?;
             let prices_before = catalog_before.capture_prices(self.prices.as_ref(), &extra_routes);
 
             let catalog_after = CatalogSnapshot::capture(self.catalog.as_ref())?;
-            let config_after = self.prepared_config(request.mode, effective_timeout_ms)?;
+            let config_after = self.prepared_config(&request, effective_timeout_ms)?;
             let prices_after = catalog_after.capture_prices(self.prices.as_ref(), &extra_routes);
 
             if config_before == config_after
                 && catalog_before == catalog_after
                 && prices_before == prices_after
             {
-                return Ok(FusionRuntimeSnapshot::new(
-                    config_after,
-                    catalog_after,
-                    prices_after,
-                ));
+                let mut snapshot =
+                    FusionRuntimeSnapshot::new(config_after, catalog_after, prices_after);
+                snapshot.strategy = request.strategy_metadata();
+                return Ok(snapshot);
             }
         }
         Err(FusionError::InvalidConfiguration(
@@ -340,7 +372,7 @@ impl FusionOrchestrator {
         stage: &str,
     ) -> Result<(), FusionError> {
         let current = source
-            .load()
+            .load_strategy(request.strategy.as_ref())
             .map_err(|_| {
                 FusionError::InvalidConfiguration(format!(
                     "fusion {stage} settings could not be revalidated"
@@ -819,7 +851,7 @@ impl FusionOrchestrator {
         settlement: Arc<Mutex<Option<(u64, bool)>>>,
     ) -> Result<FusionResult, FusionError> {
         Self::ensure_operational_time(operational_deadline)?;
-        let request = validate_request(request)?;
+        let request = self.capture_request(validate_request(request)?)?;
         self.emit_started(
             &request,
             &resolved,
@@ -2278,7 +2310,7 @@ impl FusionExecutor for FusionOrchestrator {
             identity,
         } = submission;
         let inherit = scope_inheritance_to_identity(&identity, inherit)?;
-        let request = validate_request(request)?;
+        let request = self.capture_request(validate_request(request)?)?;
         let runtime_snapshot =
             self.capture_runtime_snapshot(&request, inherit.effective_timeout_ms)?;
         let config = runtime_snapshot.config.clone();
@@ -2311,6 +2343,7 @@ impl FusionExecutor for FusionOrchestrator {
             .effective_timeout_ms
             .unwrap_or_else(|| config.total_timeout_ms.saturating_add(FINALIZE_GRACE_MS));
         let summary = FusionPreparedSummary {
+            strategy: request.strategy_metadata(),
             identity: identity.clone(),
             duration_ms,
             planned_panels: Some(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX)),
@@ -2327,6 +2360,7 @@ impl FusionExecutor for FusionOrchestrator {
             },
         );
         let facts = control.facts();
+        facts.set_strategy(request.strategy_metadata());
         facts.set_resolved_panels(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
         // This exact zero is provisional until a provider-capable boundary is
         // reached. It lets pre-reservation failures remain distinguishable
@@ -2418,6 +2452,43 @@ impl FusionExecutor for FusionOrchestrator {
         let Ok(config) = self.config_source.load() else {
             return FusionAgentSurface::default();
         };
+        self.surface_from_config(&config)
+    }
+
+    fn capture_strategy(
+        &self,
+        requested: Option<&lingxi_core::host::fusion_strategy::FusionStrategyRef>,
+    ) -> Result<Option<lingxi_core::host::fusion_strategy::FusionStrategySelection>, FusionError>
+    {
+        self.config_source.capture_strategy(requested)
+    }
+
+    fn agent_surface_for_strategy(
+        &self,
+        selection: Option<&lingxi_core::host::fusion_strategy::FusionStrategySelection>,
+    ) -> Result<FusionAgentSurface, FusionError> {
+        let config = match selection {
+            Some(selection) => FusionRuntimeConfig::from_settings(&selection.config)?,
+            None => self.config_source.load()?,
+        };
+        Ok(self.surface_from_config(&config))
+    }
+
+    fn implement_confirmation(&self, request: &FusionRequest) -> ImplementConfirmation {
+        self.confirm_implementation(request)
+    }
+
+    fn resolve_parent_profile(
+        &self,
+        parent_model: &str,
+        explicit_profile: Option<&str>,
+    ) -> Option<String> {
+        self.parent_profile_for(parent_model, explicit_profile)
+    }
+}
+
+impl FusionOrchestrator {
+    fn surface_from_config(&self, config: &FusionRuntimeConfig) -> FusionAgentSurface {
         FusionAgentSurface {
             // Advertising the `fusion` agent while its models are unconfigured
             // would put a subagent type in front of the model that cannot
@@ -2439,7 +2510,7 @@ impl FusionExecutor for FusionOrchestrator {
         }
     }
 
-    fn implement_confirmation(&self, request: &FusionRequest) -> ImplementConfirmation {
+    fn confirm_implementation(&self, request: &FusionRequest) -> ImplementConfirmation {
         // The same snapshot, resolution and quote `prepare` makes, without
         // registering, reserving or spending anything.
         let Ok(request) = validate_request(request.clone()) else {
@@ -2480,7 +2551,7 @@ impl FusionExecutor for FusionOrchestrator {
         }
     }
 
-    fn resolve_parent_profile(
+    fn parent_profile_for(
         &self,
         parent_model: &str,
         explicit_profile: Option<&str>,
@@ -3637,6 +3708,9 @@ mod check_panel_bar_preflight_tests {
     /// `ok == 0` branch, so the exact field values here are irrelevant.
     fn minimal_request() -> FusionRequest {
         FusionRequest {
+            strategy: None,
+            strategy_revision: None,
+            strategy_snapshot: None,
             verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Agent,
@@ -3993,6 +4067,9 @@ mod outer_err_arm_realized_tokens_tests {
 
     fn request() -> FusionRequest {
         FusionRequest {
+            strategy: None,
+            strategy_revision: None,
+            strategy_snapshot: None,
             verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Slash,
