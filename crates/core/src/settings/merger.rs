@@ -127,7 +127,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         auto_memory_enabled: next.auto_memory_enabled.or(prev.auto_memory_enabled),
         effort_level: next.effort_level.or(prev.effort_level),
         fast_mode: next.fast_mode.or(prev.fast_mode),
-        prompt_suggestion_enabled: next.prompt_suggestion_enabled.or(prev.prompt_suggestion_enabled),
+        prompt_suggestion_enabled: next
+            .prompt_suggestion_enabled
+            .or(prev.prompt_suggestion_enabled),
         fast_mode_per_session_opt_in: next
             .fast_mode_per_session_opt_in
             .or(prev.fast_mode_per_session_opt_in),
@@ -259,17 +261,29 @@ fn merge_model_settings(
 }
 
 fn merge_fusion_settings(
-    prev: Option<crate::settings::schema::FusionSettingsJson>,
-    next: Option<crate::settings::schema::FusionSettingsJson>,
-) -> Option<crate::settings::schema::FusionSettingsJson> {
+    prev: Option<crate::settings::schema::FusionRegistrySettingsJson>,
+    next: Option<crate::settings::schema::FusionRegistrySettingsJson>,
+) -> Option<crate::settings::schema::FusionRegistrySettingsJson> {
     match (prev, next) {
         (None, None) => None,
         (Some(v), None) | (None, Some(v)) => Some(v),
-        (Some(p), Some(n)) => {
-            let pv = serde_json::to_value(&p).unwrap_or(serde_json::Value::Null);
-            let nv = serde_json::to_value(&n).unwrap_or(serde_json::Value::Null);
-            serde_json::from_value(deep_merge_value(pv, nv)).ok()
-        }
+        (Some(p), Some(n)) => Some(crate::settings::schema::FusionRegistrySettingsJson {
+            enabled: n.enabled.or(p.enabled),
+            proactive: n.proactive.or(p.proactive),
+            allowed_profiles: n.allowed_profiles.or(p.allowed_profiles),
+            allow_cross_provider_for_agent: n
+                .allow_cross_provider_for_agent
+                .or(p.allow_cross_provider_for_agent),
+            slash_cross_provider_default: n
+                .slash_cross_provider_default
+                .or(p.slash_cross_provider_default),
+            // The merged view is informational only. Selection consumes the
+            // retained source layers, so records and defaults never change scope.
+            strategies: n.strategies,
+            default_strategy_id: n.default_strategy_id,
+            overrides: n.overrides.or(p.overrides),
+            diagnostic: n.diagnostic.or(p.diagnostic),
+        }),
     }
 }
 
@@ -347,6 +361,22 @@ pub fn merge_raw_layer(
             // `next`, matching `deep_merge_object` / `deep_merge_value_opt`.
             MergeStrategy::DeepMerge if key == "permissions" => {
                 merge_permissions_value(v_prev, v_next.clone())
+            }
+            MergeStrategy::DeepMerge if key == "fusion" => {
+                // Only global controls inherit in the informational merged
+                // view. The source-aware catalog retains every strategy.
+                match (v_prev, v_next.clone()) {
+                    (Value::Object(mut previous), Value::Object(next)) => {
+                        previous.remove("strategies");
+                        previous.remove("defaultStrategyId");
+                        previous.extend(next);
+                        previous
+                            .entry("strategies")
+                            .or_insert_with(|| Value::Array(Vec::new()));
+                        Value::Object(previous)
+                    }
+                    (_, next) => next,
+                }
             }
             MergeStrategy::DeepMerge => deep_merge_value(v_prev, v_next.clone()),
         };
@@ -842,59 +872,43 @@ mod tests {
     }
 
     #[test]
-    fn fusion_completion_policy_cross_layer_conflict_is_preserved_for_validation() {
-        let lower: SettingsJson =
-            serde_json::from_str(r#"{"fusion":{"completionPolicy":"quorum_after_grace"}}"#)
-                .unwrap();
-        let upper: SettingsJson =
-            serde_json::from_str(r#"{"fusion":{"partialOk":false}}"#).unwrap();
-        lower.fusion.as_ref().unwrap().validate().unwrap();
-        upper.fusion.as_ref().unwrap().validate().unwrap();
-        let merged = merge(lower, upper);
-        let settings = merged.fusion.unwrap();
-        assert_eq!(
-            settings.completion_policy,
-            Some(crate::settings::schema::FusionCompletionPolicy::QuorumAfterGrace)
-        );
-        assert!(settings.validate().is_err());
-        let reset: SettingsJson =
-            serde_json::from_str(r#"{"fusion":{"completionPolicy":"wait_all"}}"#).unwrap();
-        let merged = merge(
-            SettingsJson {
-                fusion: Some(settings),
-                ..Default::default()
-            },
-            reset,
-        );
-        merged.fusion.unwrap().validate().unwrap();
+    fn fusion_globals_merge_without_combining_strategy_configs() {
+        let lower: SettingsJson = serde_json::from_value(serde_json::json!({
+            "fusion": {"enabled": true, "defaultStrategyId": "a", "strategies": [
+                {"id": "a", "name": "Review", "config": {"qualityPanelCount": 4}}
+            ]}
+        }))
+        .unwrap();
+        let upper: SettingsJson = serde_json::from_value(serde_json::json!({
+            "fusion": {"allowedProfiles": ["openai"], "strategies": [
+                {"id": "b", "name": "Review", "config": {"preset": "fast"}}
+            ]}
+        }))
+        .unwrap();
+        let merged = merge(lower, upper).fusion.unwrap();
+        assert_eq!(merged.enabled, Some(true));
+        assert_eq!(merged.default_strategy_id, None);
+        assert_eq!(merged.strategies.len(), 1);
+        assert_eq!(merged.strategies[0].id, "b");
+        assert_eq!(merged.strategies[0].config.quality_panel_count, None);
+        assert_eq!(merged.allowed_profiles, Some(vec!["openai".into()]));
     }
 
     #[test]
-    fn fusion_deep_merge_overrides_scalars_and_replaces_arrays() {
-        let prev = SettingsJson {
-            fusion: Some(crate::settings::schema::FusionSettingsJson {
-                enabled: Some(false),
-                quality_panel_count: Some(3),
-                allowed_profiles: Some(vec!["anthropic".into()]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let next = SettingsJson {
-            fusion: Some(crate::settings::schema::FusionSettingsJson {
-                enabled: Some(true),
-                allowed_profiles: Some(vec!["openai".into()]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let merged = merge(prev, next).fusion.unwrap();
-        assert_eq!(merged.enabled, Some(true));
-        assert_eq!(merged.quality_panel_count, Some(3));
-        assert_eq!(
-            merged.allowed_profiles.as_deref(),
-            Some(&["openai".to_string()][..])
-        );
+    fn fusion_legacy_diagnostic_survives_higher_valid_globals() {
+        let lower: SettingsJson = serde_json::from_value(serde_json::json!({
+            "fusion": {"panelModels": []}
+        }))
+        .unwrap();
+        let upper: SettingsJson = serde_json::from_value(serde_json::json!({
+            "fusion": {"enabled": true}
+        }))
+        .unwrap();
+        let merged = merge(lower, upper);
+        merged
+            .validate()
+            .expect("Fusion errors must preserve unrelated settings");
+        assert!(merged.fusion.unwrap().diagnostic.is_some());
     }
 
     #[test]
@@ -1129,8 +1143,8 @@ mod tests {
             ),
             (
                 "fusion",
-                json!({"qualityPanelCount": 3}),
-                json!({"fastPanelCount": 2}),
+                json!({"enabled": true}),
+                json!({"proactive": true, "strategies": []}),
             ),
             (
                 "modelSettings",
@@ -1291,8 +1305,8 @@ mod tests {
         let candidates: Vec<(Value, Value)> = vec![
             (json!({"lowerEntry": "l"}), json!({"upperEntry": "u"})),
             (
-                json!({"qualityPanelCount": 3}),
-                json!({"fastPanelCount": 2}),
+                json!({"enabled": true, "strategies": []}),
+                json!({"proactive": true, "strategies": []}),
             ),
             // `attribution` is a TYPED object, so the generic `lowerEntry`/
             // `upperEntry` probe cannot round-trip it — serde drops the unknown

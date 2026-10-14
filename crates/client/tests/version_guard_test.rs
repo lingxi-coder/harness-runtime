@@ -244,6 +244,22 @@ fn current_contract_index() -> ContractIndex {
         ix.insert(path.to_string(), ty.to_string());
     };
 
+    put("ClientCommand::FusionAdmin", "fusion_admin");
+    put("ClientCommand::FusionAdmin.command", "FusionAdminCommandDto");
+    put("FusionAdminCommandDto.action", "String");
+    put("FusionAdminCommandDto.operation_id", "Option<u64>");
+    put("FusionAdminCommandDto.target", "Option<String>");
+    put("FusionAdminCommandDto.scope", "Option<String>");
+    put("FusionAdminCommandDto.revision", "Option<String>");
+    put("FusionAdminCommandDto.payload_json", "Option<String>");
+    put("ConfigurationDomainDto::Fusion", "fusion");
+    put("ClientEvent::FusionCatalog", "fusion_catalog");
+    put("ClientEvent::FusionCatalog.catalog_json", "String");
+    put("ClientEvent::FusionStrategyResolved", "fusion_strategy_resolved");
+    put("ClientEvent::FusionStrategyResolved.operation_id", "u64");
+    put("ClientEvent::FusionStrategyResolved.selection_json", "Option<String>");
+    put("ClientEvent::FusionStrategyResolved.error", "Option<String>");
+
     // ── ClientEvent (events.rs) ───────────────────────────────────────────
     put("ClientEvent::Error", "error");
     put("ClientEvent::Error.kind", "ErrorKindDto");

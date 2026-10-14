@@ -92,8 +92,8 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // LingXi extension — deep-merge so multiple settings layers can each
     // contribute routing aliases, fallback chains, and retry policy.
     ("routing", MergeStrategy::DeepMerge),
-    // LingXi extension — Fusion multi-model deliberation. Deep-merge objects;
-    // arrays (panel lists, dimensions, allowedProfiles) replace as a whole.
+    // Fusion merges global controls only; the loader preserves independent
+    // source registries for strategy selection before runtime configuration.
     ("fusion", MergeStrategy::DeepMerge),
     // Managed model-restriction map — deep-merge (CC `settingsMergeCustomizer`
     // leaves objects to lodash's recursive merge; only specific arrays concat).
@@ -1021,10 +1021,164 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<Value>,
 
-    /// Object-merge field (deep-merge). LingXi extension: Fusion multi-model
-    /// deliberation. Absent ⇒ Fusion stays disabled (default `enabled: false`).
+    /// Fusion global controls and named strategy registry. The source-aware
+    /// resolver aggregates strategies without merging their configurations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fusion: Option<FusionSettingsJson>,
+    pub fusion: Option<FusionRegistrySettingsJson>,
+}
+
+/// One complete strategy. Its containing file supplies its scope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FusionStrategy {
+    pub id: String,
+    pub name: String,
+    pub config: FusionSettingsJson,
+}
+
+/// Current Fusion wire format. Invalid blocks carry a Fusion-only diagnostic
+/// so unrelated settings still load; strategy resolution and writes reject it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FusionRegistrySettingsJson {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proactive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_profiles: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_cross_provider_for_agent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slash_cross_provider_default: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_strategy_id: Option<String>,
+    #[serde(default)]
+    pub strategies: Vec<FusionStrategy>,
+    /// Runtime overrides supplied by CLI or managed policy, never by a
+    /// file-backed user/project/local registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<FusionSettingsJson>,
+    #[serde(skip)]
+    pub diagnostic: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for FusionRegistrySettingsJson {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            enabled: Option<bool>,
+            proactive: Option<bool>,
+            allowed_profiles: Option<Vec<String>>,
+            allow_cross_provider_for_agent: Option<bool>,
+            slash_cross_provider_default: Option<bool>,
+            default_strategy_id: Option<String>,
+            #[serde(default)]
+            strategies: Vec<FusionStrategy>,
+            overrides: Option<FusionSettingsJson>,
+        }
+        let value = Value::deserialize(deserializer)?;
+        let wire = match serde_json::from_value::<Wire>(value) {
+            Ok(wire) => wire,
+            Err(error) => return Ok(Self {
+                diagnostic: Some(format!("Invalid Fusion registry: {error}. Configure named strategies; the old single-configuration format is unsupported.")),
+                ..Self::default()
+            }),
+        };
+        let mut registry = Self {
+            enabled: wire.enabled,
+            proactive: wire.proactive,
+            allowed_profiles: wire.allowed_profiles,
+            allow_cross_provider_for_agent: wire.allow_cross_provider_for_agent,
+            slash_cross_provider_default: wire.slash_cross_provider_default,
+            default_strategy_id: wire.default_strategy_id,
+            strategies: wire.strategies,
+            overrides: wire.overrides,
+            diagnostic: None,
+        };
+        if let Err(error) = registry.validate() {
+            registry.diagnostic = Some(match error {
+                crate::settings::SettingsError::SchemaViolation(message) => message,
+                other => other.to_string(),
+            });
+        }
+        Ok(registry)
+    }
+}
+
+impl FusionRegistrySettingsJson {
+    /// Validate before persistence or use. Loading quarantines these errors
+    /// within Fusion instead of dropping the containing settings file.
+    pub fn validate(&self) -> Result<(), crate::settings::SettingsError> {
+        use crate::settings::SettingsError::SchemaViolation;
+        if let Some(diagnostic) = &self.diagnostic {
+            return Err(SchemaViolation(diagnostic.clone()));
+        }
+        let mut ids = std::collections::HashSet::new();
+        let mut names = std::collections::HashSet::new();
+        for strategy in &self.strategies {
+            if !valid_fusion_strategy_id(&strategy.id) {
+                return Err(SchemaViolation(
+                    "fusion strategy id must contain only ASCII letters, digits, hyphens, underscores or periods".into(),
+                ));
+            }
+            if strategy.name.trim().is_empty() || strategy.name.trim() != strategy.name {
+                return Err(SchemaViolation(
+                    "fusion strategy name must be nonempty and trimmed".into(),
+                ));
+            }
+            if !ids.insert(&strategy.id) {
+                return Err(SchemaViolation(format!(
+                    "fusion strategy id `{}` is duplicated in this scope",
+                    strategy.id
+                )));
+            }
+            if !names.insert(&strategy.name) {
+                return Err(SchemaViolation(format!(
+                    "fusion strategy name `{}` is duplicated in this scope",
+                    strategy.name
+                )));
+            }
+            strategy.config.validate()?;
+            if strategy.config.enabled.is_some()
+                || strategy.config.proactive.is_some()
+                || strategy.config.allowed_profiles.is_some()
+                || strategy.config.allow_cross_provider_for_agent.is_some()
+                || strategy.config.slash_cross_provider_default.is_some()
+            {
+                return Err(SchemaViolation("fusion strategy config cannot contain global switches or provider restrictions".into()));
+            }
+        }
+        if let Some(id) = &self.default_strategy_id {
+            if !ids.contains(id) {
+                return Err(SchemaViolation(format!(
+                    "fusion defaultStrategyId `{id}` does not identify a strategy in this scope"
+                )));
+            }
+        }
+        if self
+            .allowed_profiles
+            .as_ref()
+            .is_some_and(|profiles| profiles.iter().any(|p| p.trim().is_empty()))
+        {
+            return Err(SchemaViolation(
+                "fusion.allowedProfiles entries must not be empty".into(),
+            ));
+        }
+        if let Some(overrides) = &self.overrides {
+            overrides.validate_override()?;
+        }
+        Ok(())
+    }
+}
+
+/// IDs can safely travel through CLI selectors without quoting ambiguity.
+pub fn valid_fusion_strategy_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 /// Panel completion policy. Missing settings retain the wait-all behavior.
@@ -1074,9 +1228,10 @@ impl FusionModelSelectionJson {
     }
 }
 
-/// Typed `settings.fusion` object. Every field is `Option` so a partial layer
-/// can set a subset. Runtime defaults are applied by the Fusion orchestrator;
-/// [`SettingsJson::validate`] rejects values that would be dangerous if used.
+/// Execution parameters in `fusion.strategies[].config`, also used for CLI
+/// and managed runtime overrides. Missing strategy parameters use engine
+/// defaults, never another strategy. Global controls below are populated only
+/// during resolution and are rejected inside a persisted strategy config.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FusionSettingsJson {
@@ -1275,6 +1430,20 @@ impl FusionSettingsJson {
     /// Absent fields are not errors — the orchestrator fills runtime defaults.
     /// Invalid *present* values fail the settings load.
     pub fn validate(&self) -> Result<(), crate::settings::SettingsError> {
+        self.validate_with_stage_defaults(true)
+    }
+
+    /// Runtime overlays get absent operands from the selected strategy, not
+    /// engine defaults. Validate present fields now and dependent totals once
+    /// the complete selected configuration has been assembled.
+    pub fn validate_override(&self) -> Result<(), crate::settings::SettingsError> {
+        self.validate_with_stage_defaults(false)
+    }
+
+    fn validate_with_stage_defaults(
+        &self,
+        use_stage_defaults: bool,
+    ) -> Result<(), crate::settings::SettingsError> {
         use crate::settings::SettingsError::SchemaViolation;
         if self.partial_ok == Some(false)
             && self.completion_policy == Some(FusionCompletionPolicy::QuorumAfterGrace)
@@ -1463,6 +1632,10 @@ impl FusionSettingsJson {
         // run, which is the right blast radius for a genuine violation.
         if self.total_timeout_ms.is_some()
             && (self.panel_total_timeout_ms.is_some() || self.analyst_timeout_ms.is_some())
+            && (use_stage_defaults
+                || (self.panel_total_timeout_ms.is_some()
+                    && self.analyst_timeout_ms.is_some()
+                    && self.analysis_protocol_retries.is_some()))
         {
             let panel_total = self.panel_total_timeout_ms.unwrap_or(600_000);
             let analyst = self.analyst_timeout_ms.unwrap_or(120_000);
@@ -1632,7 +1805,11 @@ impl SettingsJson {
             &["classic", "readline"],
         )?;
         if let Some(fusion) = self.fusion.as_ref() {
-            fusion.validate()?;
+            // Invalid Fusion must not discard unrelated settings. Strategy
+            // resolution surfaces the diagnostic and refuses execution.
+            if fusion.diagnostic.is_none() {
+                fusion.validate()?;
+            }
         }
         Ok(())
     }
@@ -1713,6 +1890,20 @@ fn validate_enum(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Existing execution-parameter tests exercise the leaf config in isolation;
+    // this fixture is not the production settings wire format.
+    #[derive(Serialize, Deserialize)]
+    struct FusionConfigFixture {
+        fusion: Option<FusionSettingsJson>,
+    }
+    impl FusionConfigFixture {
+        fn validate(&self) -> Result<(), crate::settings::SettingsError> {
+            self.fusion
+                .as_ref()
+                .map_or(Ok(()), FusionSettingsJson::validate)
+        }
+    }
 
     #[test]
     fn fusion_completion_policy_is_typed_optional_and_validated() {
@@ -1797,7 +1988,7 @@ mod tests {
         // config (e.g. a user tier setting qualityPanelCount=5,
         // fastPanelCount=4) is perfectly valid, and the whole file — not
         // just the fusion block — would then be silently dropped.
-        let settings: SettingsJson =
+        let settings: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"minSuccessfulPanels":3}}"#).unwrap();
         settings
             .validate()
@@ -1811,7 +2002,7 @@ mod tests {
         // `panelTotalTimeoutMs` / `analystTimeoutMs` — defaulting both
         // against this file's total alone would reject a file that sets
         // nothing else (840_000 > 500_000).
-        let settings: SettingsJson =
+        let settings: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"totalTimeoutMs":500000}}"#).unwrap();
         settings
             .validate()
@@ -1830,7 +2021,7 @@ mod tests {
         // (900_000 + 120_000*2 + 180_000 = 1_320_000 > 1_200_000) — that
         // would silently drop the whole tier's unrelated
         // permissions/hooks/model, not just the fusion block.
-        let settings: SettingsJson =
+        let settings: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":900000}}"#).unwrap();
         settings
             .validate()
@@ -1852,7 +2043,7 @@ mod tests {
         // even though the merged config is perfectly valid, and
         // `read_layer_or_skip` then silently drops the whole tier's
         // unrelated permissions/hooks/model along with it.
-        let settings: SettingsJson =
+        let settings: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":1500000}}"#).unwrap();
         settings
             .validate()
@@ -1871,7 +2062,7 @@ mod tests {
         // panel itself is still running), not a comparison against
         // `totalTimeoutMs`. This must be rejected even with no
         // `totalTimeoutMs` anywhere in the file.
-        let settings: SettingsJson = serde_json::from_str(
+        let settings: FusionConfigFixture = serde_json::from_str(
             r#"{"fusion":{"panelIdleTimeoutMs":5000000,"panelTotalTimeoutMs":600000}}"#,
         )
         .unwrap();
@@ -1884,7 +2075,7 @@ mod tests {
 
     #[test]
     fn fusion_panel_idle_timeout_at_or_below_same_file_panel_total_is_accepted() {
-        let settings: SettingsJson = serde_json::from_str(
+        let settings: FusionConfigFixture = serde_json::from_str(
             r#"{"fusion":{"panelIdleTimeoutMs":600000,"panelTotalTimeoutMs":600000}}"#,
         )
         .unwrap();
@@ -1910,7 +2101,7 @@ mod tests {
         // use site (fusion/src/panel.rs::panel_stall_timeout_ms) as defense
         // in depth. This test covers only THIS function's narrow, correct,
         // per-file scope.
-        let settings: SettingsJson =
+        let settings: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"panelIdleTimeoutMs":5000000}}"#).unwrap();
         settings
             .validate()
@@ -1919,7 +2110,7 @@ mod tests {
 
     #[test]
     fn fusion_model_roles_round_trip_and_keep_roster_order() {
-        let settings: SettingsJson = serde_json::from_str(
+        let settings: FusionConfigFixture = serde_json::from_str(
             r#"{"fusion":{
                 "panelModels":[
                     {"profile":"anthropic","model":"claude-opus-5"},
@@ -1963,7 +2154,7 @@ mod tests {
     #[test]
     fn fusion_panel_roster_shape_violations_each_name_the_offender() {
         let reject = |body: &str| -> String {
-            let settings: SettingsJson = serde_json::from_str(body).unwrap();
+            let settings: FusionConfigFixture = serde_json::from_str(body).unwrap();
             settings
                 .validate()
                 .expect_err("this roster must be rejected")
@@ -2015,7 +2206,7 @@ mod tests {
         // a tier that raises `minSuccessfulPanels` has no opinion on a roster
         // that lives in a different tier, and rejecting the file would make
         // `read_layer_or_skip` drop its unrelated permissions/hooks/model too.
-        let roster_only: SettingsJson = serde_json::from_str(
+        let roster_only: FusionConfigFixture = serde_json::from_str(
             r#"{"fusion":{"panelModels":[
                 {"profile":"anthropic","model":"claude-opus-5"},
                 {"profile":"openai","model":"gpt-5.6-sol"}
@@ -2025,7 +2216,7 @@ mod tests {
         roster_only
             .validate()
             .expect("roster alone is a valid file");
-        let bar_only: SettingsJson =
+        let bar_only: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"minSuccessfulPanels":3,"qualityPanelCount":3}}"#)
                 .unwrap();
         bar_only
@@ -2961,13 +3152,13 @@ mod tests {
     }
 
     #[test]
-    fn fusion_defaults_disabled_and_deep_merges() {
+    fn fusion_leaf_defaults_disabled_and_round_trips() {
         assert_eq!(strategy_for("fusion"), Some(MergeStrategy::DeepMerge));
-        let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        let absent: FusionConfigFixture = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
         assert!(absent.fusion.is_none());
         absent.validate().expect("absent fusion is valid");
 
-        let parsed: SettingsJson = serde_json::from_str(
+        let parsed: FusionConfigFixture = serde_json::from_str(
             r#"{"fusion":{"enabled":false,"preset":"quality","qualityPanelCount":3}}"#,
         )
         .unwrap();
@@ -2981,20 +3172,21 @@ mod tests {
 
     #[test]
     fn fusion_rejects_out_of_range_counts_and_timeouts() {
-        let too_few: SettingsJson =
+        let too_few: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"qualityPanelCount":1}}"#).unwrap();
         assert!(too_few.validate().is_err());
 
-        let max_panel: SettingsJson = serde_json::from_str(r#"{"fusion":{"maxPanel":9}}"#).unwrap();
+        let max_panel: FusionConfigFixture =
+            serde_json::from_str(r#"{"fusion":{"maxPanel":9}}"#).unwrap();
         assert!(max_panel.validate().is_err());
 
-        let timeout: SettingsJson = serde_json::from_str(
+        let timeout: FusionConfigFixture = serde_json::from_str(
             r#"{"fusion":{"totalTimeoutMs":1000,"panelTotalTimeoutMs":2000}}"#,
         )
         .unwrap();
         assert!(timeout.validate().is_err());
 
-        let zero_total: SettingsJson =
+        let zero_total: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"totalTimeoutMs":0}}"#).unwrap();
         assert!(zero_total.validate().is_err());
 
@@ -3005,7 +3197,7 @@ mod tests {
         // `fusion_stage_field_alone_above_the_default_total_does_not_trip_the_per_stage_bound_check`).
         // Only `FusionRuntimeConfig::from_settings`, on the merged view,
         // may reject this.
-        let stage_alone_exceeds_default_total: SettingsJson =
+        let stage_alone_exceeds_default_total: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":1200001}}"#).unwrap();
         assert!(stage_alone_exceeds_default_total.validate().is_ok());
         // The SAME idea, with `totalTimeoutMs` present in this same file (so
@@ -3018,7 +3210,7 @@ mod tests {
         // isolating the per-stage branch this test exists to pin.
         // `panelIdleTimeoutMs` is not part of that sum, so only the
         // per-stage branch can produce this Err.
-        let exceeds_default_total: SettingsJson = serde_json::from_str(
+        let exceeds_default_total: FusionConfigFixture = serde_json::from_str(
             r#"{"fusion":{"totalTimeoutMs":1200000,"panelIdleTimeoutMs":1200001}}"#,
         )
         .unwrap();
@@ -3030,7 +3222,7 @@ mod tests {
             "expected the per-stage branch to name panelIdleTimeoutMs, got {err:?}"
         );
 
-        let retries: SettingsJson =
+        let retries: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"analysisProtocolRetries":2}}"#).unwrap();
         assert!(retries.validate().is_err());
     }
@@ -3041,7 +3233,7 @@ mod tests {
         // panelTotal + analyst*(1+retries) sums past it — every
         // per-field "must not exceed total" check above passes, so only the
         // dedicated stage-sum check (F004) can catch this.
-        let sum_exceeds_total: SettingsJson = serde_json::from_str(
+        let sum_exceeds_total: FusionConfigFixture = serde_json::from_str(
             r#"{"fusion":{
                 "totalTimeoutMs": 100000,
                 "panelTotalTimeoutMs": 60000,
@@ -3060,7 +3252,7 @@ mod tests {
         // The documented defaults (panelTotal 600_000 + analyst 120_000*2 =
         // 840_000) must fit under the default total
         // (1_200_000) with an absent `totalTimeoutMs`.
-        let defaults_fit: SettingsJson =
+        let defaults_fit: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"enabled":true}}"#).unwrap();
         defaults_fit
             .validate()
@@ -3076,14 +3268,14 @@ mod tests {
     /// `BudgetExceeded` for money that could never be spent (F002).
     #[test]
     fn fusion_panel_max_turns_is_capped_at_the_runner_ceiling_of_12() {
-        let at_ceiling: SettingsJson =
+        let at_ceiling: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"panelMaxTurns":12}}"#).unwrap();
         assert!(
             at_ceiling.validate().is_ok(),
             "12 matches the runner's hard-coded fusion-panel max_turns and must stay valid"
         );
 
-        let above_ceiling: SettingsJson =
+        let above_ceiling: FusionConfigFixture =
             serde_json::from_str(r#"{"fusion":{"panelMaxTurns":13}}"#).unwrap();
         assert!(
             above_ceiling.validate().is_err(),

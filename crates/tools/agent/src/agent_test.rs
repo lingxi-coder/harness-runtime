@@ -984,6 +984,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             let settlement_failure = self.settlement_failure.clone();
             Ok(lingxi_core::host::PreparedFusionRun::new(
                 lingxi_core::host::FusionPreparedSummary {
+                    strategy: None,
                     identity,
                     duration_ms: 1_000,
                     planned_panels: Some(3),
@@ -1158,6 +1159,134 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 ..lingxi_core::host::FusionAgentSurface::default()
             }
         }
+    }
+
+    struct NamedStrategyFusion {
+        inner: Arc<CapturingFusion>,
+        captures: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl lingxi_core::host::FusionExecutor for NamedStrategyFusion {
+        fn prepare(
+            self: Arc<Self>,
+            submission: lingxi_core::host::FusionSubmission,
+        ) -> Result<lingxi_core::host::PreparedFusionRun, lingxi_core::host::FusionError> {
+            assert!(
+                submission.request.strategy_snapshot.is_some(),
+                "preparation must receive the captured config"
+            );
+            self.inner.clone().prepare(submission)
+        }
+
+        fn capture_strategy(
+            &self,
+            selector: Option<&lingxi_core::host::FusionStrategyRef>,
+        ) -> Result<
+            Option<lingxi_core::host::FusionStrategySelection>,
+            lingxi_core::host::FusionError,
+        > {
+            assert_eq!(selector.unwrap().to_string(), "project:fast");
+            self.captures
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(lingxi_core::host::FusionStrategySelection {
+                reference: selector.unwrap().clone(),
+                name: "Fast review".into(),
+                revision: "captured-revision".into(),
+                config: lingxi_core::settings::schema::FusionSettingsJson::default(),
+            }))
+        }
+
+        fn agent_surface(&self) -> lingxi_core::host::FusionAgentSurface {
+            self.inner.agent_surface()
+        }
+
+        fn agent_surface_for_strategy(
+            &self,
+            selection: Option<&lingxi_core::host::FusionStrategySelection>,
+        ) -> Result<lingxi_core::host::FusionAgentSurface, lingxi_core::host::FusionError> {
+            assert_eq!(selection.unwrap().revision, "captured-revision");
+            Ok(lingxi_core::host::FusionAgentSurface {
+                implement_available: true,
+                default_preset: FusionPreset::Fast,
+                default_partial_ok: false,
+                ..self.inner.agent_surface()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn fusion_strategy_is_captured_once_before_agent_defaults_and_preparation() {
+        let inner = Arc::new(CapturingFusion {
+            requests: Default::default(),
+            sessions: Default::default(),
+        });
+        let fusion = Arc::new(NamedStrategyFusion {
+            inner: inner.clone(),
+            captures: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.options.model_profile = Some("openai".into());
+        tool.call(serde_json::json!({"description":"review","prompt":"review this","subagent_type":"fusion","strategy":"project:fast"}), ctx, fresh_tx()).await.unwrap();
+        assert_eq!(fusion.captures.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let requests = inner.requests.lock().unwrap();
+        assert_eq!(requests[0].preset, FusionPreset::Fast);
+        assert!(!requests[0].partial_ok);
+        assert_eq!(
+            requests[0].strategy.as_ref().unwrap().to_string(),
+            "project:fast"
+        );
+        assert_eq!(
+            requests[0].strategy_revision.as_deref(),
+            Some("captured-revision")
+        );
+        assert_eq!(
+            requests[0].strategy_snapshot.as_ref().unwrap().name,
+            "Fast review"
+        );
+    }
+
+    #[tokio::test]
+    async fn fusion_implement_permission_and_execution_share_one_snapshot() {
+        let inner = Arc::new(CapturingFusion {
+            requests: Default::default(),
+            sessions: Default::default(),
+        });
+        let fusion = Arc::new(NamedStrategyFusion {
+            inner: inner.clone(),
+            captures: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.options.model_profile = Some("openai".into());
+        ctx.tool_use_id = Some("fusion-reviewed-call".into());
+        let input = serde_json::json!({"description":"review","prompt":"review this","subagent_type":"fusion","strategy":"project:fast","fusion_mode":"implement"});
+        assert!(matches!(
+            tool.fusion_implement_ask(&input, &ctx),
+            Some(PermissionResult::Ask { .. })
+        ));
+        tool.call(input, ctx, fresh_tx()).await.unwrap();
+        assert_eq!(fusion.captures.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            inner.requests.lock().unwrap()[0]
+                .strategy_revision
+                .as_deref(),
+            Some("captured-revision")
+        );
+        assert!(tool.fusion_permission_strategies.lock().unwrap().is_empty());
     }
 
     /// F005: sends three scripted `FusionProgress` events through the
@@ -1444,10 +1573,10 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         };
         assert!(prompt.message.contains("3 panels"), "{}", prompt.message);
         assert!(prompt.message.contains("$2.50"), "{}", prompt.message);
-        assert!(prompt.message.contains("autoApproveMaxUsd"));
+        assert!(!prompt.message.contains("autoApproveMaxUsd"));
 
-        // Within the user's automatic limit, analysis mode, other agents and
-        // a host without implement support never ask.
+        // Within the host's automatic limit, analysis mode and other agents
+        // keep their existing permission behavior.
         for (tool, input) in [
             (
                 implement_tool(ImplementFusion::new(true, false)),
@@ -1465,10 +1594,6 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 implement_tool(ImplementFusion::new(true, true)),
                 serde_json::json!({"description": "d", "prompt": "p", "fusion_mode": "implement"}),
             ),
-            (
-                implement_tool(ImplementFusion::new(false, true)),
-                fusion_input(Some("implement")),
-            ),
         ] {
             assert!(
                 matches!(
@@ -1477,6 +1602,256 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 ),
                 "{input}"
             );
+        }
+        assert!(matches!(
+            implement_tool(ImplementFusion::new(false, true))
+                .check_permissions(&fusion_input(Some("implement")), &ctx)
+                .await,
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    struct ChangingPermissionFusion {
+        inner: Arc<ImplementFusion>,
+        // 0: capture fails; 1: strategy disabled; 2: runnable.
+        state: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl lingxi_core::host::FusionExecutor for ChangingPermissionFusion {
+        fn prepare(
+            self: Arc<Self>,
+            submission: lingxi_core::host::FusionSubmission,
+        ) -> Result<lingxi_core::host::PreparedFusionRun, lingxi_core::host::FusionError> {
+            self.inner.clone().prepare(submission)
+        }
+
+        fn capture_strategy(
+            &self,
+            _: Option<&lingxi_core::host::FusionStrategyRef>,
+        ) -> Result<
+            Option<lingxi_core::host::FusionStrategySelection>,
+            lingxi_core::host::FusionError,
+        > {
+            if self.state.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                Err(lingxi_core::host::FusionError::InvalidConfiguration(
+                    "strategy is unavailable".into(),
+                ))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn agent_surface(&self) -> lingxi_core::host::FusionAgentSurface {
+            lingxi_core::host::FusionAgentSurface {
+                enabled: self.state.load(std::sync::atomic::Ordering::SeqCst) == 2,
+                ..self.inner.agent_surface()
+            }
+        }
+
+        fn resolve_parent_profile(&self, model: &str, explicit: Option<&str>) -> Option<String> {
+            self.inner.resolve_parent_profile(model, explicit)
+        }
+
+        fn implement_confirmation(
+            &self,
+            request: &lingxi_core::host::FusionRequest,
+        ) -> lingxi_core::host::ImplementConfirmation {
+            self.inner.implement_confirmation(request)
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_implement_review_cannot_become_an_unapproved_run_after_config_changes() {
+        for initial_state in [0, 1] {
+            let inner = ImplementFusion::new(true, true);
+            let fusion = Arc::new(ChangingPermissionFusion {
+                inner: inner.clone(),
+                state: std::sync::atomic::AtomicUsize::new(initial_state),
+            });
+            let tool = AgentTool::new(wired_ctx(
+                arc_mock_spawner(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ))
+            .with_fusion(fusion.clone());
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.tool_use_id = Some("failed-fusion-review".into());
+            let input = fusion_input(Some("implement"));
+            assert!(matches!(
+                tool.check_permissions(&input, &ctx).await,
+                PermissionResult::Deny { .. }
+            ));
+            fusion.state.store(2, std::sync::atomic::Ordering::SeqCst);
+            let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+            assert!(
+                error.to_string().contains("current permission review"),
+                "{error}"
+            );
+            assert!(inner.requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_expired_implement_review_requires_approval_again() {
+        for expired in [false, true] {
+            let fusion = ImplementFusion::new(true, true);
+            let tool = implement_tool(fusion.clone());
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.tool_use_id = Some("stale-fusion-review".into());
+            let cancel = tokio_util::sync::CancellationToken::new();
+            ctx.cancel = Some(cancel.clone());
+            let input = fusion_input(Some("implement"));
+            assert!(matches!(
+                tool.check_permissions(&input, &ctx).await,
+                PermissionResult::Ask { .. }
+            ));
+            if expired {
+                tool.fusion_permission_strategies
+                    .lock()
+                    .unwrap()
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .reviewed_at = Instant::now() - FUSION_PERMISSION_REVIEW_MAX_AGE;
+            } else {
+                cancel.cancel();
+            }
+            let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+            assert!(
+                error.to_string().contains("current permission review"),
+                "{error}"
+            );
+            assert!(fusion.requests.lock().unwrap().is_empty());
+            assert!(tool.fusion_permission_strategies.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_implement_reviews_are_bounded_and_eviction_does_not_grant_authority() {
+        let fusion = ImplementFusion::new(true, true);
+        let tool = implement_tool(fusion.clone());
+        let input = fusion_input(Some("implement"));
+        for index in 0..MAX_FUSION_PERMISSION_STRATEGIES + 3 {
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.tool_use_id = Some(format!("denied-fusion-{index}").into());
+            assert!(matches!(
+                tool.check_permissions(&input, &ctx).await,
+                PermissionResult::Ask { .. }
+            ));
+            // Simulate the host denying the prompt: no `call` follows.
+        }
+        assert_eq!(
+            tool.fusion_permission_strategies.lock().unwrap().len(),
+            MAX_FUSION_PERMISSION_STRATEGIES
+        );
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.tool_use_id = Some("denied-fusion-0".into());
+        let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("current permission review"),
+            "{error}"
+        );
+        assert!(fusion.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn early_implement_execution_rejection_consumes_its_review() {
+        let tool = implement_tool(ImplementFusion::new(true, true));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.tool_use_id = Some("rejected-fusion-review".into());
+        let mut input = fusion_input(Some("implement"));
+        input["run_in_background"] = serde_json::json!(true);
+        assert!(matches!(
+            tool.check_permissions(&input, &ctx).await,
+            PermissionResult::Ask { .. }
+        ));
+        assert!(tool.call(input, ctx, fresh_tx()).await.is_err());
+        assert!(tool.fusion_permission_strategies.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fusion_implement_prompt_is_enforced_by_the_real_nested_dispatcher() {
+        use lingxi_core::host::permission_gate::{
+            PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
+        };
+        use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker};
+
+        struct AllowPolicyWithDenyingPrompt;
+        #[async_trait::async_trait]
+        impl PermissionGate for AllowPolicyWithDenyingPrompt {
+            async fn check(&self, _: &str, _: &Value) -> PermissionDecision {
+                PermissionDecision::Allow
+            }
+
+            async fn ask_via_transport(
+                &self,
+                _: &str,
+                _: &Value,
+                _: &PermissionCheckContext,
+            ) -> PermissionOutcome {
+                PermissionOutcome::Deny {
+                    reason: "User declined implement work".into(),
+                }
+            }
+        }
+
+        for with_gate in [false, true] {
+            let fusion = ImplementFusion::new(true, true);
+            let mut registry = ToolRegistry::new();
+            registry.register_builtin(Arc::new(implement_tool(fusion.clone())));
+            let mut invoker =
+                tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry));
+            if with_gate {
+                invoker = invoker.with_gate(Arc::new(AllowPolicyWithDenyingPrompt));
+            }
+            let error = invoker
+                .invoke(
+                    "Agent",
+                    fusion_input(Some("implement")),
+                    SubagentInvocationContext {
+                        input_projection: None,
+                        cancellation_token: tokio_util::sync::CancellationToken::new(),
+                        permission_pause_observer: None,
+                        parent_agent_id: None,
+                        origin_session_id: None,
+                        instruction_context: None,
+                        fork_context: None,
+                        tool_execution_policy: Default::default(),
+                        agent_name: None,
+                        team_name: None,
+                        is_async: false,
+                        is_non_interactive_session: false,
+                        can_show_permission_prompts: true,
+                        cwd: None,
+                        tool_use_id: Some("protected-fusion-implement".into()),
+                        assistant_message_id: None,
+                        assistant_message: None,
+                        same_turn_tool_uses: Vec::new(),
+                        depth: 0,
+                        observer: None,
+                        parent_model: Some("parent-model".into()),
+                        parent_model_profile: Some("openai".into()),
+                        agent_spawn_provenance: Default::default(),
+                        tool_context_state: None,
+                        current_history: Vec::new(),
+                        mode_override: Some("bypassPermissions".into()),
+                        request_source: None,
+                        frozen_command_denies: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(if with_gate {
+                    "User declined"
+                } else {
+                    "has been denied"
+                }),
+                "{error}"
+            );
+            assert!(fusion.requests.lock().unwrap().is_empty());
         }
     }
 
@@ -2577,6 +2952,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             let settled = self.settled.clone();
             Ok(lingxi_core::host::PreparedFusionRun::new(
                 lingxi_core::host::FusionPreparedSummary {
+                    strategy: None,
                     identity,
                     duration_ms: 1_000,
                     planned_panels: Some(3),
@@ -3283,6 +3659,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let runner_control = control.clone();
         let prepared = lingxi_core::host::PreparedFusionRun::new(
             lingxi_core::host::FusionPreparedSummary {
+                strategy: None,
                 identity,
                 duration_ms: 1_000,
                 planned_panels: Some(3),
@@ -3350,6 +3727,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         );
         let prepared = lingxi_core::host::PreparedFusionRun::failed(
             lingxi_core::host::FusionPreparedSummary {
+                strategy: None,
                 identity,
                 duration_ms: 1_000,
                 planned_panels: Some(3),

@@ -3176,6 +3176,7 @@ pub fn build_mobile_engine_inner(
         serde_json::to_value(inner.provider_region).expect("region serializes"),
     );
     let settings = Some(::configuration_admin::settings_bridge::SettingsContext {
+        fusion_layers: None,
         paths: settings_paths,
         active: Arc::new(std::sync::RwLock::new(active)),
         managed,

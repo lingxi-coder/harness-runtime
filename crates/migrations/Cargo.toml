@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+fs2 = "0.4"
 core = { path = "../core" }
 # SubscriptionType for the subscriber-gated migrations' fail-closed context.
 llm-runtime = { path = "../llm-runtime" }

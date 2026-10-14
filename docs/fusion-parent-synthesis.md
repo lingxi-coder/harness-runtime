@@ -42,6 +42,44 @@ Fable 5 + GPT-5.5 由 Opus 4.8 综合 69.0%。**同模型也提升 6.7 分**，�
 触发。workflow 脚本的 `fusion()` 已移除，待 Fusion 稳定后再按父模型综合的形态重新加入
 （脚本即父级，拿 `responses` 后自行调用 `agent()` 综合）。
 
+### 具名策略与作用域
+
+Fusion 使用策略集合，不再读取或自动迁移旧的单份 `panelModels` / `analystModel` 配置。
+在 Desktop 的 Fusion 设置页或 `/fusion setup` 创建策略，配置名称、Panel 顺序与 Analyst。
+每个策略的 scope 来自所在文件：用户 `~/.lingxi/settings.json`、项目
+`.lingxi/settings.json`、本地 `.lingxi/settings.local.json`。不同 scope 的同名策略互相独立。
+
+```json
+{
+  "fusion": {
+    "enabled": true,
+    "defaultStrategyId": "review",
+    "strategies": [{
+      "id": "review",
+      "name": "代码审查",
+      "config": {
+        "preset": "fast",
+        "panelModels": [
+          { "profile": "provider-a", "model": "model-a" },
+          { "profile": "provider-b", "model": "model-b" }
+        ],
+        "analystModel": { "profile": "provider-a", "model": "model-a" }
+      }
+    }]
+  }
+}
+```
+
+上例的 provider/model 是占位符，应替换为已连接的真实路由；Analyst 必须支持结构化输出。
+运行 `/fusion --strategy project:review 检查本次改动` 可明确选择策略。
+Agent 工具在 `subagent_type: "fusion"` 时接受相同的 `strategy: "project:review"` 参数。
+省略策略时使用本地、项目、用户依次查找到的默认项；没有默认项则要求选择，损坏的默认引用不会回退。
+CLI `--settings` 中的执行覆盖写入 `fusion.overrides`，不创建新的文件 scope。
+
+策略 ID 在重命名时保持不变。跨 scope 复制创建新 ID；删除策略同时清除所属 scope 的默认引用。
+保存采用源配置版本校验。每次运行在准备凭据和预算前捕获策略身份、配置与版本，默认切换
+不改变已启动任务；删除策略或收紧限制会阻止后续阶段派发。预算仍由当前会话统一管理。
+
 ### 流程
 
 ```

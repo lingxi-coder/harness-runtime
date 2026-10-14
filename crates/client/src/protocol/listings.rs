@@ -262,6 +262,8 @@ pub enum ConfigurationDomainDto {
     Plugin,
     /// Hook configuration and registry state.
     Hook,
+    /// Scoped Fusion strategies and defaults.
+    Fusion,
 }
 
 /// One configuration-operation lifecycle status.

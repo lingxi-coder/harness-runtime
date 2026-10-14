@@ -164,6 +164,10 @@ where
 #[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
+        ("event/prompt_suggestion.json", ClientEvent::PromptSuggestion { suggestion: "Continue reviewing the implementation".into(), uuid: "suggestion-1".into(), session_id: "session-1".into() }),
+        ("event/prompt_suggestion_state.json", ClientEvent::PromptSuggestionState { enabled: true, notice: None }),
+        ("event/fusion_catalog.json", ClientEvent::FusionCatalog { catalog_json: r#"{"scopes":[],"effective_globals":{},"default_strategy":null,"diagnostics":[]}"#.into() }),
+        ("event/fusion_strategy_resolved.json", ClientEvent::FusionStrategyResolved { operation_id: 71, selection_json: Some(r#"{"reference":{"scope":"user","id":"review"},"name":"Review","config":{},"revision":"abc"}"#.into()), error: None }),
         ("event/audio_session_context.json", ClientEvent::AudioSessionContext {session_id:"session-1".into(),profile_id:"profile-1".into(),account_scope:"profile:profile-1".into()}),
         ("event/realtime_audio_event.json", ClientEvent::RealtimeAudioEvent {session_id:"session-1".into(),event_json:r#"{"type":"closed","reason":"Cancelled"}"#.into()}),
         ("event/cron_run_bound.json", ClientEvent::CronRunBound {run_id: "run-1".into(), error: None}),
@@ -1199,6 +1203,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
 #[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
+        ("command/update_prompt_suggestion_context.json", ClientCommand::UpdatePromptSuggestionContext { session_id: "session-1".into(), focus: "focused".into(), input_empty: true, pending_permission: false, elicitation_active: false }),
+        ("command/prompt_suggestion_feedback.json", ClientCommand::PromptSuggestionFeedback { session_id: "session-1".into(), uuid: "suggestion-1".into(), action: "accept".into() }),
+        ("command/record_prompt_suggestion_submission.json", ClientCommand::RecordPromptSuggestionSubmission { text: "Continue reviewing the implementation".into() }),
+        ("command/fusion_admin.json", ClientCommand::FusionAdmin { command: client::protocol::commands::FusionAdminCommandDto { action: "save".into(), operation_id: Some(71), scope: Some("user".into()), target: None, revision: Some("abc".into()), payload_json: Some(r#"{"id":"review","name":"Review","config":{}}"#.into()) } }),
         ("command/get_audio_session_context.json", ClientCommand::GetAudioSessionContext),
         ("command/start_realtime_audio.json", ClientCommand::StartRealtimeAudio {request_json:r#"{"operationId":"audio-1"}"#.into()}),
         ("command/realtime_audio_input.json", ClientCommand::RealtimeAudioInput {input_json:r#"{"type":"commit_input"}"#.into()}),

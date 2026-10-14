@@ -246,6 +246,7 @@ fn fusion_state(
     error: Option<&str>,
 ) -> tasks::state::TaskState {
     tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
+        strategy: None,
         base: tasks::state::TaskStateBase {
             id: "ftest0001".to_string(),
             task_type: tasks::id::TaskType::LocalFusion,
@@ -296,13 +297,16 @@ fn completed_fusion_state(final_text: &str) -> tasks::state::LocalFusionTaskStat
 #[test]
 fn pending_local_fusion_task_id_recognizes_the_fusion_done_display() {
     assert_eq!(
-        pending_local_fusion_task_id("f1a2b3c4d  quality  same-provider"),
+        pending_local_fusion_task_id("Fusion started: f1a2b3c4d  quality  same-provider"),
         Some("f1a2b3c4d")
     );
     // Wrong length / non-fusion prefix / plain error text: no match.
-    assert_eq!(pending_local_fusion_task_id("f1a2b3c  quality  x"), None);
     assert_eq!(
-        pending_local_fusion_task_id("b1a2b3c4d  running"),
+        pending_local_fusion_task_id("Fusion started: f1a2b3c  quality  x"),
+        None
+    );
+    assert_eq!(
+        pending_local_fusion_task_id("Fusion started: b1a2b3c4d  running"),
         None,
         "'b' is the local_bash prefix, not local_fusion's 'f'"
     );
@@ -324,7 +328,10 @@ fn pending_local_fusion_task_id_recognizes_the_fusion_done_display() {
 fn local_fusion_task_id_to_await_requires_the_dispatched_command_to_be_fusion() {
     // The real /fusion shape: recovered.
     assert_eq!(
-        local_fusion_task_id_to_await("/fusion review this", "f1a2b3c4d  quality  same-provider"),
+        local_fusion_task_id_to_await(
+            "/fusion --strategy user:review review this",
+            "Fusion started: f1a2b3c4d  quality  same-provider"
+        ),
         Some("f1a2b3c4d")
     );
     // A DIFFERENT command's Handled display that collides with the
@@ -332,7 +339,7 @@ fn local_fusion_task_id_to_await_requires_the_dispatched_command_to_be_fusion() 
     assert_eq!(
         local_fusion_task_id_to_await(
             "/btw which commit fixed the panel cap?",
-            "f3ac93bac fixed it in the panel bar"
+            "Fusion started: f3ac93bac  quality  same-provider"
         ),
         None,
         "a non-fusion command's display must never be parsed as a \
@@ -345,7 +352,10 @@ fn local_fusion_task_id_to_await_requires_the_dispatched_command_to_be_fusion() 
     // A command whose NAME merely starts with "fusion" must not match
     // either — only the exact command name counts.
     assert_eq!(
-        local_fusion_task_id_to_await("/fusionx review this", "f1a2b3c4d  quality  same-provider"),
+        local_fusion_task_id_to_await(
+            "/fusionx review this",
+            "Fusion started: f1a2b3c4d  quality  same-provider"
+        ),
         None
     );
 }

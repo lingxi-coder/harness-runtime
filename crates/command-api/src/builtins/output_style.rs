@@ -120,14 +120,41 @@ fn render_listing(listing: &lingxi_core::host::OutputStyleListing) -> String {
 fn persist_choice(name: &str) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let path = lingxi_core::settings::loader::local_settings_path(&cwd);
-    match lingxi_core::settings::loader::set_settings_key(
-        &path,
-        "outputStyle",
-        serde_json::Value::String(name.to_string()),
-    ) {
+    match persist_choice_at(&path, name) {
         Ok(()) => None,
         Err(error) => Some(format!("Could not save output style: {error}")),
     }
+}
+
+fn persist_choice_at(path: &std::path::Path, name: &str) -> Result<(), String> {
+    // Keep the output-style writer's existing settings-file size boundary.
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() > lingxi_core::settings::loader::MAX_SETTINGS_FILE_BYTES => {
+            return Err(
+                lingxi_core::settings::SettingsError::SchemaViolation(format!(
+                    "settings file at {} exceeds {} bytes",
+                    path.display(),
+                    lingxi_core::settings::loader::MAX_SETTINGS_FILE_BYTES
+                ))
+                .to_string(),
+            );
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(lingxi_core::settings::SettingsError::Io {
+                path: path.to_path_buf(),
+                source: error,
+            }
+            .to_string());
+        }
+        _ => {}
+    }
+    migrations::settings_update::update_settings(
+        path,
+        vec![(
+            "outputStyle".into(),
+            Some(serde_json::Value::String(name.to_string())),
+        )],
+    )
 }
 
 #[async_trait]
@@ -354,5 +381,60 @@ mod tests {
             display(&h, "").await,
             "Output styles are not available in this session."
         );
+    }
+
+    #[test]
+    fn style_persistence_preserves_a_pending_fusion_registry_update() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let root = std::env::temp_dir().join(format!(
+            "harness-output-style-fusion-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.local.json");
+        std::fs::write(&path, r#"{"fusion":{"strategies":[]},"other":7}"#).unwrap();
+        let fusion =
+            serde_json::json!({"strategies":[{"id":"review","name":"Review","config":{}}]});
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (publish_tx, publish_rx) = mpsc::channel();
+        let fusion_path = path.clone();
+        let expected = fusion.clone();
+        let fusion_writer = std::thread::spawn(move || {
+            migrations::settings_update::transform_settings_with_before_publish(
+                &fusion_path,
+                |map| {
+                    locked_tx.send(()).unwrap();
+                    publish_rx.recv().unwrap();
+                    map.insert("fusion".into(), expected);
+                    Ok(())
+                },
+                || {},
+            )
+        });
+        locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let style_path = path.clone();
+        let style_writer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = persist_choice_at(&style_path, "Explanatory");
+            completed_tx.send(()).unwrap();
+            result
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let blocked = completed_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err();
+        publish_tx.send(()).unwrap();
+        fusion_writer.join().unwrap().unwrap();
+        style_writer.join().unwrap().unwrap();
+        assert!(blocked, "output-style must wait for the Fusion write");
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["fusion"], fusion);
+        assert_eq!(saved["other"], 7);
+        assert_eq!(saved["outputStyle"], "Explanatory");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

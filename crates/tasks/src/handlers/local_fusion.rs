@@ -670,6 +670,7 @@ impl Task for LocalFusionHandler {
         // reload mutable settings merely to populate that fallback row.
         let fallback_duration_ms = 0;
         let fallback_summary = FusionPreparedSummary {
+            strategy: request.strategy_metadata(),
             identity: identity.clone(),
             duration_ms: fallback_duration_ms,
             planned_panels: None,

@@ -126,6 +126,13 @@ pub mod fork_resume_gate;
 pub mod fork_subagent;
 pub mod fusion;
 pub mod fusion_setup;
+pub mod fusion_strategy;
+
+pub use fusion_strategy::{
+    default_fusion_strategy, fusion_global_settings, fusion_registry_revision,
+    resolve_fusion_strategy, FusionSettingsLayer, FusionStrategyError, FusionStrategyRef,
+    FusionStrategySelection,
+};
 pub mod handback;
 pub mod handback_wire;
 pub mod http;
@@ -248,20 +255,21 @@ pub use fusion::{
     FusionPublicationState, FusionPublicationStatus, FusionRequest, FusionResult, FusionRunControl,
     FusionRunFacts, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunOutcome,
     FusionRunRecorder, FusionRunRecorderFactory, FusionSlashPublicationTarget, FusionStage,
-    FusionStatus, FusionSubmission, FusionTerminalCapability, FusionTiming, FusionUniqueInsight,
-    FusionUsage, ImplementConfirmation, MaterialClaim, MaterialEvidence, NoopFusionCompletionSink,
-    PanelClaim, PanelEvidence, PanelMaterial, PanelOutcome, PanelPatch, PanelPosition, PanelReport,
-    PanelRisk, PanelRunStatus, PanelVerification, PreparedFusionRun, RiskSeverity, SupportedPoint,
-    VerificationOutcome, VerificationRun, VerifiedClaim, DEFAULT_FUSION_DIMENSIONS,
-    DEFAULT_FUSION_DIMENSION_DESCRIPTIONS, DEFAULT_IMPLEMENT_FUSION_DIMENSIONS,
-    DEFAULT_IMPLEMENT_FUSION_DIMENSION_DESCRIPTIONS, FUSION_ANALYST_TYPE, FUSION_IMPLEMENTER_TYPE,
-    FUSION_MATERIAL_ANALYSIS_BYTE_CAP, FUSION_MATERIAL_ANSWERS_BYTE_BUDGET,
-    FUSION_MATERIAL_ANSWER_BYTE_CAP, FUSION_MATERIAL_DIFF_BYTE_CAP, FUSION_MATERIAL_ITEM_BYTE_CAP,
-    FUSION_MATERIAL_LOCATOR_BYTE_CAP, FUSION_MATERIAL_MAX_CLAIM_EVIDENCE,
-    FUSION_MATERIAL_MAX_ITEMS, FUSION_MATERIAL_MAX_PATCH_FILES, FUSION_MATERIAL_SUMMARY_BYTE_CAP,
-    FUSION_MATERIAL_TOTAL_BYTE_CAP, FUSION_MAX_PANEL, FUSION_MAX_VERIFY_COMMANDS,
-    FUSION_MAX_VERIFY_COMMAND_BYTES, FUSION_MIN_PANEL, FUSION_PANEL_POOL_CAP, FUSION_PANEL_TYPE,
-    FUSION_SCHEMA_VERSION, FUSION_VERIFICATION_OUTPUT_BYTE_CAP,
+    FusionStatus, FusionStrategyMetadata, FusionSubmission, FusionTerminalCapability, FusionTiming,
+    FusionUniqueInsight, FusionUsage, ImplementConfirmation, MaterialClaim, MaterialEvidence,
+    NoopFusionCompletionSink, PanelClaim, PanelEvidence, PanelMaterial, PanelOutcome, PanelPatch,
+    PanelPosition, PanelReport, PanelRisk, PanelRunStatus, PanelVerification, PreparedFusionRun,
+    RiskSeverity, SupportedPoint, VerificationOutcome, VerificationRun, VerifiedClaim,
+    DEFAULT_FUSION_DIMENSIONS, DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
+    DEFAULT_IMPLEMENT_FUSION_DIMENSIONS, DEFAULT_IMPLEMENT_FUSION_DIMENSION_DESCRIPTIONS,
+    FUSION_ANALYST_TYPE, FUSION_IMPLEMENTER_TYPE, FUSION_MATERIAL_ANALYSIS_BYTE_CAP,
+    FUSION_MATERIAL_ANSWERS_BYTE_BUDGET, FUSION_MATERIAL_ANSWER_BYTE_CAP,
+    FUSION_MATERIAL_DIFF_BYTE_CAP, FUSION_MATERIAL_ITEM_BYTE_CAP, FUSION_MATERIAL_LOCATOR_BYTE_CAP,
+    FUSION_MATERIAL_MAX_CLAIM_EVIDENCE, FUSION_MATERIAL_MAX_ITEMS, FUSION_MATERIAL_MAX_PATCH_FILES,
+    FUSION_MATERIAL_SUMMARY_BYTE_CAP, FUSION_MATERIAL_TOTAL_BYTE_CAP, FUSION_MAX_PANEL,
+    FUSION_MAX_VERIFY_COMMANDS, FUSION_MAX_VERIFY_COMMAND_BYTES, FUSION_MIN_PANEL,
+    FUSION_PANEL_POOL_CAP, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
+    FUSION_VERIFICATION_OUTPUT_BYTE_CAP,
 };
 pub use handback::{
     BeginHandbackRun, HandbackAdmissionError, HandbackAdmissionOutcome, HandbackConsumptionAck,

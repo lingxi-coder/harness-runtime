@@ -1,0 +1,5 @@
+{
+  "type": "fusion_strategy_resolved",
+  "operation_id": 71,
+  "selection_json": "{\"reference\":{\"scope\":\"user\",\"id\":\"review\"},\"name\":\"Review\",\"config\":{},\"revision\":\"abc\"}"
+}

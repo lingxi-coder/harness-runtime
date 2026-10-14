@@ -20,6 +20,7 @@
 #![allow(dead_code)]
 
 pub mod config_admin;
+pub mod fusion_admin;
 pub mod hook_admin;
 pub mod mcp_admin;
 pub mod mcp_bridge;
