@@ -815,7 +815,6 @@ pub struct ResumeRuntimeSnapshot {
     /// when the resume source has an authoritative value. `None` keeps the live
     /// configured setting; cold JSONL replay uses the current CLI/settings
     /// value because transcripts store only the resolved wire model.
-    #[serde(default)]
     pub user_model_setting: Option<ModelSourceBinding>,
     /// Provenance and precedence for a carried raw model setting. These fields
     /// are paired with `user_model_setting` and ignored when it is absent.
@@ -1400,11 +1399,6 @@ pub struct StatusSnapshot {
     pub session_id: String,
     /// Active model name (e.g. `"claude-opus-4-7"`).
     pub model: String,
-    /// Exact effective Native model identity when the known route anchor cannot
-    /// represent it. Clients display this projection while retaining `model`
-    /// and `model_profile` for routing and capability lookups.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_source: Option<Utf16JsonProjection>,
     /// Active model's provider profile (e.g. `Some("copilot")`), disambiguating a
     /// model id shared across providers (e.g. `gpt-5.6-sol` on both OpenAI and
     /// Copilot). `None` when routing resolves the id by-provider (e.g. after a

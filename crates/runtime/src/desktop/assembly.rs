@@ -5510,6 +5510,9 @@ pub async fn build_with_credential_stack(
         cwd.clone(),
     )
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())
+    .with_native_model_settings_snapshot(crate::native_model_settings::snapshot(Some(
+        &effective_settings,
+    )))
     .with_main_model_selection(
         Some(main_model_setting.clone()),
         main_model_source,

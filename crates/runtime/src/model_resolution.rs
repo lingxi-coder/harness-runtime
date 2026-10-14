@@ -6,8 +6,11 @@ use std::sync::Arc;
 
 use agent::model_resolution::{
     FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionContextProvider,
-    ModelResolutionError, ModelRouteFacts,
+    ModelResolutionError, ModelRouteFacts, NativeModelObservation, NativeModelSettingsSnapshot,
+    NativeModelValidationContext,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_llm_client::protocol::{native_static_model_suggestion_defaults, NativeModelProvider};
 use llm_runtime::{ClientConfig, ModelRuntime, ProviderId, ProviderProfile};
 
 #[derive(Clone)]
@@ -260,6 +263,94 @@ impl ModelResolutionContextProvider for RuntimeModelResolutionProvider {
             disable_legacy_model_remap: env_truthy(branding::DISABLE_LEGACY_MODEL_REMAP_ENV),
         })
     }
+
+    fn native_model_validation_context(
+        &self,
+        route: &ModelResolutionContext,
+        _candidate: &Utf16JsonProjection,
+        settings: &NativeModelSettingsSnapshot,
+    ) -> NativeModelValidationContext {
+        let provider = native_suggestion_provider(route);
+        let effective_model_by_catalog_id = match provider {
+            Some(provider) => {
+                match effective_native_suggestion_models(provider, &settings.model_overrides) {
+                    Some(models) => NativeModelObservation::Observed(models),
+                    None => NativeModelObservation::Unobserved,
+                }
+            }
+            None => NativeModelObservation::Unobserved,
+        };
+
+        NativeModelValidationContext {
+            effective_model_by_catalog_id,
+            picker_options: settings.picker_options.clone(),
+            // Native `yfo` also checks model-service eligibility, alias
+            // availability, and the `fSe` exclusion. The runtime route and
+            // picker rows do not provide those facts, so do not infer them.
+            picker_eligibility: NativeModelObservation::Unobserved,
+            anthropic_default_opus_model: settings.anthropic_default_opus_model.clone(),
+        }
+    }
+}
+
+fn native_suggestion_provider(route: &ModelResolutionContext) -> Option<NativeModelProvider> {
+    match (route.route.provider?, route.route.protocol.as_deref()?) {
+        (ModelProviderKind::FirstParty, "AnthropicMessages") => {
+            Some(NativeModelProvider::FirstParty)
+        }
+        // Runtime does not expose a current Native provider map for the
+        // account-specific AWS inference-profile discovery path. In
+        // particular, static Bedrock seeds must not be reported as effective
+        // when discovery may have replaced them.
+        (ModelProviderKind::Bedrock, _) => None,
+        (ModelProviderKind::Vertex, "VertexClaude") => Some(NativeModelProvider::Vertex),
+        (ModelProviderKind::Foundry, "FoundryClaude") => Some(NativeModelProvider::Foundry),
+        _ => None,
+    }
+}
+
+fn effective_native_suggestion_models(
+    provider: NativeModelProvider,
+    model_overrides: &NativeModelObservation<Option<Utf16JsonProjection>>,
+) -> Option<BTreeMap<String, Utf16JsonProjection>> {
+    let overrides = match model_overrides {
+        NativeModelObservation::Unobserved => return None,
+        NativeModelObservation::Observed(None) => None,
+        NativeModelObservation::Observed(Some(source)) => Some(source),
+    };
+    let native_overrides = match overrides {
+        Some(source) => Some(source.object_entries()?),
+        None => None,
+    };
+    let first_party = native_static_model_suggestion_defaults(NativeModelProvider::FirstParty);
+    let defaults = native_static_model_suggestion_defaults(provider);
+    let mut effective = BTreeMap::new();
+
+    for (catalog_id, default) in defaults {
+        let first_party_id = first_party.get(&catalog_id)?.root_string_code_units()?;
+        let replacement_units = if let Some(entries) = &native_overrides {
+            match entries
+                .iter()
+                .find(|entry| entry.code_units == first_party_id.as_slice())
+            {
+                Some(entry) => Some(entry.value.code_units()?.to_vec()),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let units = match replacement_units {
+            // Native's modelOverrides values are selected with JS truthiness:
+            // an empty string does not replace the provider default.
+            Some(units) if !units.is_empty() => units,
+            Some(_) | None => default.root_string_code_units()?,
+        };
+        let projection =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).ok()?;
+        effective.insert(catalog_id, projection);
+    }
+
+    Some(effective)
 }
 
 fn provider_kind(provider: &ProviderId) -> ModelProviderKind {
@@ -526,6 +617,141 @@ mod tests {
             };
         }
         provider
+    }
+
+    fn foundry_route_context() -> ModelResolutionContext {
+        ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: "claude-opus-4-6".into(),
+                profile: Some("foundry".into()),
+                provider: Some(ModelProviderKind::Foundry),
+                endpoint: Some("https://example.invalid".into()),
+                protocol: Some("FoundryClaude".into()),
+            },
+            ..ModelResolutionContext::default()
+        }
+    }
+
+    fn model_override_source(model_id: &str, value_units: Vec<u16>) -> Utf16JsonProjection {
+        let value =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&value_units), value_units)
+                .unwrap();
+        Utf16JsonProjection::object(vec![(model_id.to_owned(), value)]).unwrap()
+    }
+
+    #[test]
+    fn native_validation_facts_apply_exact_nonempty_overrides_and_preserve_picker_source() {
+        let provider = resolution_provider(ClientConfig {
+            providers: vec![profile(ProviderId::OpenAI, "ordinary", "gpt-4o")],
+        });
+        let first_party = native_static_model_suggestion_defaults(NativeModelProvider::FirstParty);
+        let model_id_units = first_party
+            .get("claude-opus-4-6")
+            .unwrap()
+            .root_string_code_units()
+            .unwrap();
+        let model_id = String::from_utf16(&model_id_units).unwrap();
+        let override_units = "profile-"
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let picker_option = Utf16JsonProjection::parse(r#"{"model":"claude-opus-4-6"}"#).unwrap();
+        let settings = NativeModelSettingsSnapshot {
+            model_overrides: NativeModelObservation::Observed(Some(model_override_source(
+                &model_id,
+                override_units.clone(),
+            ))),
+            picker_options: NativeModelObservation::Observed(Some(vec![picker_option.clone()])),
+            anthropic_default_opus_model: NativeModelObservation::Observed(None),
+        };
+
+        let candidate = Utf16JsonProjection::from("claude-opus-4-6");
+        let facts = provider.native_model_validation_context(
+            &foundry_route_context(),
+            &candidate,
+            &settings,
+        );
+        let NativeModelObservation::Observed(models) = facts.effective_model_by_catalog_id else {
+            panic!("complete Foundry settings produce observed static-plus-override facts");
+        };
+        assert_eq!(
+            models["claude-opus-4-6"].string_units(""),
+            Some(override_units),
+            "the override retains exact UTF-16 units"
+        );
+        assert_eq!(
+            facts.picker_options,
+            NativeModelObservation::Observed(Some(vec![picker_option]))
+        );
+        assert_eq!(facts.picker_eligibility, NativeModelObservation::Unobserved);
+        assert_eq!(
+            facts.anthropic_default_opus_model,
+            NativeModelObservation::Observed(None)
+        );
+    }
+
+    #[test]
+    fn native_validation_facts_keep_static_default_for_empty_override_and_unknown_source() {
+        let provider = resolution_provider(ClientConfig {
+            providers: vec![profile(ProviderId::OpenAI, "ordinary", "gpt-4o")],
+        });
+        let first_party = native_static_model_suggestion_defaults(NativeModelProvider::FirstParty);
+        let model_id = String::from_utf16(
+            &first_party
+                .get("claude-opus-4-6")
+                .unwrap()
+                .root_string_code_units()
+                .unwrap(),
+        )
+        .unwrap();
+        let route = foundry_route_context();
+        let candidate = Utf16JsonProjection::from("claude-opus-4-6");
+        let settings = NativeModelSettingsSnapshot {
+            model_overrides: NativeModelObservation::Observed(Some(model_override_source(
+                &model_id,
+                Vec::new(),
+            ))),
+            picker_options: NativeModelObservation::Unobserved,
+            anthropic_default_opus_model: NativeModelObservation::Unobserved,
+        };
+        let facts = provider.native_model_validation_context(&route, &candidate, &settings);
+        let NativeModelObservation::Observed(models) = facts.effective_model_by_catalog_id else {
+            panic!("a complete empty override still observes the provider default map");
+        };
+        let expected = native_static_model_suggestion_defaults(NativeModelProvider::Foundry)
+            .get("claude-opus-4-6")
+            .unwrap()
+            .root_string_code_units()
+            .unwrap();
+        assert_eq!(models["claude-opus-4-6"].string_units(""), Some(expected));
+
+        let incomplete = NativeModelSettingsSnapshot::default();
+        let unknown = provider.native_model_validation_context(&route, &candidate, &incomplete);
+        assert_eq!(
+            unknown.effective_model_by_catalog_id,
+            NativeModelObservation::Unobserved,
+            "an unobserved settings source cannot be replaced by static defaults"
+        );
+    }
+
+    #[test]
+    fn native_suggestion_provider_requires_the_matching_claude_protocol() {
+        let mut route = foundry_route_context();
+        assert_eq!(
+            native_suggestion_provider(&route),
+            Some(NativeModelProvider::Foundry)
+        );
+        route.route.protocol = Some("OpenAiChat".into());
+        assert_eq!(native_suggestion_provider(&route), None);
+
+        let mut bedrock = foundry_route_context();
+        bedrock.route.provider = Some(ModelProviderKind::Bedrock);
+        bedrock.route.protocol = Some("BedrockClaude".into());
+        assert_eq!(
+            native_suggestion_provider(&bedrock),
+            None,
+            "the runtime does not observe Native Bedrock profile discovery"
+        );
     }
 
     #[test]

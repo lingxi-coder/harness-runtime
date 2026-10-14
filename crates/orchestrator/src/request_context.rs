@@ -22,6 +22,22 @@ pub(crate) struct PromptIngressAttachment {
     pub(crate) rendered: Utf16JsonProjection,
 }
 
+/// A prompt-history append that must remain behind the current Native NAr
+/// batch. Qe returns those rows after NAr has been assembled, while the host
+/// can receive them earlier at queued-prompt admission.
+#[derive(Clone, Debug)]
+pub(crate) enum BufferedPromptHistoryAppend {
+    NativePromptExpansion {
+        row: Utf16JsonProjection,
+        row_id: MessageId,
+        durable_once: bool,
+    },
+    ModPromptSubmit {
+        context: Utf16JsonProjection,
+        message_id: MessageId,
+    },
+}
+
 /// Trusted source class for one user-row/model-step ingress. Direct Bash is
 /// carried by the host from the durable queue; it is never inferred from
 /// rendered transcript text and is consumed for exactly one model step.
@@ -104,6 +120,17 @@ struct PromptIngressBatch {
     /// An append attempt is consumed before awaiting the best-effort writer so
     /// a cancelled retry cannot emit a duplicate row with the same UUID.
     append_attempted_ids: std::collections::HashSet<MessageId>,
+    /// Set only after preparation has assembled the complete Native NAr batch.
+    /// Scope cleanup must not persist staged ingress from a prompt rejected
+    /// before request assembly, such as a blocking UserPromptSubmit hook.
+    native_request_assembly_accepted: bool,
+    /// Qe's current history tail is buffered until the NAr rows are committed.
+    /// This preserves both JSONL and live session append order.
+    buffered_prompt_history_appends: std::collections::VecDeque<BufferedPromptHistoryAppend>,
+    /// Exact model-visible identities allocated by buffered prompt.submit
+    /// appends. UPE row identities are maintained by PromptRuntime. Retained
+    /// after flush for the same query's request projection.
+    buffered_prompt_submit_row_ids: Vec<MessageId>,
     transcript_fallback_attempted: bool,
     finalized: bool,
 }
@@ -175,12 +202,17 @@ impl ConversationOrchestrator {
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
-                self.run_turn_streaming_with_cancel_image_sources_and_message_id(
-                    prompt,
-                    Vec::new(),
-                    cancel,
-                    Some(prompt_id),
-                ),
+                async {
+                    let outcome = self
+                        .run_turn_streaming_with_cancel_image_sources_and_message_id(
+                            prompt,
+                            Vec::new(),
+                            cancel,
+                            Some(prompt_id),
+                        )
+                        .await;
+                    finalize_prompt_context_output(self, outcome).await
+                },
             )
             .await
     }
@@ -205,12 +237,17 @@ impl ConversationOrchestrator {
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
-                self.run_turn_with_cancel_image_sources_and_message_id(
-                    prompt,
-                    Vec::new(),
-                    cancel,
-                    Some(prompt_id),
-                ),
+                async {
+                    let outcome = self
+                        .run_turn_with_cancel_image_sources_and_message_id(
+                            prompt,
+                            Vec::new(),
+                            cancel,
+                            Some(prompt_id),
+                        )
+                        .await;
+                    finalize_prompt_context_output(self, outcome).await
+                },
             )
             .await
     }
@@ -254,7 +291,10 @@ fn sort_prompt_ingress_source_order(rows: &mut [PromptIngressAttachment]) {
 /// Install per-turn ingress state for ordinary turns while preserving an
 /// enclosing request-context scope. The user-row append fills the actual
 /// prompt ID before preparation projects any staged rows.
-pub(crate) async fn scope_if_missing<F: Future>(future: F) -> F::Output {
+pub(crate) async fn scope_if_missing<T, F: Future<Output = Result<T, OrchestratorError>>>(
+    orchestrator: &ConversationOrchestrator,
+    future: F,
+) -> Result<T, OrchestratorError> {
     if REQUEST_CONTEXT.try_with(|_| ()).is_ok() {
         future.await
     } else {
@@ -269,10 +309,207 @@ pub(crate) async fn scope_if_missing<F: Future>(future: F) -> F::Output {
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
-                future,
+                async {
+                    let output = future.await;
+                    // The finalizer is gated by the explicit assembly mark:
+                    // an early blocked submit or preparation error must not
+                    // turn unconsumed staged rows into durable NAr history.
+                    finalize_prompt_context_output(orchestrator, output).await
+                },
             )
             .await
     }
+}
+
+async fn finalize_prompt_context_output<T>(
+    orchestrator: &ConversationOrchestrator,
+    output: Result<T, OrchestratorError>,
+) -> Result<T, OrchestratorError> {
+    let finalization = match finalize_prompt_ingress_batch(orchestrator, None).await {
+        Ok(()) => Ok(()),
+        Err(first_error) => match finalize_prompt_ingress_batch(orchestrator, None).await {
+            Ok(()) => Ok(()),
+            Err(retry_error) => {
+                tracing::error!(
+                    first_error = %first_error,
+                    retry_error = %retry_error,
+                    "accepted prompt history finalization failed twice"
+                );
+                Err(retry_error)
+            }
+        },
+    };
+    match finalization {
+        Ok(()) => output,
+        Err(finalize_error) => match output {
+            Ok(_) => Err(finalize_error),
+            Err(original_error) => {
+                tracing::error!(
+                    error = %finalize_error,
+                    "failed to finalize accepted prompt history after turn error"
+                );
+                Err(original_error)
+            }
+        },
+    }
+}
+
+/// Buffer Native Qe history rows only while this request owns an unfinalized
+/// NAr batch. Their UUIDs are allocated now so retries retain identity.
+pub(crate) fn buffer_native_prompt_expansion_rows(
+    rows: &[Utf16JsonProjection],
+    row_ids: &[MessageId],
+    durable_once: bool,
+) -> Result<bool, OrchestratorError> {
+    if rows.len() != row_ids.len() {
+        return Err(OrchestratorError::Internal(format!(
+            "pending prompt hook identity count mismatch: {} rows, {} ids",
+            rows.len(),
+            row_ids.len()
+        )));
+    }
+    match REQUEST_CONTEXT.try_with(|context| {
+            let staged = context
+                .staged_ingress_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
+            let mut batch = context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !staged || batch.finalized {
+                return Ok(false);
+            }
+            for (index, row) in rows.iter().enumerate() {
+                let row_id = row_ids[index];
+                if durable_once {
+                    if let Some(existing) = batch
+                        .buffered_prompt_history_appends
+                        .iter()
+                        .find_map(|append| match append {
+                            BufferedPromptHistoryAppend::NativePromptExpansion {
+                                row: existing_row,
+                                row_id: existing_id,
+                                durable_once: existing_once,
+                            } if *existing_id == row_id && *existing_once => {
+                                Some(existing_row)
+                            }
+                            _ => None,
+                        })
+                    {
+                        if existing == row {
+                            continue;
+                        }
+                        return Err(OrchestratorError::Internal(format!(
+                            "pending prompt hook UUID {row_id} was retried with different source content"
+                        )));
+                    }
+                }
+                batch
+                    .buffered_prompt_history_appends
+                    .push_back(BufferedPromptHistoryAppend::NativePromptExpansion {
+                        row: row.clone(),
+                        row_id,
+                        durable_once,
+                    });
+            }
+            Ok(true)
+        }) {
+        Ok(result) => result,
+        Err(_) => Ok(false),
+    }
+}
+
+/// Keep the host prompt.submit sidecar behind a Qe batch when it was produced
+/// after that batch. Callers that have no buffered Qe rows retain the existing
+/// immediate persistence path.
+pub(crate) fn buffer_mod_prompt_context_after_upe(
+    context_projection: &Utf16JsonProjection,
+) -> Option<MessageId> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            let staged = context
+                .staged_ingress_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
+            let mut batch = context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !staged
+                || batch.finalized
+                || !batch.buffered_prompt_history_appends.iter().any(|append| {
+                    matches!(
+                        append,
+                        BufferedPromptHistoryAppend::NativePromptExpansion { .. }
+                    )
+                })
+            {
+                return None;
+            }
+            let message_id = MessageId::new();
+            batch.buffered_prompt_history_appends.push_back(
+                BufferedPromptHistoryAppend::ModPromptSubmit {
+                    context: context_projection.clone(),
+                    message_id,
+                },
+            );
+            if !batch.buffered_prompt_submit_row_ids.contains(&message_id) {
+                batch.buffered_prompt_submit_row_ids.push(message_id);
+            }
+            Some(message_id)
+        })
+        .unwrap_or(None)
+}
+
+/// Exact buffered prompt.submit rows after the NAr/UPE commit completes. UPE
+/// identities come from the current-query runtime set; this scope-local set
+/// excludes historical attachments and staged NAr rows.
+pub(crate) fn finalized_buffered_prompt_submit_row_ids() -> std::collections::HashSet<MessageId> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            let batch = context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if batch.finalized {
+                batch
+                    .buffered_prompt_submit_row_ids
+                    .iter()
+                    .copied()
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            }
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn pop_buffered_prompt_history_append() -> Option<BufferedPromptHistoryAppend> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .buffered_prompt_history_appends
+                .pop_front()
+        })
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn restore_buffered_prompt_history_append_front(append: BufferedPromptHistoryAppend) {
+    let _ = REQUEST_CONTEXT.try_with(|context| {
+        context
+            .ingress_batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .buffered_prompt_history_appends
+            .push_front(append);
+    });
 }
 
 /// Stage the common typed prompt-ingress rows after the original user row is
@@ -333,10 +570,6 @@ pub(crate) async fn persist_prompt_ingress_after_user(
         }
         if let Some(reminder) = orchestrator.budget_usd_prompt_ingress_attachment().await {
             staged.push(reminder);
-        }
-
-        for attachment in &staged {
-            orchestrator.stage_prompt_ingress_reminder(attachment).await;
         }
 
         let _ = REQUEST_CONTEXT.try_with(|context| {
@@ -422,16 +655,13 @@ fn should_stage_prompt_ingress(kind: PromptIngressKind, fallback_pending: bool) 
 /// Native's unknown-command collector has no regular-user ingress (`e === null`),
 /// so it still stages total tokens without reanchoring the task budget. Once
 /// the fallback batch is finalized, real continuations use the engine collector.
-fn total_tokens_ingress_reanchor(
-    kind: PromptIngressKind,
-    fallback_pending: bool,
-) -> Option<bool> {
+fn total_tokens_ingress_reanchor(kind: PromptIngressKind, fallback_pending: bool) -> Option<bool> {
     match kind {
         PromptIngressKind::RegularUser => Some(true),
         PromptIngressKind::Other if fallback_pending => Some(false),
-        PromptIngressKind::Other | PromptIngressKind::LocalSkill | PromptIngressKind::DirectBash => {
-            None
-        }
+        PromptIngressKind::Other
+        | PromptIngressKind::LocalSkill
+        | PromptIngressKind::DirectBash => None,
     }
 }
 
@@ -484,17 +714,32 @@ pub(crate) fn is_native_nar_ingress(kind: PromptIngressKind) -> bool {
         .unwrap_or(false)
 }
 
+/// Mark the request-owned batch after preparation has assembled every
+/// current Native NAr row. Scope cleanup may retry durable appends only after
+/// this point; earlier hook blocks and preparation errors never reach NAr.
+pub(crate) fn mark_native_request_assembly_accepted() {
+    let _ = REQUEST_CONTEXT.try_with(|context| {
+        let mut batch = context
+            .ingress_batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !batch.finalized {
+            batch.native_request_assembly_accepted = true;
+        }
+    });
+}
+
 /// Select and persist the complete first user-prompt attachment batch once.
 /// All stateful producers cache their result in the task-local batch before
 /// this point, including empty results.
 pub(crate) async fn finalize_prompt_ingress_batch(
     orchestrator: &ConversationOrchestrator,
     cancel: Option<&CancellationToken>,
-) {
+) -> Result<(), OrchestratorError> {
     let enabled = std::env::var("CLAUDE_CODE_SESSION_START_ANNOUNCEMENTS_BEFORE_PROMPT")
         .ok()
         .is_some_and(|value| !value.is_empty());
-    finalize_prompt_ingress_batch_with_enabled(orchestrator, enabled, cancel).await;
+    finalize_prompt_ingress_batch_with_enabled(orchestrator, enabled, cancel).await
 }
 
 #[cfg(test)]
@@ -502,7 +747,10 @@ pub(crate) async fn finalize_prompt_ingress_batch_for_test(
     orchestrator: &ConversationOrchestrator,
     enabled: bool,
 ) {
-    finalize_prompt_ingress_batch_with_enabled(orchestrator, enabled, None).await;
+    mark_native_request_assembly_accepted();
+    finalize_prompt_ingress_batch_with_enabled(orchestrator, enabled, None)
+        .await
+        .expect("test prompt-ingress finalization succeeds");
 }
 
 #[cfg(test)]
@@ -511,21 +759,24 @@ pub(crate) async fn finalize_prompt_ingress_batch_with_cancel_for_test(
     enabled: bool,
     cancel: &CancellationToken,
 ) {
-    finalize_prompt_ingress_batch_with_enabled(orchestrator, enabled, Some(cancel)).await;
+    mark_native_request_assembly_accepted();
+    finalize_prompt_ingress_batch_with_enabled(orchestrator, enabled, Some(cancel))
+        .await
+        .expect("test prompt-ingress finalization succeeds");
 }
 
 async fn finalize_prompt_ingress_batch_with_enabled(
     orchestrator: &ConversationOrchestrator,
     enabled: bool,
     cancel: Option<&CancellationToken>,
-) {
+) -> Result<(), OrchestratorError> {
     let Some((prompt_id, mut staged, api_system_rows)) = REQUEST_CONTEXT
         .try_with(|context| {
             let batch = context
                 .ingress_batch
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if batch.finalized {
+            if batch.finalized || !batch.native_request_assembly_accepted {
                 return None;
             }
             let base_rows = context
@@ -562,7 +813,7 @@ async fn finalize_prompt_ingress_batch_with_enabled(
     else {
         // No request-owned ingress batch exists on ordinary continuation steps;
         // their typed reminders use the ordinary direct-persistence path.
-        return;
+        return Ok(());
     };
     sort_prompt_ingress_source_order(&mut staged);
 
@@ -575,7 +826,9 @@ async fn finalize_prompt_ingress_batch_with_enabled(
             .iter()
             .position(|message| message.id() == prompt_id);
         let Some(current_index) = current_index else {
-            return;
+            return Err(OrchestratorError::Internal(
+                "accepted prompt-ingress history row is missing during finalization".into(),
+            ));
         };
         (
             session.history[..current_index].to_vec(),
@@ -586,7 +839,9 @@ async fn finalize_prompt_ingress_batch_with_enabled(
         )
     };
     for attachment in &staged {
-        orchestrator.stage_prompt_ingress_reminder(attachment).await;
+        orchestrator
+            .append_accepted_prompt_ingress_reminder(attachment)
+            .await;
     }
     let mut typed_attachment_ids = std::collections::HashSet::new();
     let mut raw_attachment_types = std::collections::HashMap::new();
@@ -656,7 +911,7 @@ async fn finalize_prompt_ingress_batch_with_enabled(
     // intact while deferring every durable append. A retry in this same ingress
     // scope reuses that selection and the producer caches above.
     if cancel.is_some_and(CancellationToken::is_cancelled) {
-        return;
+        return Ok(());
     }
 
     // API-system tool changes are request-normalization rows, not Native NAr
@@ -711,6 +966,10 @@ async fn finalize_prompt_ingress_batch_with_enabled(
                 .await;
         }
     }
+
+    // NAr rows are now live and durable. Qe's current hook history follows
+    // them in both Native request and transcript order.
+    orchestrator.flush_buffered_prompt_history_appends().await?;
 
     let attachment = REQUEST_CONTEXT
         .try_with(|context| {
@@ -792,6 +1051,7 @@ async fn finalize_prompt_ingress_batch_with_enabled(
         batch.finalized = true;
         batch.finalized_notify.notify_one();
     });
+    Ok(())
 }
 
 /// Read the sealed initial ingress batch for each preparation attempt. `None`
@@ -946,7 +1206,7 @@ pub(crate) async fn cache_prompt_ingress_producer_rows_pending(
 }
 
 async fn cache_prompt_ingress_producer_rows_with_completion(
-    orchestrator: &ConversationOrchestrator,
+    _orchestrator: &ConversationOrchestrator,
     producer: &str,
     rows: Vec<PromptIngressAttachment>,
     completed: bool,
@@ -977,7 +1237,7 @@ async fn cache_prompt_ingress_producer_rows_with_completion(
                 if completed {
                     batch.completed_producers.insert(producer.to_owned());
                 }
-                return Some((false, existing));
+                return Some(existing);
             }
             batch
                 .producer_rows
@@ -985,16 +1245,11 @@ async fn cache_prompt_ingress_producer_rows_with_completion(
             if completed {
                 batch.completed_producers.insert(producer.to_owned());
             }
-            Some((true, rows))
+            Some(rows)
         })
         .ok()
         .flatten()?;
-    if stored.0 {
-        for row in &stored.1 {
-            orchestrator.stage_prompt_ingress_reminder(row).await;
-        }
-    }
-    Some(stored.1)
+    Some(stored)
 }
 
 pub(crate) fn prompt_ingress_producer_is_complete(producer: &str) -> bool {
@@ -1011,7 +1266,7 @@ pub(crate) fn prompt_ingress_producer_is_complete(producer: &str) -> bool {
 }
 
 pub(crate) async fn complete_prompt_ingress_producer_rows(
-    orchestrator: &ConversationOrchestrator,
+    _orchestrator: &ConversationOrchestrator,
     producer: &str,
     rows: Vec<PromptIngressAttachment>,
 ) -> Option<Vec<PromptIngressAttachment>> {
@@ -1035,9 +1290,6 @@ pub(crate) async fn complete_prompt_ingress_producer_rows(
         .ok()?;
     if !found_producer {
         return None;
-    }
-    for row in &stored {
-        orchestrator.stage_prompt_ingress_reminder(row).await;
     }
     Some(stored)
 }
@@ -1346,7 +1598,7 @@ pub(crate) fn attach(messages: &mut Vec<ConversationMessage>) {
 
 #[cfg(test)]
 #[path = "request_context_staging_test.rs"]
-mod staging_tests;
+pub(crate) mod staging_tests;
 
 #[cfg(test)]
 mod prompt_ingress_kind_tests {
@@ -1362,7 +1614,10 @@ mod prompt_ingress_kind_tests {
         assert!(!should_stage_prompt_ingress(Other, false));
         assert!(!should_stage_prompt_ingress(DirectBash, true));
 
-        assert_eq!(total_tokens_ingress_reanchor(RegularUser, false), Some(true));
+        assert_eq!(
+            total_tokens_ingress_reanchor(RegularUser, false),
+            Some(true)
+        );
         assert_eq!(total_tokens_ingress_reanchor(LocalSkill, true), None);
         assert_eq!(total_tokens_ingress_reanchor(Other, true), Some(false));
         assert_eq!(total_tokens_ingress_reanchor(Other, false), None);

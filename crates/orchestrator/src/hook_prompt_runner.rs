@@ -528,7 +528,10 @@ fn bound_hook_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::model_resolution::{FamilyModelDefaults, ModelResolutionError, ModelRouteFacts};
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelResolutionError, ModelRouteFacts, NativeModelSettingsSnapshot,
+        NativeModelValidationContext,
+    };
     use llm_runtime::{ExecutionUsage as Usage, HistoryResponse};
     use std::sync::Mutex;
 
@@ -596,6 +599,15 @@ mod tests {
                         .collect(),
                 }),
             }
+        }
+
+        fn native_model_validation_context(
+            &self,
+            _route: &ModelResolutionContext,
+            _candidate: &Utf16JsonProjection,
+            _settings: &NativeModelSettingsSnapshot,
+        ) -> NativeModelValidationContext {
+            NativeModelValidationContext::unobserved()
         }
     }
 

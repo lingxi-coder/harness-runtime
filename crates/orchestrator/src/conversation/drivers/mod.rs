@@ -906,6 +906,7 @@ impl ConversationOrchestrator {
             prompt_len = prompt.string_at("").unwrap_or_default().len()
         );
         let result = crate::request_context::scope_if_missing(
+            self,
             crate::server_fallback::scope_query_and_flush(
                 self,
                 telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
@@ -950,6 +951,7 @@ impl ConversationOrchestrator {
         &self,
         prompt: &Utf16JsonProjection,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt for THIS turn.
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else
         // the `--agent`-adopted main-thread agent's prompt; else the default.
@@ -2556,6 +2558,10 @@ impl ConversationOrchestrator {
         row_token: Option<String>,
         projected_content: Option<ProjectedUserContent>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        // Each call admits one fresh query, including a metadata re-wake. The
+        // StreamingTurnDriver retains these IDs through internal retries and
+        // tool continuations without re-entering this wrapper.
+        self.prompt_runtime.begin_native_query();
         let suggestion_origin = queued_inputs
             .as_ref()
             .and_then(|inputs| inputs.iter().rev().find(|input| !input.is_meta))
@@ -2572,6 +2578,7 @@ impl ConversationOrchestrator {
         }
         let completion_cancel = user_cancel.clone();
         let result = crate::request_context::scope_if_missing(
+            self,
             crate::server_fallback::scope_query_and_flush(
                 self,
                 Box::pin(
@@ -2677,6 +2684,7 @@ impl ConversationOrchestrator {
                 prompt_len = prompt.string_at("").unwrap_or_default().len()
             );
             let result = crate::request_context::scope_if_missing(
+                self,
                 crate::server_fallback::scope_query_and_flush(
                     self,
                     telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
@@ -2741,6 +2749,7 @@ impl ConversationOrchestrator {
             prompt_len = prompt.string_at("").unwrap_or_default().len()
         );
         let result = crate::request_context::scope_if_missing(
+            self,
             crate::server_fallback::scope_query_and_flush(
                 self,
                 telemetry::otel::with_turn_span(
@@ -2788,6 +2797,7 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
         queued_inputs: Option<Vec<QueuedPromptInput>>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt (same as non-cancelable path).
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else the
         // `--agent` main-thread agent's prompt; else the default (`build_system_prompt`).
@@ -3987,3 +3997,259 @@ mod server_fallback_response_tests {
 #[cfg(test)]
 #[path = "accepted_query_row_tests.rs"]
 mod accepted_query_row_tests;
+
+#[cfg(test)]
+mod current_prompt_upe_scope_tests {
+    use super::*;
+    use crate::prompt::mid_turn_input::{MidTurnInput, MidTurnInputPoint, MidTurnInputSource};
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use std::sync::Arc;
+
+    struct AfterToolsMidTurnBatch(std::sync::Mutex<Option<Vec<MidTurnInput>>>);
+
+    #[async_trait::async_trait]
+    impl MidTurnInputSource for AfterToolsMidTurnBatch {
+        fn admits_at(&self, point: MidTurnInputPoint) -> bool {
+            point == MidTurnInputPoint::AfterTools
+        }
+
+        async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+            None
+        }
+
+        async fn take_mid_turn_batch(&self) -> Result<Option<Vec<MidTurnInput>>, String> {
+            Ok(self.0.lock().unwrap().take())
+        }
+    }
+
+    struct LoopStartMidTurnBatch(std::sync::Mutex<Option<Vec<MidTurnInput>>>);
+
+    #[async_trait::async_trait]
+    impl MidTurnInputSource for LoopStartMidTurnBatch {
+        async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+            None
+        }
+
+        async fn take_mid_turn_batch(&self) -> Result<Option<Vec<MidTurnInput>>, String> {
+            Ok(self.0.lock().unwrap().take())
+        }
+    }
+
+    #[tokio::test]
+    async fn first_streaming_guard_keeps_current_upe_for_plain_human_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(LoopStartMidTurnBatch(std::sync::Mutex::new(Some(vec![
+            MidTurnInput {
+                text: source_string_projection("new first-cycle human input"),
+                images: Vec::new(),
+                origin_kind: None,
+                projected_content: None,
+                source_message_uuid: None,
+                queue_delivery: None,
+                pending_prompt_identity: None,
+            },
+        ]))));
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_mid_turn_input(source);
+
+        let current_nar = lingxi_core::types::ConversationMessage::user_meta(
+            MessageId::new(),
+            "current NAr".to_owned(),
+        );
+        let current_upe = lingxi_core::types::ConversationMessage::user_meta(
+            MessageId::new(),
+            "current UPE".to_owned(),
+        );
+        let current_nar_id = current_nar.id();
+        let current_upe_id = current_upe.id();
+        orch.prompt_runtime
+            .record_current_prompt_upe_attachment_id(current_upe_id);
+        orch.session
+            .lock()
+            .await
+            .history
+            .extend([current_nar.clone(), current_upe.clone()]);
+
+        let mut state = TurnLoopState::new(&orch, MessageId::new(), None);
+        assert!(matches!(
+            orch.run_turn_loop_guards(loop_state::LoopGuardOrder::Streaming, &mut state)
+                .await
+                .unwrap(),
+            loop_state::GuardVerdict::Proceed
+        ));
+        assert_eq!(
+            orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+            std::collections::HashSet::from([current_upe_id]),
+            "the initial loop guard stays inside the current Qe/UPE batch"
+        );
+
+        let durable_history = orch.session.lock().await.history.clone();
+        let new_human = durable_history.last().unwrap().clone();
+        assert!(new_human
+            .text_content()
+            .contains("new first-cycle human input"));
+        let durable_history_before_projection = durable_history.clone();
+        let new_nar = lingxi_core::types::ConversationMessage::user_meta(
+            MessageId::new(),
+            "new NAr".to_owned(),
+        );
+        let typed_ids =
+            std::collections::HashSet::from([current_nar_id, current_upe_id, new_nar.id()]);
+        let mut request_projection = durable_history;
+        request_projection.push(new_nar.clone());
+        crate::conversation::attachment_order::repack_typed_attachments_with_trailing_ids(
+            &mut request_projection,
+            &typed_ids,
+            None,
+            None,
+            &orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+        );
+
+        assert_eq!(
+            request_projection,
+            vec![current_nar, new_nar, current_upe, new_human],
+            "the current UPE batch trails NAr attachments admitted before the first API call"
+        );
+        assert_eq!(
+            orch.session.lock().await.history,
+            durable_history_before_projection,
+            "request projection does not mutate durable history"
+        );
+    }
+
+    #[tokio::test]
+    async fn admitted_after_tools_human_input_keeps_current_upe_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(AfterToolsMidTurnBatch(std::sync::Mutex::new(Some(vec![
+            MidTurnInput {
+                text: source_string_projection("new after-tools human input"),
+                images: Vec::new(),
+                origin_kind: None,
+                projected_content: None,
+                source_message_uuid: None,
+                queue_delivery: None,
+                pending_prompt_identity: None,
+            },
+        ]))));
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_mid_turn_input(source);
+        let current_upe_id = MessageId::new();
+        let current_upe = lingxi_core::types::ConversationMessage::user_meta(
+            current_upe_id,
+            "current UPE before tool response".to_owned(),
+        );
+        let tool_response = lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
+                text: "tool response".to_owned(),
+                citations: None,
+            }],
+            stop_reason: Some("tool_use".to_owned()),
+            resumable: None,
+        };
+        orch.session
+            .lock()
+            .await
+            .history
+            .extend([current_upe.clone(), tool_response.clone()]);
+        orch.prompt_runtime
+            .record_current_prompt_upe_attachment_id(current_upe_id);
+
+        orch.drain_mid_turn_input_after_tools().await.unwrap();
+
+        assert_eq!(
+            orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+            std::collections::HashSet::from([current_upe_id]),
+            "the after-tools drain does not reset the active query selector"
+        );
+        let durable_history = orch.session.lock().await.history.clone();
+        let new_human = durable_history.last().unwrap().clone();
+        assert!(new_human
+            .text_content()
+            .contains("new after-tools human input"));
+        let new_nar = lingxi_core::types::ConversationMessage::user_meta(
+            MessageId::new(),
+            "new after-tools NAr".to_owned(),
+        );
+        let typed_ids = std::collections::HashSet::from([current_upe_id, new_nar.id()]);
+        let mut request_projection = durable_history.clone();
+        request_projection.push(new_nar.clone());
+        crate::conversation::attachment_order::repack_typed_attachments_with_trailing_ids(
+            &mut request_projection,
+            &typed_ids,
+            None,
+            None,
+            &orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+        );
+        assert_eq!(
+            request_projection,
+            vec![current_upe, tool_response, new_nar, new_human],
+            "the assistant boundary keeps the prior UPE row in its completed group"
+        );
+        assert_eq!(
+            orch.session.lock().await.history,
+            durable_history,
+            "request projection does not mutate durable history"
+        );
+    }
+
+    #[tokio::test]
+    async fn admitted_after_tools_peer_context_keeps_current_upe_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(AfterToolsMidTurnBatch(std::sync::Mutex::new(Some(vec![
+            MidTurnInput {
+                text: source_string_projection("after-tools peer context"),
+                images: Vec::new(),
+                origin_kind: Some("peer"),
+                projected_content: None,
+                source_message_uuid: None,
+                queue_delivery: None,
+                pending_prompt_identity: None,
+            },
+        ]))));
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_mid_turn_input(source);
+        let current_upe_id = MessageId::new();
+        orch.prompt_runtime
+            .record_current_prompt_upe_attachment_id(current_upe_id);
+
+        orch.drain_mid_turn_input_after_tools().await.unwrap();
+
+        assert_eq!(
+            orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+            std::collections::HashSet::from([current_upe_id]),
+            "peer context is not a new local human prompt"
+        );
+    }
+}

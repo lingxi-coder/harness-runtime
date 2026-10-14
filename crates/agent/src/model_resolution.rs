@@ -49,6 +49,7 @@
 
 use crate::definition::{AgentDefinition, AgentModel, AgentSource};
 use lingxi_core::host::env::is_env_truthy;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use llm_runtime::model::allowlist::{self, ModelEnforcement};
 use permission::PermissionMode;
 
@@ -167,6 +168,70 @@ pub struct ModelResolutionContext {
     pub disable_legacy_model_remap: bool,
 }
 
+/// A settings fact whose source has not been observed is distinct from a
+/// complete source snapshot that contains no value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeModelObservation<T> {
+    /// The corresponding Native input was not available to this host path.
+    Unobserved,
+    /// The input was observed, including an explicit absence when `T` is `Option<_>`.
+    Observed(T),
+}
+
+impl<T> Default for NativeModelObservation<T> {
+    fn default() -> Self {
+        Self::Unobserved
+    }
+}
+
+impl<T> NativeModelObservation<T> {
+    /// Represent a caller that has not loaded the Native model settings snapshot.
+    #[must_use]
+    pub const fn unobserved() -> Self {
+        Self::Unobserved
+    }
+}
+
+/// Raw settings needed to reproduce Native model validation and suggestions.
+/// The caller must populate an absent field as `Observed(None)` only after a
+/// complete settings load; a partial source read remains `Unobserved`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeModelSettingsSnapshot {
+    /// Effective `modelOverrides` after Native source selection, preserving UTF-16.
+    pub model_overrides: NativeModelObservation<Option<Utf16JsonProjection>>,
+    /// `dSe()` winner's exact model picker option list; project/local tiers are excluded.
+    pub picker_options: NativeModelObservation<Option<Vec<Utf16JsonProjection>>>,
+    /// `ANTHROPIC_DEFAULT_OPUS_MODEL`, retaining the distinction between unset and empty.
+    pub anthropic_default_opus_model: NativeModelObservation<Option<Utf16JsonProjection>>,
+}
+
+/// Source-bound Native model facts for one logical candidate and selected route.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeModelValidationContext {
+    /// Current `hb()[catalogId]` values after static route selection and model overrides.
+    pub effective_model_by_catalog_id:
+        NativeModelObservation<std::collections::BTreeMap<String, Utf16JsonProjection>>,
+    /// The observed `dSe()` model picker winner, if any.
+    pub picker_options: NativeModelObservation<Option<Vec<Utf16JsonProjection>>>,
+    /// Native `yfo(candidate)` gate, including catalog/entitlement checks.
+    pub picker_eligibility: NativeModelObservation<bool>,
+    /// Exact `ANTHROPIC_DEFAULT_OPUS_MODEL` value used by the Fable suggestion row.
+    pub anthropic_default_opus_model: NativeModelObservation<Option<Utf16JsonProjection>>,
+}
+
+impl NativeModelValidationContext {
+    /// Explicitly leave each Native fact unknown when the host lacks its source.
+    #[must_use]
+    pub fn unobserved() -> Self {
+        Self {
+            effective_model_by_catalog_id: NativeModelObservation::Unobserved,
+            picker_options: NativeModelObservation::Unobserved,
+            picker_eligibility: NativeModelObservation::Unobserved,
+            anthropic_default_opus_model: NativeModelObservation::Unobserved,
+        }
+    }
+}
+
 /// Host route lookup failure. The Agent layer reports ambiguity and missing
 /// configured routes instead of selecting the first/last same-named profile.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -208,6 +273,16 @@ pub trait ModelResolutionContextProvider: Send + Sync {
         model: &str,
         profile: Option<&str>,
     ) -> Result<ModelResolutionContext, ModelResolutionError>;
+
+    /// Read source-bound Native validation facts for this exact candidate and route.
+    /// Implementations must preserve unknown settings as `Unobserved`; they must
+    /// not infer picker options from route listings or family defaults.
+    fn native_model_validation_context(
+        &self,
+        route: &ModelResolutionContext,
+        candidate: &Utf16JsonProjection,
+        settings: &NativeModelSettingsSnapshot,
+    ) -> NativeModelValidationContext;
 }
 
 impl<F> ModelResolutionContextProvider for F
@@ -220,6 +295,15 @@ where
         profile: Option<&str>,
     ) -> Result<ModelResolutionContext, ModelResolutionError> {
         self(model, profile)
+    }
+
+    fn native_model_validation_context(
+        &self,
+        _route: &ModelResolutionContext,
+        _candidate: &Utf16JsonProjection,
+        _settings: &NativeModelSettingsSnapshot,
+    ) -> NativeModelValidationContext {
+        NativeModelValidationContext::unobserved()
     }
 }
 

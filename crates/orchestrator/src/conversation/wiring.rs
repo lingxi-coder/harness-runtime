@@ -641,6 +641,20 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Install settings facts from the same boot snapshot as the model selection.
+    #[must_use]
+    pub fn with_native_model_settings_snapshot(
+        self,
+        settings: agent::model_resolution::NativeModelSettingsSnapshot,
+    ) -> Self {
+        *self
+            .model_runtime
+            .native_model_settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+        self
+    }
+
     /// Share the host's model route authority and refresh the initial tool gate.
     #[must_use]
     pub fn with_model_resolution_context_provider(

@@ -3006,7 +3006,7 @@ mod tests {
                 .unwrap()
                 .is_none());
             let unchanged = store.load("session", 1).unwrap();
-            assert_eq!(unchanged.state, Some(paused.state.clone()));
+            assert_eq!(unchanged.state, paused.state);
             assert_eq!(unchanged.revision, paused.revision);
             assert_eq!(unchanged.reason, paused.reason);
             assert_eq!(unchanged.safe_to_resume, paused.safe_to_resume);

@@ -487,7 +487,10 @@ async fn live_orchestrator_prompt_uses_production_context() {
         cwd.clone(),
     );
 
-    let prompt = orchestrator.assemble_system_prompt_preview().await;
+    let prompt = orchestrator
+        .assemble_system_prompt_preview()
+        .await
+        .expect("production system prompt preview must succeed");
     assert!(
         prompt.contains(&format!(" - Primary working directory: {}", cwd.display())),
         "live cwd must come from the production prompt context"

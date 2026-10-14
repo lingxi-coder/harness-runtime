@@ -349,12 +349,9 @@ define_client_event! {
         // validity only; it says nothing about OS write permission.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         files_json: Option<String>,
-        // `{key: value}` — the FILE-LAYER values as read at session start.
-        // NOT the session's live configuration: no `cli` / `managed` / `env`
-        // overlay is applied, so this is strictly "what the settings files
-        // said at boot" and can differ from `effective_json` both because of
-        // an on-disk edit not yet picked up AND because `effective_json`
-        // carries the managed overlay that this field does not.
+        // `{key: value}` — the file-layer and managed values loaded at boot,
+        // updated for keys successfully hot-reloaded. No `cli` or `env`
+        // overlay is applied; those affect the effective view separately.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_json: Option<String>,
         // Keys an administrator pinned through the managed-settings layer;
@@ -363,7 +360,7 @@ define_client_event! {
         locked: Option<Vec<String>>,
         // `{layer: {key: value}}` — each FILE layer's OWN raw settings map,
         // unmerged. `effective_json` is a cross-layer merge and `active_json`
-        // is the file-layer merge without the managed overlay; NEITHER can
+        // includes the managed overlay; NEITHER can
         // stand in for "what does layer L's file itself say", which a
         // layered editor needs before it writes back to one layer: the
         // generic `update_settings` command replaces a key WHOLESALE in one
@@ -826,6 +823,16 @@ define_client_event! {
 impl From<ClientEventWire> for ClientEvent {
     fn from(value: ClientEventWire) -> Self {
         match value {
+            ClientEventWire::FusionCatalog { catalog_json } => Self::FusionCatalog { catalog_json },
+            ClientEventWire::FusionStrategyResolved {
+                operation_id,
+                selection_json,
+                error,
+            } => Self::FusionStrategyResolved {
+                operation_id,
+                selection_json,
+                error,
+            },
             ClientEventWire::CoordinatorStatus {
                 active_workers,
                 team,

@@ -84,6 +84,43 @@ fn native_request_header_facts(
     NativeAnthropicRequestHeaderFacts::from_process_environment(protocol, provider, selected_url)
 }
 
+fn native_hq_model_provider_family(
+    provider_id: &crate::ProviderId,
+    protocol: wire::ProtocolFamily,
+) -> Option<wire::NativeAnthropicModelProviderFamily> {
+    use wire::NativeAnthropicModelProviderFamily as Family;
+
+    match (provider_id, protocol) {
+        (crate::ProviderId::AnthropicFirstParty, wire::ProtocolFamily::AnthropicMessages) => {
+            Some(Family::FirstParty)
+        }
+        (crate::ProviderId::BedrockClaude, wire::ProtocolFamily::BedrockClaude) => {
+            Some(Family::Bedrock)
+        }
+        (crate::ProviderId::VertexClaude, wire::ProtocolFamily::VertexClaude) => {
+            Some(Family::Vertex)
+        }
+        (crate::ProviderId::FoundryClaude, wire::ProtocolFamily::FoundryClaude) => {
+            Some(Family::Foundry)
+        }
+        // Anthropic AWS/GCP and Mantle are not represented by a corresponding
+        // resolved Host route. Never infer their Native family from a profile.
+        _ => None,
+    }
+}
+
+fn native_hq_model_source(
+    source: Option<&wire::JsonPayload>,
+    fallback_model: &str,
+    provider_family: Option<wire::NativeAnthropicModelProviderFamily>,
+) -> Option<wire::JsonPayload> {
+    provider_family.map(|_| {
+        source
+            .cloned()
+            .unwrap_or_else(|| wire::JsonPayload::string(fallback_model))
+    })
+}
+
 struct PreparationOnly;
 #[async_trait::async_trait]
 impl sdk::Transport for PreparationOnly {
@@ -205,23 +242,46 @@ pub(crate) async fn prepare(
                 profile.base_url.clone(),
             )
         });
-    let mut draft = Box::pin(client.prepare_draft_on(
-        &profile.profile_name,
-        &input,
-        &sdk::RequestOptions {
-            anthropic_request_kind,
-            native_anthropic_endpoint_admission,
-            native_anthropic_request_context:
-                request.execution.native_anthropic_request_context.clone(),
-            message_text_utf16_overrides: request.execution.message_json_string_overrides.clone(),
-            fast_capability,
-            authenticator: Some(sdk::client::options::RequestAuthenticator(authenticator)),
-            account_scope: request.execution.account_scope.clone(),
-            file_account_scope: request.execution.file_account_scope.clone(),
-            ..Default::default()
-        },
-        mode,
-    ))
+    let native_hq_model_provider_family =
+        native_hq_model_provider_family(&route.provider_id, profile.protocol);
+    let native_hq_model_source = native_hq_model_source(
+        request.input.model_source.as_ref(),
+        &request.input.model,
+        native_hq_model_provider_family,
+    );
+    let mut draft = Box::pin(
+        client.prepare_draft_on(
+            &profile.profile_name,
+            &input,
+            &sdk::RequestOptions {
+                anthropic_request_kind,
+                native_anthropic_endpoint_admission,
+                native_anthropic_context: sdk::NativeAnthropicContextInput {
+                    context_1m_beta_suppressed: request.execution.context_1m_beta_suppressed,
+                    native_thinking_binding_controls_beta_requested: request
+                        .execution
+                        .native_thinking_binding_controls_beta_requested,
+                    native_hq_model_source,
+                    native_hq_model_provider_family,
+                    ..Default::default()
+                },
+                native_anthropic_request_context: request
+                    .execution
+                    .native_anthropic_request_context
+                    .clone(),
+                message_text_utf16_overrides: request
+                    .execution
+                    .message_json_string_overrides
+                    .clone(),
+                fast_capability,
+                authenticator: Some(sdk::client::options::RequestAuthenticator(authenticator)),
+                account_scope: request.execution.account_scope.clone(),
+                file_account_scope: request.execution.file_account_scope.clone(),
+                ..Default::default()
+            },
+            mode,
+        ),
+    )
     .await
     .map_err(crate::upstream::error)?;
     draft
@@ -567,6 +627,74 @@ pub(crate) async fn next_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_hq_model_family_requires_exact_provider_and_protocol() {
+        use wire::NativeAnthropicModelProviderFamily as Family;
+
+        assert_eq!(
+            native_hq_model_provider_family(
+                &crate::ProviderId::BedrockClaude,
+                wire::ProtocolFamily::BedrockClaude,
+            ),
+            Some(Family::Bedrock)
+        );
+        assert_eq!(
+            native_hq_model_provider_family(
+                &crate::ProviderId::VertexClaude,
+                wire::ProtocolFamily::VertexClaude,
+            ),
+            Some(Family::Vertex)
+        );
+        assert_eq!(
+            native_hq_model_provider_family(
+                &crate::ProviderId::FoundryClaude,
+                wire::ProtocolFamily::FoundryClaude,
+            ),
+            Some(Family::Foundry)
+        );
+        assert_eq!(
+            native_hq_model_provider_family(
+                &crate::ProviderId::Custom {
+                    name: "anthropic-compatible".into(),
+                },
+                wire::ProtocolFamily::AnthropicMessages,
+            ),
+            None
+        );
+        assert_eq!(
+            native_hq_model_provider_family(
+                &crate::ProviderId::BedrockClaude,
+                wire::ProtocolFamily::AnthropicMessages,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn native_hq_model_source_is_copied_as_raw_utf16_json_payload() {
+        use wire::NativeAnthropicModelProviderFamily as Family;
+
+        let source =
+            wire::JsonPayload::string_from_utf16_code_units(&[b'c' as u16, 0xd800, b'x' as u16]);
+        assert_eq!(
+            native_hq_model_source(Some(&source), "fallback", Some(Family::Bedrock)),
+            Some(source.clone())
+        );
+        assert_eq!(
+            native_hq_model_source(Some(&source), "fallback", None),
+            None
+        );
+        assert_eq!(
+            native_hq_model_source(None, "request-model", Some(Family::Vertex)),
+            Some(wire::JsonPayload::string("request-model"))
+        );
+        let non_string = wire::JsonPayload::parse("null").unwrap();
+        assert_eq!(
+            native_hq_model_source(Some(&non_string), "fallback", Some(Family::Bedrock)),
+            Some(non_string)
+        );
+    }
 
     #[test]
     fn provider_response_keeps_valid_json_source_and_maps_non_json_error_text() {

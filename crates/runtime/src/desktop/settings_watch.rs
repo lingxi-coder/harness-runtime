@@ -99,6 +99,7 @@ pub trait MainModelSelectionRefresher: Send + Sync {
         model_source: Option<Utf16JsonProjection>,
         provenance: lingxi_core::host::ModelProvenance,
         restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+        native_settings: agent::model_resolution::NativeModelSettingsSnapshot,
     );
 }
 
@@ -110,6 +111,7 @@ impl MainModelSelectionRefresher for orchestrator::ConversationOrchestrator {
         model_source: Option<Utf16JsonProjection>,
         provenance: lingxi_core::host::ModelProvenance,
         restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+        native_settings: agent::model_resolution::NativeModelSettingsSnapshot,
     ) {
         orchestrator::ConversationOrchestrator::refresh_main_model_selection(
             self,
@@ -117,6 +119,7 @@ impl MainModelSelectionRefresher for orchestrator::ConversationOrchestrator {
             model_source,
             provenance,
             restriction,
+            native_settings,
         )
         .await;
     }
@@ -299,6 +302,7 @@ impl MainModelSelectionRefresh {
                     model_source,
                     provenance,
                     restriction,
+                    crate::native_model_settings::snapshot(Some(&effective)),
                 )
                 .await;
         }
@@ -2308,6 +2312,7 @@ mod tests {
                 Option<Utf16JsonProjection>,
                 lingxi_core::host::ModelProvenance,
                 Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+                agent::model_resolution::NativeModelSettingsSnapshot,
             )>,
         >,
     );
@@ -2320,11 +2325,15 @@ mod tests {
             model_source: Option<Utf16JsonProjection>,
             provenance: lingxi_core::host::ModelProvenance,
             restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+            native_settings: agent::model_resolution::NativeModelSettingsSnapshot,
         ) {
-            self.0
-                .lock()
-                .unwrap()
-                .push((raw_model_setting, model_source, provenance, restriction));
+            self.0.lock().unwrap().push((
+                raw_model_setting,
+                model_source,
+                provenance,
+                restriction,
+                native_settings,
+            ));
         }
     }
 
@@ -2633,10 +2642,13 @@ mod tests {
         {
             let selections = refresher.0.lock().unwrap();
             assert_eq!(selections.len(), 1);
-            let (raw_model, model_source, provenance, restriction) = &selections[0];
+            let (raw_model, model_source, provenance, restriction, _native_settings) =
+                &selections[0];
             assert_eq!(raw_model.as_deref(), Some("opusplan"));
             assert_eq!(
-                model_source.as_ref().and_then(|source| source.string_at("")),
+                model_source
+                    .as_ref()
+                    .and_then(|source| source.string_at("")),
                 Some("opusplan"),
                 "the winning project model remains available as exact source",
             );
@@ -2687,7 +2699,10 @@ mod tests {
                 "internal model changes still refresh the live model selection"
             );
             assert_eq!(
-                selections[1].1.as_ref().and_then(|source| source.string_at("")),
+                selections[1]
+                    .1
+                    .as_ref()
+                    .and_then(|source| source.string_at("")),
                 Some("project-next"),
                 "the refreshed project model source replaces the previous source",
             );

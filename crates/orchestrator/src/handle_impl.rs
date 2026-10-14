@@ -324,6 +324,7 @@ impl ConversationOrchestrator {
         validation: ModelValidationMode,
     ) -> Result<(String, Option<String>, ModelSourceBinding), HandleError> {
         use crate::model_validation::{
+            native_model_suggestion_facts, native_picker_model_option_is_valid,
             prepare_native_model_validation, NativeModelProbeWait, NativeModelValidationDecision,
             NativeModelValidationFacts,
         };
@@ -508,11 +509,31 @@ impl ConversationOrchestrator {
                 || classifier_route_facts
                     .as_ref()
                     .is_some_and(|facts| facts.native_base_url);
-            // H has no observed owner for Native's `yfo(model)` and live
-            // `dSe()?.picker.options` facts. A route listing is not proof that
-            // Native offered a matching picker option, so keep this fast path
-            // closed until that exact producer is wired.
-            let picker_model_option_is_valid = false;
+            // Read the current settings snapshot without retaining its lock
+            // across any async work. The route provider computes source-bound
+            // Native facts for this exact logical candidate; picker matching
+            // does not use model-listing labels or route display names.
+            let native_validation_context = route_context.as_ref().and_then(|route_context| {
+                self.model_resolution_context_provider
+                    .as_ref()
+                    .map(|provider| {
+                        let settings = self
+                            .model_runtime
+                            .native_model_settings
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        provider.native_model_validation_context(
+                            route_context,
+                            &validation_source,
+                            &settings,
+                        )
+                    })
+            });
+            let picker_model_option_is_valid = native_validation_context
+                .as_ref()
+                .map(|context| native_picker_model_option_is_valid(&validation_source, context))
+                .unwrap_or(lingxi_llm_client::protocol::NativeModelObservation::Unobserved);
             let custom_model_option_matches = self
                 .api
                 .model_validation_custom_model_option()
@@ -530,12 +551,12 @@ impl ConversationOrchestrator {
                     picker_model_option_is_valid,
                     provider,
                     first_party_base_url,
-                    // H has not yet connected Native's current per-catalog
-                    // post-overrides/default observations; keep suggestion
-                    // facts explicitly unknown instead of substituting family
-                    // defaults or inventing a mapping.
-                    suggestion_facts:
-                        lingxi_llm_client::protocol::NativeModelSuggestionFacts::unobserved(),
+                    suggestion_facts: native_validation_context
+                        .as_ref()
+                        .map(native_model_suggestion_facts)
+                        .unwrap_or_else(
+                            lingxi_llm_client::protocol::NativeModelSuggestionFacts::unobserved,
+                        ),
                 },
                 &self.model_runtime.native_model_validation_cache,
             )
@@ -713,19 +734,36 @@ impl ConversationOrchestrator {
                 current_binding,
             )
         };
-        let same_binding = match (&current_binding, &model_binding) {
-            (Some(current), Some(next)) => {
-                current.source.string_units("") == next.source.string_units("")
-                    && current.effective_source.string_units("")
-                        == next.effective_source.string_units("")
-                    && current.route_anchor == next.route_anchor
-            }
-            (None, None) => true,
-            _ => false,
+        // A default reset targets the configured source owner; explicit
+        // selections target their validated binding. Automatic changes carry
+        // no logical source into a different route. Compute these projections
+        // before the same-route fast path so reset no-ops compare the actual
+        // effective target rather than the intentionally absent model_binding.
+        let hook_target_binding = if clear_user_selection {
+            self.model_runtime
+                .configured_model_source
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        } else if user_selection {
+            model_binding.clone()
+        } else {
+            None
         };
+        let from_hook_model = self.model_switch_source_projection_for_route(
+            &from_model,
+            from_profile.as_deref(),
+            current_binding.as_ref(),
+        );
+        let to_hook_model = self.model_switch_source_projection_for_route(
+            &target_model,
+            target_profile.as_deref(),
+            hook_target_binding.as_ref(),
+        );
+        let same_logical_model = from_hook_model.string_units("") == to_hook_model.string_units("");
         if from_model == target_model
             && from_profile == target_profile
-            && (!user_selection || same_binding)
+            && (!user_selection || same_logical_model)
         {
             if user_selection {
                 let mut session = self.session.lock().await;
@@ -767,9 +805,10 @@ impl ConversationOrchestrator {
                 .model_pick(&target_model);
             let aggregate = self
                 .run_pre_model_switch_hooks(
-                    &from_model,
-                    &target_model,
+                    &from_hook_model,
+                    &to_hook_model,
                     requested_model.as_ref(),
+                    &target_model,
                     target_profile.as_deref(),
                     source,
                 )
@@ -833,9 +872,10 @@ impl ConversationOrchestrator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .override_model = Some(Some(target_model.clone()));
         self.run_post_model_switch_hooks(
-            &from_model,
-            &target_model,
+            &from_hook_model,
+            &to_hook_model,
             requested_model.as_ref(),
+            &target_model,
             target_profile.as_deref(),
             source,
         )
@@ -1111,12 +1151,24 @@ impl ConversationOrchestrator {
         active_goal: Option<ActiveGoalSnapshot>,
         runtime: lingxi_core::host::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
-        let (old_session_id, from_model, from_profile) = {
+        let (old_session_id, from_model, from_profile, from_binding) = {
             let session = self.session.lock().await;
+            let binding = match session.user_model_setting_source {
+                lingxi_core::session::SessionModelSettingSource::Configured => self
+                    .model_runtime
+                    .configured_model_source
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+                lingxi_core::session::SessionModelSettingSource::UserSelection => {
+                    session.user_model_setting.clone()
+                }
+            };
             (
                 session.session_id,
                 session.model.clone(),
                 session.model_profile.clone(),
+                binding,
             )
         };
         let requested_model = (!runtime.model.is_empty()).then(|| {
@@ -1238,6 +1290,14 @@ impl ConversationOrchestrator {
             s.user_model_setting_source = runtime
                 .user_model_setting_source
                 .unwrap_or(lingxi_core::session::SessionModelSettingSource::Configured);
+        } else {
+            // A missing resume binding means the live configured owner remains
+            // authoritative. Do not carry a previous session's user pick into
+            // the resumed transcript.
+            s.user_model_setting = None;
+            s.user_model_setting_provenance = lingxi_core::host::ModelProvenance::default();
+            s.user_model_setting_source =
+                lingxi_core::session::SessionModelSettingSource::Configured;
         }
         if let Some(restore) = self
             .model_runtime
@@ -1420,11 +1480,39 @@ impl ConversationOrchestrator {
             let session = self.session.lock().await;
             (session.model.clone(), session.model_profile.clone())
         };
+        // ResumeRuntimeSnapshot::None means keep the live configured owner;
+        // never let a previous session's user-selection binding leak into it.
+        let to_binding = match (
+            runtime.user_model_setting_source,
+            runtime.user_model_setting.as_ref(),
+        ) {
+            (
+                Some(lingxi_core::session::SessionModelSettingSource::UserSelection),
+                Some(binding),
+            ) => Some(binding.clone()),
+            _ => self
+                .model_runtime
+                .configured_model_source
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        };
         if from_model != to_model || from_profile != to_profile {
-            self.run_post_model_switch_hooks(
+            let from_hook_model = self.model_switch_source_projection_for_route(
                 &from_model,
+                from_profile.as_deref(),
+                from_binding.as_ref(),
+            );
+            let to_hook_model = self.model_switch_source_projection_for_route(
                 &to_model,
+                to_profile.as_deref(),
+                to_binding.as_ref(),
+            );
+            self.run_post_model_switch_hooks(
+                &from_hook_model,
+                &to_hook_model,
                 requested_model.as_ref(),
+                &to_model,
                 to_profile.as_deref(),
                 "resume",
             )
@@ -3967,6 +4055,112 @@ mod tests {
     };
     use std::sync::Arc;
 
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    struct ResumePostTargetRecorder(Arc<std::sync::Mutex<Vec<Utf16JsonProjection>>>);
+
+    #[async_trait::async_trait]
+    impl hooks::BuiltinHookHandler for ResumePostTargetRecorder {
+        fn id(&self) -> &str {
+            "resume-post-target-recorder"
+        }
+
+        async fn handle(
+            &self,
+            event: &hooks::HookEvent,
+            _ctx: &hooks::HookContext,
+        ) -> hooks::HookResult {
+            if let hooks::HookEvent::PostModelSwitch { to_model, .. } = event {
+                self.0.lock().unwrap().push(to_model.clone());
+            }
+            hooks::HookResult {
+                outcome: hooks::HookOutcome::Success,
+                stdout: String::new().into(),
+                stderr: String::new().into(),
+                exit_code: None,
+                response: None,
+            }
+        }
+    }
+
+    struct UnusedModelSwitchHttp;
+    #[async_trait::async_trait]
+    impl lingxi_core::host::HttpTransport for UnusedModelSwitchHttp {
+        async fn request(
+            &self,
+            _request: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "builtin model-switch hook does not use HTTP".into(),
+            ))
+        }
+
+        async fn stream_sse(
+            &self,
+            _request: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "builtin model-switch hook does not stream HTTP".into(),
+            ))
+        }
+    }
+
+    struct UnusedModelSwitchRuntime;
+    #[async_trait::async_trait]
+    impl lingxi_core::host::RuntimeSpawner for UnusedModelSwitchRuntime {
+        async fn spawn(
+            &self,
+            _name: &str,
+            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal(
+                "builtin model-switch hook does not spawn runtime tasks".into(),
+            ))
+        }
+
+        async fn sleep(&self, _duration: std::time::Duration) {}
+
+        async fn cancel(
+            &self,
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    fn resume_post_target_executor(
+        targets: Arc<std::sync::Mutex<Vec<Utf16JsonProjection>>>,
+    ) -> Arc<hooks::HookExecutorImpl> {
+        let mut registry = hooks::HookRegistry::new();
+        registry.register(hooks::HookDefinition {
+            id: lingxi_core::types::HookId::new(),
+            name: "resume-post-target-recorder".into(),
+            events: vec![hooks::HookEventType::PostModelSwitch],
+            if_condition: None,
+            executor: hooks::HookExecutor::Builtin {
+                handler_id: "resume-post-target-recorder".into(),
+            },
+            source: hooks::HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+            on_failure: None,
+        });
+        let mut executor = hooks::HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(registry)),
+            Arc::new(UnusedModelSwitchHttp),
+            Arc::new(UnusedModelSwitchRuntime),
+        );
+        executor.register_builtin(Arc::new(ResumePostTargetRecorder(targets)));
+        Arc::new(executor)
+    }
+
     #[test]
     fn model_switch_requested_model_source_preserves_unpaired_utf16_and_absence() {
         let units = "claude-custom-"
@@ -4976,6 +5170,360 @@ mod tests {
                 .unwrap()
                 .as_ref(),
             Some(&usage)
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_same_route_reset_skips_model_switch_hooks() {
+        use lingxi_core::host::{ModelSelectionOrigin, ModelSelectionRequest};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct SwitchHookCounter(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl hooks::BuiltinHookHandler for SwitchHookCounter {
+            fn id(&self) -> &str {
+                "configured-reset-counter"
+            }
+
+            async fn handle(
+                &self,
+                event: &hooks::HookEvent,
+                _ctx: &hooks::HookContext,
+            ) -> hooks::HookResult {
+                if matches!(
+                    event,
+                    hooks::HookEvent::PreModelSwitch { .. }
+                        | hooks::HookEvent::PostModelSwitch { .. }
+                ) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+                hooks::HookResult {
+                    outcome: hooks::HookOutcome::Success,
+                    stdout: String::new().into(),
+                    stderr: String::new().into(),
+                    exit_code: None,
+                    response: None,
+                }
+            }
+        }
+
+        struct UnusedHookHttp;
+        #[async_trait::async_trait]
+        impl lingxi_core::host::HttpTransport for UnusedHookHttp {
+            async fn request(
+                &self,
+                _request: lingxi_core::types::HttpRequest,
+            ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError>
+            {
+                Err(lingxi_core::host::HttpError::InvalidRequest(
+                    "builtin model-switch hook does not use HTTP".into(),
+                ))
+            }
+
+            async fn stream_sse(
+                &self,
+                _request: lingxi_core::types::HttpRequest,
+            ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError>
+            {
+                Err(lingxi_core::host::HttpError::InvalidRequest(
+                    "builtin model-switch hook does not stream HTTP".into(),
+                ))
+            }
+        }
+
+        struct UnusedHookRuntime;
+        #[async_trait::async_trait]
+        impl lingxi_core::host::RuntimeSpawner for UnusedHookRuntime {
+            async fn spawn(
+                &self,
+                _name: &str,
+                _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+            ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+            {
+                Err(lingxi_core::host::RuntimeError::Internal(
+                    "builtin model-switch hook does not spawn runtime tasks".into(),
+                ))
+            }
+
+            async fn sleep(&self, _duration: std::time::Duration) {}
+
+            async fn cancel(
+                &self,
+                _handle: &lingxi_core::host::BackgroundTaskHandle,
+            ) -> Result<(), lingxi_core::host::RuntimeError> {
+                Ok(())
+            }
+        }
+
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
+        {
+            let mut registry = registry.write().await;
+            for event in [
+                hooks::HookEventType::PreModelSwitch,
+                hooks::HookEventType::PostModelSwitch,
+            ] {
+                registry.register(hooks::HookDefinition {
+                    id: lingxi_core::types::HookId::new(),
+                    name: "configured-reset-counter".into(),
+                    events: vec![event],
+                    if_condition: None,
+                    executor: hooks::HookExecutor::Builtin {
+                        handler_id: "configured-reset-counter".into(),
+                    },
+                    source: hooks::HookSource::Session,
+                    blocking: true,
+                    timeout: None,
+                    priority: 0,
+                    once: false,
+                    status_message: None,
+                    async_rewake: false,
+                    async_timeout: None,
+                    rewake_message: None,
+                    on_failure: None,
+                });
+            }
+        }
+        let mut hook_executor = hooks::HookExecutorImpl::new(
+            registry,
+            Arc::new(UnusedHookHttp),
+            Arc::new(UnusedHookRuntime),
+        );
+        hook_executor.register_builtin(Arc::new(SwitchHookCounter(hook_calls.clone())));
+
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "claude-known".into(),
+                ..Default::default()
+            },
+            Arc::new(ModelSelectionApi::default()),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            Arc::new(hook_executor),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        *orch
+            .configured_model_source_handle()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ModelSourceBinding {
+            source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "configured-selector",
+            ),
+            effective_source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "configured-logical-model",
+            ),
+            route_anchor: ModelRouteAnchor {
+                model: "claude-known".into(),
+                profile: None,
+            },
+        });
+        {
+            let mut session = orch.session.lock().await;
+            session.model = "claude-known".into();
+            session.model_profile = None;
+            session.user_model_setting = None;
+            session.user_model_setting_source =
+                lingxi_core::session::SessionModelSettingSource::Configured;
+        }
+
+        lingxi_core::host::OrchestratorHandle::select_model(
+            &orch,
+            ModelSelectionRequest::Reset {
+                origin: ModelSelectionOrigin::Command,
+            },
+        )
+        .await
+        .expect("reset to the configured model on its current route");
+
+        assert_eq!(
+            hook_calls.load(Ordering::SeqCst),
+            0,
+            "same-route reset with an unchanged effective source is not a model switch"
+        );
+        let session = orch.session.lock().await;
+        assert_eq!(session.model, "claude-known");
+        assert_eq!(session.model_profile, None);
+        assert_eq!(
+            session.user_model_setting_source,
+            lingxi_core::session::SessionModelSettingSource::Configured
+        );
+        drop(session);
+        let request_source = orch
+            .main_model_source_for_request("claude-known", None)
+            .await
+            .expect("reset keeps using the configured logical source");
+        assert_eq!(
+            request_source.string_at(""),
+            Some("configured-logical-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_with_user_owner_but_missing_binding_uses_configured_hook_source() {
+        let post_targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "claude-previous".into(),
+                ..Default::default()
+            },
+            Arc::new(ModelSelectionApi::default()),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            resume_post_target_executor(post_targets.clone()),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        *orch
+            .configured_model_source_handle()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ModelSourceBinding {
+            source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "configured-selector",
+            ),
+            effective_source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "configured-logical-model",
+            ),
+            route_anchor: ModelRouteAnchor {
+                model: "claude-known".into(),
+                profile: Some("anthropic".into()),
+            },
+        });
+        {
+            let mut session = orch.session.lock().await;
+            session.model = "claude-previous".into();
+            session.model_profile = Some("anthropic".into());
+            session.user_model_setting = None;
+            session.user_model_setting_source =
+                lingxi_core::session::SessionModelSettingSource::Configured;
+        }
+
+        lingxi_core::host::OrchestratorHandle::resume_session(
+            &orch,
+            lingxi_core::types::SessionId::new(),
+            Vec::new(),
+            None,
+            None,
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                model: "claude-known".into(),
+                model_profile: Some("anthropic".into()),
+                user_model_setting: None,
+                user_model_setting_source: Some(
+                    lingxi_core::session::SessionModelSettingSource::UserSelection,
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("resume with a missing user binding");
+
+        assert_eq!(
+            *post_targets.lock().unwrap(),
+            vec![Utf16JsonProjection::from("configured-logical-model")],
+            "resume hook target must match the configured owner restored to the request path"
+        );
+        let session = orch.session.lock().await;
+        assert_eq!(
+            session.user_model_setting_source,
+            lingxi_core::session::SessionModelSettingSource::Configured
+        );
+        assert!(session.user_model_setting.is_none());
+        drop(session);
+        let request_source = orch
+            .main_model_source_for_request("claude-known", Some("anthropic"))
+            .await
+            .expect("resumed request uses configured source");
+        assert_eq!(
+            request_source.string_at(""),
+            Some("configured-logical-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_resume_without_saved_user_source_restores_configured_request_source() {
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(ModelSelectionApi::default()),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let configured = lingxi_core::host::ModelSourceBinding {
+            source: lingxi_core::types::utf16_json::Utf16JsonProjection::from("configured-source"),
+            effective_source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "configured-logical-model",
+            ),
+            route_anchor: lingxi_core::host::ModelRouteAnchor {
+                model: "claude-known".into(),
+                profile: Some("anthropic".into()),
+            },
+        };
+        *orch
+            .configured_model_source_handle()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(configured);
+        {
+            let stale_source =
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from("stale-session-source");
+            let mut session = orch.session.lock().await;
+            session.model = "claude-known".into();
+            session.model_profile = Some("anthropic".into());
+            session.user_model_setting = Some(lingxi_core::host::ModelSourceBinding {
+                source: stale_source.clone(),
+                effective_source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                    "stale-session-logical-model",
+                ),
+                route_anchor: lingxi_core::host::ModelRouteAnchor {
+                    model: "claude-known".into(),
+                    profile: Some("anthropic".into()),
+                },
+            });
+            session.user_model_setting_provenance = lingxi_core::host::ModelProvenance::UserOrEnv;
+            session.user_model_setting_source =
+                lingxi_core::session::SessionModelSettingSource::UserSelection;
+        }
+
+        lingxi_core::host::OrchestratorHandle::resume_session(
+            &orch,
+            lingxi_core::types::SessionId::new(),
+            Vec::new(),
+            None,
+            None,
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                model: "claude-known".into(),
+                model_profile: Some("anthropic".into()),
+                user_model_setting: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("hot resume without a session-owned source");
+
+        {
+            let session = orch.session.lock().await;
+            assert_eq!(
+                session.user_model_setting_source,
+                lingxi_core::session::SessionModelSettingSource::Configured
+            );
+            assert!(session.user_model_setting.is_none());
+            assert_eq!(
+                session.user_model_setting_provenance,
+                lingxi_core::host::ModelProvenance::default()
+            );
+        }
+        let request_source = orch
+            .main_model_source_for_request("claude-known", Some("anthropic"))
+            .await
+            .expect("the resumed request reads the live configured source owner");
+        assert_eq!(
+            request_source.string_at(""),
+            Some("configured-logical-model"),
+            "an old user source anchored to the same route must not survive resume"
         );
     }
 

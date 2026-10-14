@@ -71,6 +71,31 @@ fn orchestrator_with_api(
     )))
 }
 
+fn bind_test_durable_transcript_target(
+    orchestrator: &ConversationOrchestrator,
+    cwd: &Path,
+    state_root: &Path,
+    transcript: &Path,
+) {
+    std::fs::create_dir_all(state_root).expect("create test durable state root");
+    let durable = Arc::new(
+        session::jsonl::DurableTranscriptWriter::open(state_root)
+            .expect("open test durable transcript writer"),
+    );
+    let session_id = orchestrator
+        .session
+        .try_lock()
+        .expect("bind durable target before the test turn begins")
+        .session_id;
+    let writer = orchestrator
+        .session_transcript_writer()
+        .expect("test orchestrator has a JSONL writer");
+    writer.set_durable_lock(durable);
+    writer
+        .activate_session_target(session_id, transcript.to_owned(), cwd.to_owned())
+        .expect("bind pending durable target to the orchestrator session");
+}
+
 fn fallback_attachment() -> RequestContextTranscriptAttachment {
     RequestContextTranscriptAttachment {
         message_id: MessageId::new(),
@@ -385,14 +410,14 @@ async fn prepare_local_skill_ingress(
 
 static TOTAL_TOKEN_TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-struct TotalTokenTestEnv {
+pub(crate) struct TotalTokenTestEnv {
     _lock: std::sync::MutexGuard<'static, ()>,
     mode: Option<std::ffi::OsString>,
     after_user: Option<std::ffi::OsString>,
 }
 
 impl TotalTokenTestEnv {
-    fn enabled() -> Self {
+    pub(crate) fn enabled() -> Self {
         let lock = TOTAL_TOKEN_TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -425,6 +450,7 @@ impl Drop for TotalTokenTestEnv {
 
 #[test]
 fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
+    let _total_token_env = TotalTokenTestEnv::enabled();
     run_with_large_stack(|| async {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().join("project");
@@ -433,6 +459,12 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
         let filesystem: Arc<dyn FileSystem> =
             Arc::new(PosixFileSystem::new(root.path().to_owned()));
         let orch = orchestrator(&cwd, &transcript, filesystem.clone());
+        bind_test_durable_transcript_target(
+            &orch,
+            &cwd,
+            &root.path().join("durable-state"),
+            &transcript,
+        );
         let first_prompt_id = MessageId::new();
         let first_prompt = ConversationMessage::user(first_prompt_id, "/probe argument".into());
         orch.session.lock().await.history.push(first_prompt.clone());
@@ -506,8 +538,13 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
         let dropped_type_refs = dropped_types.iter().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(
             dropped_type_refs,
-            ["environment", "model", "unknown_command_fallback"],
-            "the fallback collector persists its common rows without claiming a regular-user token row"
+            [
+                "environment",
+                "model",
+                "total_tokens_reminder",
+                "unknown_command_fallback"
+            ],
+            "the fallback collector persists total tokens with a false reanchor bit, not a regular-user budget claim"
         );
         assert_eq!(
             dropped_types
@@ -542,8 +579,8 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
                 .attachment_projection
                 .as_ref()
                 .and_then(|payload| payload.string_at("/type")),
-            Some("model"),
-            "without a regular-user token row, the fallback sidecar follows the last common producer"
+            Some("total_tokens_reminder"),
+            "the fallback sidecar follows the last common producer, including its false-reanchor total-token reminder"
         );
         let fallback_uuid = fallback_id.as_uuid().to_string();
         assert_eq!(
@@ -863,7 +900,8 @@ fn complete_ingress_batch_is_selected_once_before_first_append_and_retried_by_id
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                 },
                 async {
-                    orch.stage_prompt_ingress_reminder(&environment).await;
+                    orch.append_accepted_prompt_ingress_reminder(&environment)
+                        .await;
                     let deferred_producer_runs =
                         Arc::new(std::sync::atomic::AtomicUsize::new(0));
                     deferred_producer_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1813,5 +1851,596 @@ fn regular_ingress_has_token_and_later_tool_continuation_uses_false_token_path()
                 },
             )
             .await;
+    });
+}
+
+#[test]
+fn accepted_upe_rows_commit_after_nar_on_early_scope_exit_and_keep_pending_ids() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("session.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let orch = orchestrator(&cwd, &transcript, filesystem.clone());
+        bind_test_durable_transcript_target(
+            &orch,
+            &cwd,
+            &root.path().join("durable-state"),
+            &transcript,
+        );
+
+        // A finished query's UPE row is already durable history and must stay
+        // where it was when the next request's NAr and UPE rows are committed.
+        let old_upe = Utf16JsonProjection::parse(
+            r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"old","content":["finished query"]}"#,
+        )
+        .unwrap();
+        orch.prompt_runtime.begin_native_query();
+        orch.append_native_prompt_expansion_history_rows(&[old_upe])
+            .await;
+        let old_history_prefix = orch.session.lock().await.history.clone();
+        let old_upe_id = old_history_prefix.last().unwrap().id();
+
+        orch.prompt_runtime.begin_native_query();
+        let prompt_id = MessageId::new();
+        let user = ConversationMessage::user(prompt_id, "/probe".into());
+        orch.session.lock().await.history.push(user.clone());
+        orch.persist_message_to_jsonl(&user).await;
+
+        let upe_rows = vec![
+            Utf16JsonProjection::parse(
+                r#"{"type":"hook_success","hookEvent":"UserPromptExpansion","hookName":"native","content":"success tail"}"#,
+            )
+            .unwrap(),
+            Utf16JsonProjection::parse(
+                r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"native","content":["context tail"]}"#,
+            )
+            .unwrap(),
+        ];
+        let upe_ids = vec![MessageId::new(), MessageId::new()];
+        let plugin_context = Utf16JsonProjection::parse(r#"["plugin tail"]"#).unwrap();
+
+        let nar_ids = crate::request_context::scope_if_missing(&orch, async {
+            crate::request_context::persist_prompt_ingress_after_user(
+                &orch,
+                prompt_id,
+                PromptIngressKind::RegularUser,
+            )
+            .await
+            .map_err(OrchestratorError::from)?;
+            let nar_ids = crate::request_context::staged_prompt_ingress_attachments()
+                .unwrap()
+                .into_iter()
+                .map(|row| row.message.id())
+                .collect::<Vec<_>>();
+            assert!(!nar_ids.is_empty());
+
+            orch.append_native_prompt_expansion_history_rows_once(&upe_rows, &upe_ids)
+                .await?;
+            // Cold-retry re-entry uses the same pending IDs and source rows.
+            orch.append_native_prompt_expansion_history_rows_once(&upe_rows, &upe_ids)
+                .await?;
+            orch.append_mod_prompt_context(&plugin_context).await;
+
+            let history = orch.session.lock().await.history.clone();
+            assert_eq!(
+                &history[..old_history_prefix.len()],
+                old_history_prefix.as_slice()
+            );
+            assert!(
+                !history
+                    .iter()
+                    .any(|message| upe_ids.contains(&message.id())),
+                "current UPE rows stay buffered until NAr finalization"
+            );
+            let prompt_uuid = prompt_id.as_uuid().to_string();
+            assert_eq!(
+                orch.transcript.last_jsonl_uuid.lock().await.as_deref(),
+                Some(prompt_uuid.as_str()),
+                "buffering does not persist an UPE sidecar before NAr"
+            );
+            let cancelled = lingxi_core::host::CancellationToken::new();
+            cancelled.cancel();
+            crate::request_context::mark_native_request_assembly_accepted();
+            crate::request_context::finalize_prompt_ingress_batch(&orch, Some(&cancelled)).await?;
+            Ok(nar_ids)
+        })
+        .await
+        .unwrap();
+
+        let history = orch.session.lock().await.history.clone();
+        let history_ids = history
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<Vec<_>>();
+        let old_position = history_ids.iter().position(|id| *id == old_upe_id).unwrap();
+        let nar_positions = nar_ids
+            .iter()
+            .map(|id| {
+                history_ids
+                    .iter()
+                    .position(|candidate| candidate == id)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let upe_positions = upe_ids
+            .iter()
+            .map(|id| {
+                history_ids
+                    .iter()
+                    .position(|candidate| candidate == id)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(old_position < nar_positions[0]);
+        assert!(nar_positions.iter().max().unwrap() < upe_positions.iter().min().unwrap());
+        assert_eq!(
+            orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+            std::collections::HashSet::from([upe_ids[0], upe_ids[1]])
+        );
+
+        let rows = JsonlReader::new(transcript, filesystem)
+            .read_all()
+            .await
+            .unwrap();
+        let positions = |uuid: &str| {
+            rows.iter()
+                .position(|row| row.uuid == uuid)
+                .expect("buffered row was appended exactly once")
+        };
+        let last_nar_position = nar_ids
+            .iter()
+            .map(|id| positions(&id.as_uuid().to_string()))
+            .max()
+            .unwrap();
+        let first_upe_position = upe_ids
+            .iter()
+            .map(|id| positions(&id.as_uuid().to_string()))
+            .min()
+            .unwrap();
+        assert!(last_nar_position < first_upe_position);
+        assert_eq!(
+            upe_ids
+                .iter()
+                .map(|id| {
+                    rows.iter()
+                        .filter(|row| row.uuid == id.as_uuid().to_string())
+                        .count()
+                })
+                .collect::<Vec<_>>(),
+            [1, 1],
+            "retry reuses each pending attachment UUID without duplicate writes"
+        );
+        let plugin_position = rows
+            .iter()
+            .position(|row| {
+                row.message_type == "attachment"
+                    && row
+                        .attachment_projection
+                        .as_ref()
+                        .and_then(|payload| payload.string_at("/hookEvent"))
+                        == Some("UserPromptSubmit")
+            })
+            .unwrap();
+        assert!(*upe_positions.iter().max().unwrap() < plugin_position);
+    });
+}
+
+#[test]
+fn production_prepare_projects_buffered_upe_and_prompt_submit_tail_after_nar() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("upe-tail-request.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let mut orch = orchestrator_with_skill_listing(&cwd, &transcript, filesystem);
+        bind_test_durable_transcript_target(
+            &orch,
+            &cwd,
+            &root.path().join("durable-state"),
+            &transcript,
+        );
+        orch.config.query_source = "sdk".into();
+
+        // A finished query's UPE row must remain in the earlier completed group.
+        orch.prompt_runtime.begin_native_query();
+        let old_user = ConversationMessage::user(MessageId::new(), "finished prompt".into());
+        orch.session.lock().await.history.push(old_user.clone());
+        orch.persist_message_to_jsonl(&old_user).await;
+        let old_upe = Utf16JsonProjection::parse(
+            r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"old","content":["finished UPE"]}"#,
+        )
+        .unwrap();
+        orch.append_native_prompt_expansion_history_rows(&[old_upe])
+            .await;
+        let old_upe_id = orch.session.lock().await.history.last().unwrap().id();
+        let previous_assistant = ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
+                text: "finished answer".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+        };
+        orch.session
+            .lock()
+            .await
+            .history
+            .push(previous_assistant.clone());
+        orch.persist_message_to_jsonl(&previous_assistant).await;
+        orch.prompt_runtime.begin_native_query();
+
+        let prompt_id = MessageId::new();
+        let header = ConversationMessage::user(prompt_id, "/review".into());
+        let mut body = ConversationMessage::user(MessageId::new(), "expanded review body".into());
+        if let ConversationMessage::User { turn_companion, .. } = &mut body {
+            *turn_companion = Some(Some(true));
+        }
+        for message in [&header, &body] {
+            orch.session.lock().await.history.push(message.clone());
+            orch.persist_message_to_jsonl(message).await;
+        }
+        let upe_rows = vec![
+            Utf16JsonProjection::parse(
+                r#"{"type":"hook_success","hookEvent":"UserPromptExpansion","hookName":"fixture","content":"current UPE success"}"#,
+            )
+            .unwrap(),
+            Utf16JsonProjection::parse(
+                r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"fixture","content":["current UPE context"]}"#,
+            )
+            .unwrap(),
+        ];
+        let upe_ids = vec![MessageId::new(), MessageId::new()];
+        let plugin_context =
+            Utf16JsonProjection::parse(r#"["current prompt.submit context"]"#).unwrap();
+
+        let (prepared, nar_ids, buffered_submit_ids) =
+            crate::request_context::scope_if_missing(&orch, async {
+                crate::request_context::persist_prompt_ingress_after_user(
+                    &orch,
+                    prompt_id,
+                    PromptIngressKind::LocalSkill,
+                )
+                .await
+                .map_err(OrchestratorError::from)?;
+                orch.append_native_prompt_expansion_history_rows_once(&upe_rows, &upe_ids)
+                    .await?;
+                orch.append_mod_prompt_context(&plugin_context).await;
+
+                let prepared = orch
+                    .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
+                    .await?;
+                let nar_ids = crate::request_context::staged_prompt_ingress_attachments()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|row| row.message.id())
+                    .collect::<std::collections::HashSet<_>>();
+                let buffered_submit_ids =
+                    crate::request_context::finalized_buffered_prompt_submit_row_ids();
+                Ok::<_, OrchestratorError>((prepared, nar_ids, buffered_submit_ids))
+            })
+            .await
+            .unwrap();
+
+        let plugin_id = {
+            let attachments = orch.prompt_runtime.mod_persisted_attachments.lock().await;
+            let (id, (kind, source)) = attachments
+                .iter()
+                .find(|(_, (_, source))| source["event"] == "prompt.submit")
+                .expect("buffered prompt.submit append keeps its registered source metadata");
+            assert_eq!(kind, "hook_additional_context");
+            assert_eq!(source["kind"], "plugin");
+            *id
+        };
+        assert_eq!(
+            buffered_submit_ids,
+            std::collections::HashSet::from([plugin_id]),
+            "the finalized request scope retains the buffered prompt.submit identity"
+        );
+        assert_eq!(
+            orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+            std::collections::HashSet::from([upe_ids[0], upe_ids[1]])
+        );
+        {
+            let attachments = orch.prompt_runtime.mod_persisted_attachments.lock().await;
+            for id in &upe_ids {
+                let (kind, source) = attachments
+                    .get(id)
+                    .expect("each projected UPE row keeps its typed provenance");
+                assert!(kind == "hook_success" || kind == "hook_additional_context");
+                assert_eq!(source["event"], "UserPromptExpansion");
+            }
+            let (_, plugin_source) = attachments
+                .get(&plugin_id)
+                .expect("prompt.submit provenance remains registered");
+            assert_eq!(plugin_source["event"], "prompt.submit");
+        }
+
+        let position = |id| {
+            prepared
+                .snapshot
+                .iter()
+                .position(|message| message.id() == id)
+                .expect("prepared request contains the row")
+        };
+        for id in &upe_ids {
+            assert_eq!(
+                prepared
+                    .snapshot
+                    .iter()
+                    .filter(|message| message.id() == *id)
+                    .count(),
+                1,
+                "buffered UPE is projected once without a second history append"
+            );
+        }
+        assert_eq!(
+            prepared
+                .snapshot
+                .iter()
+                .filter(|message| message.id() == plugin_id)
+                .count(),
+            1
+        );
+        let projected_nar_ids = nar_ids
+            .iter()
+            .filter(|id| prepared.snapshot.iter().any(|message| message.id() == **id))
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(!projected_nar_ids.is_empty());
+        let last_nar = projected_nar_ids
+            .iter()
+            .map(|id| position(*id))
+            .max()
+            .unwrap();
+        let first_upe = upe_ids.iter().map(|id| position(*id)).min().unwrap();
+        let last_upe = upe_ids.iter().map(|id| position(*id)).max().unwrap();
+        let plugin_position = position(plugin_id);
+        let header_position = position(prompt_id);
+        let body_position = position(body.id());
+        assert!(last_nar < first_upe, "current NAr rows precede UPE rows");
+        assert!(
+            last_upe < plugin_position,
+            "prompt.submit stays after current UPE"
+        );
+        assert!(plugin_position < header_position && header_position < body_position);
+        assert_eq!(
+            prepared
+                .snapshot
+                .iter()
+                .filter(|row| row.id() == old_upe_id)
+                .count(),
+            1
+        );
+        assert!(
+            position(old_upe_id) < position(previous_assistant.id()),
+            "finished UPE history remains in its earlier boundary group"
+        );
+        assert!(prepared
+            .snapshot
+            .iter()
+            .any(|message| message.text_content().contains("current UPE context")));
+        assert!(prepared.snapshot.iter().any(|message| {
+            message
+                .text_content()
+                .contains("current prompt.submit context")
+        }));
+
+        let history = orch.session.lock().await.history.clone();
+        for id in upe_ids.into_iter().chain([plugin_id]) {
+            assert_eq!(
+                history.iter().filter(|message| message.id() == id).count(),
+                1,
+                "request projection does not duplicate durable/live appends"
+            );
+        }
+    });
+}
+
+#[test]
+fn owner_scope_does_not_commit_blocked_prompt_before_native_nar_assembly() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("blocked.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let orch = orchestrator(&cwd, &transcript, filesystem.clone());
+        bind_test_durable_transcript_target(
+            &orch,
+            &cwd,
+            &root.path().join("durable-state"),
+            &transcript,
+        );
+        let prompt_id = MessageId::new();
+        let user = ConversationMessage::user(prompt_id, "/probe".into());
+        orch.session.lock().await.history.push(user.clone());
+        orch.persist_message_to_jsonl(&user).await;
+        let upe_rows = vec![Utf16JsonProjection::parse(
+            r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"fixture","content":["collected before submit"]}"#,
+        )
+        .unwrap()];
+        let upe_ids = vec![MessageId::new()];
+        let nar_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_nar_ids = nar_ids.clone();
+
+        // Native's blocked UserPromptSubmit path returns a local warning with
+        // shouldQuery=false before NAr assembly. Model that owner-only EndTurn
+        // path without manually calling the batch finalizer.
+        let outcome = crate::request_context::scope_if_missing(&orch, async {
+            crate::request_context::persist_prompt_ingress_after_user(
+                &orch,
+                prompt_id,
+                PromptIngressKind::RegularUser,
+            )
+            .await?;
+            let staged = crate::request_context::staged_prompt_ingress_attachments()
+                .expect("the accepted user body stages an NAr candidate batch");
+            *captured_nar_ids.lock().unwrap() = staged.iter().map(|row| row.message.id()).collect();
+            orch.append_native_prompt_expansion_history_rows_once(&upe_rows, &upe_ids)
+                .await?;
+            Ok::<_, OrchestratorError>(TurnOutcome::EndTurn)
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome, TurnOutcome::EndTurn);
+
+        let nar_ids = nar_ids.lock().unwrap().clone();
+        assert!(!nar_ids.is_empty());
+        let history = orch.session.lock().await.history.clone();
+        assert!(
+            history.iter().all(|message| !nar_ids.contains(&message.id())
+                && !upe_ids.contains(&message.id())),
+            "an unassembled blocked request adds neither staged NAr nor UPE rows to live history"
+        );
+        let rows = JsonlReader::new(transcript.clone(), filesystem.clone())
+            .read_all()
+            .await
+            .unwrap();
+        assert!(
+            attachment_types(&rows).is_empty(),
+            "scope cleanup does not durably commit NAr/UPE rows without the assembly mark"
+        );
+
+        // A preparation failure before Native has assembled NAr is the same
+        // boundary: the owner must preserve the error and drop staged rows.
+        let prompt_id = MessageId::new();
+        let user = ConversationMessage::user(prompt_id, "/probe".into());
+        orch.session.lock().await.history.push(user.clone());
+        orch.persist_message_to_jsonl(&user).await;
+        let failed_upe_id = MessageId::new();
+        let failed = crate::request_context::scope_if_missing(&orch, async {
+            crate::request_context::persist_prompt_ingress_after_user(
+                &orch,
+                prompt_id,
+                PromptIngressKind::RegularUser,
+            )
+            .await?;
+            orch.append_native_prompt_expansion_history_rows_once(
+                &[Utf16JsonProjection::parse(
+                    r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"fixture","content":["must not commit"]}"#,
+                )
+                .unwrap()],
+                &[failed_upe_id],
+            )
+            .await?;
+            Err::<(), _>(OrchestratorError::Internal(
+                "synthetic pre-assembly error".into(),
+            ))
+        })
+        .await;
+        assert!(
+            matches!(failed, Err(OrchestratorError::Internal(message)) if message == "synthetic pre-assembly error")
+        );
+        assert!(
+            !orch
+                .session
+                .lock()
+                .await
+                .history
+                .iter()
+                .any(|message| message.id() == failed_upe_id),
+            "a pre-assembly error leaves the pending UPE row out of live history"
+        );
+        let rows = JsonlReader::new(transcript, filesystem)
+            .read_all()
+            .await
+            .unwrap();
+        assert!(
+            attachment_types(&rows).is_empty(),
+            "a pre-assembly error does not make staged NAr/UPE rows durable"
+        );
+    });
+}
+
+#[test]
+fn owner_scope_commits_accepted_batch_on_early_error_after_nar_assembly() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("accepted-error.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let orch = orchestrator(&cwd, &transcript, filesystem.clone());
+        bind_test_durable_transcript_target(
+            &orch,
+            &cwd,
+            &root.path().join("durable-state"),
+            &transcript,
+        );
+        let prompt_id = MessageId::new();
+        let user = ConversationMessage::user(prompt_id, "/probe".into());
+        orch.session.lock().await.history.push(user.clone());
+        orch.persist_message_to_jsonl(&user).await;
+        let upe_rows = vec![Utf16JsonProjection::parse(
+            r#"{"type":"hook_success","hookEvent":"UserPromptExpansion","hookName":"fixture","content":"accepted tail"}"#,
+        )
+        .unwrap()];
+        let upe_ids = vec![MessageId::new()];
+        let nar_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_nar_ids = nar_ids.clone();
+
+        // Assembly has reached the same boundary as prepare.rs, but the
+        // downstream provider path then errors. The scope owner must finish
+        // the ordered append even though the future itself returns Err.
+        let result = crate::request_context::scope_if_missing(&orch, async {
+            crate::request_context::persist_prompt_ingress_after_user(
+                &orch,
+                prompt_id,
+                PromptIngressKind::RegularUser,
+            )
+            .await?;
+            let staged = crate::request_context::staged_prompt_ingress_attachments()
+                .expect("the accepted user body stages an NAr candidate batch");
+            *captured_nar_ids.lock().unwrap() = staged.iter().map(|row| row.message.id()).collect();
+            orch.append_native_prompt_expansion_history_rows_once(&upe_rows, &upe_ids)
+                .await?;
+            crate::request_context::mark_native_request_assembly_accepted();
+            Err::<(), _>(OrchestratorError::Internal(
+                "synthetic provider failure".into(),
+            ))
+        })
+        .await;
+        assert!(
+            matches!(result, Err(OrchestratorError::Internal(message)) if message == "synthetic provider failure")
+        );
+
+        let nar_ids = nar_ids.lock().unwrap().clone();
+        assert!(!nar_ids.is_empty());
+        let rows = JsonlReader::new(transcript, filesystem)
+            .read_all()
+            .await
+            .unwrap();
+        let nar_positions = nar_ids
+            .iter()
+            .map(|id| {
+                rows.iter()
+                    .position(|row| row.uuid == id.as_uuid().to_string())
+                    .expect("accepted NAr row is durably appended by the scope owner")
+            })
+            .collect::<Vec<_>>();
+        let upe_position = rows
+            .iter()
+            .position(|row| row.uuid == upe_ids[0].as_uuid().to_string())
+            .expect("accepted UPE row follows the NAr append");
+        assert!(*nar_positions.iter().max().unwrap() < upe_position);
+        let history_ids = orch
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<Vec<_>>();
+        assert!(nar_ids.iter().all(|id| history_ids.contains(id)));
+        assert!(history_ids.contains(&upe_ids[0]));
     });
 }

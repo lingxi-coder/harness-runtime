@@ -1493,7 +1493,7 @@ mod command_arm_tests {
         let runner = MockRunner::ok(output("", "", 0));
         let exec = executor_with(runner.clone());
         let ctx = HookContext::default();
-        let expected_session = ctx.session_id.to_string();
+        let expected_session = ctx.session_id.as_uuid().to_string();
 
         let _ = exec.execute(pre_event(), ctx).await;
 

@@ -294,10 +294,7 @@ impl ConversationOrchestrator {
                     };
                     let request = sidequery::SideQueryRequest {
                         model_source: self
-                            .configured_model_source_for_request(
-                                &query_model,
-                                query_profile.as_deref(),
-                            )
+                            .main_model_source_for_request(&query_model, query_profile.as_deref())
                             .await,
                         model_attempt: None,
                         native_prompt_context: None,

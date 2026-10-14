@@ -233,12 +233,14 @@ async fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
     std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
 }
 
-#[test]
-fn administration_and_execution_share_admitted_layers_and_cli_revision() {
+#[tokio::test]
+async fn administration_and_execution_share_admitted_layers_and_cli_revision() {
     let _guard = crate::desktop::tests::MANAGED_ENV_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let tmp = tempfile::tempdir().unwrap();
+    let managed_dir = tmp.path().join("managed-settings");
+    std::fs::create_dir_all(&managed_dir).unwrap();
     let cfg = DesktopConfig {
         cwd: tmp.path().join("project"),
         lingxi_home: tmp.path().join("home"),
@@ -251,6 +253,8 @@ fn administration_and_execution_share_admitted_layers_and_cli_revision() {
         ),
         ..DesktopConfig::default()
     };
+    cfg.managed_policy_snapshot_cache
+        .replace(settings_watch::read_managed_settings_snapshot(&managed_dir).await);
     std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
     std::fs::create_dir_all(cfg.cwd.join(".lingxi")).unwrap();
     std::fs::write(cfg.lingxi_home.join("settings.json"),

@@ -805,6 +805,7 @@ async fn hosted_overload_does_not_take_the_model_fallback_chain() {
             0,
             &[fallback],
             DispatchHeaderState::default(),
+            NonStreamDrivePolicy::Standard,
         )
         .await;
     assert!(matches!(

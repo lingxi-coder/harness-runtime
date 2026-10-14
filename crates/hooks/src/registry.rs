@@ -201,6 +201,29 @@ pub struct HookSourceReplaceResult {
     pub file_changed_matchers_after: Vec<Utf16JsonProjection>,
 }
 
+/// Explicit source partition used for the Native managed-wrapper boundary.
+/// Ordinary dispatch uses [`Self::All`] and preserves the existing ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookSourcePartition {
+    /// Match every registered source, preserving the ordinary executor path.
+    All,
+    /// Match only hooks loaded from managed settings.
+    Managed,
+    /// Match every source except managed settings.
+    NonManaged,
+}
+
+impl HookSourcePartition {
+    fn includes(self, source: HookSource) -> bool {
+        let is_managed = source == HookSource::Settings(lingxi_core::types::SettingsScope::Managed);
+        match self {
+            Self::All => true,
+            Self::Managed => is_managed,
+            Self::NonManaged => !is_managed,
+        }
+    }
+}
+
 impl HookRegistry {
     /// Create an empty registry.
     #[must_use]
@@ -507,6 +530,19 @@ impl HookRegistry {
     /// `callback` / `function` hooks) ignore it.
     #[must_use]
     pub fn match_event(&self, event: &HookEvent, ctx: &HookContext) -> Vec<&HookDefinition> {
+        self.match_event_partition(event, ctx, HookSourcePartition::All)
+    }
+
+    /// Match hooks with the same matcher, ownership, and priority semantics as
+    /// [`Self::match_event`], then restrict execution to one explicit source
+    /// partition. The filter is applied before the unchanged priority sort.
+    #[must_use]
+    pub fn match_event_partition(
+        &self,
+        event: &HookEvent,
+        ctx: &HookContext,
+        partition: HookSourcePartition,
+    ) -> Vec<&HookDefinition> {
         let et = event.event_type();
         // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
         // lists + the v2.1.195 hyphen) for this event type — claude
@@ -515,7 +551,7 @@ impl HookRegistry {
         let comma_mode = comma_mode_for(&et);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
-            if !h.events.contains(&et) {
+            if !h.events.contains(&et) || !partition.includes(h.source) {
                 return false;
             }
             // TS `getMatchingHooks`: only apply the tool-name matcher filter when
@@ -712,6 +748,10 @@ impl HookRegistry {
             HookEvent::UserPromptExpansion { command_name, .. } => {
                 matches_pattern_source_with(command_name, matcher, comma_mode, None)
             }
+            HookEvent::PreModelSwitch { to_model, .. }
+            | HookEvent::PostModelSwitch { to_model, .. } => {
+                matches_pattern_source_with(to_model, matcher, comma_mode, None)
+            }
             _ => match Self::match_query_for(event) {
                 Some(query) => matches_pattern_source_with(
                     &Utf16JsonProjection::from(query),
@@ -748,9 +788,6 @@ impl HookRegistry {
             HookEvent::PreCompact { reason, .. } => Some(reason.clone()),
             HookEvent::Setup { trigger } => Some(trigger.clone()),
             HookEvent::PostCompact { trigger, .. } => Some(trigger.clone()),
-            // claude `i = r.to_model` for both model-switch events.
-            HookEvent::PreModelSwitch { to_model, .. }
-            | HookEvent::PostModelSwitch { to_model, .. } => Some(to_model.clone()),
             // claude `i = r.mcp_server_name` for both elicitation events.
             HookEvent::Elicitation { server_name, .. }
             | HookEvent::ElicitationResult { server_name, .. } => Some(server_name.clone()),
@@ -843,15 +880,33 @@ impl HookRegistry {
     /// reports event-type subscription, which is exactly what the gate needs.
     #[must_use]
     pub fn has_hooks_for(&self, event_type: &crate::events::HookEventType) -> bool {
-        let subscribed = |h: &&HookDefinition| h.events.contains(event_type);
-        self.sources.values().flatten().any(|h| subscribed(&h))
-            || self.plugin.values().flatten().any(|h| subscribed(&h))
+        self.has_hooks_for_partition(event_type, HookSourcePartition::All)
+    }
+
+    /// Whether any subscribed hook in the requested explicit source partition
+    /// exists. This is a cheap event-type check; matchers are still evaluated
+    /// by [`Self::match_event_partition`] at dispatch time.
+    #[must_use]
+    pub fn has_hooks_for_partition(
+        &self,
+        event_type: &crate::events::HookEventType,
+        partition: HookSourcePartition,
+    ) -> bool {
+        let subscribed = |hook: &HookDefinition| {
+            hook.events.contains(event_type) && partition.includes(hook.source)
+        };
+        self.sources.values().flatten().any(|hook| subscribed(hook))
+            || self.plugin.values().flatten().any(|hook| subscribed(hook))
             || self
                 .session_named
                 .values()
                 .flat_map(std::collections::HashMap::values)
-                .any(|h| h.events.contains(event_type))
-            || self.frontmatter.values().flatten().any(|h| subscribed(&h))
+                .any(|hook| subscribed(hook))
+            || self
+                .frontmatter
+                .values()
+                .flatten()
+                .any(|hook| subscribed(hook))
     }
 
     /// Snapshot every registered hook across all sources (user / project /
@@ -1021,6 +1076,52 @@ mod all_hooks_tests {
     fn all_hooks_returns_empty_for_fresh_registry() {
         let r = HookRegistry::new();
         assert!(r.all_hooks().is_empty());
+    }
+
+    #[test]
+    fn model_switch_source_partition_is_explicit_and_preserves_all_default() {
+        let mut registry = HookRegistry::new();
+        registry.register(hk(
+            "managed",
+            HookEventType::PreModelSwitch,
+            HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
+        ));
+        registry.register(hk(
+            "user",
+            HookEventType::PreModelSwitch,
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+        ));
+        let event = HookEvent::PreModelSwitch {
+            from_model: "sonnet".into(),
+            to_model: "opus".into(),
+            requested_model: None,
+            source: "command".into(),
+            context_tokens: 0,
+            prompt_cache_warm: false,
+            cache_ttl: "5m".into(),
+            estimated_cache_write_usd: 0.0,
+            pricing: "default".into(),
+        };
+        let context = HookContext::default();
+        let names = |partition| {
+            let mut names = registry
+                .match_event_partition(&event, &context, partition)
+                .into_iter()
+                .map(|hook| hook.name.as_str())
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            names
+        };
+
+        assert_eq!(names(HookSourcePartition::All), ["managed", "user"]);
+        assert_eq!(names(HookSourcePartition::Managed), ["managed"]);
+        assert_eq!(names(HookSourcePartition::NonManaged), ["user"]);
+        assert!(registry
+            .has_hooks_for_partition(&HookEventType::PreModelSwitch, HookSourcePartition::Managed));
+        assert!(registry.has_hooks_for_partition(
+            &HookEventType::PreModelSwitch,
+            HookSourcePartition::NonManaged
+        ));
     }
 
     // Binary `Bjo`: HTTP hooks are dropped from SessionStart / Setup results
@@ -1910,6 +2011,33 @@ mod match_event_matcher_tests {
             vec!["opus-only"]
         );
         assert!(matched_names(&reg, &event("claude-haiku-4-5")).is_empty());
+    }
+
+    #[test]
+    fn model_switch_matcher_keeps_unpaired_target_units() {
+        let mut reg = HookRegistry::new();
+        let mut hook = hook_with("surrogate-target", HookEventType::PreModelSwitch, None);
+        hook.if_condition = Some(HookCondition {
+            pattern: Utf16JsonProjection::parse(r#""\ud800""#).unwrap(),
+            match_tool_name: true,
+            match_input: false,
+            if_pattern: None,
+        });
+        reg.register(hook);
+        let target = Utf16JsonProjection::parse(r#""model-\ud800-target""#).unwrap();
+        let event = HookEvent::PreModelSwitch {
+            from_model: "sonnet".into(),
+            to_model: target,
+            requested_model: None,
+            source: "picker".into(),
+            context_tokens: 0,
+            prompt_cache_warm: false,
+            cache_ttl: "5m".into(),
+            estimated_cache_write_usd: 0.0,
+            pricing: "default".into(),
+        };
+
+        assert_eq!(matched_names(&reg, &event), vec!["surrogate-target"]);
     }
 
     #[test]

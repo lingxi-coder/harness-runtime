@@ -397,6 +397,12 @@ mod upgrade_tests {
             thinking_resumption_refused: true,
             thinking_resumption_beta_requested: Some(true),
             thinking_resumption_beta_refused: false,
+            native_thinking_binding_controls_beta_requested: None,
+            native_thinking_binding_controls_error_evidence: None,
+            native_hq_model_source: None,
+            native_hq_model_provider_family: None,
+            native_hq_known_error_evidence: None,
+            native_hq_hrn15_evidence: None,
             response: Some(wire::NativeAnthropicErrorResponse {
                 body: Some(
                     wire::JsonPayload::parse(
@@ -404,6 +410,9 @@ mod upgrade_tests {
                     )
                     .unwrap(),
                 ),
+                thinking_prefix_mismatch: None,
+                    api_error_name: None,
+                    amzn_error_type: None,
                 unified_representative_claim: Some("claim".into()),
                 unified_overage_disabled_reason: Some("out_of_credits".into()),
             }),
@@ -466,6 +475,12 @@ mod upgrade_tests {
             thinking_resumption_refused: false,
             thinking_resumption_beta_requested: None,
             thinking_resumption_beta_refused: false,
+            native_thinking_binding_controls_beta_requested: None,
+            native_thinking_binding_controls_error_evidence: None,
+            native_hq_model_source: None,
+            native_hq_model_provider_family: None,
+            native_hq_known_error_evidence: None,
+            native_hq_hrn15_evidence: None,
             response: None,
         };
         let mut units = "407 ".encode_utf16().collect::<Vec<_>>();

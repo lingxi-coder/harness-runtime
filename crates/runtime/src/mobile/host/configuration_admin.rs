@@ -531,7 +531,7 @@ impl MobileEngineHandle {
                             "enableAllProjectMcpServers",
                         ]
                         .iter()
-                        .any(|key| settings.managed.contains_key(*key))
+                        .any(|key| settings.managed.contains_property(*key))
                         {
                             return Err("MCP approval is locked by managed policy.".into());
                         }
@@ -586,7 +586,7 @@ impl MobileEngineHandle {
         }
         if ["enabledPlugins", "pluginConfigs", "extraKnownMarketplaces"]
             .iter()
-            .any(|key| settings.managed.contains_key(*key))
+            .any(|key| settings.managed.contains_property(*key))
         {
             finish(
                 sink,
@@ -691,10 +691,12 @@ impl MobileEngineHandle {
             match command.action.as_str() {
                 "validate_document" => hook_admin::validate_document(payload),
                 "save_document" => match (self.settings.as_ref(), command.revision.as_deref()) {
-                    (Some(settings), Some(revision)) if !settings.managed.contains_key("hooks") => {
+                    (Some(settings), Some(revision))
+                        if !settings.managed.contains_property("hooks") =>
+                    {
                         hook_admin::save_document(settings, revision, payload)
                     }
-                    (Some(settings), _) if settings.managed.contains_key("hooks") => {
+                    (Some(settings), _) if settings.managed.contains_property("hooks") => {
                         Err("Hooks are locked by managed policy.".into())
                     }
                     _ => Err("Settings context and hook revision are required.".into()),

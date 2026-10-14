@@ -689,6 +689,12 @@ pub(crate) struct PromptRuntime {
     /// rendered, so invalidation can rerun Mods against the original body.
     pub(crate) mod_persisted_attachments:
         Mutex<std::collections::HashMap<MessageId, (String, serde_json::Value)>>,
+    /// IDs of model-visible UserPromptExpansion rows for the current query.
+    /// This execution-only set is reset at each outer query admission and stays
+    /// alive across that query's provider retries and tool continuations. A cold
+    /// pending resume repopulates it from checkpointed trailing row IDs.
+    pub(crate) current_prompt_upe_attachment_ids:
+        std::sync::Mutex<std::collections::HashSet<MessageId>>,
     /// Message ids accepted from a generation-owned PostToolBatch result.
     /// The message itself stays in ordinary session history; this private
     /// side table lets the next prompt admission remove it if its producer
@@ -972,6 +978,32 @@ pub(crate) struct PromptRuntime {
 }
 
 impl PromptRuntime {
+    /// Start a fresh outer Native query. Call once before admission; the
+    /// StreamingTurnDriver's provider retries and tool continuations remain in
+    /// this scope and therefore keep the exact current UPE IDs.
+    pub(crate) fn begin_native_query(&self) {
+        self.current_prompt_upe_attachment_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    pub(crate) fn record_current_prompt_upe_attachment_id(&self, id: MessageId) {
+        self.current_prompt_upe_attachment_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id);
+    }
+
+    pub(crate) fn current_prompt_upe_attachment_ids(
+        &self,
+    ) -> std::collections::HashSet<MessageId> {
+        self.current_prompt_upe_attachment_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             turn_execution_metrics: std::sync::Mutex::new(TurnExecutionMetricsState::default()),
@@ -983,6 +1015,8 @@ impl PromptRuntime {
             mod_prompt_context: Mutex::new(ModPromptContextCache::default()),
             mod_prompt_attachments: Mutex::new(ModPromptAttachmentCache::default()),
             mod_persisted_attachments: Mutex::new(std::collections::HashMap::new()),
+            current_prompt_upe_attachment_ids:
+                std::sync::Mutex::new(std::collections::HashSet::new()),
             guarded_prompt_messages: Mutex::new(Vec::new()),
             mod_tool_descriptions: Mutex::new(ModToolDescribeCache::default()),
             mod_command_descriptions: Arc::new(Mutex::new(ModCommandDescribeCache::default())),
@@ -1922,6 +1956,9 @@ pub(crate) struct ModelRuntime {
     /// UTF-16 strings that have no Rust String representation.
     pub(crate) configured_model_source:
         Arc<std::sync::RwLock<Option<lingxi_core::host::ModelSourceBinding>>>,
+    /// Current source-preserving settings facts for Native model validation.
+    pub(crate) native_model_settings:
+        std::sync::RwLock<agent::model_resolution::NativeModelSettingsSnapshot>,
     /// Native's validated model-name cache owned by this live runtime.
     pub(crate) native_model_validation_cache: crate::model_validation::NativeModelValidationCache,
     /// Account epoch the Native model-name cache was last paired with.
@@ -2032,6 +2069,7 @@ impl ModelRuntime {
             main_loop_latest_assistant_usage: std::sync::Mutex::new(None),
             main_model_restriction: std::sync::RwLock::new(None),
             configured_model_source: Arc::new(std::sync::RwLock::new(None)),
+            native_model_settings: std::sync::RwLock::new(Default::default()),
             native_model_validation_cache:
                 crate::model_validation::NativeModelValidationCache::default(),
             native_model_validation_account_generation: std::sync::Mutex::new(None),

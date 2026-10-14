@@ -96,7 +96,9 @@ fn split_model_selection_source(
         model: model.clone(),
         profile: Some(profile),
     });
-    if route_hint.is_some() || model != trimmed {
+    if route_hint.is_some() {
+        (source, route_hint)
+    } else if model != trimmed {
         (Utf16JsonProjection::from(model), route_hint)
     } else {
         (source, route_hint)
@@ -4872,6 +4874,22 @@ impl MobileEngineHandle {
                         turn_id: client_turn_id,
                         display: ClientTextDto::from_projection(&display)
                             .expect("slash command output is a text source"),
+                        is_error: true,
+                    })
+                    .await;
+                self.finish_local_slash(&owner, checkpoint.turn_id, &before)
+                    .await
+            }
+            lingxi_core::host::SlashDispatchResult::Failed { diagnostic } => {
+                let display = diagnostic
+                    .string_units("/message")
+                    .or_else(|| diagnostic.string_units(""))
+                    .map(ClientTextDto::from_code_units)
+                    .unwrap_or_else(|| "command settings failed".into());
+                self.event_sink
+                    .emit(ClientEvent::SlashCommandResult {
+                        turn_id: client_turn_id,
+                        display,
                         is_error: true,
                     })
                     .await;

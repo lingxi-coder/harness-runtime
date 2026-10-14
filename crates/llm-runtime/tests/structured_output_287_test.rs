@@ -1471,8 +1471,8 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                     managed_layers: &[],
                 },
                 Some(&path),
-            )?
-            .effort_layers
+            )
+            .map(|settings| settings.effort_layers)
         })
     })
     .unwrap()
@@ -1692,8 +1692,8 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                     },
                     Default::default(),
                     Some(&path),
-                )?
-                .effort_layers
+                )
+                .map(|settings| settings.effort_layers)
             })
         })
         .unwrap()

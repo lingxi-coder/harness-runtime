@@ -446,14 +446,14 @@ impl ConversationOrchestrator {
         &self,
         row: &crate::request_context::PromptIngressAttachment,
     ) {
-        self.stage_prompt_ingress_reminder(row).await;
+        self.append_accepted_prompt_ingress_reminder(row).await;
         self.persist_staged_prompt_ingress_reminder(row).await;
     }
 
-    /// Retain a typed ingress row in live history without writing its durable
-    /// sidecar yet. The request-context finalizer uses this before selection so
-    /// all candidate IDs and raw types are available together.
-    pub(crate) async fn stage_prompt_ingress_reminder(
+    /// Publish a cached NAr row only after request assembly accepts the batch.
+    /// Producers retain rows task-locally until this boundary, so a blocked or
+    /// failed pre-assembly prompt cannot leak rows into live history.
+    pub(crate) async fn append_accepted_prompt_ingress_reminder(
         &self,
         row: &crate::request_context::PromptIngressAttachment,
     ) {
@@ -478,8 +478,8 @@ impl ConversationOrchestrator {
     }
 
     /// Write a previously staged row after the complete attachment batch has
-    /// been classified. Its UUID and raw payload are already retained in live
-    /// history, so this method performs only the durable append and Mod record.
+    /// been classified. Its UUID and raw payload were published by the accepted
+    /// assembly gate, so this method performs only the durable append and Mod record.
     pub(crate) async fn persist_staged_prompt_ingress_reminder(
         &self,
         row: &crate::request_context::PromptIngressAttachment,

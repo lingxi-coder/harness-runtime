@@ -475,16 +475,28 @@ async fn apply_resolved_model_context(
     if target_model == current && target_profile == current_profile {
         return Ok(());
     }
+    let source_binding = orch.active_model_source_binding().await;
     {
         let mut session = orch.session.lock().await;
         session.model.clone_from(&target_model);
         session.model_profile.clone_from(&target_profile);
     }
     orch.refresh_main_loop_model_for_route(&target_model, target_profile.as_deref());
-    orch.run_post_model_switch_hooks(
+    let from_source = orch.model_switch_source_projection_for_route(
         &current,
+        current_profile.as_deref(),
+        source_binding.as_ref(),
+    );
+    let to_source = orch.model_switch_source_projection_for_route(
         &target_model,
+        target_profile.as_deref(),
+        source_binding.as_ref(),
+    );
+    orch.run_post_model_switch_hooks(
+        &from_source,
+        &to_source,
         None,
+        &target_model,
         target_profile.as_deref(),
         "auto",
     )

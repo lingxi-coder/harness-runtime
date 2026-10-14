@@ -4,8 +4,8 @@
 //! authority or carry account identity across sessions. This context is never
 //! forwarded to a provider; selected account scopes are passed as SDK options.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 type AdmissionCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
@@ -217,6 +217,20 @@ pub struct ExecutionContext {
     /// Trusted Native Anthropic safeguards and current beta facts, outside
     /// provider input and persisted conversation metadata.
     pub native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+    /// Native's request-local TBC admission fact; the SDK uses this only to
+    /// emit the header on a supported selected route.
+    pub native_thinking_binding_controls_beta_requested: Option<bool>,
+    /// Native Lsn's request-local thinking type, captured from the resolved
+    /// session config before `set_reasoning(None)` erases the wire mode.
+    /// `None` means the Host cannot map this config to Native's source value.
+    pub native_thinking_request_type_disabled: Option<bool>,
+    /// Native Lsn's separate `mechanical` exclusion. Only the standard main
+    /// request builder proves this absent; utility callers keep it unknown.
+    pub native_thinking_mechanically_disabled: Option<bool>,
+    /// Native ordinary-turn context-1m refusal latch for this logical model.
+    /// The SDK applies it to the final request after host body merging and
+    /// before authentication, so Bedrock body tokens cannot be reintroduced.
+    pub context_1m_beta_suppressed: bool,
     /// Classifier utility blocks keep their boundaries; cache TTL/scope still
     /// resolve against the selected request credential and current policy.
     pub classifier_system_blocks: bool,
@@ -359,19 +373,23 @@ mod tests {
         let source_id = lingxi_core::types::MessageId::new();
         let message_only =
             RequestDispatchAdmission::for_message_sources([(source_id, check(false))]);
-        assert!(message_only
-            .retaining_message_sources(&HashSet::new())
-            .is_none());
+        assert!(
+            message_only
+                .retaining_message_sources(&HashSet::new())
+                .is_none()
+        );
 
         let mixed = RequestDispatchAdmission::with_global_and_message_sources(
             [check(true)],
             [(source_id, check(false))],
         );
         assert!(!mixed.is_admitted(), "unprojected stale row rejects");
-        assert!(mixed
-            .retaining_message_sources(&HashSet::new())
-            .expect("global admission remains after row pruning")
-            .is_admitted());
+        assert!(
+            mixed
+                .retaining_message_sources(&HashSet::new())
+                .expect("global admission remains after row pruning")
+                .is_admitted()
+        );
 
         let global_rejection = RequestDispatchAdmission::with_global_and_message_sources(
             [check(false)],

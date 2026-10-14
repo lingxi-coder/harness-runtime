@@ -13310,9 +13310,13 @@ async fn cold_resumed_child_screens_source_attachment_without_sending_restore_ma
         &model_messages[1],
         ConversationMessage::User { content, is_meta: true, .. }
             if content.iter().any(|block| matches!(block,
-                ContentBlock::Text { text, .. }
-                    if text.starts_with("<system-reminder>\nToday's date is ")
-                        && text.ends_with(".\n</system-reminder>")))
+                ContentBlock::TextJsUtf16 {
+                    text,
+                    utf16_code_units,
+                    ..
+                } if text.starts_with("<system-reminder>\nToday's date is ")
+                    && text.ends_with(".\n</system-reminder>")
+                    && utf16_code_units == &text.encode_utf16().collect::<Vec<_>>() ))
     ));
     assert!(!model_messages.iter().any(|message| matches!(
         message,

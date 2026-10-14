@@ -4762,7 +4762,7 @@ mod tests {
         let mut receiver = stream
             .drain_rx
             .lock()
-            .unwrap()
+            .await
             .take()
             .expect("init frame receiver");
         stream.emit_init().await;

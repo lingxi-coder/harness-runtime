@@ -19,5 +19,6 @@ pub mod stream_recovery;
 pub mod stream_watchdog;
 pub mod telemetry;
 pub mod thinking;
+pub mod thinking_binding_controls;
 pub mod thinking_signature;
 pub mod user_agent;

@@ -1166,6 +1166,88 @@ mod tests {
     }
 
     #[test]
+    fn normalize_direct_bash_input_after_images_adds_newline_before_result_on_wire() {
+        let command = "<bash-input>printf mobile-bash</bash-input>";
+        let result =
+            "<bash-stdout>mobile stdout</bash-stdout><bash-stderr>mobile stderr</bash-stderr>";
+        let first_image_data = "cG5nLWZpcnN0";
+        let second_image_data = "anBlZy1zZWNvbmQ=";
+        let image_block = |media_type: &str, data: &str| ProtoBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: media_type.to_owned(),
+                data: data.to_owned(),
+            },
+        };
+        let input_id = MessageId::new();
+        let input = user_blocks(
+            input_id,
+            vec![
+                image_block("image/png", first_image_data),
+                image_block("image/jpeg", second_image_data),
+                ProtoBlock::Text {
+                    text: command.to_owned(),
+                    citations: None,
+                },
+            ],
+        );
+        let output = user(MessageId::new(), result);
+
+        let normalized = normalize_messages_for_api(vec![input, output]);
+        assert_eq!(normalized.len(), 1);
+        match &normalized[0] {
+            ConversationMessage::User { id, content, .. } => {
+                assert_eq!(id, &input_id, "the normalized turn keeps the input row id");
+                assert_eq!(kinds(content), vec!["image", "image", "text", "text"]);
+                assert!(matches!(
+                    &content[0],
+                    ProtoBlock::Image {
+                        source: ImageSource::Base64 { media_type, data }
+                    } if media_type == "image/png" && data == first_image_data
+                ));
+                assert!(matches!(
+                    &content[1],
+                    ProtoBlock::Image {
+                        source: ImageSource::Base64 { media_type, data }
+                    } if media_type == "image/jpeg" && data == second_image_data
+                ));
+                assert!(matches!(
+                    &content[2],
+                    ProtoBlock::Text { text, citations: None }
+                        if text == &format!("{command}\n")
+                ));
+                assert!(matches!(
+                    &content[3],
+                    ProtoBlock::Text { text, citations: None } if text == result
+                ));
+            }
+            other => panic!("expected normalized User, got {other:?}"),
+        }
+
+        let wire = to_llm_messages(normalized).expect("normalized Native Bash turn converts");
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].role, "user");
+        assert_eq!(wire[0].content.len(), 4);
+        assert!(matches!(
+            &wire[0].content[0],
+            LlmBlock::Image { media_type, bytes }
+                if media_type == "image/png" && bytes.as_slice() == b"png-first"
+        ));
+        assert!(matches!(
+            &wire[0].content[1],
+            LlmBlock::Image { media_type, bytes }
+                if media_type == "image/jpeg" && bytes.as_slice() == b"jpeg-second"
+        ));
+        assert!(matches!(
+            &wire[0].content[2],
+            LlmBlock::Text { text, .. } if text == &format!("{command}\n")
+        ));
+        assert!(matches!(
+            &wire[0].content[3],
+            LlmBlock::Text { text, .. } if text == result
+        ));
+    }
+
+    #[test]
     fn merge_hoists_tool_result_before_text() {
         // [User[Text"hi"], User[ToolResult, Text"after"]] → tool_result leads.
         let id = MessageId::new();

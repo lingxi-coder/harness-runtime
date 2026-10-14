@@ -1370,6 +1370,12 @@ impl ConversationOrchestrator {
             .iter()
             .map(ConversationMessage::id)
             .collect::<std::collections::HashSet<_>>();
+        // Only exact current-query buffered rows receive Native Qe's trailing
+        // placement. The current UPE rows and their following prompt.submit
+        // sidecar form one tail; historical origins stay in zjr's source order.
+        let mut current_tail_ids = self.prompt_runtime.current_prompt_upe_attachment_ids();
+        current_tail_ids.extend(crate::request_context::finalized_buffered_prompt_submit_row_ids());
+        current_tail_ids.retain(|id| typed_ids.contains(id) && snapshot_ids.contains(id));
         let (marked_ids, trusted_zce_ids) = {
             let session = self.session.lock().await;
             (
@@ -1418,11 +1424,12 @@ impl ConversationOrchestrator {
                 trusted_zce_ids: &trusted_zce_ids,
             },
         );
-        super::attachment_order::repack_typed_attachments(
+        super::attachment_order::repack_typed_attachments_with_trailing_ids(
             messages,
             &typed_ids,
             Some(&task_delivery_ids),
             closing_projection,
+            &current_tail_ids,
         );
 
         // Typed identity comes from the attachment sidecar, regardless of the
@@ -3116,6 +3123,168 @@ mod typed_attachment_snapshot_tests {
             request, first_projection,
             "retry retains attachment identity and order"
         );
+    }
+
+    #[tokio::test]
+    async fn current_prompt_upe_ids_trail_current_nar_without_reordering_finished_history() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            std::sync::Arc::new(MockApiClient::new(Vec::new())),
+            std::sync::Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            std::sync::Arc::new(NoOpPermissionGate),
+            std::sync::Arc::new(MockOutputStream::new()),
+            std::sync::Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let prior_user = ConversationMessage::user(MessageId::new(), "prior command".into());
+        let prior_upe_success =
+            ConversationMessage::user_meta(MessageId::new(), "finished UPE success".into());
+        let prior_nar = ConversationMessage::user_meta(MessageId::new(), "finished NAr row".into());
+        let prior_assistant = ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
+                text: "finished turn".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+        };
+        let current_user = ConversationMessage::user(MessageId::new(), "current command".into());
+        let current_upe_context =
+            ConversationMessage::user_meta(MessageId::new(), "current UPE context".into());
+        let current_nar =
+            ConversationMessage::user_meta(MessageId::new(), "current NAr row".into());
+        let current_post_model_switch =
+            ConversationMessage::user_meta(MessageId::new(), "PostModelSwitch context".into());
+        let current_upe_success =
+            ConversationMessage::user_meta(MessageId::new(), "current UPE success".into());
+        let current_body =
+            ConversationMessage::user_meta(MessageId::new(), "current expanded body".into());
+        let history = vec![
+            prior_user.clone(),
+            prior_upe_success.clone(),
+            prior_nar.clone(),
+            prior_assistant.clone(),
+            current_user.clone(),
+            current_upe_context.clone(),
+            current_nar.clone(),
+            current_post_model_switch.clone(),
+            current_upe_success.clone(),
+            current_body.clone(),
+        ];
+        orch.session.lock().await.history = history.clone();
+        for (message, kind, origin) in [
+            (
+                &prior_upe_success,
+                "hook_success",
+                serde_json::json!({"kind":"hook","event":"UserPromptExpansion"}),
+            ),
+            (
+                &prior_nar,
+                "environment",
+                serde_json::json!({"kind":"engine"}),
+            ),
+            (
+                &current_upe_context,
+                "hook_additional_context",
+                serde_json::json!({"kind":"hook","event":"UserPromptExpansion"}),
+            ),
+            (
+                &current_nar,
+                "deferred_tools_delta",
+                serde_json::json!({"kind":"engine"}),
+            ),
+            (
+                &current_post_model_switch,
+                "hook_additional_context",
+                serde_json::json!({"kind":"hook","event":"PostModelSwitch"}),
+            ),
+            (
+                &current_upe_success,
+                "hook_success",
+                serde_json::json!({"kind":"hook","event":"UserPromptExpansion"}),
+            ),
+        ] {
+            orch.register_mod_persisted_attachment(message, kind, origin)
+                .await;
+        }
+        // A fresh metadata re-wake has no current UPE rows. Resetting the
+        // previous query's exact IDs leaves this completed group in Native
+        // attachment source order even though its sidecar still says UPE.
+        orch.prompt_runtime
+            .record_current_prompt_upe_attachment_id(prior_upe_success.id());
+        orch.prompt_runtime.begin_native_query();
+        assert!(orch
+            .prompt_runtime
+            .current_prompt_upe_attachment_ids()
+            .is_empty());
+        let mut metadata_rewake_request = history.clone();
+        orch.project_typed_attachment_order(&mut metadata_rewake_request, &[], &[], false)
+            .await;
+        assert_eq!(
+            metadata_rewake_request
+                .iter()
+                .map(ConversationMessage::id)
+                .collect::<Vec<_>>(),
+            vec![
+                prior_upe_success.id(),
+                prior_nar.id(),
+                prior_user.id(),
+                prior_assistant.id(),
+                current_upe_context.id(),
+                current_nar.id(),
+                current_post_model_switch.id(),
+                current_upe_success.id(),
+                current_user.id(),
+                current_body.id(),
+            ],
+            "a metadata re-wake does not treat completed UPE origins as current"
+        );
+        assert_eq!(orch.session.lock().await.history, history);
+
+        orch.prompt_runtime
+            .record_current_prompt_upe_attachment_id(current_upe_context.id());
+        orch.prompt_runtime
+            .record_current_prompt_upe_attachment_id(current_upe_success.id());
+        let mut request = history.clone();
+        orch.project_typed_attachment_order(&mut request, &[], &[], false)
+            .await;
+        assert_eq!(
+            request
+                .iter()
+                .map(ConversationMessage::id)
+                .collect::<Vec<_>>(),
+            vec![
+                prior_upe_success.id(),
+                prior_nar.id(),
+                prior_user.id(),
+                prior_assistant.id(),
+                current_nar.id(),
+                current_post_model_switch.id(),
+                current_upe_context.id(),
+                current_upe_success.id(),
+                current_user.id(),
+                current_body.id(),
+            ],
+            "completed history keeps source order while only exact current UPE IDs trail current NAr rows"
+        );
+        assert_eq!(orch.session.lock().await.history, history);
+
+        let first_projection = request.clone();
+        orch.project_typed_attachment_order(&mut request, &[], &[], false)
+            .await;
+        assert_eq!(
+            request, first_projection,
+            "the current-batch projection is stable"
+        );
+        assert_eq!(orch.session.lock().await.history, history);
     }
 }
 

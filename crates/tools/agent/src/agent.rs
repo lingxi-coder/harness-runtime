@@ -362,6 +362,7 @@ fn parse_agent_tool_input(source: &Utf16JsonProjection) -> Result<AgentToolInput
         cwd: optional_string("cwd")?,
         context_paths: context_paths.into_iter().map(PathBuf::from).collect(),
         preset: optional_string("preset")?,
+        strategy: optional_string("strategy")?,
         models: optional_strings("models")?,
         dimensions: optional_strings("dimensions")?,
         max_panel,
@@ -1540,7 +1541,7 @@ fn fusion_request_from_agent(
             .as_deref()
             .map(str::parse)
             .transpose()
-            .map_err(|e| ToolError::InvalidInput(format!("{e}")))?,
+            .map_err(|e| ToolError::InvalidInput(format!("{e}").into()))?,
         strategy_revision: None,
         strategy_snapshot: None,
         verify_claims: false,
@@ -2334,8 +2335,10 @@ impl AgentTool {
     fn deny_fusion_implement(reason: impl ToString) -> PermissionResult {
         let reason = reason.to_string();
         PermissionResult::Deny {
-            explanation: Some(reason.clone()),
-            reason: PermissionDecisionReason::Other { reason },
+            explanation: Some(reason.clone().into()),
+            reason: PermissionDecisionReason::Other {
+                reason: reason.into(),
+            },
             metadata: PermissionMetadata::default(),
         }
     }
@@ -2375,7 +2378,7 @@ impl AgentTool {
                 .as_deref()
                 .map(str::parse::<lingxi_core::host::FusionStrategyRef>)
                 .transpose()
-                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+                .map_err(|error| ToolError::InvalidInput(error.to_string().into()))?;
             let selection = executor
                 .capture_strategy(selector.as_ref())
                 .map_err(fusion_tool_error)?;
@@ -2659,7 +2662,7 @@ impl AgentTool {
                 .as_deref()
                 .map(str::parse::<lingxi_core::host::FusionStrategyRef>)
                 .transpose()
-                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+                .map_err(|error| ToolError::InvalidInput(error.to_string().into()))?;
             let selection = if let Some(reviewed) = reviewed {
                 if reviewed.input != Self::fusion_permission_input(&parsed) {
                     return Err(ToolError::InvalidInput(

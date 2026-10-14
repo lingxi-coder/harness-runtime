@@ -1,6 +1,6 @@
 //! Request ownership for thinking-signature recovery. The scope follows a query
 //! through retries and lazy streams; sharing a service never shares its history.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -14,6 +14,8 @@ struct State {
     pending_snapshot: bool,
     stripped: bool,
     native_tool_search: NativeToolSearchState,
+    native_thinking_binding_controls: NativeThinkingBindingControlsAttempt,
+    context_1m_refused_models: HashSet<Vec<u16>>,
     recorder: Option<Arc<RecoveryRecorder>>,
 }
 
@@ -25,6 +27,52 @@ pub struct NativeToolSearchState {
     pub mid_conversation_tool_changes_sent: bool,
     /// Native classified a sent tool-change header/block as refused.
     pub tool_change_header_refused: bool,
+}
+
+/// Conversation-local Native TBC membership. Native records the beta in its
+/// conversation `nt` set during request construction; later disabled-thinking
+/// requests can retain membership until rejection or context reset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeThinkingBindingControlsState {
+    /// A request previously registered this beta in the conversation set.
+    pub beta_sent: bool,
+    /// The captured conversation state rejected this beta.
+    pub beta_rejected: bool,
+}
+
+/// Captured Native `nt` identity for one logical query. Reset replaces the
+/// active handle, so a response from an older in-flight query can mutate only
+/// the state it captured before the reset.
+#[derive(Clone, Default)]
+pub struct NativeThinkingBindingControlsAttempt(Arc<Mutex<NativeThinkingBindingControlsState>>);
+
+impl NativeThinkingBindingControlsAttempt {
+    #[must_use]
+    pub fn state(&self) -> NativeThinkingBindingControlsState {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Register Native `yD(nt, uB)` before dispatch on this captured query.
+    pub fn mark_beta_sent(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .beta_sent = true;
+    }
+
+    /// Apply Native `Wm(nt, uB)` to this captured query, never to a newer
+    /// active conversation state installed by reset.
+    pub fn refuse_beta(&self) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.beta_sent = false;
+        state.beta_rejected = true;
+    }
 }
 
 /// Cloneable identity owned by one conversation or worker query.
@@ -76,9 +124,11 @@ mod beta_tests {
         assert!(probe.on_success(&captured));
         captured.reject(Beta::ThinkingTokenCount);
         assert!(captured.rejected(Beta::ThinkingDisplayUpdates));
-        assert!(!scope
-            .beta_rejections()
-            .rejected(Beta::ThinkingDisplayUpdates));
+        assert!(
+            !scope
+                .beta_rejections()
+                .rejected(Beta::ThinkingDisplayUpdates)
+        );
         assert!(!scope.beta_rejections().rejected(Beta::ThinkingTokenCount));
         assert!(scope.stripped());
     }
@@ -168,6 +218,77 @@ mod beta_tests {
             NativeToolSearchState::default()
         );
     }
+
+    #[test]
+    fn native_tbc_planned_membership_and_rejection_reset_with_the_conversation() {
+        let scope = ThinkingRecoveryScope::default();
+        let same = scope.clone();
+        let next_conversation = ThinkingRecoveryScope::default();
+        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
+
+        same.mark_native_thinking_binding_controls_beta_sent();
+        assert!(scope.native_thinking_binding_controls_state().beta_sent);
+        scope.refuse_native_thinking_binding_controls_beta();
+        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
+        assert!(scope.beta_rejected(Beta::ThinkingBindingControls));
+        assert!(
+            !next_conversation
+                .native_thinking_binding_controls_state()
+                .beta_sent
+        );
+
+        scope.reset_beta_rejections();
+        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
+        assert!(!scope.beta_rejected(Beta::ThinkingBindingControls));
+    }
+
+    #[test]
+    fn late_tbc_refusal_after_reset_only_mutates_the_captured_query() {
+        let scope = ThinkingRecoveryScope::default();
+        scope.mark_native_thinking_binding_controls_beta_sent();
+        let in_flight_nt = scope.native_thinking_binding_controls_attempt();
+
+        // Compaction/reset replaces Native's active sticky-beta object while
+        // the provider response is still pending.
+        scope.reset_beta_rejections();
+
+        // The old response then completes with a definite TBC refusal. Wm
+        // applies to its captured `nt`, not the newly active conversation.
+        scope.refuse_native_thinking_binding_controls_beta_for_attempt(&in_flight_nt);
+        assert!(!in_flight_nt.state().beta_sent);
+        assert!(in_flight_nt.state().beta_rejected);
+        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
+        assert!(!scope.beta_rejected(Beta::ThinkingBindingControls));
+
+        // A fresh query captures the reset state and can register TBC again.
+        let fresh_nt = scope.native_thinking_binding_controls_attempt();
+        fresh_nt.mark_beta_sent();
+        assert!(scope.native_thinking_binding_controls_state().beta_sent);
+        assert!(!scope.beta_rejected(Beta::ThinkingBindingControls));
+    }
+
+    #[test]
+    fn context_1m_refusal_latch_uses_the_current_scope_after_reset() {
+        let scope = ThinkingRecoveryScope::default();
+        let key = "claude-sonnet-4-20250514"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let same = scope.clone();
+        let next_conversation = ThinkingRecoveryScope::default();
+
+        assert!(!scope.context_1m_refused(&key));
+        same.mark_context_1m_refused(&key);
+        assert!(scope.context_1m_refused(&key));
+        assert!(!next_conversation.context_1m_refused(&key));
+
+        scope.reset_beta_rejections();
+        assert!(!same.context_1m_refused(&key));
+
+        // Native `iEr` resolves the host latch when the response settles, so
+        // an older query may mark the replacement set after reset.
+        same.mark_context_1m_refused(&key);
+        assert!(scope.context_1m_refused(&key));
+    }
 }
 
 impl ThinkingRecoveryScope {
@@ -235,6 +356,86 @@ impl ThinkingRecoveryScope {
             .tool_change_header_refused = true;
     }
 
+    /// Snapshot Native's conversation `nt` membership for the TBC beta.
+    #[must_use]
+    pub fn native_thinking_binding_controls_state(&self) -> NativeThinkingBindingControlsState {
+        self.native_thinking_binding_controls_attempt().state()
+    }
+
+    /// Capture the active sticky-beta object when constructing a logical
+    /// request. Later resets detach this handle from newly started requests.
+    #[must_use]
+    pub fn native_thinking_binding_controls_attempt(&self) -> NativeThinkingBindingControlsAttempt {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .native_thinking_binding_controls
+            .clone()
+    }
+
+    /// Register planned Native TBC membership before the request draft is
+    /// sealed. This mirrors `yD(nt, uB)` and is not a dispatch-success marker.
+    pub fn mark_native_thinking_binding_controls_beta_sent(&self) {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.native_thinking_binding_controls.mark_beta_sent();
+    }
+
+    /// Apply Native `Wm(nt, uB)`: a refused TBC is removed from the sent set
+    /// and retained in the conversation rejection set.
+    pub fn refuse_native_thinking_binding_controls_beta(&self) {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.native_thinking_binding_controls.refuse_beta();
+        state.betas.reject(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls,
+        );
+    }
+
+    /// Apply a late query refusal to its captured Native `nt`. Mirror the
+    /// rejection into the currently active shared beta state only if reset
+    /// has not replaced that identity in the meantime.
+    pub(crate) fn refuse_native_thinking_binding_controls_beta_for_attempt(
+        &self,
+        attempt: &NativeThinkingBindingControlsAttempt,
+    ) {
+        attempt.refuse_beta();
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Arc::ptr_eq(&state.native_thinking_binding_controls.0, &attempt.0) {
+            state.betas.reject(
+                lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls,
+            );
+        }
+    }
+
+    /// Whether Native previously completed a successful no-context-1m retry
+    /// for this exact `Fn(model)` UTF-16 key in the current conversation.
+    #[must_use]
+    pub fn context_1m_refused(&self, model_key: &[u16]) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .context_1m_refused_models
+            .contains(model_key)
+    }
+
+    /// Commit Native's ordinary context-1m refusal only after a successful
+    /// non-stream response or the first accepted streaming MessageStart.
+    pub fn mark_context_1m_refused(&self, model_key: &[u16]) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .context_1m_refused_models
+            .insert(model_key.to_vec());
+    }
+
     /// Whether this conversation has observed a rejection for one of its
     /// computed Anthropic beta headers.
     #[must_use]
@@ -252,6 +453,10 @@ impl ThinkingRecoveryScope {
         state.betas = Default::default();
         state.server_betas = Default::default();
         state.native_tool_search = Default::default();
+        // Native reset installs a new sticky-beta object. Existing requests
+        // retain the old handle, just as their captured `nt` does.
+        state.native_thinking_binding_controls = Default::default();
+        state.context_1m_refused_models.clear();
     }
 
     /// Snapshot of rejected historical block ranges.

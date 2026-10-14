@@ -259,13 +259,6 @@ impl BetaContext {
         self.context_hint = on;
         self
     }
-
-    /// The binary's `BO()` — experimental betas enabled. `RLr()` is always true
-    /// for the first-party path; `$Be()` is `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`
-    /// (HIPAA compliance taint is out of single-process scope here).
-    fn experimental_on(&self) -> bool {
-        !crate::structured_output::experimental_betas_disabled()
-    }
 }
 
 /// Native OI/Ab built-in identity branch. Served model aliases and overrides
@@ -603,7 +596,7 @@ struct BetaEnvironment {
 impl BetaEnvironment {
     fn read() -> Self {
         Self {
-            disabled: env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"),
+            disabled: crate::model::thinking_binding_controls::native_b6_disabled(),
             interleaved_disabled: env_truthy("DISABLE_INTERLEAVED_THINKING"),
             force_mid_system: env_truthy("CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM"),
         }
@@ -717,8 +710,12 @@ fn model_betas_in(
     }
     // claude.ts appends the provider-specific tool-search header after the
     // ordinary model/request beta list once `useToolSearch` is resolved.
-    if ctx.tool_search && exp && first_party {
-        betas.push(ADVANCED_TOOL_USE_1P);
+    if ctx.tool_search {
+        betas.push(if first_party && exp {
+            ADVANCED_TOOL_USE_1P
+        } else {
+            TOOL_SEARCH_TOOL_3P
+        });
     }
     betas
 }
@@ -767,9 +764,6 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint, ctx: &BetaCo
         Provider::Anthropic | Provider::Foundry => {}
         Provider::Vertex => {
             betas.retain(|b| *b != ADVANCED_TOOL_USE_1P);
-            if ctx.tool_search && ctx.experimental_on() {
-                betas.push(TOOL_SEARCH_TOOL_3P);
-            }
         }
         Provider::Bedrock => {
             betas.retain(|b| {
@@ -790,9 +784,6 @@ pub fn bedrock_extra_body_betas(ctx: &BetaContext) -> Vec<String> {
         .filter(|beta| BEDROCK_EXTRA_PARAMS_HEADERS.contains(beta))
         .map(str::to_string)
         .collect();
-    if ctx.tool_search && ctx.experimental_on() {
-        betas.push(TOOL_SEARCH_TOOL_3P.to_string());
-    }
     if ctx.afk_mode {
         betas.push(AFK_MODE.to_string());
     }
@@ -871,11 +862,14 @@ pub fn apply_beta_header_with_auth_and_custom(
 ) {
     apply_beta_header(request, provider, endpoint, ctx);
 
-    // CLI `--betas`: API-key-only, first-party messages.create additions. The
-    // caller passes values only for an AnthropicFirstParty route; this layer
-    // still excludes OAuth and non-Anthropic/count endpoints.
+    // CLI `--betas` additions for a Native Anthropic-family Messages create
+    // request. The caller passes only route-validated, Native-filtered values;
+    // this layer still excludes OAuth and count-token endpoints.
     if !is_oauth_subscriber
-        && matches!(provider, Provider::Anthropic)
+        && matches!(
+            provider,
+            Provider::Anthropic | Provider::Foundry | Provider::Bedrock | Provider::Vertex
+        )
         && matches!(
             endpoint,
             Endpoint::MessagesCreate | Endpoint::MessagesCreateStream
@@ -934,7 +928,12 @@ mod tests {
                     .is_some_and(crate::structured_output::bool_value)
             };
             let env = BetaEnvironment {
-                disabled: bool_env("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"),
+                disabled:
+                    crate::model::thinking_binding_controls::native_disable_experimental_betas(
+                        input["env"]["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"]
+                            .as_str()
+                            .map(std::ffi::OsStr::new),
+                    ),
                 interleaved_disabled: bool_env("DISABLE_INTERLEAVED_THINKING"),
                 force_mid_system: bool_env("CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM"),
             };
@@ -1191,7 +1190,7 @@ mod tests {
     #[test]
     fn anthropic_opus48_emits_faithful_core_set() {
         // Ensure experimental gate is on for this assertion.
-        if env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+        if crate::model::thinking_binding_controls::native_b6_disabled()
             || env_truthy("DISABLE_INTERLEAVED_THINKING")
         {
             return;
@@ -1219,7 +1218,7 @@ mod tests {
     /// effort/task-budget/advisor, no `[1m]`, standard speed).
     #[test]
     fn over_emitted_betas_are_gone_by_default() {
-        if env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
+        if crate::model::thinking_binding_controls::native_b6_disabled() {
             return;
         }
         let h = assemble_beta_header(
@@ -1469,7 +1468,7 @@ mod tests {
     /// `context-1m` rides only when the model id carries `[1m]`.
     #[test]
     fn context_1m_only_when_model_marked() {
-        if env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
+        if crate::model::thinking_binding_controls::native_b6_disabled() {
             return;
         }
         let off = assemble_beta_header(
@@ -1489,7 +1488,7 @@ mod tests {
     /// `redact-thinking` rides only in interactive mode without thinking summaries.
     #[test]
     fn redact_thinking_gated_on_interactive() {
-        if env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
+        if crate::model::thinking_binding_controls::native_b6_disabled() {
             return;
         }
         let interactive = assemble_beta_header(
@@ -1542,7 +1541,7 @@ mod tests {
     /// redact-thinking, prompt-caching-scope, mid-conversation-system.
     #[test]
     fn count_tokens_filters_to_err_whitelist() {
-        if env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+        if crate::model::thinking_binding_controls::native_b6_disabled()
             || env_truthy("DISABLE_INTERLEAVED_THINKING")
         {
             return;
@@ -1634,7 +1633,7 @@ mod tests {
 
     #[test]
     fn tool_search_uses_provider_specific_beta_locations() {
-        if env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
+        if crate::model::thinking_binding_controls::native_b6_disabled() {
             return;
         }
         let ctx = BetaContext::for_model("claude-sonnet-4-5").with_tool_search(true);
@@ -1650,6 +1649,49 @@ mod tests {
         let bedrock = bedrock_extra_body_betas(&ctx);
         assert!(bedrock.iter().any(|beta| beta == TOOL_SEARCH_TOOL_3P));
         assert!(!bedrock.iter().any(|beta| beta == ADVANCED_TOOL_USE_1P));
+    }
+
+    #[test]
+    fn native_tool_search_beta_falls_back_when_native_vh_is_false() {
+        let context = BetaContext::for_model("claude-sonnet-4-5").with_tool_search(true);
+        for provider in [Provider::Anthropic, Provider::Foundry] {
+            let betas = model_betas_in(
+                provider,
+                &context,
+                BetaEnvironment {
+                    disabled: false,
+                    ..BetaEnvironment::default()
+                },
+            );
+            assert!(betas.contains(&ADVANCED_TOOL_USE_1P));
+            assert!(!betas.contains(&TOOL_SEARCH_TOOL_3P));
+
+            let betas = model_betas_in(
+                provider,
+                &context,
+                BetaEnvironment {
+                    disabled: true,
+                    ..BetaEnvironment::default()
+                },
+            );
+            assert!(!betas.contains(&ADVANCED_TOOL_USE_1P));
+            assert!(betas.contains(&TOOL_SEARCH_TOOL_3P));
+        }
+
+        for provider in [Provider::Vertex, Provider::Bedrock] {
+            for disabled in [false, true] {
+                let betas = model_betas_in(
+                    provider,
+                    &context,
+                    BetaEnvironment {
+                        disabled,
+                        ..BetaEnvironment::default()
+                    },
+                );
+                assert!(!betas.contains(&ADVANCED_TOOL_USE_1P));
+                assert!(betas.contains(&TOOL_SEARCH_TOOL_3P));
+            }
+        }
     }
 
     /// A pre-existing `anthropic-beta` value (e.g. auth-injected oauth) is
@@ -1769,6 +1811,101 @@ mod tests {
         let header = oauth_req.headers["anthropic-beta"].as_str();
         assert!(!header.split(',').any(|part| part == "example-beta-1"));
         assert!(header.split(',').any(|part| part == OAUTH));
+    }
+
+    #[test]
+    fn native_cli_betas_project_to_all_native_provider_headers_after_route_filtering() {
+        use crate::model::thinking_binding_controls::{
+            native_cli_beta_additions, ProviderRoute as NativeProviderRoute,
+        };
+
+        let cases = [
+            (
+                Provider::Anthropic,
+                NativeProviderRoute::FirstParty,
+                Endpoint::MessagesCreate,
+                vec![
+                    "cli-private-beta".to_owned(),
+                    "thinking-display-updates-2026-08-18".to_owned(),
+                ],
+            ),
+            (
+                Provider::Foundry,
+                NativeProviderRoute::Foundry,
+                Endpoint::MessagesCreateStream,
+                vec![
+                    "cli-private-beta".to_owned(),
+                    "thinking-display-updates-2026-08-18".to_owned(),
+                ],
+            ),
+            (
+                Provider::Bedrock,
+                NativeProviderRoute::Bedrock,
+                Endpoint::MessagesCreate,
+                vec!["thinking-display-updates-2026-08-18".to_owned()],
+            ),
+            (
+                Provider::Vertex,
+                NativeProviderRoute::Vertex,
+                Endpoint::MessagesCreateStream,
+                vec!["thinking-display-updates-2026-08-18".to_owned()],
+            ),
+        ];
+        let requested = vec![
+            "cli-private-beta".to_owned(),
+            "thinking-display-updates-2026-08-18".to_owned(),
+        ];
+
+        for (provider, native_route, endpoint, expected_custom) in cases {
+            let filtered = native_cli_beta_additions(native_route, false, false, &requested);
+            assert_eq!(filtered, expected_custom, "{provider:?} CLI filter");
+
+            let mut request = crate::ProviderRequest::post_json(
+                "https://provider.example/v1/messages",
+                lingxi_llm_client::protocol::JsonPayload::parse(
+                    r#"{"model":"claude-sonnet-4-5","max_tokens":1024}"#,
+                )
+                .unwrap(),
+            );
+            apply_beta_header_with_auth_and_custom(
+                &mut request,
+                provider,
+                endpoint,
+                &BetaContext::for_model("claude-sonnet-4-5"),
+                false,
+                &filtered,
+            );
+
+            let header = request
+                .headers
+                .get("anthropic-beta")
+                .expect("Native Anthropic provider beta header");
+            for beta in expected_custom {
+                assert!(
+                    header.split(',').any(|part| part == beta.as_str()),
+                    "{provider:?} missing CLI beta {beta}: {header}"
+                );
+            }
+            assert_eq!(
+                header
+                    .split(',')
+                    .filter(|part| *part == "thinking-display-updates-2026-08-18")
+                    .count(),
+                1,
+                "{provider:?} must deduplicate the CLI suffix"
+            );
+            if matches!(provider, Provider::Bedrock | Provider::Vertex) {
+                assert!(
+                    !header.split(',').any(|part| part == "cli-private-beta"),
+                    "{provider:?} must keep the Native static allowlist filter"
+                );
+            }
+            assert_eq!(
+                request.body_json.kind_at("/anthropic_beta"),
+                None,
+                "CLI header projection does not synthesize a Bedrock body-beta field"
+            );
+        }
     }
 
     /// `apply_beta_header` on a clean request equals `assemble_beta_header`.
@@ -1907,7 +2044,12 @@ mod native_per_turn_control_295_capture_tests {
                     lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
                 );
             let environment = BetaEnvironment {
-                disabled: captured_bool_env(input, "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"),
+                disabled:
+                    crate::model::thinking_binding_controls::native_disable_experimental_betas(
+                        input["env"]["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"]
+                            .as_str()
+                            .map(std::ffi::OsStr::new),
+                    ),
                 interleaved_disabled: captured_bool_env(input, "DISABLE_INTERLEAVED_THINKING"),
                 force_mid_system: captured_bool_env(
                     input,

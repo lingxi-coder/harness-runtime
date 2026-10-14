@@ -75,7 +75,9 @@ pub struct SettingsSnapshot {
     /// wrote it and no restart changes it. This field answers "what did this
     /// session load at boot" — the baseline a pending-changes diff is taken
     /// against — and managed settings are part of that answer.
-    pub active: BTreeMap<String, Value>,
+    pub active: Utf16JsonProjection,
+    /// Diagnostics retained alongside healthy managed source documents.
+    pub managed_diagnostics: Option<Utf16JsonProjection>,
     /// For each representable key in `effective_source`, the highest-priority
     /// layer that defines it. For a key in [`SettingsSnapshot::merged_keys`]
     /// this is NOT where the effective value came from — the value came from
@@ -320,7 +322,7 @@ fn fold_layer(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    merge_raw_layer(effective, owned)
+    Ok(merge_raw_layer(effective, owned)?)
 }
 
 /// Project only the fields accepted by the typed engine settings schema into
@@ -1053,7 +1055,12 @@ mod tests {
         // set without interfering with the precedence assertion below.
         let mut managed = BTreeMap::new();
         managed.insert("telemetryEnabled".to_string(), Value::from(false));
-        let snap = build_snapshot(&paths, active, source_from_values(managed)).unwrap();
+        let snap = build_snapshot(
+            &paths,
+            source_from_values(active),
+            source_from_values(managed),
+        )
+        .unwrap();
 
         assert_eq!(
             snap.effective.get("outputStyle").and_then(|v| v.as_str()),
@@ -1315,6 +1322,7 @@ mod tests {
 
         let active = active_settings_baseline(&paths, &managed).unwrap();
         let context = SettingsContext {
+            fusion_layers: None,
             paths,
             active: Arc::new(RwLock::new(active)),
             managed,

@@ -818,7 +818,6 @@ mod tests {
     use super::*;
     use crate::settings_bridge::SettingsPaths;
     use serde_json::{json, Value};
-    use std::collections::BTreeMap;
     use std::fs;
     use std::sync::{Arc, RwLock};
     use std::time::{SystemTime, UNIX_EPOCH};

@@ -363,7 +363,7 @@ impl ModelRuntime {
         if !supports_native_per_turn_effort_route(&route.provider_id, entry.protocol)
             || request.execution.anthropic_request_kind
                 != lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-            || crate::structured_output::experimental_betas_disabled()
+            || crate::model::thinking_binding_controls::native_b6_disabled()
             || !lingxi_llm_client::providers::anthropic::supports_per_message_effort(
                 &route.request_model,
             )
@@ -561,7 +561,7 @@ impl ModelRuntime {
                 return Err(LlmError::UnsupportedCapability {
                     capability: "the selected credential requires account headers or signing"
                         .into(),
-                })
+                });
             }
         };
         if token.is_empty() {
@@ -810,6 +810,29 @@ impl ModelRuntime {
                     .flatten(),
             ),
         );
+        // Bind prompt-cache account identity before the first credential
+        // await. Native TBC admission below loads through the same request
+        // OnceCell, so sampling afterward could associate an old token with a
+        // newer account generation.
+        let prompt_cache_account_epoch_before = request
+            .execution
+            .prompt_cache
+            .as_ref()
+            .map(|context| (context.current_account_epoch)());
+        // Native h3() can be proven false from a selected non-empty API key.
+        // Capture through this request's HostAuthenticator OnceCell before the
+        // TBC beta policy runs; final SDK signing reuses the same snapshot.
+        let native_tbc_first_party_h3 = if resolved_route.provider_id
+            == ProviderId::AnthropicFirstParty
+            && effective_protocol == ProtocolFamily::AnthropicMessages
+        {
+            let credential = authenticator.captured_credential().await?;
+            crate::model::thinking_binding_controls::first_party_h3_from_selected_credential(
+                credential.as_ref(),
+            )
+        } else {
+            None
+        };
         let prompt_cache_scope = credential_scope(entry, &resolved_route.profile_name);
         // Fast mode is a first-party Anthropic request property, not a generic
         // Anthropic-wire feature. Resolve the route before encoding and strip
@@ -843,6 +866,7 @@ impl ModelRuntime {
         };
         let suppress_schema = crate::structured_output::disabled_for(
             request,
+            &resolved_route.provider_id,
             effective_protocol,
             &resolved_route.request_model,
             resolved_route.capabilities.structured_output,
@@ -862,7 +886,7 @@ impl ModelRuntime {
             native_route_admitted,
             request.execution.anthropic_request_kind,
             &resolved_route.request_model,
-            crate::structured_output::experimental_betas_disabled(),
+            crate::model::thinking_binding_controls::native_b6_disabled(),
         )
         .then(|| {
             effort_policy
@@ -962,7 +986,12 @@ impl ModelRuntime {
         }
 
         let mut prepared_prompt_cache = None;
-        if let Some(context) = request.execution.prompt_cache.as_ref() {
+        if let Some((context, account_epoch_before)) = request
+            .execution
+            .prompt_cache
+            .as_ref()
+            .zip(prompt_cache_account_epoch_before)
+        {
             use lingxi_llm_client::providers::anthropic::system_prompt::{
                 project_system_prompt, PromptCacheSubscriberState,
             };
@@ -979,7 +1008,6 @@ impl ModelRuntime {
             // pair binds this call to the current account; a changed pair
             // keeps the earlier epoch so late responses cannot be attributed
             // to the new account using credential material captured mid-swap.
-            let account_epoch_before = (context.current_account_epoch)();
             let subscriber = if !caching_requested || context.native_bare_mode {
                 PromptCacheSubscriberState::NotSubscriber
             } else if context.native_unix_socket {
@@ -1269,12 +1297,37 @@ impl ModelRuntime {
             prompt_cache: prepared_prompt_cache,
             thinking_display_probe: Default::default(),
             computed_beta_headers: Vec::new(),
+            planned_native_beta_context: None,
+            context_1m_beta_suppressed: request.execution.context_1m_beta_suppressed,
+            native_thinking_binding_controls_beta_requested: request
+                .execution
+                .native_thinking_binding_controls_beta_requested,
+            native_tbc_first_party_h3,
+            native_thinking_request_type_disabled: request
+                .execution
+                .native_thinking_request_type_disabled
+                .or_else(|| {
+                    request
+                        .input
+                        .thinking
+                        .as_ref()
+                        .and_then(|thinking| thinking.mode)
+                        .map(|mode| mode == lingxi_llm_client::protocol::ThinkingMode::Disabled)
+                }),
+            native_thinking_mechanically_disabled: request
+                .execution
+                .native_thinking_mechanically_disabled,
             beta_rejection_state: request
                 .execution
                 .thinking_recovery_scope
                 .as_ref()
                 .map(|scope| scope.beta_rejections())
                 .unwrap_or_default(),
+            native_thinking_binding_controls_attempt: request
+                .execution
+                .thinking_recovery_scope
+                .as_ref()
+                .map(|scope| scope.native_thinking_binding_controls_attempt()),
             thinking_recovery_scope: request.execution.thinking_recovery_scope.clone(),
             authenticator,
             fast_account_binding: None,
@@ -1576,6 +1629,7 @@ impl ModelRuntime {
         let mut owned;
         let request = if crate::structured_output::disabled_for(
             request,
+            &route.provider_id,
             entry.protocol,
             &route.request_model,
             route.capabilities.structured_output,
@@ -1886,6 +1940,30 @@ fn validate_provider_profile(provider: &crate::ProviderProfile) -> Result<(), Ll
     Ok(())
 }
 
+/// The beta lists produced by Native host policy before `extra.body` is
+/// merged.  These are distinct from the final wire beta collection: arbitrary
+/// user body fields can carry an `anthropic_beta` entry but do not make a beta
+/// a planned Native producer input.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PlannedNativeBetaContext {
+    pub(crate) header: Vec<String>,
+    pub(crate) generated_body: Vec<String>,
+}
+
+impl PlannedNativeBetaContext {
+    pub(crate) fn contains(&self, beta: &str) -> bool {
+        self.header.iter().any(|candidate| candidate == beta)
+            || self
+                .generated_body
+                .iter()
+                .any(|candidate| candidate == beta)
+    }
+
+    pub(crate) fn header_contains(&self, beta: &str) -> bool {
+        self.header.iter().any(|candidate| candidate == beta)
+    }
+}
+
 pub struct PreparedLlmCall {
     pub(crate) request_session_id: Option<String>,
     pub(crate) computer_binding: Option<lingxi_core::host::NativeContinuationBinding>,
@@ -1904,8 +1982,24 @@ pub struct PreparedLlmCall {
     pub(crate) thinking_display_probe:
         lingxi_llm_client::providers::anthropic::thinking_display::DisplayProbe,
     pub(crate) computed_beta_headers: Vec<String>,
+    /// Exact header and host-generated Bedrock body beta lists before custom
+    /// extra-body fields are merged.  Used by Native's `DJe`/`Tp` refusal
+    /// classifier; it must not be inferred from `request_beta_tokens`.
+    pub(crate) planned_native_beta_context: Option<PlannedNativeBetaContext>,
+    pub(crate) context_1m_beta_suppressed: bool,
+    pub(crate) native_thinking_binding_controls_beta_requested: Option<bool>,
+    /// Source-owned h3 fact captured from this request's authentication OnceCell.
+    /// Only a selected non-empty API key proves false; all other auth states remain unknown.
+    pub(crate) native_tbc_first_party_h3: Option<bool>,
+    pub(crate) native_thinking_request_type_disabled: Option<bool>,
+    pub(crate) native_thinking_mechanically_disabled: Option<bool>,
     pub(crate) beta_rejection_state:
         lingxi_llm_client::providers::anthropic::beta_repair::ConversationBetaState,
+    /// Native TBC membership object captured for this logical query. A later
+    /// context reset replaces the scope's active object without retargeting
+    /// an in-flight response's eventual QEE mutation.
+    pub(crate) native_thinking_binding_controls_attempt:
+        Option<crate::thinking_scope::NativeThinkingBindingControlsAttempt>,
     /// Captured conversation-local state for actual request dispatch and
     /// Native tool-change refusal observations.
     pub(crate) thinking_recovery_scope: Option<crate::thinking_scope::ThinkingRecoveryScope>,
@@ -2160,12 +2254,15 @@ impl ModelRuntime {
         &self,
         prepared: &mut PreparedLlmCall,
     ) -> Result<(), LlmError> {
-        let draft = prepared
+        let mut draft = prepared
             .wire_draft
             .take()
             .ok_or_else(|| LlmError::InvalidRequest {
                 message: "request already sealed".into(),
             })?;
+        draft.set_native_anthropic_thinking_binding_controls_beta_requested(
+            prepared.native_thinking_binding_controls_beta_requested,
+        );
         let call = crate::execution::seal(
             draft,
             &prepared.provider_request,
@@ -2186,6 +2283,10 @@ impl ModelRuntime {
         {
             prepared.provider_request.body_json = body;
         }
+        prepared.computed_beta_headers =
+            lingxi_llm_client::providers::anthropic::beta_repair::request_betas(
+                &prepared.provider_request.headers,
+            );
         prepared.wire_call = Some(call);
         Ok(())
     }
@@ -2221,6 +2322,9 @@ impl ModelRuntime {
                 &prepared.provider_request.json_string_overrides,
             )
             .map_err(crate::upstream::error)?;
+        draft.set_native_anthropic_thinking_binding_controls_beta_requested(
+            prepared.native_thinking_binding_controls_beta_requested,
+        );
         if websocket {
             session
                 .prepare(&mut draft, false, true)
@@ -2232,6 +2336,15 @@ impl ModelRuntime {
             .await
             .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))?;
         prepared.provider_request.headers = call.request().headers.iter().cloned().collect();
+        if let Ok(body) =
+            serde_json::from_slice::<lingxi_llm_client::protocol::JsonPayload>(&call.request().body)
+        {
+            prepared.provider_request.body_json = body;
+        }
+        prepared.computed_beta_headers =
+            lingxi_llm_client::providers::anthropic::beta_repair::request_betas(
+                &prepared.provider_request.headers,
+            );
         prepared.wire_call = Some(call);
         Ok(prepared)
     }

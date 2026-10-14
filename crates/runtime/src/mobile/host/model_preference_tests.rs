@@ -144,7 +144,7 @@ mod model_preference_tests {
             listener.received.lock().await.clear();
             let error = handle
                 .submit(ClientCommand::SetModel {
-                    model: "anthropic/claude-sonnet-4-6".into(),
+                    model: "github-copilot/gpt-5.6-sol".into(),
                 })
                 .await
                 .expect_err("blocked preference destination must fail");

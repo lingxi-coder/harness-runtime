@@ -22,11 +22,32 @@ use std::collections::HashSet;
 /// stored beside each user message rather than inline in the
 /// `ConversationMessage` carrier. Those IDs mark user boundaries. A typed
 /// attachment ID takes precedence if it is also present in that boundary set.
+#[cfg(test)]
 pub(crate) fn repack_typed_attachments(
     messages: &mut Vec<ConversationMessage>,
     typed_attachment_ids: &HashSet<MessageId>,
     task_delivery_boundary_ids: Option<&HashSet<MessageId>>,
     closing_placement: Option<ClosingPlacementProjection<'_>>,
+) {
+    repack_typed_attachments_with_trailing_ids(
+        messages,
+        typed_attachment_ids,
+        task_delivery_boundary_ids,
+        closing_placement,
+        &HashSet::new(),
+    );
+}
+
+/// Repack selected current-batch attachments after the other typed rows in
+/// their existing Native boundary group. The input buffer is reverse-scanned,
+/// so selected IDs are sorted to its front and land at the group's tail after
+/// the final reverse. Stable sorting preserves order within both classes.
+pub(crate) fn repack_typed_attachments_with_trailing_ids(
+    messages: &mut Vec<ConversationMessage>,
+    typed_attachment_ids: &HashSet<MessageId>,
+    task_delivery_boundary_ids: Option<&HashSet<MessageId>>,
+    closing_placement: Option<ClosingPlacementProjection<'_>>,
+    trailing_typed_attachment_ids: &HashSet<MessageId>,
 ) {
     if !messages
         .iter()
@@ -46,6 +67,10 @@ pub(crate) fn repack_typed_attachments(
         }
 
         if is_boundary(&message, task_delivery_boundary_ids) && !pending_attachments.is_empty() {
+            sort_selected_first_in_reverse_scan(
+                &mut pending_attachments,
+                trailing_typed_attachment_ids,
+            );
             // The source appends the backward-ordered attachment buffer before
             // the boundary, then reverses the completed output once at the end.
             if let (
@@ -83,9 +108,24 @@ pub(crate) fn repack_typed_attachments(
         }
     }
 
+    sort_selected_first_in_reverse_scan(&mut pending_attachments, trailing_typed_attachment_ids);
     reversed.append(&mut pending_attachments);
     reversed.reverse();
     *messages = reversed;
+}
+
+fn sort_selected_first_in_reverse_scan(
+    pending_attachments: &mut [ConversationMessage],
+    trailing_typed_attachment_ids: &HashSet<MessageId>,
+) {
+    if pending_attachments
+        .iter()
+        .any(|attachment| trailing_typed_attachment_ids.contains(&attachment.id()))
+    {
+        pending_attachments.sort_by_key(|attachment| {
+            !trailing_typed_attachment_ids.contains(&attachment.id())
+        });
+    }
 }
 
 fn is_boundary(
@@ -240,6 +280,69 @@ mod tests {
         repack_typed_attachments(&mut messages, &HashSet::from([attachment_id]), None, None);
 
         assert_eq!(messages, vec![before, result, attachment, after]);
+    }
+
+    #[test]
+    fn only_current_upe_ids_trail_nar_within_their_existing_group() {
+        let prior_user = user("prior command");
+        let prior_upe_success = typed_meta("finished UPE success");
+        let prior_nar = typed_meta("finished NAr row");
+        let prior_assistant = assistant("finished turn");
+        let current_user = user("current command");
+        let current_upe_success = typed_meta("current UPE success");
+        let current_nar = typed_meta("current NAr row");
+        let current_upe_context = typed_meta("current UPE context");
+        let current_body = user("current expanded body");
+        let typed_ids = HashSet::from([
+            prior_upe_success.id(),
+            prior_nar.id(),
+            current_upe_success.id(),
+            current_nar.id(),
+            current_upe_context.id(),
+        ]);
+        let current_upe_ids =
+            HashSet::from([current_upe_success.id(), current_upe_context.id()]);
+        let mut messages = vec![
+            prior_user.clone(),
+            prior_upe_success.clone(),
+            prior_nar.clone(),
+            prior_assistant.clone(),
+            current_user.clone(),
+            current_upe_success.clone(),
+            current_nar.clone(),
+            current_upe_context.clone(),
+            current_body.clone(),
+        ];
+
+        repack_typed_attachments_with_trailing_ids(
+            &mut messages,
+            &typed_ids,
+            None,
+            None,
+            &current_upe_ids,
+        );
+
+        let expected = vec![
+            prior_upe_success,
+            prior_nar,
+            prior_user,
+            prior_assistant,
+            current_nar,
+            current_upe_success,
+            current_upe_context,
+            current_user,
+            current_body,
+        ];
+        assert_eq!(messages, expected);
+        let first_projection = messages.clone();
+        repack_typed_attachments_with_trailing_ids(
+            &mut messages,
+            &typed_ids,
+            None,
+            None,
+            &current_upe_ids,
+        );
+        assert_eq!(messages, first_projection, "projection remains idempotent");
     }
 
     #[test]

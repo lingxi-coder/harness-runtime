@@ -842,19 +842,20 @@ pub(super) fn mobile_effective_settings(
     cfg: &MobileConfig,
 ) -> Result<lingxi_core::settings::EffectiveSettings, lingxi_core::settings::SettingsError> {
     use lingxi_core::settings::{
-        FileLayerScope, LoadInputs, Settings, SettingsJson, SupplementalLayers,
+        FileLayerScope, LoadInputs, RawSupplementalLayers, Settings, SettingsJson,
     };
     let env = std::env::vars().collect();
-    Settings::load_with_layers_from_user_path(
+    Settings::load_raw_layer_stack_from_user_path(
         LoadInputs {
             env: &env,
             project_dir: &cfg.cwd,
             defaults: SettingsJson::default(),
         },
         FileLayerScope::ALL,
-        SupplementalLayers::default(),
+        RawSupplementalLayers::default(),
         Some(&cfg.lingxi_home.join("settings.json")),
-    )
+    )?
+    .into_effective_settings()
 }
 
 pub(super) const MOBILE_ENABLED_PROFILES_KEY: &str = "mobileEnabledProfiles";

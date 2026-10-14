@@ -31,8 +31,9 @@ use client::adapter::{ClientEventListener, PermissionRequestSink};
 use client::protocol::events::ClientEvent;
 use client::protocol::permission::PermissionRequest as PermissionRequestDto;
 use lingxi_core::host::{
-    CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
-    SecureStorage, SharingService, WorktreeManager,
+    CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessCommand, ProcessRunner,
+    Sandbox, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand,
+    SandboxedTag, SecureStorage, SharingService, WorktreeManager,
 };
 use orchestrator::StreamingApiClient;
 use tokio::sync::Mutex;
@@ -40,6 +41,53 @@ use tokio::sync::Mutex;
 pub use crate::mobile::host::{
     build_mobile_engine_inner, MobileConfig, MobileEngineError, MobileEngineHandle,
 };
+
+const FAKE_PROCESS_SANDBOX_REASON: &str =
+    "test-only admission for a fake ProcessRunner that never executes child processes";
+
+/// Test-only sandbox admission for host integration tests that inject a fake
+/// `ProcessRunner`. It does not enforce policy and reports itself unavailable;
+/// `prepare()` only mints the required typed command so the fake runner can
+/// verify that dispatch reached the process boundary. Never pair this fixture
+/// with a real process runner.
+#[derive(Default)]
+pub(crate) struct FakeProcessAdmittingSandbox;
+
+#[async_trait]
+impl Sandbox for FakeProcessAdmittingSandbox {
+    fn is_available(&self) -> bool {
+        false
+    }
+
+    fn backend(&self) -> mobile_linux_api::SandboxBackend {
+        mobile_linux_api::SandboxBackend::None
+    }
+
+    fn prepare(
+        &self,
+        cmd: ProcessCommand,
+        _policy: &SandboxPolicy,
+    ) -> Result<SandboxedCommand, SandboxError> {
+        Ok(self.bypass_with_audit(cmd, FAKE_PROCESS_SANDBOX_REASON))
+    }
+
+    fn bypass_with_audit(&self, cmd: ProcessCommand, reason: &str) -> SandboxedCommand {
+        SandboxedCommand::__new_sandboxed(
+            cmd,
+            SandboxedTag::BypassAuditedWithReason {
+                reason: reason.to_owned(),
+            },
+        )
+    }
+
+    async fn probe_capability(&self) -> SandboxCapability {
+        SandboxCapability {
+            available: false,
+            reason: Some(FAKE_PROCESS_SANDBOX_REASON.to_owned()),
+            features: SandboxFeatures::default(),
+        }
+    }
+}
 
 /// Off-device fake [`Platform`] shim: reuses the portable
 /// `platform-posix-minimal` handles (`std::fs` over a temp root, `std::time`,
@@ -79,6 +127,14 @@ impl HostFakePlatform {
     #[must_use]
     pub fn with_process_runner(mut self, process: Arc<dyn ProcessRunner>) -> Self {
         self.process = process;
+        self
+    }
+
+    /// Replace the unavailable stub sandbox for a test that pairs this
+    /// platform with a non-executing fake process runner.
+    #[must_use]
+    pub(crate) fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
+        self.sandbox = sandbox;
         self
     }
 

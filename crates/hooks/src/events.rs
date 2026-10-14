@@ -350,9 +350,11 @@ pub enum HookEvent {
     /// allow, ask for confirmation, or block the switch through its response.
     PreModelSwitch {
         /// Model active before the switch.
-        from_model: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        from_model: lingxi_core::types::utf16_json::Utf16JsonProjection,
         /// Model requested by the switch operation.
-        to_model: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        to_model: lingxi_core::types::utf16_json::Utf16JsonProjection,
         /// Original requested model, when one was supplied by the caller.
         #[serde(
             default,
@@ -377,9 +379,11 @@ pub enum HookEvent {
     /// additional context for the next model request.
     PostModelSwitch {
         /// Model active before the switch.
-        from_model: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        from_model: lingxi_core::types::utf16_json::Utf16JsonProjection,
         /// Model active after the switch.
-        to_model: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        to_model: lingxi_core::types::utf16_json::Utf16JsonProjection,
         /// Original requested model, when one was supplied by the caller.
         #[serde(
             default,

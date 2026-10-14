@@ -3168,6 +3168,128 @@ impl ConversationOrchestrator {
         })
     }
 
+    fn pending_text_display_matches_source(text: &str, units: &[u16]) -> bool {
+        String::from_utf16_lossy(units) == text
+    }
+
+    fn pending_prompt_content_block_matches_source(
+        persisted: &lingxi_core::types::ContentBlock,
+        retry: &lingxi_core::types::ContentBlock,
+    ) -> bool {
+        use lingxi_core::types::ContentBlock;
+
+        match (persisted, retry) {
+            (
+                ContentBlock::Text {
+                    text: persisted_text,
+                    citations: persisted_citations,
+                },
+                ContentBlock::Text {
+                    text: retry_text,
+                    citations: retry_citations,
+                },
+            ) => persisted_text == retry_text && persisted_citations == retry_citations,
+            (
+                ContentBlock::Text {
+                    text,
+                    citations: text_citations,
+                },
+                ContentBlock::TextJsUtf16 {
+                    text: display,
+                    utf16_code_units,
+                    citations: source_citations,
+                },
+            )
+            | (
+                ContentBlock::TextJsUtf16 {
+                    text: display,
+                    utf16_code_units,
+                    citations: source_citations,
+                },
+                ContentBlock::Text {
+                    text,
+                    citations: text_citations,
+                },
+            ) => {
+                Self::pending_text_display_matches_source(display, utf16_code_units)
+                    && text.encode_utf16().eq(utf16_code_units.iter().copied())
+                    && text_citations == source_citations
+            }
+            (
+                ContentBlock::TextJsUtf16 {
+                    text: persisted_display,
+                    utf16_code_units: persisted_units,
+                    citations: persisted_citations,
+                },
+                ContentBlock::TextJsUtf16 {
+                    text: retry_display,
+                    utf16_code_units: retry_units,
+                    citations: retry_citations,
+                },
+            ) => {
+                Self::pending_text_display_matches_source(persisted_display, persisted_units)
+                    && Self::pending_text_display_matches_source(retry_display, retry_units)
+                    && persisted_units == retry_units
+                    && persisted_citations == retry_citations
+            }
+            _ => persisted == retry,
+        }
+    }
+
+    fn pending_prompt_message_matches_source(
+        persisted: &lingxi_core::types::ConversationMessage,
+        retry: &lingxi_core::types::ConversationMessage,
+    ) -> bool {
+        use lingxi_core::types::ConversationMessage;
+
+        match (persisted, retry) {
+            (
+                ConversationMessage::User {
+                    id: persisted_id,
+                    content: persisted_content,
+                    is_meta: persisted_meta,
+                    is_compact_summary: persisted_compact,
+                    is_visible_in_transcript_only: persisted_transcript_only,
+                    turn_companion: persisted_companion,
+                    usage_limit_note: persisted_usage_note,
+                    origin: persisted_origin,
+                    turn_origin: persisted_turn_origin,
+                    api_message_override: persisted_override,
+                },
+                ConversationMessage::User {
+                    id: retry_id,
+                    content: retry_content,
+                    is_meta: retry_meta,
+                    is_compact_summary: retry_compact,
+                    is_visible_in_transcript_only: retry_transcript_only,
+                    turn_companion: retry_companion,
+                    usage_limit_note: retry_usage_note,
+                    origin: retry_origin,
+                    turn_origin: retry_turn_origin,
+                    api_message_override: retry_override,
+                },
+            ) => {
+                persisted_id == retry_id
+                    && persisted_meta == retry_meta
+                    && persisted_compact == retry_compact
+                    && persisted_transcript_only == retry_transcript_only
+                    && persisted_companion == retry_companion
+                    && persisted_usage_note == retry_usage_note
+                    && persisted_origin == retry_origin
+                    && persisted_turn_origin == retry_turn_origin
+                    && persisted_override == retry_override
+                    && persisted_content.len() == retry_content.len()
+                    && persisted_content
+                        .iter()
+                        .zip(retry_content)
+                        .all(|(left, right)| {
+                            Self::pending_prompt_content_block_matches_source(left, right)
+                        })
+            }
+            _ => false,
+        }
+    }
+
     /// Publish a pending user row to live history only after its durable
     /// append succeeded. Cold retry is idempotent by message UUID and rejects
     /// a different source projection for that UUID.
@@ -3181,7 +3303,13 @@ impl ConversationOrchestrator {
             .iter()
             .find(|existing| existing.id() == msg.id())
         {
-            return if existing == msg {
+            let matches_source = match (existing, msg) {
+                (ConversationMessage::User { .. }, ConversationMessage::User { .. }) => {
+                    Self::pending_prompt_message_matches_source(existing, msg)
+                }
+                _ => existing == msg,
+            };
+            return if matches_source {
                 Ok(())
             } else {
                 Err(OrchestratorError::Internal(format!(
@@ -6014,6 +6142,64 @@ mod rich_append_projection_tests {
 
     fn worker_frame(message: &ConversationMessage) -> Source {
         source_object([("message", mod_append_message(message))])
+    }
+
+    #[tokio::test]
+    async fn pending_prompt_history_accepts_restored_text_and_rejects_invalid_same_uuid() {
+        let root = tempfile::tempdir().unwrap();
+        let orchestrator = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(crate::test_support::MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(crate::test_support::MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        );
+
+        let prompt_id = MessageId::new();
+        let restored = ConversationMessage::user(prompt_id, "prompt".into());
+        let mut retry = restored.clone();
+        if let ConversationMessage::User { content, .. } = &mut retry {
+            content[0] = ContentBlock::TextJsUtf16 {
+                text: "prompt".into(),
+                utf16_code_units: "prompt".encode_utf16().collect(),
+                citations: None,
+            };
+        }
+        orchestrator.session.lock().await.history.push(restored);
+        orchestrator
+            .append_pending_prompt_message_to_history_once(&retry)
+            .await
+            .expect("same source units across restored text carriers are idempotent");
+        assert_eq!(orchestrator.session.lock().await.history.len(), 1);
+
+        let invalid_id = MessageId::new();
+        let mut invalid = ConversationMessage::user(invalid_id, "wrong display".into());
+        if let ConversationMessage::User { content, .. } = &mut invalid {
+            content[0] = ContentBlock::TextJsUtf16 {
+                text: "wrong display".into(),
+                utf16_code_units: "actual source".encode_utf16().collect(),
+                citations: None,
+            };
+        }
+        orchestrator
+            .session
+            .lock()
+            .await
+            .history
+            .push(invalid.clone());
+        let error = orchestrator
+            .append_pending_prompt_message_to_history_once(&invalid)
+            .await
+            .expect_err("same UUID with an inconsistent text carrier is not idempotent");
+        assert!(matches!(
+            error,
+            OrchestratorError::Internal(message)
+                if message.contains("has different source content")
+        ));
+        assert_eq!(orchestrator.session.lock().await.history.len(), 2);
     }
 
     #[test]

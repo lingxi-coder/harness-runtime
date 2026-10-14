@@ -157,7 +157,7 @@ impl BuiltinCommandHandler for ModelHandler {
         match self
             .handle
             .select_model(lingxi_core::host::ModelSelectionRequest::Select {
-                source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(model.clone()),
+                source: model_selection,
                 route_hint: profile
                     .as_deref()
                     .map(|profile| lingxi_core::host::ModelRouteAnchor {

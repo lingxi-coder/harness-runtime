@@ -19,10 +19,12 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 once_cell = "1"
+tokio.workspace = true
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-util.workspace = true
 
 [lints]
 workspace = true

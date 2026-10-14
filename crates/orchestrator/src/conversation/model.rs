@@ -100,6 +100,61 @@ impl ConversationOrchestrator {
         self.model_runtime.configured_model_source.clone()
     }
 
+    pub(crate) async fn active_model_source_binding(
+        &self,
+    ) -> Option<lingxi_core::host::ModelSourceBinding> {
+        let (source_owner, user_binding) = {
+            let session = self.session.lock().await;
+            (
+                session.user_model_setting_source,
+                session.user_model_setting.clone(),
+            )
+        };
+        match source_owner {
+            lingxi_core::session::SessionModelSettingSource::Configured => self
+                .model_runtime
+                .configured_model_source
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            lingxi_core::session::SessionModelSettingSource::UserSelection => user_binding,
+        }
+    }
+
+    /// Select the source-bearing logical model only when its anchor resolves
+    /// to this endpoint's route. Automatic fallback and route changes therefore
+    /// use a fresh projection of the known route model instead of inheriting a
+    /// stale opaque source. `known_route_model` remains the fallback wire value;
+    /// callers pass the physical route separately to cache/pricing metadata.
+    pub(crate) fn model_switch_source_projection_for_route(
+        &self,
+        known_route_model: &str,
+        route_profile: Option<&str>,
+        binding: Option<&lingxi_core::host::ModelSourceBinding>,
+    ) -> Utf16JsonProjection {
+        let known = Utf16JsonProjection::from(known_route_model.to_owned());
+        let Some(binding) = binding else {
+            return known;
+        };
+        let Ok(target_route) = self
+            .api
+            .resolve_media_route(known_route_model, route_profile)
+        else {
+            return known;
+        };
+        let Ok(anchor_route) = self.api.resolve_media_route(
+            &binding.route_anchor.model,
+            binding.route_anchor.profile.as_deref(),
+        ) else {
+            return known;
+        };
+        if same_request_route(&target_route, &anchor_route) {
+            binding.effective_source.clone()
+        } else {
+            known
+        }
+    }
+
     /// Carry the exact current Native model-selection source when the selected
     /// provider route cannot reproduce it through the ordinary model resolver.
     /// Configured source and explicit session selection remain separate owners;
@@ -2658,7 +2713,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             selection.refusal_occurred = true;
         }
         if original_model != fallback || original_profile.is_some() {
-            self.run_post_model_switch_hooks(&original_model, &fallback, None, None, "auto")
+            let binding = self.active_model_source_binding().await;
+            let from_model = self.model_switch_source_projection_for_route(
+                &original_model,
+                original_profile.as_deref(),
+                binding.as_ref(),
+            );
+            let to_model =
+                self.model_switch_source_projection_for_route(&fallback, None, binding.as_ref());
+            self.run_post_model_switch_hooks(&from_model, &to_model, None, &fallback, None, "auto")
                 .await;
         }
         // User-visible warning. 2.1.206 `VPn(e,t,r)` =
@@ -4755,6 +4818,71 @@ mod configured_model_source_tests {
                 .await
                 .is_none(),
             "a valid selected source already represented by the same Native route stays on the ordinary route path"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_switch_projection_uses_only_a_matching_route_anchor() {
+        let orchestrator = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(SourceRouteFixtureApi),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(crate::test_support::MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let units = "opaque-".encode_utf16().chain([0xD800]).collect::<Vec<_>>();
+        let binding = lingxi_core::host::ModelSourceBinding {
+            source: Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&units),
+                units.clone(),
+            )
+            .unwrap(),
+            effective_source: Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&units),
+                units.clone(),
+            )
+            .unwrap(),
+            route_anchor: lingxi_core::host::ModelRouteAnchor {
+                model: "claude-session-model".into(),
+                profile: Some("configured-profile".into()),
+            },
+        };
+
+        assert_eq!(
+            orchestrator
+                .model_switch_source_projection_for_route(
+                    "claude-session-model",
+                    Some("configured-profile"),
+                    Some(&binding),
+                )
+                .string_units(""),
+            Some(units),
+            "a matching route anchor keeps the exact effective source units"
+        );
+        assert_eq!(
+            orchestrator
+                .model_switch_source_projection_for_route(
+                    "claude-fallback-model",
+                    None,
+                    Some(&binding),
+                )
+                .string_at(""),
+            Some("claude-fallback-model"),
+            "an automatic fallback cannot inherit the previous opaque source"
+        );
+        assert_eq!(
+            orchestrator
+                .model_switch_source_projection_for_route(
+                    "claude-session-model",
+                    Some("other-profile"),
+                    Some(&binding),
+                )
+                .string_at(""),
+            Some("claude-session-model"),
+            "a different provider profile cannot inherit the source"
         );
     }
 }

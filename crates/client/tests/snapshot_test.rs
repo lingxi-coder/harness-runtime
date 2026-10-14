@@ -1221,21 +1221,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 display_salvage_text: true,
             },
         ),
-        (
-            "event/prompt_suggestion.json",
-            ClientEvent::PromptSuggestion {
-                suggestion: "Run the focused test suite".into(),
-                uuid: "44444444-4444-4444-8444-444444444444".into(),
-                session_id: "33333333-3333-4333-8333-333333333333".into(),
-            },
-        ),
-        (
-            "event/prompt_suggestion_state.json",
-            ClientEvent::PromptSuggestionState {
-                enabled: true,
-                notice: None,
-            },
-        ),
     ]
 }
 
@@ -1349,30 +1334,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::SetProactivityLevel {
                 level: "proactive".to_string(),
                 offer_bypass: Some(false),
-            },
-        ),
-        (
-            "command/update_prompt_suggestion_context.json",
-            ClientCommand::UpdatePromptSuggestionContext {
-                session_id: "session-1".to_string(),
-                focus: "composer".to_string(),
-                input_empty: false,
-                pending_permission: false,
-                elicitation_active: false,
-            },
-        ),
-        (
-            "command/prompt_suggestion_feedback.json",
-            ClientCommand::PromptSuggestionFeedback {
-                session_id: "session-1".to_string(),
-                uuid: "suggestion-1".to_string(),
-                action: "dismissed".to_string(),
-            },
-        ),
-        (
-            "command/record_prompt_suggestion_submission.json",
-            ClientCommand::RecordPromptSuggestionSubmission {
-                text: "Please review the diff.".to_string(),
             },
         ),
         (
@@ -2260,7 +2221,12 @@ fn canonical_coordinator_worker() -> CoordinatorWorkerDto {
 #[test]
 fn every_client_event_variant_matches_golden() {
     let mut failures = Vec::new();
+    let mut filenames = BTreeSet::new();
     for (filename, ev) in event_goldens() {
+        assert!(
+            filenames.insert(filename),
+            "duplicate canonical golden: {filename}"
+        );
         check_golden(filename, &ev, &mut failures);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
@@ -2294,7 +2260,7 @@ fn every_variant_has_a_golden() {
             missing.is_empty(),
             "{enum_name} variant(s) with no golden: {missing:?}. Add a row to \
              the golden table and re-bless with `BLESS=1 cargo test -p \
-             client::protocol --test snapshot_test`."
+             client --test snapshot_test`."
         );
         let unknown: Vec<&String> = goldened.difference(&declared).collect();
         assert!(
@@ -2309,7 +2275,12 @@ fn every_variant_has_a_golden() {
 #[test]
 fn every_client_command_variant_matches_golden() {
     let mut failures = Vec::new();
+    let mut filenames = BTreeSet::new();
     for (filename, cmd) in command_goldens() {
+        assert!(
+            filenames.insert(filename),
+            "duplicate canonical golden: {filename}"
+        );
         check_golden(filename, &cmd, &mut failures);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

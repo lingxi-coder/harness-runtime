@@ -471,7 +471,7 @@ fn merge_fusion_source_value(
     if !fields.iter().any(|(key, _)| key == &strategy_key) {
         fields.push((strategy_key, Utf16JsonProjection::parse("[]")?));
     }
-    Utf16JsonProjection::object(fields)
+    Utf16JsonProjection::object_units(fields)
 }
 
 /// Fold one exact source settings layer into another using the same per-key

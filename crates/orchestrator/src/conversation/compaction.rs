@@ -831,7 +831,13 @@ impl ConversationOrchestrator {
         model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         provenance: lingxi_core::host::ModelProvenance,
         restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
+        native_settings: agent::model_resolution::NativeModelSettingsSnapshot,
     ) {
+        *self
+            .model_runtime
+            .native_model_settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = native_settings;
         let fallback_anchor = self
             .model_runtime
             .configured_model_source

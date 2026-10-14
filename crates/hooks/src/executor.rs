@@ -25,27 +25,26 @@ use crate::hook_payload::{
     HookEventNameElicitationResult, HookEventNameFileChanged, HookEventNameInstructionsLoaded,
     HookEventNameMessageDisplay, HookEventNameNotification, HookEventNamePermissionDenied,
     HookEventNamePermissionRequest, HookEventNamePost, HookEventNamePostCompact,
-    HookEventNamePostModelSwitch, HookEventNamePostToolBatch, HookEventNamePostToolUseFailure,
-    HookEventNamePre, HookEventNamePreCompact, HookEventNamePreModelSwitch,
-    HookEventNameSessionEnd, HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop,
-    HookEventNameStopFailure, HookEventNameSubagentStart, HookEventNameSubagentStop,
-    HookEventNameTaskCompleted, HookEventNameTaskCreated, HookEventNameTeammateIdle,
-    HookEventNameUserPromptExpansion, HookEventNameUserPromptSubmit, HookEventNameWorktreeCreate,
-    HookEventNameWorktreeRemove, HookResponseParseError, InstructionsLoadedPayload,
-    MessageDisplayPayload, NotificationPayload, PermissionDeniedPayload, PermissionRequestPayload,
-    PostCompactPayload, PostModelSwitchPayload, PostToolBatchPayload, PostToolUseFailurePayload,
-    PostToolUsePayload, PreCompactPayload, PreModelSwitchPayload, PreToolUsePayload,
-    SessionEndPayload, SessionStartPayload, SetupPayload, StopFailurePayload, StopPayload,
-    SubagentStartPayload, SubagentStopPayload, TaskCompletedPayload, TaskCreatedPayload,
-    TeammateIdlePayload, UserPromptExpansionPayload, UserPromptSubmitPayload,
-    WorktreeCreatePayload, WorktreeRemovePayload,
+    HookEventNamePostToolBatch, HookEventNamePostToolUseFailure, HookEventNamePre,
+    HookEventNamePreCompact, HookEventNameSessionEnd, HookEventNameSessionStart,
+    HookEventNameSetup, HookEventNameStop, HookEventNameStopFailure, HookEventNameSubagentStart,
+    HookEventNameSubagentStop, HookEventNameTaskCompleted, HookEventNameTaskCreated,
+    HookEventNameTeammateIdle, HookEventNameUserPromptExpansion, HookEventNameUserPromptSubmit,
+    HookEventNameWorktreeCreate, HookEventNameWorktreeRemove, HookResponseParseError,
+    InstructionsLoadedPayload, MessageDisplayPayload, NotificationPayload, PermissionDeniedPayload,
+    PermissionRequestPayload, PostCompactPayload, PostToolBatchPayload, PostToolUseFailurePayload,
+    PostToolUsePayload, PreCompactPayload, PreToolUsePayload, SessionEndPayload,
+    SessionStartPayload, SetupPayload, StopFailurePayload, StopPayload, SubagentStartPayload,
+    SubagentStopPayload, TaskCompletedPayload, TaskCreatedPayload, TeammateIdlePayload,
+    UserPromptExpansionPayload, UserPromptSubmitPayload, WorktreeCreatePayload,
+    WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor, HttpHookPolicy};
 use crate::mcp_invoker::{HookMcpInvocation, HookMcpInvocationResult, HookMcpInvoker};
 use crate::prompt_executor::{
     HookPromptRunner, PromptExecutionSignal, PromptExecutor, HOOK_PROMPT_TIMEOUT_MS,
 };
-use crate::registry::{HookContext, HookRegistry};
+use crate::registry::{HookContext, HookRegistry, HookSourcePartition};
 use crate::response::{
     AggregateHookResult, ExactHookText, HookDecision, HookOutcome, HookResponse, HookResult,
     PermissionRequestResult,
@@ -1256,12 +1255,51 @@ impl HookExecutorImpl {
         self.execute_excluding_hook(event, ctx, None).await
     }
 
+    /// Execute one explicit registry source partition through the same hook
+    /// matching, dispatch, and aggregate fold as ordinary execution.
+    ///
+    /// This is used only where the host has a source-backed middleware
+    /// boundary. Ordinary callers continue to use [`Self::execute`], which
+    /// includes every source.
+    pub async fn execute_partitioned(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        partition: HookSourcePartition,
+    ) -> AggregateHookResult {
+        self.execute_partitioned_excluding_hook(event, ctx, None, partition)
+            .await
+    }
+
+    /// Cheap event-type gate for one explicit registry source partition.
+    pub async fn has_hooks_for_partition(
+        &self,
+        event_type: &crate::events::HookEventType,
+        partition: HookSourcePartition,
+    ) -> bool {
+        self.registry
+            .read()
+            .await
+            .has_hooks_for_partition(event_type, partition)
+    }
+
     /// Skip a deferred session goal before dispatch, preserving all other hooks.
     pub async fn execute_excluding_hook(
         &self,
         event: HookEvent,
+        ctx: HookContext,
+        excluded: Option<lingxi_core::types::HookId>,
+    ) -> AggregateHookResult {
+        self.execute_partitioned_excluding_hook(event, ctx, excluded, HookSourcePartition::All)
+            .await
+    }
+
+    async fn execute_partitioned_excluding_hook(
+        &self,
+        event: HookEvent,
         mut ctx: HookContext,
         excluded: Option<lingxi_core::types::HookId>,
+        partition: HookSourcePartition,
     ) -> AggregateHookResult {
         self.capture_model_safety(&mut ctx).await;
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips
@@ -1271,7 +1309,7 @@ impl HookExecutorImpl {
         }
         let reg = self.registry.read().await;
         let matched: Vec<HookDefinition> = reg
-            .match_event(&event, &ctx)
+            .match_event_partition(&event, &ctx, partition)
             .into_iter()
             .filter(|hook| Some(hook.id) != excluded)
             .cloned()
@@ -2555,7 +2593,10 @@ impl Dispatcher {
                 // overlap, so order is cosmetic, but it tracks the binary's spread
                 // position).
                 child_env.insert("LINGXI".to_string(), "1".to_string());
-                child_env.insert("LINGXI_SESSION_ID".to_string(), ctx.session_id.to_string());
+                child_env.insert(
+                    "LINGXI_SESSION_ID".to_string(),
+                    ctx.session_id.as_uuid().to_string(),
+                );
                 child_env.insert("LINGXI_CHILD_SESSION".to_string(), "1".to_string());
                 if let Some(effort) = &ctx.effort {
                     child_env.insert("LINGXI_EFFORT".to_string(), effort.level.clone());
@@ -3088,7 +3129,9 @@ impl HookExecutorImpl {
             | HookEvent::PermissionRequest { tool_name, .. }
             | HookEvent::PermissionDenied { tool_name, .. } => Some(tool_name.clone()),
             HookEvent::PreModelSwitch { to_model, .. }
-            | HookEvent::PostModelSwitch { to_model, .. } => Some(to_model.clone()),
+            | HookEvent::PostModelSwitch { to_model, .. } => {
+                Some(to_model.string_at("").unwrap_or_default().to_owned())
+            }
             _ => None,
         }
     }
@@ -3687,7 +3730,7 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
         } => {
             let payload = PreToolUsePayload {
                 hook_event_name: HookEventNamePre,
-                session_id: ctx.session_id.to_string(),
+                session_id: ctx.session_id.as_uuid().to_string(),
                 transcript_path: ctx.transcript_path.to_string_lossy().into_owned(),
                 cwd: ctx.cwd.to_string_lossy().into_owned(),
                 prompt_id: ctx.prompt_id.clone(),
@@ -3710,7 +3753,7 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
         } => {
             let payload = PostToolUsePayload {
                 hook_event_name: HookEventNamePost,
-                session_id: ctx.session_id.to_string(),
+                session_id: ctx.session_id.as_uuid().to_string(),
                 transcript_path: ctx.transcript_path.to_string_lossy().into_owned(),
                 cwd: ctx.cwd.to_string_lossy().into_owned(),
                 prompt_id: ctx.prompt_id.clone(),
@@ -3762,7 +3805,7 @@ struct BaseHookFields {
 impl BaseHookFields {
     fn from_ctx(ctx: &HookContext) -> Self {
         Self {
-            session_id: ctx.session_id.to_string(),
+            session_id: ctx.session_id.as_uuid().to_string(),
             transcript_path: ctx.transcript_path.to_string_lossy().into_owned(),
             cwd: ctx.cwd.to_string_lossy().into_owned(),
             prompt_id: ctx.prompt_id.clone(),
@@ -4057,71 +4100,8 @@ fn build_lifecycle_envelope_body(
             };
             Some(("PostCompact", serde_json::to_string(&payload).ok()?))
         }
-        HookEvent::PreModelSwitch {
-            from_model,
-            to_model,
-            requested_model,
-            source,
-            context_tokens,
-            prompt_cache_warm,
-            cache_ttl,
-            estimated_cache_write_usd,
-            pricing,
-        } => {
-            let payload = PreModelSwitchPayload {
-                hook_event_name: HookEventNamePreModelSwitch,
-                session_id: b.session_id,
-                transcript_path: b.transcript_path,
-                cwd: b.cwd,
-                prompt_id: b.prompt_id,
-                permission_mode: b.permission_mode,
-                agent_id: b.agent_id,
-                agent_type: b.agent_type,
-                effort: b.effort,
-                from_model: from_model.clone(),
-                to_model: to_model.clone(),
-                requested_model: requested_model.clone(),
-                source: source.clone(),
-                context_tokens: *context_tokens,
-                prompt_cache_warm: *prompt_cache_warm,
-                cache_ttl: cache_ttl.clone(),
-                estimated_cache_write_usd: *estimated_cache_write_usd,
-                pricing: pricing.clone(),
-            };
-            Some(("PreModelSwitch", serde_json::to_string(&payload).ok()?))
-        }
-        HookEvent::PostModelSwitch {
-            from_model,
-            to_model,
-            requested_model,
-            source,
-            context_tokens,
-            prompt_cache_warm,
-            cache_ttl,
-            estimated_cache_write_usd,
-            pricing,
-        } => {
-            let payload = PostModelSwitchPayload {
-                hook_event_name: HookEventNamePostModelSwitch,
-                session_id: b.session_id,
-                transcript_path: b.transcript_path,
-                cwd: b.cwd,
-                prompt_id: b.prompt_id,
-                permission_mode: b.permission_mode,
-                agent_id: b.agent_id,
-                agent_type: b.agent_type,
-                effort: b.effort,
-                from_model: from_model.clone(),
-                to_model: to_model.clone(),
-                requested_model: requested_model.clone(),
-                source: source.clone(),
-                context_tokens: *context_tokens,
-                prompt_cache_warm: *prompt_cache_warm,
-                cache_ttl: cache_ttl.clone(),
-                estimated_cache_write_usd: *estimated_cache_write_usd,
-                pricing: pricing.clone(),
-            };
-            Some(("PostModelSwitch", serde_json::to_string(&payload).ok()?))
+        HookEvent::PreModelSwitch { .. } | HookEvent::PostModelSwitch { .. } => {
+            crate::hook_payload::model_switch_event_body(event, ctx)
         }
         HookEvent::Notification { message, kind } => {
             let payload = NotificationPayload {

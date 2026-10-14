@@ -251,7 +251,9 @@ macro_rules! define_client_command {
         pub enum ClientCommand { $($variants)* }
 
         #[derive(Deserialize)]
-        #[serde(tag = "type", rename_all = "snake_case")]
+        // Private external tagging avoids serde's Content buffer, which cannot
+        // deserialize RawValue-backed text. The public wire stays type-tagged.
+        #[serde(rename_all = "snake_case")]
         #[allow(dead_code)]
         enum ClientCommandWire { $($variants)* }
 
@@ -887,6 +889,7 @@ define_client_command! {
 impl From<ClientCommandWire> for ClientCommand {
     fn from(value: ClientCommandWire) -> Self {
         match value {
+            ClientCommandWire::FusionAdmin { command } => Self::FusionAdmin { command },
             ClientCommandWire::StartRealtimeAudio { request_json } => {
                 Self::StartRealtimeAudio { request_json }
             }
@@ -1282,22 +1285,24 @@ where
     }
 }
 
-fn command_raw_fallback_json<E>(
-    tag: &str,
-    fields: HashMap<String, Box<RawValue>>,
-) -> Result<String, E>
+fn command_raw_wire_json<E>(tag: &str, fields: HashMap<String, Box<RawValue>>) -> Result<String, E>
 where
     E: serde::de::Error,
 {
-    let mut json = String::from("{\"type\":");
+    let mut json = String::from("{");
     json.push_str(&serde_json::to_string(tag).map_err(E::custom)?);
+    json.push_str(":{");
+    let mut first = true;
     for (key, value) in fields {
-        json.push(',');
+        if !first {
+            json.push(',');
+        }
+        first = false;
         json.push_str(&serde_json::to_string(&key).map_err(E::custom)?);
         json.push(':');
         json.push_str(value.get());
     }
-    json.push('}');
+    json.push_str("}}");
     Ok(json)
 }
 
@@ -1309,6 +1314,17 @@ impl<'de> Deserialize<'de> for ClientCommand {
         let RawEnvelopeFields(mut fields) = RawEnvelopeFields::deserialize(deserializer)?;
         let tag = command_raw_required::<String, D::Error>(&mut fields, "type")?;
         match tag.as_str() {
+            // Unit variants have no raw payload to decode.
+            "stop_realtime_audio" => Ok(Self::StopRealtimeAudio),
+            "get_audio_session_context" => Ok(Self::GetAudioSessionContext),
+            "list_models" => Ok(Self::ListModels),
+            "list_session_agents" => Ok(Self::ListSessionAgents),
+            "login" => Ok(Self::Login),
+            "logout" => Ok(Self::Logout),
+            "force_compact" => Ok(Self::ForceCompact),
+            "clear_session" => Ok(Self::ClearSession),
+            "request_exit" => Ok(Self::RequestExit),
+            "get_conversation_controls" => Ok(Self::GetConversationControls),
             // These prompt fields are Source text. Decode their raw member
             // tokens directly so serde's internally-tagged Content buffer
             // cannot normalize isolated UTF-16 surrogates first.
@@ -1333,7 +1349,7 @@ impl<'de> Deserialize<'de> for ClientCommand {
                 answers: command_raw_required(&mut fields, "answers")?,
             }),
             _ => {
-                let json = command_raw_fallback_json::<D::Error>(&tag, fields)?;
+                let json = command_raw_wire_json::<D::Error>(&tag, fields)?;
                 let wire: ClientCommandWire =
                     serde_json::from_str(&json).map_err(serde::de::Error::custom)?;
                 Ok(wire.into())

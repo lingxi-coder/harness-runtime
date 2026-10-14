@@ -12,6 +12,7 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::events::HookEvent;
 use crate::response::{
     ExactHookText, HookDecision, HookJson, HookResponse, PermissionRequestResult,
 };
@@ -709,8 +710,10 @@ pub struct PreModelSwitchPayload {
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
-    pub from_model: String,
-    pub to_model: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub from_model: Utf16JsonProjection,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub to_model: Utf16JsonProjection,
     #[serde(
         default,
         serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
@@ -745,8 +748,10 @@ pub struct PostModelSwitchPayload {
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
-    pub from_model: String,
-    pub to_model: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub from_model: Utf16JsonProjection,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub to_model: Utf16JsonProjection,
     #[serde(
         default,
         serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
@@ -759,6 +764,111 @@ pub struct PostModelSwitchPayload {
     pub cache_ttl: String,
     pub estimated_cache_write_usd: f64,
     pub pricing: String,
+}
+
+/// Serialize a model-switch event through the current hook payload schema.
+/// Both the ordinary hook executor and classic Mod middleware use this
+/// producer so `from_model`, `to_model`, and nullable `requested_model` remain
+/// source-identical.
+pub fn model_switch_event_body(
+    event: &HookEvent,
+    ctx: &crate::registry::HookContext,
+) -> Option<(&'static str, String)> {
+    let session_id = ctx.session_id.as_uuid().to_string();
+    let transcript_path = ctx.transcript_path.to_string_lossy().into_owned();
+    let cwd = ctx.cwd.to_string_lossy().into_owned();
+    let prompt_id = ctx.prompt_id.clone();
+    let permission_mode = ctx.permission_mode.clone();
+    let agent_id = ctx.agent_id.as_ref().map(ToString::to_string);
+    let agent_type = ctx.agent_type.clone();
+    let effort = ctx.effort.clone();
+    match event {
+        HookEvent::PreModelSwitch {
+            from_model,
+            to_model,
+            requested_model,
+            source,
+            context_tokens,
+            prompt_cache_warm,
+            cache_ttl,
+            estimated_cache_write_usd,
+            pricing,
+        } => {
+            if from_model.string_units("").is_none() || to_model.string_units("").is_none() {
+                return None;
+            }
+            let payload = PreModelSwitchPayload {
+                hook_event_name: HookEventNamePreModelSwitch,
+                session_id: session_id.clone(),
+                transcript_path: transcript_path.clone(),
+                cwd: cwd.clone(),
+                prompt_id: prompt_id.clone(),
+                permission_mode: permission_mode.clone(),
+                agent_id: agent_id.clone(),
+                agent_type: agent_type.clone(),
+                effort: effort.clone(),
+                from_model: from_model.clone(),
+                to_model: to_model.clone(),
+                requested_model: requested_model.clone(),
+                source: source.clone(),
+                context_tokens: *context_tokens,
+                prompt_cache_warm: *prompt_cache_warm,
+                cache_ttl: cache_ttl.clone(),
+                estimated_cache_write_usd: *estimated_cache_write_usd,
+                pricing: pricing.clone(),
+            };
+            Some(("PreModelSwitch", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::PostModelSwitch {
+            from_model,
+            to_model,
+            requested_model,
+            source,
+            context_tokens,
+            prompt_cache_warm,
+            cache_ttl,
+            estimated_cache_write_usd,
+            pricing,
+        } => {
+            if from_model.string_units("").is_none() || to_model.string_units("").is_none() {
+                return None;
+            }
+            let payload = PostModelSwitchPayload {
+                hook_event_name: HookEventNamePostModelSwitch,
+                session_id,
+                transcript_path,
+                cwd,
+                prompt_id,
+                permission_mode,
+                agent_id,
+                agent_type,
+                effort,
+                from_model: from_model.clone(),
+                to_model: to_model.clone(),
+                requested_model: requested_model.clone(),
+                source: source.clone(),
+                context_tokens: *context_tokens,
+                prompt_cache_warm: *prompt_cache_warm,
+                cache_ttl: cache_ttl.clone(),
+                estimated_cache_write_usd: *estimated_cache_write_usd,
+                pricing: pricing.clone(),
+            };
+            Some(("PostModelSwitch", serde_json::to_string(&payload).ok()?))
+        }
+        _ => None,
+    }
+}
+
+/// Build the exact source projection passed to `classic.PreModelSwitch` or
+/// `classic.PostModelSwitch` Mod handlers.
+pub fn model_switch_event_projection(
+    event: &HookEvent,
+    ctx: &crate::registry::HookContext,
+) -> Option<(&'static str, Utf16JsonProjection)> {
+    let (name, body) = model_switch_event_body(event, ctx)?;
+    let projection =
+        Utf16JsonProjection::parse_utf16_json(&body.encode_utf16().collect::<Vec<_>>()).ok()?;
+    Some((name, projection))
 }
 
 /// Wire-format `Notification` payload (1:1 with `coreSchemas.ts:473-482`
@@ -1745,7 +1855,7 @@ fn validate_optional_string_array(
     Ok(())
 }
 
-fn validate_permission_request_decision(
+pub(crate) fn validate_permission_request_decision(
     object: lingxi_core::types::utf16_json::JsonValueView<'_>,
 ) -> Result<(), HookResponseParseError> {
     let Some(value) = object.get_property("decision") else {
@@ -2254,7 +2364,7 @@ mod hook_payload_test;
 
 #[cfg(test)]
 mod flat_response_projection_tests {
-    use super::{parse_response_projection, HookJson};
+    use super::{parse_response_projection, HookEvent, HookJson};
 
     #[test]
     fn response_projection_keeps_arbitrary_text_units_and_null_presence() {
@@ -2309,5 +2419,73 @@ mod flat_response_projection_tests {
             response.classifier_context.unwrap().utf16_code_units,
             [0xD800]
         );
+    }
+
+    #[test]
+    fn model_switch_mod_input_reuses_the_exact_nullable_hook_payload() {
+        let from_units = "before-".encode_utf16().chain([0xD800]).collect::<Vec<_>>();
+        let to_units = "after-".encode_utf16().chain([0xDC00]).collect::<Vec<_>>();
+        let from_model =
+            HookJson::root_string(String::from_utf16_lossy(&from_units), from_units.clone())
+                .unwrap();
+        let to_model =
+            HookJson::root_string(String::from_utf16_lossy(&to_units), to_units.clone()).unwrap();
+        let units = "custom-".encode_utf16().chain([0xD800]).collect::<Vec<_>>();
+        let requested_model =
+            HookJson::root_string(String::from_utf16_lossy(&units), units.clone()).unwrap();
+        let event = HookEvent::PreModelSwitch {
+            from_model: from_model.clone(),
+            to_model: to_model.clone(),
+            requested_model: Some(requested_model),
+            source: "command".into(),
+            context_tokens: 9,
+            prompt_cache_warm: false,
+            cache_ttl: "5m".into(),
+            estimated_cache_write_usd: 0.0,
+            pricing: "unavailable".into(),
+        };
+
+        let ctx = crate::registry::HookContext::default();
+        let expected_session_id = ctx.session_id.as_uuid().to_string();
+        let (name, projection) = super::model_switch_event_projection(&event, &ctx).unwrap();
+
+        assert_eq!(name, "PreModelSwitch");
+        assert_eq!(
+            projection.string_at("/session_id"),
+            Some(expected_session_id.as_str())
+        );
+        assert_eq!(
+            projection.string_units("/from_model"),
+            Some(from_units.clone())
+        );
+        assert_eq!(projection.string_units("/to_model"), Some(to_units.clone()));
+        assert_eq!(projection.string_units("/requested_model"), Some(units));
+        assert_eq!(
+            projection.string_at("/hook_event_name"),
+            Some("PreModelSwitch")
+        );
+
+        let omitted_source = HookEvent::PostModelSwitch {
+            from_model,
+            to_model,
+            requested_model: None,
+            source: "resume".into(),
+            context_tokens: 9,
+            prompt_cache_warm: false,
+            cache_ttl: "5m".into(),
+            estimated_cache_write_usd: 0.0,
+            pricing: "unavailable".into(),
+        };
+        let (name, projection) =
+            super::model_switch_event_projection(&omitted_source, &ctx).unwrap();
+        assert_eq!(name, "PostModelSwitch");
+        assert_eq!(
+            projection.string_at("/session_id"),
+            Some(expected_session_id.as_str())
+        );
+        assert_eq!(projection.string_units("/from_model"), Some(from_units));
+        assert_eq!(projection.string_units("/to_model"), Some(to_units));
+        assert!(projection.contains_property("requested_model"));
+        assert!(projection.at_pointer("/requested_model").unwrap().is_null());
     }
 }

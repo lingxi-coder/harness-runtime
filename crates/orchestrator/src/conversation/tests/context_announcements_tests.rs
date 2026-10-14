@@ -422,6 +422,127 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
 }
 
 #[tokio::test]
+async fn nonempty_session_context_reaches_the_model_request_with_source_units() {
+    let _after_user_turn = crate::request_context::staging_tests::TotalTokenTestEnv::enabled();
+    let dir = tempfile::tempdir().unwrap();
+    let email = "source-🧭@example.test";
+    let mut config = crate::OrchestratorConfig::default();
+    config.user_email = Some(email.to_owned());
+    let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+        vec![llm_runtime::ContentBlock::Text {
+            text: "answer".into(),
+            cache_control: None,
+            citations: None,
+        }],
+        Some("end_turn"),
+    )]));
+    let orch = ConversationOrchestrator::new(
+        config,
+        api.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_owned(),
+    );
+
+    orch.run_turn("hello").await.unwrap();
+
+    let calls = api.captured_msgs().await;
+    assert_eq!(calls.len(), 1, "the prompt reaches the model exactly once");
+    let request = &calls[0];
+    let context_rows = request
+        .iter()
+        .filter_map(|message| {
+            orch.context_attachment_history(std::slice::from_ref(message))
+                .into_iter()
+                .find(|attachment| attachment.string_at("/type") == Some("session_context"))
+                .map(|attachment| (message.id(), attachment))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        context_rows.len(),
+        1,
+        "one typed session_context sidecar is attached to the outgoing request row"
+    );
+    let (context_id, context_payload) = &context_rows[0];
+    let source_email_units = context_payload
+        .string_units("/context/userEmail")
+        .expect("the durable context contains the configured email");
+    assert_eq!(
+        source_email_units,
+        email.encode_utf16().collect::<Vec<_>>(),
+        "the durable source attachment retains the exact JavaScript UTF-16 field"
+    );
+
+    let matching_rows = request
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::User {
+                id,
+                content,
+                is_meta,
+                ..
+            } if id == context_id => {
+                let text_units = content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.encode_utf16().collect()),
+                    ContentBlock::TextJsUtf16 {
+                        utf16_code_units, ..
+                    } => Some(utf16_code_units.clone()),
+                    _ => None,
+                });
+                Some((*is_meta, text_units))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_rows.len(),
+        1,
+        "the nonempty durable context reaches the actual model request once"
+    );
+    let (is_meta, text_units) = &matching_rows[0];
+    assert!(*is_meta, "session_context is a meta user row");
+    let text_units = text_units
+        .as_ref()
+        .expect("the rendered context request row contains text");
+    assert!(
+        text_units
+            .windows(source_email_units.len())
+            .any(|window| window == source_email_units.as_slice()),
+        "the model row retains the context field's exact UTF-16 source units"
+    );
+
+    let reminder_ids = request
+        .iter()
+        .filter_map(|message| {
+            orch.context_attachment_history(std::slice::from_ref(message))
+                .into_iter()
+                .find(|attachment| attachment.string_at("/type") == Some("total_tokens_reminder"))
+                .map(|_| message.id())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reminder_ids.len(),
+        1,
+        "one NAr reminder precedes context rows"
+    );
+    let reminder_index = request
+        .iter()
+        .position(|message| message.id() == reminder_ids[0])
+        .unwrap();
+    let context_index = request
+        .iter()
+        .position(|message| message.id() == *context_id)
+        .unwrap();
+    assert!(
+        reminder_index < context_index,
+        "Native NAr rows precede Wi session-context announcements in the request"
+    );
+}
+
+#[tokio::test]
 async fn successful_empty_provider_and_compaction_use_actual_durable_baseline() {
     let dir = tempfile::tempdir().unwrap();
     let orch = orchestrator(Vec::new(), dir.path());

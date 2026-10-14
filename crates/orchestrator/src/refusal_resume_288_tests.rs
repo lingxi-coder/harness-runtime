@@ -107,7 +107,20 @@ async fn hot_resume_pick_clear_and_neutralized_notice_keep_the_native_sdk_header
         .live_latch()
         .is_some());
     assert!(root.run_turn_streaming("first").await.is_ok());
-    root.switch_model(MODEL, None).await.unwrap();
+    root.select_model(lingxi_core::host::ModelSelectionRequest::Select {
+        source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(MODEL.to_owned()),
+        route_hint: Some(lingxi_core::host::ModelRouteAnchor {
+            model: MODEL.into(),
+            profile: Some("direct".into()),
+        }),
+        origin: lingxi_core::host::ModelSelectionOrigin::Sdk,
+        validation: lingxi_core::host::ModelValidationMode::ServerProbeDisabled,
+    })
+    .await
+    .unwrap();
+    let picked = root.get_status_snapshot().await;
+    assert_eq!(picked.model, MODEL);
+    assert_eq!(picked.model_profile.as_deref(), Some("direct"));
     assert!(root
         .model_runtime
         .refusal_selection
@@ -142,6 +155,8 @@ async fn hot_resume_pick_clear_and_neutralized_notice_keep_the_native_sdk_header
     assert!(root.run_turn_streaming("neutralized").await.is_ok());
     let requests = capture.requests.lock().unwrap();
     assert_eq!(requests.len(), 4);
+    assert_eq!(requests[2].0["model"].as_str(), Some(MODEL));
+    assert_eq!(requests[3].0["model"].as_str(), Some(MODEL));
     for index in [0, 1] {
         assert_eq!(
             header(&requests, index, "x-is-refusal-fallback"),

@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
+use crate::mobile::turn_durability::QueueDeliveryState;
 use async_trait::async_trait;
 use client::adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
 use client::protocol::events::ClientEvent;
@@ -1509,7 +1510,11 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
     let provider = rt.wired_skill_listing_provider.clone();
     let loader = rt.wired_skill_loader.clone();
 
-    let listed = provider.skill_listing_snapshot().await.entries;
+    let listed = provider
+        .skill_listing_snapshot()
+        .await
+        .expect("mobile skill listing snapshot")
+        .entries;
     let listed_names: std::collections::BTreeSet<_> = listed
         .iter()
         .map(|entry| entry.name.string_at("").expect("skill name is a string"))
@@ -1613,7 +1618,11 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         SlashDispatchResult::Handled { .. } => {}
         other => panic!("reload-skills must be handled locally, got {other:?}"),
     }
-    let listed_after_delete = provider.skill_listing_snapshot().await.entries;
+    let listed_after_delete = provider
+        .skill_listing_snapshot()
+        .await
+        .expect("mobile skill listing snapshot")
+        .entries;
     let listed_after_delete_names: std::collections::BTreeSet<_> = listed_after_delete
         .iter()
         .map(|entry| entry.name.string_at("").expect("skill name is a string"))
@@ -1715,10 +1724,13 @@ async fn mobile_bundled_device_skill_is_prompt_discoverable_after_executor_conve
         Arc::new(RwLock::new(registry)),
         session::jsonl::SessionMode::Code,
         None,
-        Arc::new(|| false),
+        Arc::new(|| Ok(false)),
         None,
     );
-    let snapshot = provider.skill_listing_snapshot().await;
+    let snapshot = provider
+        .skill_listing_snapshot()
+        .await
+        .expect("mobile skill listing snapshot");
     assert!(snapshot
         .entries
         .iter()
@@ -1846,6 +1858,7 @@ async fn listing_and_invocation_share_one_registry() {
         .wired_skill_listing_provider
         .skill_listing_snapshot()
         .await
+        .expect("wired mobile skill listing snapshot")
         .entries;
     assert!(
         listed
@@ -2745,6 +2758,7 @@ async fn build_mobile_with_injected_memory_reaches_system_prompt() {
         .orchestrator
         .additional_context_preview()
         .await
+        .expect("additional-context preview must succeed")
         .expect("an additional-context meta must be present (currentDate is unconditional)");
     assert!(
             ctx.contains(
@@ -2787,7 +2801,11 @@ async fn build_mobile_default_loads_no_memory() {
         .await
         .expect("default build_mobile must succeed");
 
-    let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+    let sys = rt
+        .orchestrator
+        .assemble_system_prompt_preview()
+        .await
+        .expect("system prompt preview must succeed");
     assert!(
             !sys.contains(
                 "Codebase and user instructions are shown below. Be sure to adhere to these instructions."
@@ -5073,7 +5091,7 @@ fn new_session_with_an_unroutable_model_is_refused_without_clearing_the_session(
     let cfg = MobileConfig {
         cwd: tmp.path().to_path_buf(),
         lingxi_home: tmp.path().join(branding::DOT_DIR),
-        routing: Some(serde_json::json!({ "mobileEnabledProfiles": ["anthropic"] })),
+        routing: Some(serde_json::json!({ "mobileEnabledProfiles": ["anthropic", "openai"] })),
         ..MobileConfig::default()
     };
     let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
@@ -5100,7 +5118,7 @@ fn new_session_with_an_unroutable_model_is_refused_without_clearing_the_session(
         handle
             .submit(ClientCommand::NewSession {
                 cwd: None,
-                model: Some("anthropic/claude-sonnet-5".into()),
+                model: Some("openai/gpt-5.6-sol".into()),
             })
             .await
             .expect("a routable model must be accepted");
@@ -5523,9 +5541,45 @@ impl lingxi_core::host::ProcessRunner for MobileBashProcess {
     }
 }
 
+fn exact_native_text_block(block: &lingxi_core::types::ContentBlock, expected: &str) -> bool {
+    let expected_units = expected.encode_utf16().collect::<Vec<_>>();
+    match block {
+        lingxi_core::types::ContentBlock::Text { text, citations } => {
+            text == expected
+                && text.encode_utf16().eq(expected_units.iter().copied())
+                && citations.is_none()
+        }
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            citations,
+        } => {
+            utf16_code_units == &expected_units
+                && text == expected
+                && text.encode_utf16().eq(utf16_code_units.iter().copied())
+                && citations.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn native_text_block_contains(block: &lingxi_core::types::ContentBlock, needle: &str) -> bool {
+    match block {
+        lingxi_core::types::ContentBlock::Text { text, .. } => text.contains(needle),
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => text.contains(needle) || String::from_utf16_lossy(utf16_code_units).contains(needle),
+        _ => false,
+    }
+}
+
 #[test]
 fn mobile_bash_prompt_runs_shell_once_then_sends_native_rows_and_images_to_model() {
-    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
     use lingxi_core::types::{ContentBlock, ConversationMessage};
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -5534,10 +5588,12 @@ fn mobile_bash_prompt_runs_shell_once_then_sends_native_rows_and_images_to_model
     install_mobile_bash_probe_hooks(tmp.path(), true);
     let process = Arc::new(MobileBashProcess::default());
     let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
-        HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+        HostFakePlatform::new(tmp.path().to_path_buf())
+            .with_process_runner(process.clone())
+            .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
     );
     let listener = Arc::new(FakeListener::default());
-    let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
     let handle = new_engine_with_streaming(
         config,
@@ -5589,34 +5645,75 @@ fn mobile_bash_prompt_runs_shell_once_then_sends_native_rows_and_images_to_model
 
         let calls = pending.captured_calls();
         assert_eq!(calls.len(), 1);
-        let user_messages = calls[0]
+        let (bash_input_message_index, bash_content, is_meta, turn_companion) = calls[0]
             .messages
             .iter()
-            .filter_map(|message| match message {
-                ConversationMessage::User { content, .. } => Some(content),
+            .enumerate()
+            .find_map(|(index, message)| match message {
+                ConversationMessage::User {
+                    content,
+                    is_meta,
+                    turn_companion,
+                    ..
+                } if content
+                    .iter()
+                    .any(|block| exact_native_text_block(
+                        block,
+                        "<bash-input>printf mobile-bash</bash-input>",
+                    )) => Some((index, content, *is_meta, *turn_companion)),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        let bash_input_index = user_messages
+            .expect("un-normalized Native Bash input reaches the streaming client");
+        assert!(!is_meta, "the direct command is a user row");
+        assert_eq!(turn_companion, None, "Bash input is not a skill companion");
+        let input_block_index = bash_content
             .iter()
-            .position(|content| {
-                content.iter().any(|block| matches!(
-                    block,
-                    ContentBlock::TextJsUtf16 { utf16_code_units, .. }
-                        if utf16_code_units == &"<bash-input>printf mobile-bash</bash-input>"
-                            .encode_utf16().collect::<Vec<_>>()
-                ))
+            .position(|block| {
+                exact_native_text_block(block, "<bash-input>printf mobile-bash</bash-input>")
             })
-            .expect("Native bash input row reaches the model context");
-        let result = &user_messages[bash_input_index + 1];
-        assert!(result.iter().any(|block| matches!(
-            block,
-            ContentBlock::TextJsUtf16 { utf16_code_units, .. }
-                if utf16_code_units == &"<bash-stdout>mobile stdout</bash-stdout><bash-stderr>mobile stderr</bash-stderr>"
-                    .encode_utf16().collect::<Vec<_>>()
-        )));
-        let bash_input = &user_messages[bash_input_index];
-        let images = bash_input
+            .expect("the host preserves the exact un-normalized Bash input block");
+        assert_eq!(bash_content.len(), 3, "raw input is exactly two images then command");
+        assert_eq!(input_block_index, 2);
+        assert!(
+            !bash_content.iter().any(|block| exact_native_text_block(
+                block,
+                "<bash-stdout>mobile stdout</bash-stdout><bash-stderr>mobile stderr</bash-stderr>",
+            )),
+            "the pending stream client sees the raw input row before API normalization"
+        );
+        let (bash_result_message_index, result_content, result_is_meta, result_turn_companion) =
+            calls[0]
+                .messages
+                .iter()
+                .enumerate()
+                .find_map(|(index, message)| match message {
+                    ConversationMessage::User {
+                        content,
+                        is_meta,
+                        turn_companion,
+                        ..
+                    } if content.iter().any(|block| exact_native_text_block(
+                        block,
+                        "<bash-stdout>mobile stdout</bash-stdout><bash-stderr>mobile stderr</bash-stderr>",
+                    )) => Some((index, content, *is_meta, *turn_companion)),
+                    _ => None,
+                })
+                .expect("Bash output remains a separate queued user row before normalization");
+        assert!(bash_input_message_index < bash_result_message_index);
+        assert!(!result_is_meta, "the Bash result is a user row");
+        assert_eq!(result_turn_companion, None);
+        let result_block_index = result_content
+            .iter()
+            .position(|block| {
+                exact_native_text_block(
+                    block,
+                    "<bash-stdout>mobile stdout</bash-stdout><bash-stderr>mobile stderr</bash-stderr>",
+                )
+            })
+            .expect("the exact Bash output survives in its separate raw user row");
+        assert_eq!(result_content.len(), 1);
+        assert_eq!(result_block_index, 0);
+        let images = bash_content
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Image { source } => Some(source),
@@ -5624,6 +5721,20 @@ fn mobile_bash_prompt_runs_shell_once_then_sends_native_rows_and_images_to_model
             })
             .collect::<Vec<_>>();
         assert_eq!(images.len(), 2);
+        let image_block_indices = bash_content
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| {
+                matches!(block, ContentBlock::Image { .. }).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(image_block_indices.len(), images.len());
+        assert!(
+            image_block_indices
+                .iter()
+                .all(|index| *index < input_block_index),
+            "Native carries pasted blocks before the Bash command"
+        );
         assert!(matches!(
             images[0],
             lingxi_core::types::ImageSource::Base64 { media_type, data }
@@ -5644,7 +5755,9 @@ fn mobile_bash_prompt_runs_shell_once_then_sends_native_rows_and_images_to_model
 
 #[test]
 fn mobile_bash_interrupt_persists_native_rows_and_ends_once_without_query() {
-    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
     use lingxi_core::types::{ContentBlock, ConversationMessage};
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -5653,7 +5766,9 @@ fn mobile_bash_interrupt_persists_native_rows_and_ends_once_without_query() {
     install_mobile_bash_probe_hooks(tmp.path(), true);
     let process = Arc::new(InterruptibleMobileBashProcess::default());
     let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
-        HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+        HostFakePlatform::new(tmp.path().to_path_buf())
+            .with_process_runner(process.clone())
+            .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
     );
     let listener = Arc::new(FakeListener::default());
     let (entered_tx, _entered_rx) = tokio::sync::oneshot::channel();
@@ -5704,7 +5819,6 @@ fn mobile_bash_interrupt_persists_native_rows_and_ends_once_without_query() {
 
         let session_id = handle.active_session_id();
         let checkpoint = handle
-            .inner()
             .durable_turns
             .load(&session_id, 812)
             .expect("cancelled Bash checkpoint");
@@ -5734,24 +5848,22 @@ fn mobile_bash_interrupt_persists_native_rows_and_ends_once_without_query() {
             .iter()
             .filter_map(|message| match message {
                 ConversationMessage::User {
-                    content, is_meta, ..
-                } => Some((*is_meta, content)),
+                    content,
+                    is_meta,
+                    turn_companion,
+                    ..
+                } => Some((*is_meta, *turn_companion, content)),
                 _ => None,
             })
             .collect::<Vec<_>>();
         let row_contains = |content: &[ContentBlock], expected: &str| {
-            let expected_units = expected.encode_utf16().collect::<Vec<_>>();
-            content.iter().any(|block| match block {
-                ContentBlock::Text { text, .. } => text.as_str() == expected,
-                ContentBlock::TextJsUtf16 {
-                    utf16_code_units, ..
-                } => utf16_code_units == &expected_units,
-                _ => false,
-            })
+            content
+                .iter()
+                .any(|block| exact_native_text_block(block, expected))
         };
         let notice_index = rows
             .iter()
-            .position(|(is_meta, content)| {
+            .position(|(is_meta, _, content)| {
                 *is_meta
                     && row_contains(
                         content,
@@ -5761,21 +5873,28 @@ fn mobile_bash_interrupt_persists_native_rows_and_ends_once_without_query() {
             .expect("Native direct-Bash notice survives interruption");
         let input_index = rows
             .iter()
-            .position(|(_, content)| {
+            .position(|(_, _, content)| {
                 row_contains(content, "<bash-input>printf interrupted-mobile-bash</bash-input>")
             })
             .expect("Native Bash input survives interruption");
         let interrupted_index = rows
             .iter()
-            .position(|(_, content)| row_contains(content, "[Request interrupted by user]"))
+            .position(|(_, _, content)| row_contains(content, "[Request interrupted by user]"))
             .expect("Native interruption marker is persisted");
+        assert!(!rows[input_index].0, "the command stays a user row");
+        assert!(!rows[interrupted_index].0, "the result stays a user row");
+        assert_eq!(rows[notice_index].1, None);
+        assert_eq!(rows[input_index].1, None);
+        assert_eq!(rows[interrupted_index].1, None);
         assert!(notice_index < input_index && input_index < interrupted_index);
     });
 }
 
 #[test]
 fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_query() {
-    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
     use lingxi_core::types::{ContentBlock, ConversationMessage};
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -5784,7 +5903,9 @@ fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_que
     install_mobile_bash_probe_hooks(tmp.path(), false);
     let process = Arc::new(MobileBashProcess::default());
     let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
-        HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+        HostFakePlatform::new(tmp.path().to_path_buf())
+            .with_process_runner(process.clone())
+            .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
     );
     let listener = Arc::new(FakeListener::default());
     let (entered_tx, _entered_rx) = tokio::sync::oneshot::channel();
@@ -5813,7 +5934,6 @@ fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_que
         let session_id = handle.active_session_id();
         for _ in 0..5_000 {
             let completed = handle
-                .inner()
                 .durable_turns
                 .load(&session_id, 807)
                 .ok()
@@ -5827,7 +5947,6 @@ fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_que
         }
 
         let checkpoint = handle
-            .inner()
             .durable_turns
             .load(&session_id, 807)
             .expect("completed Bash checkpoint");
@@ -5856,24 +5975,22 @@ fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_que
             .iter()
             .filter_map(|message| match message {
                 ConversationMessage::User {
-                    content, is_meta, ..
-                } => Some((*is_meta, content)),
+                    content,
+                    is_meta,
+                    turn_companion,
+                    ..
+                } => Some((*is_meta, *turn_companion, content)),
                 _ => None,
             })
             .collect::<Vec<_>>();
         let row_contains = |content: &[ContentBlock], expected: &str| {
-            let expected_units = expected.encode_utf16().collect::<Vec<_>>();
-            content.iter().any(|block| match block {
-                ContentBlock::Text { text, .. } => text.as_str() == expected,
-                ContentBlock::TextJsUtf16 {
-                    utf16_code_units, ..
-                } => utf16_code_units == &expected_units,
-                _ => false,
-            })
+            content
+                .iter()
+                .any(|block| exact_native_text_block(block, expected))
         };
         let notice_index = rows
             .iter()
-            .position(|(is_meta, content)| {
+            .position(|(is_meta, _, content)| {
                 *is_meta
                     && row_contains(
                         content,
@@ -5883,34 +6000,34 @@ fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_que
             .expect("Native no-response notice row");
         let input_index = rows
             .iter()
-            .position(|(_, content)| row_contains(content, "<bash-input>printf no-response</bash-input>"))
+            .position(|(_, _, content)| row_contains(content, "<bash-input>printf no-response</bash-input>"))
             .expect("Native Bash input row");
         let result_index = rows
             .iter()
-            .position(|(_, content)| {
+            .position(|(_, _, content)| {
                 row_contains(
                     content,
                     "<bash-stdout>mobile stdout</bash-stdout><bash-stderr>mobile stderr</bash-stderr>",
                 )
             })
             .expect("Native Bash output row");
+        assert!(!rows[input_index].0, "the command stays a user row");
+        assert!(!rows[result_index].0, "the no-response result stays a user row");
+        assert_eq!(rows[notice_index].1, None);
+        assert_eq!(rows[input_index].1, None);
+        assert_eq!(rows[result_index].1, None);
         assert!(notice_index < input_index && input_index < result_index);
-        assert!(rows.iter().all(|(_, content)| content.iter().all(|block| {
-            !matches!(
-                block,
-                ContentBlock::Text { text, .. } if text.contains("<bash-exit-code>")
-            ) && !matches!(
-                block,
-                ContentBlock::TextJsUtf16 { utf16_code_units, .. }
-                    if String::from_utf16_lossy(utf16_code_units).contains("<bash-exit-code>")
-            )
+        assert!(rows.iter().all(|(_, _, content)| content.iter().all(|block| {
+            !native_text_block_contains(block, "<bash-exit-code>")
         })));
     });
 }
 
 #[test]
 fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_again() {
-    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut config = test_config(tmp.path());
@@ -5918,7 +6035,9 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
     install_mobile_bash_probe_hooks(tmp.path(), false);
     let process = Arc::new(MobileBashProcess::default());
     let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
-        HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+        HostFakePlatform::new(tmp.path().to_path_buf())
+            .with_process_runner(process.clone())
+            .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
     );
     let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
     let first_pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
@@ -5957,14 +6076,14 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
             .expect("accept no-response Bash prompt");
 
         for _ in 0..5_000 {
-            let completed = first
-                .inner()
-                .durable_turns
-                .load(&session_id, 808)
-                .ok()
-                .is_some_and(|checkpoint| {
-                    checkpoint.state == Some(TurnRecoveryStateDto::Completed)
-                });
+            let completed =
+                first
+                    .durable_turns
+                    .load(&session_id, 808)
+                    .ok()
+                    .is_some_and(|checkpoint| {
+                        checkpoint.state == Some(TurnRecoveryStateDto::Completed)
+                    });
             if completed {
                 break;
             }
@@ -5972,7 +6091,6 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
         }
         assert_eq!(
             first
-                .inner()
                 .durable_turns
                 .load(&session_id, 808)
                 .expect("completed first Bash turn")
@@ -5991,7 +6109,9 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
     let resumed = new_engine_with_streaming(
         test_config(tmp.path()),
         Arc::new(
-            HostFakePlatform::new(tmp.path().to_path_buf()).with_process_runner(process.clone()),
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_process_runner(process.clone())
+                .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
         ),
         Arc::new(FakeListener::default()),
         Arc::new(RecordingPermissionSink::default()),
@@ -6015,7 +6135,6 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
         assert_eq!(process.commands(), ["printf cold-no-response"]);
         assert_eq!(
             resumed
-                .inner()
                 .durable_turns
                 .load(&session_id, 808)
                 .expect("restored Bash checkpoint")
@@ -6470,7 +6589,7 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
         assert_eq!(checkpoint.original_client_turn_id, None);
         assert_eq!(
             checkpoint.prompt.string_units(""),
-            Some(prompt_units.clone())
+            Some(initial_prompt_units.clone())
         );
         assert_eq!(checkpoint.images, image_refs);
         assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Running));
@@ -6487,7 +6606,6 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
             .expect("mark the active request resumable before restart");
         (session_id, turn_id)
     });
-    drop(runtime);
     drop(engine);
 
     let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
@@ -6562,11 +6680,23 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
         assert!(calls[0].messages.iter().any(|message| matches!(
             message,
             ConversationMessage::User { content, .. }
-                if content.iter().any(|block| matches!(
-                    block,
-                    ContentBlock::TextJsUtf16 { utf16_code_units, .. }
-                        if utf16_code_units == &prompt_units
-                ))
+                if content.iter().any(|block| match block {
+                    ContentBlock::Text { text, .. } => {
+                        text.encode_utf16().collect::<Vec<_>>() == prompt_units
+                    }
+                    ContentBlock::TextJsUtf16 {
+                        text,
+                        utf16_code_units,
+                        ..
+                    } => {
+                        utf16_code_units == &prompt_units
+                            && text.encode_utf16().collect::<Vec<_>>()
+                                == String::from_utf16_lossy(utf16_code_units)
+                                    .encode_utf16()
+                                    .collect::<Vec<_>>()
+                    }
+                    _ => false,
+                })
         )));
     });
 }
@@ -6808,19 +6938,21 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             .collect()
     }
 
-    fn transcript_typed_attachment_rows(transcript: &str) -> Vec<(String, String)> {
+    fn transcript_typed_attachment_rows(
+        transcript: &str,
+    ) -> Vec<(String, String, Option<Utf16JsonProjection>)> {
         session::jsonl::reader::route_lines(transcript)
             .messages_in_order
             .into_iter()
             .filter(|row| row.message_type == "attachment")
             .map(|row| {
-                let kind = row
-                    .attachment_projection
+                let payload = row.attachment_projection;
+                let kind = payload
                     .as_ref()
                     .and_then(|payload| payload.string_at("/type"))
                     .unwrap_or("<missing attachment type>")
                     .to_owned();
-                (row.uuid, kind)
+                (row.uuid, kind, payload)
             })
             .collect()
     }
@@ -6884,10 +7016,13 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         }
 
         let attachments = transcript_typed_attachment_rows(transcript);
+        let empty_session_context =
+            Utf16JsonProjection::parse(r#"{"type":"session_context","context":{}}"#)
+                .expect("the known empty durable session-context payload is valid JSON");
         let mut attachment_ids = std::collections::HashSet::new();
         let mut type_by_id = HashMap::new();
         let mut request_attachments = Vec::new();
-        for (uuid, kind) in &attachments {
+        for (uuid, kind, payload) in &attachments {
             assert!(
                 attachment_ids.insert(uuid.clone()),
                 "a typed JSONL attachment UUID is unique: {uuid}"
@@ -6906,6 +7041,28 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                     transcript_uuid_count(transcript, uuid),
                     1,
                     "the non-request prompt_snapshot sidecar remains unique in JSONL"
+                );
+                continue;
+            }
+            let payload = payload
+                .as_ref()
+                .expect("each typed JSONL attachment retains its raw payload");
+            if kind == "session_context" && payload == &empty_session_context {
+                assert!(
+                    lingxi_core::host::instruction_announcements::render_instruction_attachment(
+                        payload
+                    )
+                    .is_none(),
+                    "the exact empty session_context payload renders no Native model row"
+                );
+                assert!(
+                    matches.is_empty(),
+                    "the empty durable session_context stays absent from API user rows"
+                );
+                assert_eq!(
+                    transcript_uuid_count(transcript, uuid),
+                    1,
+                    "the empty model-invisible session_context remains one durable JSONL sidecar"
                 );
                 continue;
             }
@@ -6975,6 +7132,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             "environment".to_owned(),
             "model".to_owned(),
             "skill_listing".to_owned(),
+            "auto_mode".to_owned(),
             "hook_additional_context".to_owned(),
         ];
         assert_eq!(
@@ -7137,7 +7295,10 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             Some(session_id)
         );
         assert_eq!(
-            command.env.get("LINGXI_PROJECT_DIR").map(String::as_str),
+            command
+                .env
+                .get(branding::PROJECT_DIR_ENV)
+                .map(String::as_str),
             Some(cwd.to_string_lossy().as_ref())
         );
 
@@ -7324,15 +7485,15 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             let first_user_rows = source_user_rows(&first_calls[0].messages);
             assert_eq!(
                 first_user_rows.len(),
-                8,
-                "warm Skill request has six ordered prefix rows followed by command/body; bounded rows:\n{}",
+                9,
+                "warm Skill request has seven ordered prefix rows followed by command/body; bounded rows:\n{}",
                 bounded_request_rows_diagnostic(&first_calls[0].messages),
             );
             let command_row_index = first_user_rows
                 .iter()
                 .position(|row| row.text_utf16.as_deref() == Some(first_command_header_units.as_slice()))
                 .expect("Native API projection retains the exact slash command");
-            assert_eq!(command_row_index, 6, "Native Qe attachment rows precede the command");
+            assert_eq!(command_row_index, 7, "Native Qe attachment rows precede the command");
             let body_row_index = command_row_index + 1;
             assert_eq!(body_row_index + 1, first_user_rows.len());
             assert_skill_pair(
@@ -7345,8 +7506,6 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 "# Environment",
                 "You are powered by the model",
                 "The following skills are available for use with the Skill tool:",
-                "Today's date is ",
-                "UserPromptExpansion hook additional context: UPE ",
             ];
             for (index, marker) in expected_prefix_markers.iter().enumerate() {
                 let row = &first_user_rows[index];
@@ -7390,10 +7549,18 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 1,
                 "the request keeps its model-reminder marker"
             );
+            let date_user_row_index = first_user_rows
+                .iter()
+                .position(|row| {
+                    row.text_utf16.as_deref().is_some_and(|units| {
+                        contains_utf16(units, "Today's date is ")
+                    })
+                })
+                .expect("date metadata remains in the outgoing request");
             let date_message_index = first_calls[0]
                 .messages
                 .iter()
-                .position(|message| message.id() == first_user_rows[4].id)
+                .position(|message| message.id() == first_user_rows[date_user_row_index].id)
                 .expect("date metadata remains in the outgoing request");
             assert_eq!(
                 system_markers[0] + 1,
@@ -7401,8 +7568,34 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 "the model-reminder marker stays immediately before the date context"
             );
 
-            let upe_row_index = 5;
             let listing_row_index = 3;
+            let upe_row_index = first_user_rows
+                .iter()
+                .position(|row| {
+                    row.text_utf16.as_deref().is_some_and(|units| {
+                        contains_utf16(units, "UserPromptExpansion hook additional context: UPE ")
+                    })
+                })
+                .expect("the current UPE row remains model-visible");
+            let auto_mode_row_index = first_user_rows
+                .iter()
+                .position(|row| {
+                    row.text_utf16.as_deref().is_some_and(|units| {
+                        contains_utf16(units, "Bias toward working without stopping for clarifying questions")
+                            || contains_utf16(units, "While auto mode is active:")
+                            || contains_utf16(units, "While bypass permissions mode is active:")
+                    })
+                })
+                .expect("the current auto_mode attachment is model-visible");
+            assert!(
+                listing_row_index < auto_mode_row_index
+                    && date_user_row_index < upe_row_index
+                    && auto_mode_row_index < upe_row_index
+                    && upe_row_index < command_row_index,
+                "Native NAr auto_mode follows skill_listing and precedes Qe's UPE and the slash command"
+            );
+            assert!(first_user_rows[auto_mode_row_index].is_meta);
+            assert_eq!(first_user_rows[auto_mode_row_index].turn_companion, None);
             let upe_message_id = first_user_rows[upe_row_index].id;
             let upe_text_units = first_user_rows[upe_row_index]
                 .text_utf16
@@ -8677,7 +8870,7 @@ async fn lifecycle_listener_drops_quiesced_events_without_cancel_rewrite() {
     listener
         .on_event(Ev::Error {
             kind: client::protocol::events::ErrorKindDto::Internal,
-            message: "late error".to_string(),
+            message: "late error".to_string().into(),
         })
         .await;
 
@@ -9000,6 +9193,7 @@ async fn lifecycle_listener_keeps_connection_scoped_events_out_of_the_turn_journ
         .on_event(Ev::ModelList {
             models: Vec::new(),
             current: "m".to_string(),
+            current_model_source: None,
             details: Vec::new(),
         })
         .await;
@@ -11250,6 +11444,121 @@ fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() 
         assert_eq!(
             handle.inner.session_writer.session_target_path(next),
             Some(next_path)
+        );
+    });
+}
+
+/// Exercise the production `/context` failure path through the mobile submit
+/// queue. A settings-source merge error must be returned as a local slash
+/// result, durably delivered, and never start an ordinary model request.
+#[test]
+fn mobile_context_settings_failure_delivers_and_settles_durable_slash_without_model_request() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use orchestrator::test_support_stream::MockStreamingApiClient;
+
+    let root = tempfile::tempdir().expect("mobile context root");
+    let mut cfg = test_config(root.path());
+    // Keep the User settings layer distinct from the project settings layer.
+    cfg.lingxi_home = root.path().join("user-settings-home");
+    let user_settings = cfg.lingxi_home.join("settings.json");
+    let project_settings = cfg.cwd.join(".lingxi/settings.json");
+    let listener = Arc::new(FakeListener::default());
+    let streaming = Arc::new(MockStreamingApiClient::with_open_error(
+        llm_runtime::LlmError::Authentication {
+            message: String::new(),
+        },
+        Vec::new(),
+    ));
+    let handle = new_engine_with_streaming(
+        cfg,
+        Arc::new(HostFakePlatform::new(root.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(streaming.clone()),
+    )
+    .expect("build production mobile host with deterministic streaming client");
+
+    handle.runtime().block_on(async {
+        std::fs::create_dir_all(user_settings.parent().expect("user settings parent"))
+            .expect("create user settings home");
+        std::fs::write(&user_settings, r#"{"extraKnownMarketplaces":[]}"#)
+            .expect("write lower array source");
+        std::fs::create_dir_all(project_settings.parent().expect("project settings parent"))
+            .expect("create project settings directory");
+        std::fs::write(
+            &project_settings,
+            r#"{"extraKnownMarketplaces":{"length":1.5}}"#,
+        )
+        .expect("write invalid Native array-length override");
+
+        // Confirm the real, wired settings reader sees the fixture error before
+        // exercising the public slash-command path that consumes it.
+        let settings_error = handle
+            .inner
+            .wired_skill_listing_provider
+            .skill_listing_snapshot()
+            .await
+            .expect_err("the two real settings layers must fail their Native merge");
+        assert_eq!(
+            settings_error.to_string(),
+            "RangeError: Invalid array length"
+        );
+
+        handle
+            .submit(ClientCommand::RunSlashCommand {
+                raw: "/context".into(),
+                turn_id: Some(641),
+            })
+            .await
+            .expect("the failed local slash is acknowledged");
+
+        let events = listener.received.lock().await.clone();
+        let exact_message = "RangeError: Invalid array length"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Ev::SlashCommandResult {
+                    turn_id: Some(641),
+                    display,
+                    is_error: true,
+                } if display.code_units == exact_message
+            )),
+            "the production /context failure must reach the client unchanged: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ev::TurnStarted { .. })),
+            "a local Failed slash must not enter ordinary turn lifecycle: {events:?}"
+        );
+        assert!(
+            streaming.captured_calls().await.is_empty(),
+            "a local Failed slash must not issue a model request"
+        );
+
+        let session_id = handle
+            .inner
+            .active_session_uuid
+            .lock()
+            .expect("active session identity")
+            .clone();
+        let checkpoint = handle
+            .durable_turns
+            .load(&session_id, 641)
+            .expect("read the settled durable slash checkpoint");
+        assert_eq!(
+            checkpoint.queue_operation,
+            crate::mobile::turn_durability::QueueOperationKind::Slash
+        );
+        assert_eq!(checkpoint.queue_delivery, QueueDeliveryState::Delivered);
+        assert!(checkpoint.state.is_none());
+        assert!(!checkpoint.safe_to_resume);
+        assert_eq!(checkpoint.reason, None);
+        assert!(
+            handle.active_cancel.lock().await.is_none(),
+            "the local slash owner must be released after durable delivery"
         );
     });
 }

@@ -65,6 +65,514 @@ mod tests {
             .expect("test provider response is valid JSON")
     }
 
+    fn context_1m_refusal_response(message: &str) -> FakeResponse {
+        FakeResponse::Ok(ProviderResponse::json(
+            400,
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": message
+                }
+            }),
+        ))
+    }
+
+    fn request_header_has_beta(headers: &BTreeMap<String, String>, beta: &str) -> bool {
+        headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+            .is_some_and(|(_, value)| value.split(',').map(str::trim).any(|item| item == beta))
+    }
+
+    fn request_body_has_beta(body: &lingxi_llm_client::protocol::JsonPayload, beta: &str) -> bool {
+        request_body_value(body)
+            .get("anthropic_beta")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(beta)))
+    }
+
+    #[tokio::test]
+    async fn main_request_preserves_source_thinking_type_before_wire_projection() {
+        use crate::model::thinking::ThinkingConfig;
+
+        for (thinking, expected) in [
+            (ThinkingConfig::Disabled, Some(true)),
+            (ThinkingConfig::Adaptive, Some(false)),
+            (ThinkingConfig::Automatic, None),
+        ] {
+            let service = make_adapter(FakeTransport::always(ProviderResponse::json(
+                200,
+                ok_response_json(),
+            )))
+            .with_thinking(thinking);
+            let request = service
+                .build_main_message_request(
+                    MessagesCreateRequest::new(
+                        "claude-sonnet-4-20250514",
+                        None,
+                        None,
+                        vec![text_user_msg("hello")],
+                        vec![],
+                    ),
+                    false,
+                )
+                .expect("build a StandardMain request from the captured session config")
+                .0;
+            assert_eq!(
+                request.execution.native_thinking_request_type_disabled,
+                expected
+            );
+            assert_eq!(
+                request.execution.native_thinking_mechanically_disabled,
+                Some(false)
+            );
+            let prepared = service
+                .client
+                .prepare(&request)
+                .await
+                .expect("prepare the request without losing source thinking type");
+            assert_eq!(prepared.native_thinking_request_type_disabled, expected);
+            assert_eq!(prepared.native_thinking_mechanically_disabled, Some(false));
+
+            let utility_request = service
+                .build_request(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    vec![text_user_msg("utility query")],
+                    vec![],
+                    false,
+                    None,
+                    false,
+                    PromptCacheQuerySource::Unspecified,
+                )
+                .expect("build a utility request without claiming StandardMain provenance");
+            assert_eq!(
+                utility_request
+                    .execution
+                    .native_thinking_request_type_disabled,
+                None
+            );
+            assert_eq!(
+                utility_request
+                    .execution
+                    .native_thinking_mechanically_disabled,
+                None
+            );
+
+            let scheduled_request = service
+                .build_scheduled_request(
+                    MessagesCreateRequest::new(
+                        "claude-sonnet-4-20250514",
+                        None,
+                        None,
+                        vec![text_user_msg("scheduled turn")],
+                        vec![],
+                    ),
+                    ThinkingConfig::Disabled,
+                    None,
+                )
+                .expect("scheduled requests use their own thinking source");
+            assert_eq!(
+                scheduled_request
+                    .execution
+                    .native_thinking_request_type_disabled,
+                None
+            );
+            assert_eq!(
+                scheduled_request
+                    .execution
+                    .native_thinking_mechanically_disabled,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn native_context_1m_latch_key_strips_only_case_insensitive_beta_tags() {
+        let request = LlmRequest::new("claude-[1M]-Opus-[2m]-Alias");
+        let actual = String::from_utf16(&native_context_1m_model_key(&request)).unwrap();
+        assert_eq!(actual, "claude--Opus--Alias");
+    }
+
+    #[test]
+    fn native_custom_beta_route_requires_a_represented_provider_family() {
+        use crate::model::thinking_binding_controls::ProviderRoute;
+
+        assert_eq!(
+            native_custom_beta_provider_route(
+                &ProviderId::BedrockClaude,
+                ProtocolFamily::BedrockClaude
+            ),
+            Some(ProviderRoute::Bedrock)
+        );
+        assert_eq!(
+            native_custom_beta_provider_route(
+                &ProviderId::VertexClaude,
+                ProtocolFamily::VertexClaude
+            ),
+            Some(ProviderRoute::Vertex)
+        );
+        assert_eq!(
+            native_custom_beta_provider_route(
+                &ProviderId::FoundryClaude,
+                ProtocolFamily::FoundryClaude
+            ),
+            Some(ProviderRoute::Foundry)
+        );
+        assert_eq!(
+            native_custom_beta_provider_route(
+                &ProviderId::Custom {
+                    name: "compatible".into()
+                },
+                ProtocolFamily::AnthropicMessages
+            ),
+            None
+        );
+        assert_eq!(
+            native_custom_beta_provider_route(
+                &ProviderId::BedrockClaude,
+                ProtocolFamily::AnthropicMessages
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn vertex_custom_beta_additions_keep_native_r_s_entries_when_b6_is_true() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_VERTEX_BASE_URL",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1");
+
+        let model = "claude-sonnet-4-20250514";
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::VertexClaude,
+            ProviderId::VertexClaude,
+            "https://vertex.example.test",
+            "vertex",
+            model,
+            transport.clone(),
+        )
+        .with_custom_cli_betas(vec![
+            crate::model::betas::CONTEXT_1M.to_owned(),
+            "not-in-native-static-list".to_owned(),
+        ]);
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("vertex".into());
+
+        service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("Vertex request succeeds");
+
+        let headers = transport.seen_headers(0);
+        assert!(request_header_has_beta(
+            &headers,
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!request_header_has_beta(
+            &headers,
+            "not-in-native-static-list"
+        ));
+    }
+
+    #[tokio::test]
+    async fn bedrock_custom_beta_additions_keep_only_native_r_s_entries_when_b6_is_true() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1");
+
+        let model = "claude-sonnet-4-20250514";
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        )
+        .with_custom_cli_betas(vec![
+            crate::model::betas::CONTEXT_1M.to_owned(),
+            "not-in-native-static-list".to_owned(),
+        ]);
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+
+        service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("Bedrock request succeeds");
+
+        let body = transport.seen_body(0);
+        assert!(request_body_has_beta(
+            &body,
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!request_body_has_beta(&body, "not-in-native-static-list"));
+    }
+
+    #[tokio::test]
+    async fn native_hq_unknown_400_retires_tbc_only_after_gb_and_jk_are_known_false() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                400,
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request field is not recognized"
+                    }
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-opus-4-7";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+        request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+
+        service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("HQ's broad QEE retries only when both native classifiers are false");
+
+        let tbc = "thinking-binding-controls-2026-08-01";
+        assert_eq!(transport.seen_count(), 2);
+        assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
+        assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
+        assert!(scope.beta_rejected(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_hq_known_error_keeps_tbc_when_generic_claim_matches() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        let transport = FakeTransport::sequence(vec![FakeResponse::Ok(ProviderResponse::json(
+            400,
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "the advisor tool is not available in this workspace"
+                }
+            }),
+        ))]);
+        let model = "claude-opus-4-7";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+        request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+
+        let result = service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(transport.seen_count(), 1);
+        assert!(request_header_has_beta(
+            &transport.seen_headers(0),
+            "thinking-binding-controls-2026-08-01"
+        ));
+        assert!(!scope.beta_rejected(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_hq_n_b_refusal_fallback_target_keeps_tbc() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        let model = "claude-opus-4-7";
+        let transport = FakeTransport::sequence(vec![FakeResponse::Ok(ProviderResponse::json(
+            400,
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "'claude-opus-4-7' does not support the `speed` parameter"
+                }
+            }),
+        ))]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+        request.execution.refusal_fallback_context =
+            Some(lingxi_core::host::refusal_driver::FallbackTargetContext {
+                user_model: "claude-sonnet-4-7".into(),
+                turn_override: Some(model.to_owned()),
+                ..Default::default()
+            });
+        request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+
+        let result = service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(transport.seen_count(), 1);
+        assert!(request_header_has_beta(
+            &transport.seen_headers(0),
+            "thinking-binding-controls-2026-08-01"
+        ));
+        assert!(!scope.beta_rejected(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_tbc_h3_fact_and_final_authentication_share_one_selected_key_snapshot() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&["ADAPTER_TEST_KEY"]);
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let service = make_adapter_with_subscriber(transport.clone(), SubscriberState::default());
+        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("Hi");
+        request.profile = Some("anthropic".into());
+
+        let mut prepared = service
+            .client
+            .prepare_on(&request, transport)
+            .await
+            .expect("preparation captures the selected key");
+        assert_eq!(prepared.native_tbc_first_party_h3, Some(false));
+
+        std::env::set_var("ADAPTER_TEST_KEY", "rotated-test-key");
+        assert_eq!(
+            prepared.authenticator.captured_credential().await.unwrap(),
+            Some(Credential::ApiKey("test-key".to_owned()))
+        );
+        service
+            .client
+            .seal_prepared(&mut prepared)
+            .await
+            .expect("final SDK authentication reuses the captured key");
+        let call = prepared.wire_call.take().expect("sealed wire call");
+        assert_eq!(
+            call.request()
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("x-api-key"))
+                .map(|(_, value)| value.as_str()),
+            Some("test-key")
+        );
+    }
+
     fn classified_error<T>(result: &Result<T, LlmError>) -> Option<&LlmError> {
         result.as_ref().err().map(LlmError::classification_source)
     }
@@ -324,6 +832,10 @@ mod tests {
     #[allow(dead_code)]
     enum FakeResponse {
         Ok(ProviderResponse),
+        ResetScopeBeforeReply {
+            scope: crate::thinking_scope::ThinkingRecoveryScope,
+            response: ProviderResponse,
+        },
         Err(LlmError),
     }
 
@@ -350,6 +862,10 @@ mod tests {
 
         fn seen_headers(&self, idx: usize) -> BTreeMap<String, String> {
             self.seen.lock().unwrap()[idx].headers.clone()
+        }
+
+        fn seen_body(&self, idx: usize) -> lingxi_llm_client::protocol::JsonPayload {
+            self.seen.lock().unwrap()[idx].body_json.clone()
         }
 
         /// Return the `"model"` field from the JSON body of the `idx`-th request.
@@ -435,6 +951,10 @@ mod tests {
             Box::pin(async move {
                 match resp {
                     FakeResponse::Ok(r) => Ok(r),
+                    FakeResponse::ResetScopeBeforeReply { scope, response } => {
+                        scope.reset_beta_rejections();
+                        Ok(response)
+                    }
                     FakeResponse::Err(e) => Err(e),
                 }
             })
@@ -846,6 +1366,715 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_context_1m_retry_suppresses_bedrock_wire_and_latches_after_success() {
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&["CLAUDE_CODE_EXTRA_BODY"]);
+        let transport = FakeTransport::sequence(vec![
+            context_1m_refusal_response("The context-1m-2025-08-07 beta is not supported"),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-sonnet-4-20250514[1m]";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let model_key = model.encode_utf16().collect::<Vec<_>>();
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+
+        service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("the ordinary Native context-beta repair succeeds");
+        assert!(scope.context_1m_refused(&native_foundry_model_key(&model_key)));
+
+        let mut next_request = LlmRequest::new(model).with_user_text("Continue");
+        next_request.profile = Some("bedrock".into());
+        next_request.execution.thinking_recovery_scope = Some(scope.clone());
+        service
+            .execute_non_stream_request(
+                next_request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("the next same-session request succeeds without context-1m");
+
+        assert_eq!(transport.seen_count(), 3);
+        assert!(request_body_has_beta(
+            &transport.seen_body(0),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!request_body_has_beta(
+            &transport.seen_body(1),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!request_body_has_beta(
+            &transport.seen_body(2),
+            crate::model::betas::CONTEXT_1M
+        ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_context_1m_retry_ignores_custom_body_only_membership() {
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore(vec![(
+            "CLAUDE_CODE_EXTRA_BODY",
+            std::env::var_os("CLAUDE_CODE_EXTRA_BODY"),
+        )]);
+        std::env::set_var(
+            "CLAUDE_CODE_EXTRA_BODY",
+            r#"{"anthropic_beta":["context-1m-2025-08-07"]}"#,
+        );
+        let transport = FakeTransport::sequence(vec![
+            context_1m_refusal_response("The context-1m-2025-08-07 beta is not supported"),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-sonnet-4-20250514";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+
+        assert!(service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .is_err());
+        assert_eq!(transport.seen_count(), 1);
+        assert!(request_body_has_beta(
+            &transport.seen_body(0),
+            crate::model::betas::CONTEXT_1M
+        ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_context_1m_default_first_party_refusal_is_terminal_without_latching() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        let transport = FakeTransport::sequence(vec![
+            context_1m_refusal_response("The context-1m-2025-08-07 beta is not supported"),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-sonnet-4-20250514";
+        let service = make_adapter(transport.clone()).with_custom_cli_betas(vec![
+            crate::model::context_window::CONTEXT_1M_BETA_HEADER.to_string(),
+        ]);
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+
+        assert!(service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .is_err());
+        assert_eq!(transport.seen_count(), 1);
+        assert!(request_header_has_beta(
+            &transport.seen_headers(0),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!scope.context_1m_refused(&native_foundry_model_key(
+            &model.encode_utf16().collect::<Vec<_>>()
+        )));
+    }
+
+    #[tokio::test]
+    async fn ordinary_context_1m_generic_refusal_retries_when_sticky_tbc_is_on_u6_route() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+            "ANTHROPIC_FOUNDRY_RESOURCE",
+            "ANTHROPIC_FOUNDRY_BASE_URL",
+            "CLAUDE_CODE_EXTRA_BODY",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        ]);
+        let transport = FakeTransport::sequence(vec![
+            context_1m_refusal_response("invalid beta flag"),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-opus-4-7[1m]";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::FoundryClaude,
+            ProviderId::FoundryClaude,
+            "https://resource.services.ai.azure.com/anthropic",
+            "foundry",
+            model,
+            transport.clone(),
+        );
+        // This conversation has prior Native `sent` membership from an earlier
+        // eligible route. Foundry is in U6 but cannot newly register via sl;
+        // it still preserves `kc=J_(nt,uB)` for this request.
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        scope.mark_native_thinking_binding_controls_beta_sent();
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("foundry".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+
+        service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("RZe retries context-1m because Native Tp is false on U6 routes");
+
+        let tbc = "thinking-binding-controls-2026-08-01";
+        assert_eq!(transport.seen_count(), 2);
+        assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
+        assert!(request_header_has_beta(
+            &transport.seen_headers(0),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(request_header_has_beta(&transport.seen_headers(1), tbc));
+        assert!(!request_header_has_beta(
+            &transport.seen_headers(1),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!scope.beta_rejected(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
+        ));
+        assert!(scope.context_1m_refused(&native_foundry_model_key(
+            &model.encode_utf16().collect::<Vec<_>>()
+        )));
+    }
+
+    #[tokio::test]
+    async fn ordinary_context_1m_generic_refusal_prefers_tbc_qee_then_retires_only_tbc_for_conversation(
+    ) {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+            "CLAUDE_CODE_EXTRA_BODY",
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        ]);
+        let transport = FakeTransport::sequence(vec![
+            context_1m_refusal_response("invalid beta flag"),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-opus-4-7[1m]";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+        request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+
+        service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("the exact TBC refusal retries without TBC");
+        assert_eq!(transport.seen_count(), 2);
+        let headers = transport.seen_headers(0);
+        let tbc = "thinking-binding-controls-2026-08-01";
+        assert!(request_header_has_beta(
+            &headers,
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(request_header_has_beta(&headers, tbc));
+        assert!(request_body_has_beta(
+            &transport.seen_body(0),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(request_header_has_beta(
+            &transport.seen_headers(1),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
+        assert!(request_body_has_beta(
+            &transport.seen_body(1),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(scope.beta_rejected(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
+        ));
+        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
+        assert!(!scope.context_1m_refused(&model.encode_utf16().collect::<Vec<_>>()));
+
+        let mut same_conversation = LlmRequest::new(model).with_user_text("Next");
+        same_conversation.profile = Some("bedrock".into());
+        same_conversation.execution.thinking_recovery_scope = Some(scope.clone());
+        same_conversation.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+        service
+            .execute_non_stream_request(
+                same_conversation,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("a later request in this conversation keeps the refusal latch");
+        assert_eq!(transport.seen_count(), 3);
+        assert!(!request_header_has_beta(&transport.seen_headers(2), tbc));
+
+        let mut fresh_conversation = LlmRequest::new(model).with_user_text("Fresh");
+        fresh_conversation.profile = Some("bedrock".into());
+        fresh_conversation.execution.thinking_recovery_scope =
+            Some(crate::thinking_scope::ThinkingRecoveryScope::default());
+        fresh_conversation.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+        service
+            .execute_non_stream_request(
+                fresh_conversation,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("a new conversation does not inherit a model-wide TBC refusal");
+        assert_eq!(transport.seen_count(), 4);
+        assert!(request_header_has_beta(&transport.seen_headers(3), tbc));
+    }
+
+    #[tokio::test]
+    async fn late_tbc_refusal_after_context_reset_does_not_poison_fresh_request() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+            "CLAUDE_CODE_EXTRA_BODY",
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        ]);
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::ResetScopeBeforeReply {
+                scope: scope.clone(),
+                response: ProviderResponse::json(
+                    400,
+                    serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "invalid beta flag"
+                        }
+                    }),
+                ),
+            },
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-opus-4-7[1m]";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let tbc = "thinking-binding-controls-2026-08-01";
+        let mut request = LlmRequest::new(model).with_user_text("Pending");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+        request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+
+        service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("the in-flight request retries after its TBC refusal");
+        assert_eq!(transport.seen_count(), 2);
+        assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
+        assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
+        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
+        assert!(!scope.beta_rejected(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
+        ));
+
+        let mut fresh_request = LlmRequest::new(model).with_user_text("After reset");
+        fresh_request.profile = Some("bedrock".into());
+        fresh_request.execution.thinking_recovery_scope = Some(scope.clone());
+        fresh_request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+        service
+            .execute_non_stream_request(
+                fresh_request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("a fresh query can register TBC in the reset conversation");
+        assert_eq!(transport.seen_count(), 3);
+        assert!(request_header_has_beta(&transport.seen_headers(2), tbc));
+        assert!(scope.native_thinking_binding_controls_state().beta_sent);
+        assert!(!scope.beta_rejected(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
+        ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_context_1m_generic_refusal_retries_when_tbc_is_absent() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://proxy.example.test");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
+        let transport = FakeTransport::sequence(vec![
+            context_1m_refusal_response("invalid beta flag"),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-sonnet-4-20250514";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://proxy.example.test",
+            "proxy",
+            model,
+            transport.clone(),
+        )
+        .with_custom_cli_betas(vec![crate::model::betas::CONTEXT_1M.to_string()]);
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("proxy".into());
+
+        service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("ambiguous refusal retries without the TBC disambiguator");
+        assert_eq!(transport.seen_count(), 2);
+        assert!(request_header_has_beta(
+            &transport.seen_headers(0),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!request_header_has_beta(
+            &transport.seen_headers(1),
+            crate::model::betas::CONTEXT_1M
+        ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_context_1m_does_not_infer_tbc_admission_from_header_alone() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://proxy.example.test");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
+        let transport = FakeTransport::sequence(vec![
+            context_1m_refusal_response("invalid beta flag"),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-sonnet-4-20250514";
+        let tbc = "thinking-binding-controls-2026-08-01";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://proxy.example.test",
+            "proxy",
+            model,
+            transport.clone(),
+        )
+        .with_custom_cli_betas(vec![
+            crate::model::betas::CONTEXT_1M.to_string(),
+            tbc.to_string(),
+        ]);
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("proxy".into());
+        assert_eq!(
+            request
+                .execution
+                .native_thinking_binding_controls_beta_requested,
+            None,
+            "wire header alone is not Native's J_(nt,uB) admission fact"
+        );
+
+        service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("a header token without the Native gate does not block the ctx1m repair");
+        assert_eq!(transport.seen_count(), 2);
+        assert!(request_header_has_beta(
+            &transport.seen_headers(0),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
+        assert!(!request_header_has_beta(
+            &transport.seen_headers(1),
+            crate::model::betas::CONTEXT_1M
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_tbc_first_party_uses_separate_tf_kxt_and_sl_facts() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        let model = "claude-sonnet-4-20250514";
+        let tbc = "thinking-binding-controls-2026-08-01";
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+
+        let make_request = |profile: &str| {
+            let mut request = LlmRequest::new(model).with_user_text("Hi");
+            request.profile = Some(profile.to_owned());
+            request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+                mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+                ..Default::default()
+            });
+            request
+        };
+
+        // An explicitly configured canonical URL takes Native KXt's local
+        // true branch. Its provider route remains first-party even when the
+        // configured profile itself has a different URL.
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
+        let canonical_env = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://proxy.example.test",
+            "proxy-profile",
+            model,
+            transport.clone(),
+        );
+        let canonical_scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let mut canonical_request = make_request("proxy-profile");
+        canonical_request.execution.thinking_recovery_scope = Some(canonical_scope.clone());
+        canonical_env
+            .execute_non_stream_request(
+                canonical_request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("the canonical tf/KXt path sends the planned Native beta");
+        assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
+        assert!(
+            canonical_scope
+                .native_thinking_binding_controls_state()
+                .beta_sent
+        );
+
+        // With the env absent, tf/sl are true but KXt still depends on
+        // Native's bd()/h3()/profile path, which this Host has not observed.
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+        let default_route = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+            "native-default",
+            model,
+            transport.clone(),
+        );
+        let default_scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let mut default_request = make_request("native-default");
+        default_request.execution.thinking_recovery_scope = Some(default_scope.clone());
+        default_route
+            .execute_non_stream_request(
+                default_request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("an unresolved KXt fact does not prevent the ordinary request");
+        assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
+        assert!(
+            !default_scope
+                .native_thinking_binding_controls_state()
+                .beta_sent
+        );
+
+        // The captured Native assume setting can make sl true while a custom
+        // env URL makes tf/KXt false. Keeping those predicates separate avoids
+        // treating the endpoint assumption as account-gate evidence.
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://proxy.example.test");
+        let assumed_proxy = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://proxy.example.test",
+            "assumed-proxy",
+            model,
+            transport.clone(),
+        )
+        .with_native_system_prefix(
+            lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix {
+                compatibility_version: "2.1.295".into(),
+                entrypoint: "cli".into(),
+                host_identity:
+                    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                        "LingXi",
+                    ),
+                attribution_enabled: false,
+                assume_first_party_base_url: true,
+            },
+        );
+        let assumed_scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let mut assumed_request = make_request("assumed-proxy");
+        assumed_request.execution.thinking_recovery_scope = Some(assumed_scope.clone());
+        assumed_proxy
+            .execute_non_stream_request(
+                assumed_request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .expect("a source endpoint assumption does not fabricate KXt");
+        assert!(!request_header_has_beta(&transport.seen_headers(2), tbc));
+        assert!(
+            !assumed_scope
+                .native_thinking_binding_controls_state()
+                .beta_sent
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_context_1m_retry_failure_does_not_commit_session_latch() {
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&["CLAUDE_CODE_EXTRA_BODY"]);
+        let transport = FakeTransport::sequence(vec![
+            context_1m_refusal_response("The context-1m-2025-08-07 beta is not supported"),
+            context_1m_refusal_response("The context-1m-2025-08-07 beta is still not supported"),
+        ]);
+        let model = "claude-sonnet-4-20250514[1m]";
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let key = native_foundry_model_key(&model.encode_utf16().collect::<Vec<_>>());
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+
+        assert!(service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await
+            .is_err());
+        assert_eq!(transport.seen_count(), 2);
+        assert!(!scope.context_1m_refused(&key));
+    }
+
+    #[tokio::test]
     async fn model_validation_retries_only_the_native_context_1m_repair() {
         let _env_lock = CACHE_ENV_LOCK
             .lock()
@@ -1029,7 +2258,7 @@ mod tests {
                 profile_name: "anthropic-oauth".into(),
                 base_url: "https://api.anthropic.com".into(),
                 protocol: ProtocolFamily::AnthropicMessages,
-                auth: AuthStrategy::ApiKey,
+                auth: AuthStrategy::OAuthBearer,
                 credential: CredentialConfig::HostManaged {
                     id: "anthropic-oauth".into(),
                 },
@@ -1096,8 +2325,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_validation_replays_once_after_foundry_tool_search_capability_refusal() {
-        let source_units = "custom-foundry-model".encode_utf16().collect::<Vec<_>>();
+    async fn model_validation_strips_deferred_foundry_features_and_keeps_local_search() {
+        let model = "claude-opus-4-7";
+        let source_units = model.encode_utf16().collect::<Vec<_>>();
         let unsupported = ProviderResponse::json(
             400,
             serde_json::json!({
@@ -1110,15 +2340,75 @@ mod tests {
             FakeResponse::Ok(unsupported),
             FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
         ]);
-        let service = make_adapter_for_protocol_with_transport(
-            ProtocolFamily::FoundryClaude,
-            ProviderId::FoundryClaude,
-            "https://foundry.example/anthropic/",
-            "p",
-            "route-model",
-            transport.clone(),
+        let endpoint = "https://foundry.services.ai.azure.com/anthropic";
+        let wire_profile: lingxi_llm_client::protocol::ProviderProfile =
+            serde_json::from_value(serde_json::json!({
+                "provider_id": "foundry",
+                "profile_name": "p",
+                "protocol": "foundry_claude",
+                "base_url": endpoint,
+                "auth": "none",
+                "regions": ["international"],
+                "models": [{
+                    "display_model": model,
+                    "request_model": model,
+                    "billing_model": model,
+                    "foundry": {"hosting": "anthropic", "model_id": model}
+                }]
+            }))
+            .expect("Foundry wire profile carries explicit supported deployment facts");
+        let client = Arc::new(
+            ModelRuntime::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    wire_profile: Some(wire_profile),
+                    regions: crate::Region::all(),
+                    provider_id: ProviderId::FoundryClaude,
+                    profile_name: "p".to_owned(),
+                    base_url: endpoint.to_owned(),
+                    protocol: ProtocolFamily::FoundryClaude,
+                    auth: AuthStrategy::None,
+                    credential: CredentialConfig::None,
+                    models: vec![ModelProfile {
+                        display_model: model.to_owned(),
+                        request_model: model.to_owned(),
+                        billing_model: model.to_owned(),
+                        aliases: Vec::new(),
+                        description: None,
+                        metadata: Default::default(),
+                        capabilities: Capabilities {
+                            streaming: true,
+                            tools: true,
+                            reasoning: true,
+                            structured_output: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
+                    connection: Default::default(),
+                }],
+            })
+            .expect("Foundry test client"),
         );
-        let mut request = LlmRequest::new("route-model").with_user_text("Hi");
+        let service = ApiService::new(
+            client,
+            transport.clone(),
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_owned()),
+                entrypoint: Some("cli".to_owned()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+        );
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
         request.profile = Some("p".to_owned());
         request.input.max_tokens = Some(1);
         request.input.model_source = Some(
@@ -1128,28 +2418,28 @@ mod tests {
             lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!({
                 "type": "object",
                 "properties": {},
-                "additionalProperties": true
+                "additionalProperties": false
             }))
             .unwrap();
         request.input.tools = vec![
             lingxi_llm_client::protocol::ToolSpec {
-                name: NATIVE_DEFERRED_TOOL_PLACEHOLDER_NAME.to_owned(),
+                name: NATIVE_TOOL_SEARCH_NAME.to_owned(),
                 description: lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(
-                    &NATIVE_DEFERRED_TOOL_PLACEHOLDER_DESCRIPTION
+                    &NATIVE_TOOL_SEARCH_DESCRIPTION
                         .encode_utf16()
                         .collect::<Vec<_>>(),
                 ),
                 input_schema: schema.clone(),
                 strict: false,
-                defer_loading: true,
+                defer_loading: false,
                 native_options: Vec::new(),
                 tool_type: None,
                 extra: Default::default(),
             },
             lingxi_llm_client::protocol::ToolSpec {
-                name: NATIVE_TOOL_SEARCH_NAME.to_owned(),
+                name: NATIVE_DEFERRED_TOOL_PLACEHOLDER_NAME.to_owned(),
                 description: lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(
-                    &NATIVE_TOOL_SEARCH_DESCRIPTION
+                    &NATIVE_DEFERRED_TOOL_PLACEHOLDER_DESCRIPTION
                         .encode_utf16()
                         .collect::<Vec<_>>(),
                 ),
@@ -1185,7 +2475,6 @@ mod tests {
                 extra: Default::default(),
             },
         ];
-
         service
             .execute_model_validation_request(request)
             .await
@@ -1196,12 +2485,12 @@ mod tests {
         let second = request_body_value(&seen[1].body_json);
         let first_tools = first["tools"].as_array().unwrap();
         assert_eq!(first_tools.len(), 4);
+        assert_eq!(first_tools[0]["name"], NATIVE_TOOL_SEARCH_NAME);
+        assert_ne!(first_tools[0]["defer_loading"].as_bool(), Some(true));
         assert_eq!(
-            first_tools[0]["name"],
+            first_tools[1]["name"],
             NATIVE_DEFERRED_TOOL_PLACEHOLDER_NAME
         );
-        assert!(first_tools[0]["defer_loading"].as_bool().unwrap());
-        assert_eq!(first_tools[1]["name"], NATIVE_TOOL_SEARCH_NAME);
         assert!(first_tools[1]["defer_loading"].as_bool().unwrap());
         assert_eq!(first_tools[2]["name"], "DeferredRead");
         assert!(first_tools[2]["defer_loading"].as_bool().unwrap());
@@ -1217,7 +2506,7 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == NATIVE_TOOL_SEARCH_NAME)
             .expect("real ToolSearch remains after the placeholder is removed");
-        assert!(tool_search.get("defer_loading").is_none());
+        assert_ne!(tool_search["defer_loading"].as_bool(), Some(true));
         let deferred_read = second_tools
             .iter()
             .find(|tool| tool["name"] == "DeferredRead")
@@ -4964,6 +6253,233 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_structured_output_hun_obeys_typed_disable_gates_and_preserves_extra_format() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let model = "claude-sonnet-4-20250514";
+        let make_schema_request = || {
+            let mut request = LlmRequest::new(model).with_user_text("Return JSON.");
+            request.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
+                name: "response".into(),
+                schema: provider_payload(serde_json::json!({
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}}
+                })),
+                strict: true,
+            };
+            request
+        };
+
+        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
+        for (raw_disabled, schema_enabled) in [
+            ("0", true),
+            ("false", true),
+            ("", true),
+            ("wat", true),
+            ("true", false),
+            ("1", false),
+            ("yes", false),
+            ("on", false),
+        ] {
+            std::env::set_var(branding::DISABLE_STRUCTURED_OUTPUTS_ENV, raw_disabled);
+            assert_eq!(
+                crate::structured_output::bool_environment(
+                    branding::DISABLE_STRUCTURED_OUTPUTS_ENV
+                ),
+                !schema_enabled,
+                "both Native HUn and the existing typed helper parse {raw_disabled:?} the same way"
+            );
+            let mut prepared = adapter
+                .client
+                .prepare(&make_schema_request())
+                .await
+                .expect("HUn applies the Native M.bool gate before schema validation");
+            assert_eq!(
+                prepared
+                    .provider_request
+                    .body_json
+                    .raw_source_at("/output_config/format")
+                    .is_some(),
+                schema_enabled,
+                "schema admission follows Native M.bool for {raw_disabled:?}"
+            );
+            adapter
+                .inject_headers(&mut prepared, DispatchHeaderState::default())
+                .unwrap();
+            assert_eq!(
+                request_header_has_beta(
+                    &prepared.provider_request.headers,
+                    crate::model::betas::STRUCTURED_OUTPUTS,
+                ),
+                schema_enabled,
+                "the late beta gate follows the same Native HUn result for {raw_disabled:?}"
+            );
+        }
+
+        std::env::remove_var(branding::DISABLE_STRUCTURED_OUTPUTS_ENV);
+        let mut prepared = adapter
+            .client
+            .prepare(&make_schema_request())
+            .await
+            .expect("an unset structured-output disable variable admits the schema");
+        assert!(prepared
+            .provider_request
+            .body_json
+            .raw_source_at("/output_config/format")
+            .is_some());
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        assert!(request_header_has_beta(
+            &prepared.provider_request.headers,
+            crate::model::betas::STRUCTURED_OUTPUTS,
+        ));
+
+        for raw_enabled in ["false", "0", "wat", ""] {
+            std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", raw_enabled);
+            let mut prepared = adapter
+                .client
+                .prepare(&make_schema_request())
+                .await
+                .expect("falsey or unrecognized M.bool values leave HUn enabled");
+            assert!(prepared
+                .provider_request
+                .body_json
+                .raw_source_at("/output_config/format")
+                .is_some());
+            adapter
+                .inject_headers(&mut prepared, DispatchHeaderState::default())
+                .unwrap();
+            assert!(
+                request_header_has_beta(
+                    &prepared.provider_request.headers,
+                    crate::model::betas::STRUCTURED_OUTPUTS,
+                ),
+                "Native M.bool leaves the schema beta enabled for {raw_enabled:?}"
+            );
+        }
+
+        for raw_disabled in ["true", "1", "yes", "on"] {
+            std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", raw_disabled);
+            let mut prepared = adapter
+                .client
+                .prepare(&make_schema_request())
+                .await
+                .expect("Native M.bool B6 suppresses schema before SDK validation");
+            assert!(prepared
+                .provider_request
+                .body_json
+                .raw_source_at("/output_config/format")
+                .is_none());
+            adapter
+                .inject_headers(&mut prepared, DispatchHeaderState::default())
+                .unwrap();
+            assert!(!request_header_has_beta(
+                &prepared.provider_request.headers,
+                crate::model::betas::STRUCTURED_OUTPUTS,
+            ));
+        }
+
+        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
+        let mut prepared = adapter
+            .client
+            .prepare(&make_schema_request())
+            .await
+            .expect("schema is admitted before the late Host policy runs");
+        assert!(prepared
+            .provider_request
+            .body_json
+            .raw_source_at("/output_config/format")
+            .is_some());
+        std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "0");
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        assert!(prepared
+            .provider_request
+            .body_json
+            .raw_source_at("/output_config/format")
+            .is_some());
+        assert!(
+            request_header_has_beta(
+                &prepared.provider_request.headers,
+                crate::model::betas::STRUCTURED_OUTPUTS,
+            ),
+            "M.bool treats late value 0 as false, so HUn adds the beta"
+        );
+
+        let mut prepared = adapter
+            .client
+            .prepare(&make_schema_request())
+            .await
+            .expect("schema is admitted before the late Host policy runs");
+        assert!(prepared
+            .provider_request
+            .body_json
+            .raw_source_at("/output_config/format")
+            .is_some());
+        std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "true");
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        assert!(prepared
+            .provider_request
+            .body_json
+            .raw_source_at("/output_config/format")
+            .is_some());
+        assert!(
+            !request_header_has_beta(
+                &prepared.provider_request.headers,
+                crate::model::betas::STRUCTURED_OUTPUTS,
+            ),
+            "a true value added after preparation still suppresses the late beta"
+        );
+
+        std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "false");
+        std::env::set_var(
+            "CLAUDE_CODE_EXTRA_BODY",
+            r#"{"output_config":{"format":{"type":"json_schema","name":"explicit","schema":{"type":"object"},"strict":true}}}"#,
+        );
+        let request = LlmRequest::new(model).with_user_text("Keep explicit format.");
+        let mut prepared = adapter
+            .client
+            .prepare(&request)
+            .await
+            .expect("extra-body format is caller-authored");
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        assert_eq!(
+            prepared
+                .provider_request
+                .body_json
+                .string_at("/output_config/format/name")
+                .as_deref(),
+            Some("explicit"),
+            "Native B6 does not delete an explicit extra-body format"
+        );
+        assert!(!request_header_has_beta(
+            &prepared.provider_request.headers,
+            crate::model::betas::STRUCTURED_OUTPUTS,
+        ));
+    }
+
+    #[tokio::test]
     async fn extra_body_speed_computed_wins() {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_thinking_env();
@@ -8638,6 +10154,78 @@ mod tests {
         }
     }
 
+    fn bedrock_event_stream_frame(payload: &[u8]) -> Vec<u8> {
+        let headers = [
+            (":message-type", "event"),
+            (":event-type", "chunk"),
+            (":content-type", "application/json"),
+        ];
+        let mut encoded_headers = Vec::new();
+        for (name, value) in headers {
+            encoded_headers.push(name.len() as u8);
+            encoded_headers.extend_from_slice(name.as_bytes());
+            encoded_headers.push(7); // AWS event-stream string header.
+            encoded_headers.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            encoded_headers.extend_from_slice(value.as_bytes());
+        }
+
+        let total_len = 12 + encoded_headers.len() + payload.len() + 4;
+        let mut frame = Vec::with_capacity(total_len);
+        frame.extend_from_slice(&(total_len as u32).to_be_bytes());
+        frame.extend_from_slice(&(encoded_headers.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&crate::crc32(&frame).to_be_bytes());
+        frame.extend_from_slice(&encoded_headers);
+        frame.extend_from_slice(payload);
+        let message_crc = crate::crc32(&frame);
+        frame.extend_from_slice(&message_crc.to_be_bytes());
+        frame
+    }
+
+    fn successful_bedrock_anthropic_frames(model: &str) -> Vec<Vec<u8>> {
+        use base64::Engine as _;
+
+        let events = vec![
+            serde_json::to_vec(&serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_context_1m",
+                    "model": model,
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0
+                    }
+                }
+            }))
+            .unwrap(),
+            br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#.to_vec(),
+            br#"{"type":"message_stop"}"#.to_vec(),
+        ];
+        events
+            .into_iter()
+            .map(|event| {
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "bytes": base64::engine::general_purpose::STANDARD.encode(event)
+                }))
+                .expect("event-stream chunk envelope");
+                bedrock_event_stream_frame(&body)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bedrock_stream_fixture_uses_eventstream_crc_and_chunk_envelope() {
+        let frame = bedrock_event_stream_frame(br#"{"bytes":"e30="}"#);
+        let mut splitter = crate::EventStreamSplitter::new();
+        let messages = splitter.feed(&frame).expect("valid AWS EventStream frame");
+        splitter.finish().expect("complete AWS EventStream frame");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].header(":message-type"), Some("event"));
+        assert_eq!(messages[0].header(":event-type"), Some("chunk"));
+        assert_eq!(messages[0].payload, br#"{"bytes":"e30="}"#);
+    }
+
     /// A Transport that sequences execute responses AND can return scripted
     /// streaming (`open_stream`) responses.
     struct FakeStreamTransport {
@@ -8654,6 +10242,11 @@ mod tests {
             status: u16,
             headers: BTreeMap<String, String>,
             body_json: Option<serde_json::Value>,
+        },
+        Frames {
+            status: u16,
+            headers: BTreeMap<String, String>,
+            frames: Vec<Vec<u8>>,
         },
         /// Terminal transport error (e.g. connection failure).
         Err(LlmError),
@@ -8676,6 +10269,14 @@ mod tests {
             request_body_value(&self.requests.lock().unwrap()[index].body_json)
                 .get("max_tokens")
                 .and_then(serde_json::Value::as_u64)
+        }
+
+        fn seen_headers(&self, index: usize) -> BTreeMap<String, String> {
+            self.requests.lock().unwrap()[index].headers.clone()
+        }
+
+        fn seen_body(&self, index: usize) -> lingxi_llm_client::protocol::JsonPayload {
+            self.requests.lock().unwrap()[index].body_json.clone()
         }
     }
 
@@ -8717,6 +10318,15 @@ mod tests {
                             frames: Box::new(RawBodyFrames(body)),
                         })
                     }
+                    FakeStreamResp::Frames {
+                        status,
+                        headers,
+                        frames,
+                    } => Ok(StreamingResponse {
+                        status: *status,
+                        headers: headers.clone(),
+                        frames: Box::new(ScriptedFrames::new(frames.clone())),
+                    }),
                     FakeStreamResp::Err(e) => Err(e.clone()),
                 }
             };
@@ -8724,6 +10334,305 @@ mod tests {
         }
     }
     llm_runtime::impl_fixture_transport!(FakeStreamTransport);
+
+    #[tokio::test]
+    async fn native_stream_hq_unknown_400_uses_the_same_provenance_guards() {
+        use futures::StreamExt;
+
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        let model = "claude-opus-4-7";
+        let transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Status {
+                status: 400,
+                headers: BTreeMap::new(),
+                body_json: Some(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request field is not recognized"
+                    }
+                })),
+            },
+            FakeStreamResp::Frames {
+                status: 200,
+                headers: BTreeMap::new(),
+                frames: successful_bedrock_anthropic_frames(model),
+            },
+        ]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+        request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+
+        let mut stream = service
+            .stream_request(request)
+            .await
+            .expect("HQ broad QEE recovers the unknown Bedrock refusal");
+        assert_eq!(transport.stream_call_count(), 2);
+        assert!(request_header_has_beta(
+            &transport.seen_headers(0),
+            "thinking-binding-controls-2026-08-01"
+        ));
+        assert!(!request_header_has_beta(
+            &transport.seen_headers(1),
+            "thinking-binding-controls-2026-08-01"
+        ));
+        while let Some(event) = stream.next().await {
+            event.expect("successful retry stream");
+        }
+        assert!(scope.beta_rejected(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
+        ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_stream_context_1m_generic_refusal_retires_tbc_before_context_1m_retry() {
+        use futures::StreamExt;
+
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+            "CLAUDE_CODE_EXTRA_BODY",
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        ]);
+        let model = "claude-opus-4-7[1m]";
+        let transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Status {
+                status: 400,
+                headers: BTreeMap::new(),
+                body_json: Some(serde_json::json!({
+                    "type":"error",
+                    "error":{"type":"invalid_request_error","message":"invalid beta flag"}
+                })),
+            },
+            FakeStreamResp::Frames {
+                status: 200,
+                headers: BTreeMap::new(),
+                frames: successful_bedrock_anthropic_frames(model),
+            },
+        ]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let model_key = native_foundry_model_key(&model.encode_utf16().collect::<Vec<_>>());
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+        request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+
+        let mut stream = service
+            .stream_request(request)
+            .await
+            .expect("the TBC error retries the stream without TBC");
+        assert_eq!(transport.stream_call_count(), 2);
+        let tbc = "thinking-binding-controls-2026-08-01";
+        assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
+        assert!(request_body_has_beta(
+            &transport.seen_body(0),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
+        assert!(request_header_has_beta(
+            &transport.seen_headers(1),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(request_body_has_beta(
+            &transport.seen_body(1),
+            crate::model::betas::CONTEXT_1M
+        ));
+
+        let first = stream
+            .next()
+            .await
+            .expect("first event")
+            .expect("valid stream event");
+        assert!(matches!(first, HistoryEvent::MessageStart { .. }));
+        while let Some(event) = stream.next().await {
+            event.expect("remaining successful stream events");
+        }
+        assert!(scope.beta_rejected(
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
+        ));
+        assert!(!scope.context_1m_refused(&model_key));
+    }
+
+    #[tokio::test]
+    async fn ordinary_stream_context_1m_retry_latches_at_message_start_and_suppresses_next_call() {
+        use futures::StreamExt;
+
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&["CLAUDE_CODE_EXTRA_BODY"]);
+        let model = "claude-sonnet-4-20250514[1m]";
+        let transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Status {
+                status: 400,
+                headers: BTreeMap::new(),
+                body_json: Some(serde_json::json!({
+                    "type":"error",
+                    "error":{"type":"invalid_request_error","message":"context-1m-2025-08-07 beta is not supported"}
+                })),
+            },
+            FakeStreamResp::Frames {
+                status: 200,
+                headers: BTreeMap::new(),
+                frames: successful_bedrock_anthropic_frames(model),
+            },
+            FakeStreamResp::Frames {
+                status: 200,
+                headers: BTreeMap::new(),
+                frames: successful_bedrock_anthropic_frames(model),
+            },
+        ]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let model_key = native_foundry_model_key(&model.encode_utf16().collect::<Vec<_>>());
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+
+        let mut stream = service
+            .stream_request(request)
+            .await
+            .expect("retry opens stream");
+        assert!(
+            !scope.context_1m_refused(&model_key),
+            "a 2xx stream open without a projected message_start does not commit the latch"
+        );
+        let first = stream
+            .next()
+            .await
+            .expect("first event")
+            .expect("valid event");
+        assert!(matches!(first, HistoryEvent::MessageStart { .. }));
+        assert!(scope.context_1m_refused(&model_key));
+        while let Some(event) = stream.next().await {
+            event.expect("remaining successful stream events");
+        }
+
+        let mut next_request = LlmRequest::new(model).with_user_text("Continue");
+        next_request.profile = Some("bedrock".into());
+        next_request.execution.thinking_recovery_scope = Some(scope.clone());
+        let mut next_stream = service
+            .stream_request(next_request)
+            .await
+            .expect("next same-session stream");
+        while let Some(event) = next_stream.next().await {
+            event.expect("next successful stream events");
+        }
+
+        assert_eq!(transport.stream_call_count(), 3);
+        assert!(request_body_has_beta(
+            &transport.seen_body(0),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!request_body_has_beta(
+            &transport.seen_body(1),
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(!request_body_has_beta(
+            &transport.seen_body(2),
+            crate::model::betas::CONTEXT_1M
+        ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_stream_context_1m_retry_without_message_start_does_not_latch() {
+        use futures::StreamExt;
+
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&["CLAUDE_CODE_EXTRA_BODY"]);
+        let model = "claude-sonnet-4-20250514[1m]";
+        let transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Status {
+                status: 400,
+                headers: BTreeMap::new(),
+                body_json: Some(serde_json::json!({
+                    "type":"error",
+                    "error":{"type":"invalid_request_error","message":"context-1m-2025-08-07 beta is not supported"}
+                })),
+            },
+            FakeStreamResp::Frames {
+                status: 200,
+                headers: BTreeMap::new(),
+                frames: Vec::new(),
+            },
+        ]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let key = native_foundry_model_key(&model.encode_utf16().collect::<Vec<_>>());
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope.clone());
+
+        let mut stream = service
+            .stream_request(request)
+            .await
+            .expect("retry opens stream");
+        while let Some(event) = stream.next().await {
+            let _ = event;
+        }
+
+        assert_eq!(transport.stream_call_count(), 2);
+        assert!(!scope.context_1m_refused(&key));
+    }
 
     #[tokio::test]
     async fn stream_dispatch_admission_guards_the_actual_sdk_send_boundary() {
@@ -11281,7 +13190,9 @@ mod tests {
                 (
                     400,
                     error_headers,
-                    vec![body("The tool_addition block is not supported on this model")],
+                    vec![body(
+                        "The tool_addition block is not supported on this model",
+                    )],
                 ),
                 (
                     200,

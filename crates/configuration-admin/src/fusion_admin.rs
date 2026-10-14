@@ -13,6 +13,7 @@ use lingxi_core::host::fusion_strategy::{
 };
 use lingxi_core::settings::schema::{FusionRegistrySettingsJson, FusionStrategy};
 use lingxi_core::settings::tracer::Source;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::WritableScope;
 use migrations::settings_update::{
     read_settings_map, settings_path, transform_settings_with_before_publish,
@@ -75,6 +76,19 @@ fn registry(raw: Option<&Value>) -> Result<FusionRegistrySettingsJson, String> {
     match raw.filter(|value| !value.is_null()) {
         Some(value) => serde_json::from_value(value.clone()).map_err(|error| error.to_string()),
         None => Ok(FusionRegistrySettingsJson::default()),
+    }
+}
+
+fn managed_registry(source: &Utf16JsonProjection) -> Result<FusionRegistrySettingsJson, String> {
+    match source.get_property("fusion") {
+        Some(value) if !value.is_null() => {
+            let raw = source
+                .subprojection_property_units(&"fusion".encode_utf16().collect::<Vec<_>>())
+                .and_then(|value| value.to_json_string())
+                .map_err(|error| error.to_string())?;
+            serde_json::from_str(&raw).map_err(|error| error.to_string())
+        }
+        _ => Ok(FusionRegistrySettingsJson::default()),
     }
 }
 
@@ -162,7 +176,7 @@ pub fn catalog_json(context: &SettingsContext) -> Result<String, String> {
             "diagnostic":registry.diagnostic,
         }));
     }
-    let managed = registry(context.managed.get("fusion"))?;
+    let managed = managed_registry(&context.managed)?;
     layers.push(FusionSettingsLayer {
         source: Source::Managed,
         path: None,
@@ -240,11 +254,11 @@ fn file_layers(context: &SettingsContext) -> Result<Vec<FusionSettingsLayer>, St
             registry: file_registry(map.get("fusion"))?,
         });
     }
-    if let Some(raw) = context.managed.get("fusion") {
+    if context.managed.get_property("fusion").is_some() {
         layers.push(FusionSettingsLayer {
             source: Source::Managed,
             path: None,
-            registry: registry(Some(raw))?,
+            registry: managed_registry(&context.managed)?,
         });
     }
     Ok(layers)
@@ -483,7 +497,6 @@ async fn emit_catalog(context: &SettingsContext, sink: &dyn ClientEventSink) {
 mod tests {
     use super::*;
     use crate::settings_bridge::SettingsPaths;
-    use std::collections::BTreeMap;
     use std::sync::{Arc, RwLock};
 
     fn context(root: &std::path::Path) -> SettingsContext {
@@ -493,8 +506,11 @@ mod tests {
                 lingxi_home: root.join("home"),
                 project_dir: root.join("project"),
             },
-            active: Arc::new(RwLock::new(BTreeMap::new())),
-            managed: BTreeMap::new(),
+            active: Arc::new(RwLock::new(
+                Utf16JsonProjection::object(Vec::new()).unwrap(),
+            )),
+            managed: Utf16JsonProjection::object(Vec::new()).unwrap(),
+            managed_diagnostics: None,
         }
     }
 
@@ -929,10 +945,15 @@ mod tests {
             )
             .unwrap();
         }
-        ctx.managed.insert(
-            "fusion".into(),
-            json!({"allowCrossProviderForAgent":false,"overrides":{"panelMaxTurns":2}}),
-        );
+        ctx.managed
+            .set_field(
+                "fusion",
+                Utf16JsonProjection::from_serde_value(
+                    &json!({"allowCrossProviderForAgent":false,"overrides":{"panelMaxTurns":2}}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let selected: Value = serde_json::from_str(&resolve_json(&ctx, None).unwrap()).unwrap();
         assert_eq!(selected["reference"], json!({"scope":"local","id":"same"}));
         assert_eq!(selected["config"]["panelMaxTurns"], 2);

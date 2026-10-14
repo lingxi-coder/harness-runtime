@@ -266,9 +266,8 @@ fn write_fusion_settings(cfg: &DesktopConfig, extra: serde_json::Value) {
 
 #[tokio::test]
 async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare() {
-    let (tmp, mut cfg) = tests::test_config(true);
+    let (tmp, cfg) = tests::test_config(true);
     seed_managed_policy_snapshot(&cfg, tmp.path()).await;
-    cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
     write_fusion_settings(&cfg, serde_json::json!({}));
     let session = lingxi_core::types::SessionId::new();
     let lease =
@@ -431,7 +430,7 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
 
 #[tokio::test]
 async fn desktop_fusion_composition_refuses_ephemeral_tracker_even_with_output_scope() {
-    let (tmp, mut cfg) = tests::test_config(true);
+    let (tmp, cfg) = tests::test_config(true);
     seed_managed_policy_snapshot(&cfg, tmp.path()).await;
     // The models must be configured for this test to still reach its subject.
     // Without them the run is refused earlier, with `NotConfigured`, and the

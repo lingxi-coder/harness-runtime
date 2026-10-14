@@ -1021,6 +1021,7 @@ mod tests {
 
     fn cache_safe_params(prefix: Vec<ConversationMessage>) -> CacheSafeParams {
         CacheSafeParams {
+            model_source: None,
             system_prompt: std::sync::Arc::new("PARENT SYSTEM PROMPT".into()),
             system_prompt_input: None,
             user_context: HashMap::new(),

@@ -1104,6 +1104,63 @@ pub enum HookOutcome {
     Timeout,
 }
 
+/// The two model-switch event shapes that pass through the Native classic
+/// middleware result projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSwitchHookPhase {
+    /// A model switch that has not yet been applied.
+    Pre,
+    /// A model switch that has already been applied.
+    Post,
+}
+
+/// A generic classic Mod `decision.behavior` override kept separate from
+/// explicit `permissionDecision`, which can independently create a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSwitchPermissionBehavior {
+    /// Skip the confirmation prompt unless an explicit block already exists.
+    Allow,
+    /// Continue without an ask or skip-confirm signal unless blocked.
+    Deny,
+}
+
+/// Source-distinct Native fields retained for a model-switch hook result.
+/// These are kept separate from the normalized `decision` / `reason` fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelSwitchHookOutput {
+    /// Native `block` text, when a hook returned an actual block field.
+    pub block: Option<ExactHookText>,
+    /// PreModelSwitch `permissionDecision` from the original hook JSON.
+    pub permission_decision: Option<ExactHookText>,
+    /// PreModelSwitch `permissionDecisionReason` from the original hook JSON.
+    pub permission_decision_reason: Option<ExactHookText>,
+    /// Top-level `stopReason` from the original hook JSON.
+    pub stop_reason: Option<ExactHookText>,
+    /// Internal Mod-only behavior override. Never part of Native's result
+    /// projection; retained separately from explicit permission fields.
+    pub mod_permission_behavior_override: Option<ModelSwitchPermissionBehavior>,
+}
+
+/// Invalid source shape while projecting a classic model-switch middleware
+/// result into the current aggregate.
+#[derive(Debug, thiserror::Error)]
+pub enum ModelSwitchProjectionError {
+    /// The middleware result must remain an object projection.
+    #[error("model-switch middleware result must be a JSON object")]
+    NotObject,
+    /// A supported result member had a shape that Native does not accept.
+    #[error("model-switch result field {field} must be {expected}")]
+    InvalidField {
+        /// Exact result field name.
+        field: &'static str,
+        /// Expected source shape.
+        expected: &'static str,
+    },
+    /// Building or reading the exact flat projection failed.
+    #[error(transparent)]
+    Projection(#[from] lingxi_core::types::utf16_json::Utf16JsonProjectionError),
+}
+
 /// Merged result of all hooks fired for one event. The executor folds each
 /// individual [`HookResult`] into this aggregate in priority order; the first
 /// `Block` decision wins and stops further folding.
@@ -1295,14 +1352,902 @@ pub struct AggregateHookResult {
     /// so this is captured (no longer dropped at parse) but its re-scan action is a
     /// documented follow-up. Additive default `false`.
     pub reload_skills: bool,
+    /// Source-distinct classic model-switch result fields after middleware
+    /// projection. `None` means derive them from retained exact hook stdout.
+    pub model_switch_output: Option<ModelSwitchHookOutput>,
+}
+
+impl AggregateHookResult {
+    /// Build the narrow Native classic result object used between managed,
+    /// Mod, and core model-switch middleware. Exact hook strings are projected
+    /// directly from retained UTF-16 stdout; no serde `Value` conversion is
+    /// used. `additionalContext` is omitted when the ordered aggregate is
+    /// empty, and `preventContinuation` is emitted only when true.
+    pub fn model_switch_classic_projection(
+        &self,
+        phase: ModelSwitchHookPhase,
+    ) -> Result<HookJson, ModelSwitchProjectionError> {
+        let native = self
+            .model_switch_output
+            .clone()
+            .unwrap_or_else(|| self.model_switch_output_from_source(phase));
+        model_switch_projection_from_parts(
+            native,
+            self.additional_contexts.clone(),
+            self.prevent_continuation,
+            phase,
+        )
+    }
+
+    /// Apply Native's outer `gyt(managed, downstream)` wrapper to a final Mod
+    /// return. `next(e)` receives only the core partition; managed fields are
+    /// overlaid after the Mod chain returns.
+    pub fn model_switch_classic_managed_overlay(
+        &self,
+        phase: ModelSwitchHookPhase,
+        downstream: &HookJson,
+    ) -> Result<(HookJson, Option<PermissionRequestResult>), ModelSwitchProjectionError> {
+        if downstream
+            .at_pointer("")
+            .and_then(|value| value.object_entries())
+            .is_none()
+        {
+            return Err(ModelSwitchProjectionError::NotObject);
+        }
+        let managed_output = self
+            .model_switch_output
+            .clone()
+            .unwrap_or_else(|| self.model_switch_output_from_source(phase));
+        let downstream_output = model_switch_output_from_projection(downstream, phase)?;
+        if downstream.contains_property("permissionDecision")
+            && !matches!(
+                downstream_output
+                    .permission_decision
+                    .as_ref()
+                    .map(|decision| decision.display.as_str()),
+                Some("allow" | "ask" | "deny")
+            )
+        {
+            return Err(ModelSwitchProjectionError::InvalidField {
+                field: "permissionDecision",
+                expected: "allow, ask, or deny",
+            });
+        }
+        // Native model-switch M/C results do not produce a generic decision.
+        // A Mod can, and k9n/_yt applies it after the managed/downstream
+        // permission fold, so retain it separately until delta reconciliation.
+        let mod_decision = permission_request_decision_from_mod_return(downstream, phase)?;
+        let mut output = managed_output;
+        merge_native_gyt_model_switch_outputs(&mut output, downstream_output, phase);
+
+        let mut contexts = self.additional_contexts.clone();
+        if downstream.contains_property("additionalContext") {
+            contexts.extend(exact_string_array(downstream, "additionalContext")?);
+        }
+        let prevent_continuation =
+            self.prevent_continuation || returned_prevent_continuation(downstream)?;
+        Ok((
+            model_switch_projection_from_parts(output, contexts, prevent_continuation, phase)?,
+            mod_decision,
+        ))
+    }
+
+    /// Native runs managed model-switch hooks before entering classic Mod
+    /// middleware. Its managed-result predicate short-circuits on any block,
+    /// preventContinuation, PreModelSwitch deny, or deny decision. Keep this
+    /// gate at the partition boundary so later Mod/core results cannot erase it.
+    pub fn model_switch_managed_blocks_mod_dispatch(&self, phase: ModelSwitchHookPhase) -> bool {
+        let output = self
+            .model_switch_output
+            .clone()
+            .unwrap_or_else(|| self.model_switch_output_from_source(phase));
+        self.decision == Some(HookDecision::Block)
+            || self
+                .permission_request_result
+                .as_ref()
+                .is_some_and(|decision| matches!(decision, PermissionRequestResult::Deny { .. }))
+            || self.prevent_continuation
+            || output.block.is_some()
+            || (phase == ModelSwitchHookPhase::Pre
+                && output
+                    .permission_decision
+                    .as_ref()
+                    .is_some_and(|decision| decision.display == "deny"))
+    }
+
+    /// Merge a direct classic Mod return that did not call `next(e)`.
+    /// `managed` retains field provenance: Native overlays only ordinary
+    /// properties that the managed result actually supplied, while contexts
+    /// and permission decisions use their dedicated folds.
+    pub fn apply_model_switch_classic_direct(
+        &mut self,
+        phase: ModelSwitchHookPhase,
+        managed: &Self,
+        baseline: &HookJson,
+        returned: &HookJson,
+    ) -> Result<(), ModelSwitchProjectionError> {
+        self.apply_model_switch_classic_delta(phase, managed, baseline, returned)
+    }
+
+    /// Apply the PreModelSwitch-only `permissionBehavior` derived by Native
+    /// from a validated classic Mod `decision` object. It remains separate
+    /// from explicit `permissionDecision` / `block`: generic deny means
+    /// proceed, while explicit deny still blocks.
+    pub fn apply_model_switch_classic_mod_decision(
+        &mut self,
+        phase: ModelSwitchHookPhase,
+        decision: Option<PermissionRequestResult>,
+    ) -> Result<(), ModelSwitchProjectionError> {
+        if phase != ModelSwitchHookPhase::Pre {
+            return Ok(());
+        }
+        let Some(decision) = decision else {
+            return Ok(());
+        };
+        let behavior = match decision {
+            PermissionRequestResult::Allow { .. } => ModelSwitchPermissionBehavior::Allow,
+            PermissionRequestResult::Deny { .. } => ModelSwitchPermissionBehavior::Deny,
+        };
+        let mut output = self
+            .model_switch_output
+            .clone()
+            .unwrap_or_else(|| self.model_switch_output_from_source(phase));
+        output.mod_permission_behavior_override = Some(behavior);
+        let has_explicit_block = self.decision == Some(HookDecision::Block)
+            || output.block.is_some()
+            || output
+                .permission_decision
+                .as_ref()
+                .is_some_and(|value| value.display == "deny");
+        if !has_explicit_block {
+            self.decision = match behavior {
+                ModelSwitchPermissionBehavior::Allow => Some(HookDecision::Approve),
+                ModelSwitchPermissionBehavior::Deny => None,
+            };
+        }
+        self.model_switch_output = Some(output);
+        Ok(())
+    }
+
+    /// Apply the final Mod projection against Native's managed-plus-last-core
+    /// baseline, then fold the final downstream result with the original
+    /// managed partition. Keeping `managed` separate is necessary because
+    /// `gyt` overlays only fields actually present on that partition; core
+    /// fields must remain replaceable by the Mod return.
+    pub fn apply_model_switch_classic_delta(
+        &mut self,
+        phase: ModelSwitchHookPhase,
+        managed: &Self,
+        baseline: &HookJson,
+        returned: &HookJson,
+    ) -> Result<(), ModelSwitchProjectionError> {
+        if baseline
+            .at_pointer("")
+            .and_then(|value| value.object_entries())
+            .is_none()
+            || returned
+                .at_pointer("")
+                .and_then(|value| value.object_entries())
+                .is_none()
+        {
+            return Err(ModelSwitchProjectionError::NotObject);
+        }
+
+        let managed_output = managed
+            .model_switch_output
+            .clone()
+            .unwrap_or_else(|| managed.model_switch_output_from_source(phase));
+        let previous_decision = managed.decision;
+        let previous_output = managed_output.clone();
+        let mut downstream_output = model_switch_output_from_projection(baseline, phase)?;
+
+        if projection_field_changed(baseline, returned, "block")? {
+            downstream_output.block = exact_optional_string(returned, "block")?;
+        }
+        if phase == ModelSwitchHookPhase::Pre
+            && projection_field_changed(baseline, returned, "permissionDecision")?
+        {
+            downstream_output.permission_decision =
+                exact_optional_string(returned, "permissionDecision")?;
+        }
+        if phase == ModelSwitchHookPhase::Pre
+            && projection_field_changed(baseline, returned, "permissionDecisionReason")?
+        {
+            downstream_output.permission_decision_reason =
+                exact_optional_string(returned, "permissionDecisionReason")?;
+        }
+        if projection_field_changed(baseline, returned, "stopReason")? {
+            downstream_output.stop_reason = exact_optional_string(returned, "stopReason")?;
+        }
+        if projection_field_changed(baseline, returned, "additionalContext")? {
+            let baseline_contexts = if baseline.contains_property("additionalContext") {
+                exact_string_array(baseline, "additionalContext")?
+            } else {
+                Vec::new()
+            };
+            let returned_contexts = if returned.contains_property("additionalContext") {
+                exact_string_array(returned, "additionalContext")?
+            } else {
+                Vec::new()
+            };
+            append_returned_contexts(
+                &mut self.additional_contexts,
+                &baseline_contexts,
+                returned_contexts,
+            );
+        }
+        if projection_field_changed(baseline, returned, "preventContinuation")? {
+            self.prevent_continuation = returned.contains_property("preventContinuation")
+                && optional_bool(returned, "preventContinuation")?;
+        }
+        self.prevent_continuation |= managed.prevent_continuation;
+
+        let mut output = managed_output;
+        merge_native_gyt_model_switch_outputs(&mut output, downstream_output, phase);
+        self.decision = managed.decision;
+        self.reason = managed.reason.clone();
+        if output.block.is_none() {
+            self.block_command = None;
+        }
+
+        self.apply_model_switch_normalized_decision(
+            phase,
+            previous_decision,
+            &previous_output,
+            &output,
+        )?;
+        self.model_switch_output = Some(output);
+        Ok(())
+    }
+
+    fn apply_model_switch_normalized_decision(
+        &mut self,
+        phase: ModelSwitchHookPhase,
+        previous_decision: Option<HookDecision>,
+        previous_output: &ModelSwitchHookOutput,
+        output: &ModelSwitchHookOutput,
+    ) -> Result<(), ModelSwitchProjectionError> {
+        if phase == ModelSwitchHookPhase::Post {
+            if previous_output.block.is_none() && output.block.is_some() {
+                self.reason = output.block.clone();
+            }
+            return Ok(());
+        }
+
+        if previous_decision == Some(HookDecision::Block) || output.block.is_some() {
+            self.decision = Some(HookDecision::Block);
+            self.reason = output.block.clone().or_else(|| self.reason.clone());
+            return Ok(());
+        }
+
+        let normalized = permission_decision(&output.permission_decision)?;
+        if let Some(normalized) = normalized {
+            self.decision = Some(normalized);
+            self.reason = output.permission_decision_reason.clone();
+        } else if previous_decision.is_none() {
+            self.reason = output.permission_decision_reason.clone();
+        }
+        Ok(())
+    }
+
+    /// Fold a later source partition after the earlier managed partition.
+    /// Side-effect vectors retain source order; model-switch decisions follow
+    /// Native's severity fold and ordinary result fields keep the managed value.
+    pub fn append_model_switch_partition(&mut self, phase: ModelSwitchHookPhase, mut later: Self) {
+        let current_output = self
+            .model_switch_output
+            .clone()
+            .unwrap_or_else(|| self.model_switch_output_from_source(phase));
+        let later_output = later
+            .model_switch_output
+            .clone()
+            .unwrap_or_else(|| later.model_switch_output_from_source(phase));
+        let mut merged_output = current_output.clone();
+        merge_native_yv_model_switch_outputs(&mut merged_output, later_output.clone(), phase);
+
+        let already_blocked = self.decision == Some(HookDecision::Block)
+            || self.prevent_continuation
+            || current_output.block.is_some()
+            || (phase == ModelSwitchHookPhase::Pre
+                && current_output
+                    .permission_decision
+                    .as_ref()
+                    .is_some_and(|decision| decision.display == "deny"));
+        if !already_blocked {
+            let mut later_owns_decision = false;
+            if merged_output.block.is_some() || later.decision == Some(HookDecision::Block) {
+                self.decision = Some(HookDecision::Block);
+                self.reason = merged_output.block.clone().or_else(|| later.reason.clone());
+                if later.decision == Some(HookDecision::Block)
+                    || (current_output.block.is_none() && later_output.block.is_some())
+                {
+                    self.hook_source = later.hook_source.clone();
+                }
+            } else if phase == ModelSwitchHookPhase::Pre {
+                let current_rank = permission_rank(current_output.permission_decision.as_ref());
+                let later_rank = permission_rank(later_output.permission_decision.as_ref());
+                let later_owns_permission = later_rank > current_rank;
+                if let Some(decision) = permission_decision(&merged_output.permission_decision)
+                    .ok()
+                    .flatten()
+                {
+                    self.decision = Some(decision);
+                    if later_owns_permission {
+                        self.hook_source = later.hook_source.clone();
+                    }
+                    later_owns_decision = later_owns_permission;
+                } else if decision_rank(later.decision) > decision_rank(self.decision) {
+                    if let Some(decision) = later.decision {
+                        self.decision = Some(decision);
+                        self.hook_source = later.hook_source.clone();
+                        later_owns_decision = true;
+                    }
+                }
+            } else if let Some(decision) = later.decision {
+                self.decision = Some(decision);
+                self.hook_source = later.hook_source.clone();
+                later_owns_decision = true;
+            }
+            if phase == ModelSwitchHookPhase::Pre {
+                self.reason = if merged_output.block.is_some() {
+                    merged_output.block.clone()
+                } else if merged_output.permission_decision.is_some() {
+                    merged_output
+                        .permission_decision_reason
+                        .clone()
+                        .or_else(|| self.reason.clone())
+                } else if later_owns_decision {
+                    later.reason.clone().or_else(|| self.reason.clone())
+                } else {
+                    self.reason.clone()
+                };
+            } else if self.reason.is_none() {
+                self.reason = later.reason.take();
+            }
+            if later.decision == Some(HookDecision::Block) {
+                self.block_command = later.block_command.take();
+            }
+            if later.permission_request_result.is_some() {
+                self.permission_request_result = later.permission_request_result.take();
+                self.permission_updates = std::mem::take(&mut later.permission_updates);
+            }
+            if !later.permission_updates.is_empty() {
+                self.permission_updates = std::mem::take(&mut later.permission_updates);
+            }
+        }
+        self.modified_input = later.modified_input.take().or(self.modified_input.take());
+        self.interrupt |= later.interrupt;
+        self.system_messages.append(&mut later.system_messages);
+        self.additional_contexts
+            .append(&mut later.additional_contexts);
+        self.prevent_continuation |= later.prevent_continuation;
+        self.attachments.append(&mut later.attachments);
+        self.all_results.append(&mut later.all_results);
+        self.prompt_expansion_history_rows
+            .append(&mut later.prompt_expansion_history_rows);
+        self.progress.append(&mut later.progress);
+        if later.elicitation_response.is_some() {
+            self.elicitation_response = later.elicitation_response.take();
+        }
+        if later.updated_mcp_tool_output.is_some() {
+            self.updated_mcp_tool_output = later.updated_mcp_tool_output.take();
+        }
+        if later.updated_tool_output.is_some() {
+            self.updated_tool_output = later.updated_tool_output.take();
+        }
+        self.classifier_contexts
+            .append(&mut later.classifier_contexts);
+        self.classifier_context_chars = self
+            .classifier_context_chars
+            .saturating_add(later.classifier_context_chars);
+        if later.paired_rewrite.is_some() {
+            self.paired_rewrite = later.paired_rewrite;
+        }
+        self.retry |= later.retry;
+        if later.terminal_sequence.is_some() {
+            self.terminal_sequence = later.terminal_sequence.take();
+        }
+        if later.session_title.is_some() {
+            self.session_title = later.session_title.take();
+        }
+        self.suppress_original_prompt |= later.suppress_original_prompt;
+        if later.display_content.is_some() {
+            self.display_content = later.display_content.take();
+        }
+        self.watch_paths.append(&mut later.watch_paths);
+        if later.initial_user_message.is_some() {
+            self.initial_user_message = later.initial_user_message.take();
+        }
+        self.hook_attachments.append(&mut later.hook_attachments);
+        self.reload_skills |= later.reload_skills;
+        self.model_switch_output = Some(merged_output);
+    }
+
+    fn model_switch_output_from_source(
+        &self,
+        phase: ModelSwitchHookPhase,
+    ) -> ModelSwitchHookOutput {
+        let mut output = ModelSwitchHookOutput::default();
+        for (_, result) in &self.all_results {
+            if result.response.is_none() {
+                continue;
+            }
+            let source = HookJson::parse_utf16_json(&result.stdout.utf16_code_units);
+            let Ok(source) = source else {
+                // Non-JSON executor failures synthesize their decision in the
+                // existing aggregate path; preserve that source instead of
+                // inferring a permissionDecision from the normalized enum.
+                if result
+                    .response
+                    .as_ref()
+                    .is_some_and(|response| response.decision == Some(HookDecision::Block))
+                {
+                    output.block = result
+                        .response
+                        .as_ref()
+                        .and_then(|response| response.reason.clone())
+                        .or_else(|| self.reason.clone());
+                }
+                continue;
+            };
+            if source.string_at("/decision") == Some("block") {
+                output.block = ExactHookText::from_json_projection(&source, "/reason");
+            }
+            if source.contains_property("stopReason") {
+                output.stop_reason = ExactHookText::from_json_projection(&source, "/stopReason");
+            }
+            if phase == ModelSwitchHookPhase::Pre {
+                if let Ok(specific) = source.subprojection("/hookSpecificOutput") {
+                    if specific.contains_property("permissionDecision") {
+                        let decision = ExactHookText::from_json_projection(
+                            &source,
+                            "/hookSpecificOutput/permissionDecision",
+                        );
+                        if decision.as_ref().is_some_and(|value| !value.is_empty()) {
+                            output.permission_decision = decision;
+                        }
+                    }
+                    if specific.contains_property("permissionDecisionReason") {
+                        output.permission_decision_reason = ExactHookText::from_json_projection(
+                            &source,
+                            "/hookSpecificOutput/permissionDecisionReason",
+                        );
+                    }
+                }
+            }
+        }
+        if output.block.is_none()
+            && self.decision == Some(HookDecision::Block)
+            && output
+                .permission_decision
+                .as_ref()
+                .map(|value| value.display.as_str())
+                != Some("deny")
+            && self.all_results.iter().any(|(_, result)| {
+                result.response.as_ref().is_some_and(|response| {
+                    response.decision == Some(HookDecision::Block)
+                        && HookJson::parse_utf16_json(&result.stdout.utf16_code_units).is_err()
+                })
+            })
+        {
+            output.block = self.reason.clone();
+        }
+        output
+    }
+}
+
+fn projection_field_changed(
+    before: &HookJson,
+    after: &HookJson,
+    field: &'static str,
+) -> Result<bool, ModelSwitchProjectionError> {
+    let before_has = before.contains_property(field);
+    let after_has = after.contains_property(field);
+    if before_has != after_has {
+        return Ok(true);
+    }
+    if !before_has {
+        return Ok(false);
+    }
+    let before_value = before.subprojection(&format!("/{field}"))?;
+    let after_value = after.subprojection(&format!("/{field}"))?;
+    Ok(!before_value.semantically_eq(&after_value))
+}
+
+fn model_switch_projection_from_parts(
+    output: ModelSwitchHookOutput,
+    contexts: Vec<ExactHookText>,
+    prevent_continuation: bool,
+    phase: ModelSwitchHookPhase,
+) -> Result<HookJson, ModelSwitchProjectionError> {
+    let mut fields = Vec::new();
+    if let Some(block) = output.block {
+        fields.push(("block".to_owned(), block.json_projection()));
+    }
+    if !contexts.is_empty() {
+        fields.push((
+            "additionalContext".to_owned(),
+            HookJson::array(
+                contexts
+                    .iter()
+                    .map(ExactHookText::json_projection)
+                    .collect(),
+            )?,
+        ));
+    }
+    if prevent_continuation {
+        fields.push(("preventContinuation".to_owned(), HookJson::parse("true")?));
+    }
+    if let Some(stop_reason) = output.stop_reason {
+        fields.push(("stopReason".to_owned(), stop_reason.json_projection()));
+    }
+    if phase == ModelSwitchHookPhase::Pre {
+        if let Some(decision) = output.permission_decision {
+            fields.push(("permissionDecision".to_owned(), decision.json_projection()));
+        }
+        if let Some(reason) = output.permission_decision_reason {
+            fields.push((
+                "permissionDecisionReason".to_owned(),
+                reason.json_projection(),
+            ));
+        }
+    }
+    Ok(HookJson::object(fields)?)
+}
+
+fn model_switch_output_from_projection(
+    projection: &HookJson,
+    _phase: ModelSwitchHookPhase,
+) -> Result<ModelSwitchHookOutput, ModelSwitchProjectionError> {
+    let mut output = ModelSwitchHookOutput::default();
+    if projection.contains_property("block") {
+        output.block = exact_optional_string(projection, "block")?;
+    }
+    if projection.contains_property("stopReason") {
+        output.stop_reason = exact_optional_string(projection, "stopReason")?;
+    }
+    if projection.contains_property("permissionDecision") {
+        output.permission_decision = exact_optional_string(projection, "permissionDecision")?;
+        if !matches!(
+            output
+                .permission_decision
+                .as_ref()
+                .map(|decision| decision.display.as_str()),
+            Some("allow" | "ask" | "deny")
+        ) {
+            return Err(ModelSwitchProjectionError::InvalidField {
+                field: "permissionDecision",
+                expected: "allow, ask, or deny",
+            });
+        }
+    }
+    if projection.contains_property("permissionDecisionReason") {
+        output.permission_decision_reason =
+            exact_optional_string(projection, "permissionDecisionReason")?;
+    }
+    Ok(output)
+}
+
+fn permission_request_decision_from_mod_return(
+    projection: &HookJson,
+    phase: ModelSwitchHookPhase,
+) -> Result<Option<PermissionRequestResult>, ModelSwitchProjectionError> {
+    returned_prevent_continuation(projection)?;
+    if !projection.contains_property("decision") {
+        return Ok(None);
+    }
+    let root = projection
+        .at_pointer("")
+        .ok_or(ModelSwitchProjectionError::NotObject)?;
+    crate::hook_payload::validate_permission_request_decision(root).map_err(|_| {
+        ModelSwitchProjectionError::InvalidField {
+            field: "decision",
+            expected: "a valid allow or deny decision object",
+        }
+    })?;
+    let decision = projection.subprojection("/decision")?;
+    let serialized = decision.to_json_string()?;
+    let decision = serde_json::from_str::<PermissionRequestResult>(&serialized).map_err(|_| {
+        ModelSwitchProjectionError::InvalidField {
+            field: "decision",
+            expected: "a valid allow or deny decision object",
+        }
+    })?;
+    Ok((phase == ModelSwitchHookPhase::Pre).then_some(decision))
+}
+
+fn returned_prevent_continuation(
+    projection: &HookJson,
+) -> Result<bool, ModelSwitchProjectionError> {
+    if !projection.contains_property("preventContinuation") {
+        return Ok(false);
+    }
+    if optional_bool(projection, "preventContinuation")? {
+        Ok(true)
+    } else {
+        Err(ModelSwitchProjectionError::InvalidField {
+            field: "preventContinuation",
+            expected: "true",
+        })
+    }
+}
+
+/// Native's `pyt` permission fold is severity ordered (`allow < ask < deny`),
+/// with the earlier result winning ties. A missing winning reason falls back
+/// to the other reason only when both partitions carry the same decision.
+fn merge_native_permission_fields(
+    output: &mut ModelSwitchHookOutput,
+    later_decision: Option<ExactHookText>,
+    later_reason: Option<ExactHookText>,
+) {
+    let same_decision = output.permission_decision == later_decision;
+    let current_rank = permission_rank(output.permission_decision.as_ref());
+    let later_rank = permission_rank(later_decision.as_ref());
+    match later_rank.cmp(&current_rank) {
+        std::cmp::Ordering::Greater => {
+            output.permission_decision = later_decision;
+            output.permission_decision_reason = later_reason.or_else(|| {
+                same_decision
+                    .then(|| output.permission_decision_reason.clone())
+                    .flatten()
+            });
+        }
+        std::cmp::Ordering::Equal => {
+            if output.permission_decision.is_none() {
+                output.permission_decision = later_decision;
+            }
+            if output.permission_decision_reason.is_none() && same_decision {
+                output.permission_decision_reason = later_reason;
+            }
+        }
+        std::cmp::Ordering::Less => {
+            if output.permission_decision_reason.is_none() && same_decision {
+                output.permission_decision_reason = later_reason;
+            }
+        }
+    }
+}
+
+/// Native `YV(managed, downstream)` spreads downstream ordinary fields over
+/// managed fields, while folding permissions and contexts specially.
+fn merge_native_yv_model_switch_outputs(
+    output: &mut ModelSwitchHookOutput,
+    later: ModelSwitchHookOutput,
+    phase: ModelSwitchHookPhase,
+) {
+    if later.block.is_some() {
+        output.block = later.block;
+    }
+    if phase == ModelSwitchHookPhase::Pre {
+        merge_native_permission_fields(
+            output,
+            later.permission_decision,
+            later.permission_decision_reason,
+        );
+    }
+    if later.stop_reason.is_some() {
+        output.stop_reason = later.stop_reason;
+    }
+}
+
+/// Native `gyt` restores ordinary fields that were present on the managed
+/// result over the final downstream value. The left side is the original
+/// managed partition, not an already merged managed-plus-core aggregate.
+fn merge_native_gyt_model_switch_outputs(
+    output: &mut ModelSwitchHookOutput,
+    later: ModelSwitchHookOutput,
+    phase: ModelSwitchHookPhase,
+) {
+    if output.block.is_none() {
+        output.block = later.block;
+    }
+    if phase == ModelSwitchHookPhase::Pre {
+        merge_native_permission_fields(
+            output,
+            later.permission_decision,
+            later.permission_decision_reason,
+        );
+    }
+    if output.stop_reason.is_none() {
+        output.stop_reason = later.stop_reason;
+    }
+}
+
+fn permission_rank(decision: Option<&ExactHookText>) -> u8 {
+    match decision.map(|value| value.display.as_str()) {
+        Some("allow") => 1,
+        Some("ask") => 2,
+        Some("deny") => 3,
+        _ => 0,
+    }
+}
+
+fn decision_rank(decision: Option<HookDecision>) -> u8 {
+    match decision {
+        Some(HookDecision::Approve | HookDecision::Allow) => 1,
+        Some(HookDecision::Ask) => 2,
+        Some(HookDecision::Block) => 3,
+        _ => 0,
+    }
+}
+
+fn append_returned_contexts(
+    aggregate: &mut Vec<ExactHookText>,
+    baseline: &[ExactHookText],
+    returned: Vec<ExactHookText>,
+) {
+    let shared_prefix = baseline
+        .iter()
+        .zip(returned.iter())
+        .take_while(|(before, after)| before == after)
+        .count();
+    aggregate.extend(returned.into_iter().skip(shared_prefix));
+}
+
+fn exact_optional_string(
+    projection: &HookJson,
+    field: &'static str,
+) -> Result<Option<ExactHookText>, ModelSwitchProjectionError> {
+    if !projection.contains_property(field) {
+        return Ok(None);
+    }
+    ExactHookText::from_json_projection(projection, &format!("/{field}"))
+        .map(Some)
+        .ok_or(ModelSwitchProjectionError::InvalidField {
+            field,
+            expected: "a string",
+        })
+}
+
+fn exact_string_array(
+    projection: &HookJson,
+    field: &'static str,
+) -> Result<Vec<ExactHookText>, ModelSwitchProjectionError> {
+    if !projection.contains_property(field) {
+        return Ok(Vec::new());
+    }
+    let length = projection.array_len(&format!("/{field}")).ok_or(
+        ModelSwitchProjectionError::InvalidField {
+            field,
+            expected: "an ordered string array",
+        },
+    )?;
+    (0..length)
+        .map(|index| {
+            ExactHookText::from_json_projection(projection, &format!("/{field}/{index}")).ok_or(
+                ModelSwitchProjectionError::InvalidField {
+                    field,
+                    expected: "an ordered string array",
+                },
+            )
+        })
+        .collect()
+}
+
+fn optional_bool(
+    projection: &HookJson,
+    field: &'static str,
+) -> Result<bool, ModelSwitchProjectionError> {
+    if !projection.contains_property(field) {
+        return Ok(false);
+    }
+    projection
+        .at_pointer(&format!("/{field}"))
+        .and_then(|value| value.as_bool())
+        .ok_or(ModelSwitchProjectionError::InvalidField {
+            field,
+            expected: "a boolean",
+        })
+}
+
+fn permission_decision(
+    decision: &Option<ExactHookText>,
+) -> Result<Option<HookDecision>, ModelSwitchProjectionError> {
+    match decision.as_ref().map(|value| value.display.as_str()) {
+        None => Ok(None),
+        Some("") => Ok(None),
+        Some("allow") => Ok(Some(HookDecision::Approve)),
+        Some("deny") => Ok(Some(HookDecision::Block)),
+        Some("ask") => Ok(Some(HookDecision::Ask)),
+        Some(_) => Err(ModelSwitchProjectionError::InvalidField {
+            field: "permissionDecision",
+            expected: "allow, deny, or ask",
+        }),
+    }
 }
 
 #[cfg(test)]
 mod exact_hook_text_tests {
     use super::{
+        exact_string_array, model_switch_output_from_projection,
+        permission_request_decision_from_mod_return, returned_prevent_continuation,
         ElicitationHookResponse, ExactHookText, HookJson, HookOutcome, HookResponse, HookResult,
-        PermissionRequestResult,
+        ModelSwitchHookPhase, ModelSwitchProjectionError, PermissionRequestResult,
     };
+
+    #[test]
+    fn classic_mod_null_decision_is_rejected_instead_of_becoming_deny_or_allow() {
+        let returned = HookJson::parse(r#"{"decision":null}"#).unwrap();
+        assert!(matches!(
+            permission_request_decision_from_mod_return(&returned, ModelSwitchHookPhase::Pre),
+            Err(ModelSwitchProjectionError::InvalidField {
+                field: "decision",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn post_model_switch_validates_ignored_permission_fields_and_decision_shape() {
+        let empty_decision = HookJson::parse(r#"{"permissionDecision":""}"#).unwrap();
+        assert!(matches!(
+            model_switch_output_from_projection(&empty_decision, ModelSwitchHookPhase::Post),
+            Err(ModelSwitchProjectionError::InvalidField {
+                field: "permissionDecision",
+                ..
+            })
+        ));
+
+        let null_reason = HookJson::parse(r#"{"permissionDecisionReason":null}"#).unwrap();
+        assert!(matches!(
+            model_switch_output_from_projection(&null_reason, ModelSwitchHookPhase::Post),
+            Err(ModelSwitchProjectionError::InvalidField {
+                field: "permissionDecisionReason",
+                ..
+            })
+        ));
+
+        let null_decision = HookJson::parse(r#"{"stopReason":"ignored","decision":null}"#).unwrap();
+        assert!(matches!(
+            permission_request_decision_from_mod_return(&null_decision, ModelSwitchHookPhase::Post),
+            Err(ModelSwitchProjectionError::InvalidField {
+                field: "decision",
+                ..
+            })
+        ));
+
+        let invalid_behavior = HookJson::parse(r#"{"decision":{"behavior":"ask"}}"#).unwrap();
+        assert!(matches!(
+            permission_request_decision_from_mod_return(
+                &invalid_behavior,
+                ModelSwitchHookPhase::Post
+            ),
+            Err(ModelSwitchProjectionError::InvalidField {
+                field: "decision",
+                ..
+            })
+        ));
+
+        let invalid_updated_input =
+            HookJson::parse(r#"{"decision":{"behavior":"allow","updatedInput":null}}"#).unwrap();
+        assert!(matches!(
+            permission_request_decision_from_mod_return(
+                &invalid_updated_input,
+                ModelSwitchHookPhase::Post
+            ),
+            Err(ModelSwitchProjectionError::InvalidField {
+                field: "decision",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn classic_mod_return_rejects_false_prevent_continuation_but_accepts_empty_context_items() {
+        let false_prevent = HookJson::parse(r#"{"preventContinuation":false}"#).unwrap();
+        assert!(matches!(
+            returned_prevent_continuation(&false_prevent),
+            Err(ModelSwitchProjectionError::InvalidField {
+                field: "preventContinuation",
+                ..
+            })
+        ));
+
+        let empty_context = HookJson::parse(r#"{"additionalContext":[""]}"#).unwrap();
+        let contexts = exact_string_array(&empty_context, "additionalContext").unwrap();
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].utf16_code_units.is_empty());
+    }
 
     #[test]
     fn exact_surrogate_text_cannot_be_silently_serialized_as_display() {

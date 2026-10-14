@@ -8,7 +8,6 @@ use client::adapter::ClientEventSink;
 use client::protocol::commands::{PermissionBehaviorDto, WritableScopeDto};
 use client::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::Value;
 use std::sync::{Arc, RwLock};
 
 pub(super) struct MobileModSettingsReader {
@@ -496,7 +495,7 @@ mod tests {
 
     #[test]
     fn settings_listing_error_keeps_exact_utf16_message_units() {
-        let suffix = vec![u16::from('e'), 0xD800];
+        let suffix = vec![u16::from(b'e'), 0xD800];
         let projection =
             Utf16JsonProjection::root_string(String::from_utf16_lossy(&suffix), suffix.clone())
                 .unwrap();

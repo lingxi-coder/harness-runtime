@@ -50,12 +50,14 @@ pub async fn record_fusion_command_failure(
     }
     let target = handle.current_session_id().await.to_string();
     let display = format!("fusion failed to start: {error}");
+    let raw_source = Utf16JsonProjection::from(raw);
+    let display_source = Utf16JsonProjection::from(display.clone());
     handle
-        .append_fusion_command_message(&target, raw, true)
+        .append_fusion_command_message(&target, &raw_source, true)
         .await
         .map_err(|error| error.to_string())?;
     handle
-        .append_fusion_command_message(&target, &display, false)
+        .append_fusion_command_message(&target, &display_source, false)
         .await
         .map_err(|error| error.to_string())?;
     Ok(display)
@@ -500,7 +502,7 @@ impl DesktopFusionCommandHandler {
             Ok(strategy) => strategy,
             Err(error) => {
                 return CommandResult::Done {
-                    display: Some(format!("fusion failed to start: {error}")),
+                    display: Some(format!("fusion failed to start: {error}").into()),
                 }
             }
         };
@@ -517,7 +519,7 @@ impl DesktopFusionCommandHandler {
             Ok(surface) => surface,
             Err(error) => {
                 return CommandResult::Done {
-                    display: Some(format!("fusion failed to start: {error}")),
+                    display: Some(format!("fusion failed to start: {error}").into()),
                 }
             }
         };
@@ -671,7 +673,7 @@ fn fusion_visible_args(raw: &Utf16JsonProjection) -> Utf16JsonProjection {
         return raw.clone();
     };
     let prefix = "--strategy-revision ".encode_utf16().collect::<Vec<_>>();
-    let Some(revision_and_prompt) = raw_units.strip_prefix(&prefix) else {
+    let Some(revision_and_prompt) = raw_units.strip_prefix(prefix.as_slice()) else {
         return raw.clone();
     };
     let mut unit_offset = 0usize;

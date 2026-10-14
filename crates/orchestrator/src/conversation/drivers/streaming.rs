@@ -1122,7 +1122,7 @@ impl StreamingTurnDriver<'_> {
                 orch.config.model.clone(),
                 input,
                 model_profile.clone(),
-                orch.configured_model_source_for_request(&model, model_profile.as_deref())
+                orch.main_model_source_for_request(&model, model_profile.as_deref())
                     .await,
                 system_prompt.clone(),
                 snapshot,
@@ -1196,11 +1196,8 @@ impl StreamingTurnDriver<'_> {
                             native_anthropic_request_context.clone(),
                             typed_attachment_ids,
                             task_deliveries,
-                            orch.configured_model_source_for_request(
-                                &model,
-                                model_profile.as_deref(),
-                            )
-                            .await,
+                            orch.main_model_source_for_request(&model, model_profile.as_deref())
+                                .await,
                         ),
                     ),
                 )
@@ -1739,7 +1736,7 @@ impl StreamingTurnDriver<'_> {
                                         .to_string(),
                                 );
                                 request.opts.model_source = orch
-                                    .configured_model_source_for_request(
+                                    .main_model_source_for_request(
                                         &non_stream_model,
                                         non_stream_profile.as_deref(),
                                     )
@@ -2341,7 +2338,7 @@ impl StreamingTurnDriver<'_> {
                                             native_anthropic_request_context.clone(),
                                             typed_attachment_ids,
                                             task_deliveries,
-                                            orch.configured_model_source_for_request(
+                                            orch.main_model_source_for_request(
                                                 &re_model,
                                                 re_profile.as_deref(),
                                             )
@@ -3926,6 +3923,29 @@ impl StreamingTurnDriver<'_> {
                         input.is_meta,
                         input.images.clone(),
                     );
+                    if input.prompt_ingress_kind
+                        == Some(crate::request_context::PromptIngressKind::DirectBash)
+                    {
+                        if let ConversationMessage::User { content, .. } = &mut message {
+                            // Native carries pasted input blocks before the
+                            // wrapped Bash command. `user_with_images` builds
+                            // text before images, so restore Native's order
+                            // for this host-stamped ingress before persistence
+                            // and request normalization.
+                            let mut preceding = Vec::with_capacity(content.len());
+                            let mut command = Vec::with_capacity(content.len());
+                            for block in content.drain(..) {
+                                if matches!(&block, lingxi_core::types::ContentBlock::Image { .. })
+                                {
+                                    preceding.push(block);
+                                } else {
+                                    command.push(block);
+                                }
+                            }
+                            preceding.extend(command);
+                            *content = preceding;
+                        }
+                    }
                     if input.turn_companion {
                         if let ConversationMessage::User { turn_companion, .. } = &mut message {
                             *turn_companion = Some(Some(true));
@@ -4048,6 +4068,80 @@ impl StreamingTurnDriver<'_> {
                 }
                 for context in &mod_contexts {
                     orch.append_mod_prompt_context(context).await;
+                }
+            } else if direct_bash_ingress {
+                // Direct Bash bypasses ordinary prompt screening above, so it
+                // has no ModPromptScreen contexts. Persist each Native row
+                // directly instead of zipping submissions with that empty
+                // context list. Its trailing rows are the Bash output messages,
+                // not hook attachments; retain their checkpointed UUIDs when
+                // available and append source-preserving User rows after input.
+                for (input, message) in &submissions {
+                    if let Some(identity) = &input.pending_prompt_identity {
+                        let persisted_message = orch
+                            .persist_pending_prompt_queued_message_once(
+                                message,
+                                input,
+                                &identity.prompt_id,
+                            )
+                            .await?;
+                        orch.append_pending_prompt_message_to_history_once(&persisted_message)
+                            .await?;
+                    } else {
+                        orch.session.lock().await.history.push(message.clone());
+                        orch.persist_queued_message_to_jsonl(message, input).await;
+                    }
+                }
+                for (input, _) in &submissions {
+                    let identity = input.pending_prompt_identity.as_ref();
+                    if let Some(identity) = identity {
+                        if input.trailing_history_rows.len()
+                            != identity.trailing_history_row_ids.len()
+                        {
+                            return Err(OrchestratorError::Internal(format!(
+                                "direct Bash trailing row identity count mismatch: {} rows, {} ids",
+                                input.trailing_history_rows.len(),
+                                identity.trailing_history_row_ids.len(),
+                            )));
+                        }
+                    }
+                    for (index, row) in input.trailing_history_rows.iter().enumerate() {
+                        if let Some(identity) = identity {
+                            let row_id = identity.trailing_history_row_ids[index];
+                            let message =
+                                super::user_message_from_projection(row_id, row, false, Vec::new());
+                            let row_input = QueuedPromptInput {
+                                text: row.clone(),
+                                message_id: Some(row_id),
+                                pending_prompt_identity: Some(super::PendingPromptIdentity {
+                                    prompt_id: identity.prompt_id.clone(),
+                                    trailing_history_row_ids: Vec::new(),
+                                }),
+                                ..QueuedPromptInput::default()
+                            };
+                            let persisted_message = orch
+                                .persist_pending_prompt_queued_message_once(
+                                    &message,
+                                    &row_input,
+                                    &identity.prompt_id,
+                                )
+                                .await?;
+                            orch.append_pending_prompt_message_to_history_once(&persisted_message)
+                                .await?;
+                        } else {
+                            let row_id = lingxi_core::types::MessageId::new();
+                            let message =
+                                super::user_message_from_projection(row_id, row, false, Vec::new());
+                            let row_input = QueuedPromptInput {
+                                text: row.clone(),
+                                message_id: Some(row_id),
+                                ..QueuedPromptInput::default()
+                            };
+                            orch.session.lock().await.history.push(message.clone());
+                            orch.persist_queued_message_to_jsonl(&message, &row_input)
+                                .await;
+                        }
+                    }
                 }
             } else {
                 for (index, ((input, message), context)) in

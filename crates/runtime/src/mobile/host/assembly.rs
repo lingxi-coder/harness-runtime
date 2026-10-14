@@ -44,11 +44,11 @@ use super::{
     mobile_provider_settings, mobile_reload_skills_handler, mobile_settings_write_lock,
     mobile_skill_listing_provider_with_settings, mobile_typescript_lsp_mode,
     mobile_typescript_lsp_ready, model_listings, model_preference, model_visible_mobile_cwd,
-    permission_preference, provider_model_catalog_from_listings, resolve_default_model_ref,
-    settings_commands, settle_mobile_loop_turn, ActiveTurn, MobileBuildError, MobileConfig,
-    MobileEngineError, MobileEngineHandle, MobileMcpReloadJob, MobileMsgQueueInput,
-    MobileOAuthManager, MobileRuntime, MobileSessionAgentObserver, MobileWakeupDelivery,
-    TurnLifecycleListener, MOBILE_CRON_HANDLES,
+    permission_preference, provider_model_catalog_from_listings,
+    rebuild_mobile_prompt_dispatch_cache, resolve_default_model_ref, settings_commands,
+    settle_mobile_loop_turn, ActiveTurn, MobileBuildError, MobileConfig, MobileEngineError,
+    MobileEngineHandle, MobileMcpReloadJob, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
+    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
 
 /// Project Native QO values from the already-merged settings. This bool map
@@ -2373,6 +2373,11 @@ pub(super) async fn build_mobile_inner_with_ask(
     .with_hook_agent_inheritance(parked_agent_restore_inheritance.clone())
     .with_dynamic_workflows_gate(dynamic_workflows_gate)
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())
+    .with_native_model_settings_snapshot(crate::native_model_settings::snapshot(
+        super::provider_services::mobile_effective_settings(&cfg)
+            .ok()
+            .as_ref(),
+    ))
     .with_instruction_user_email_provider(instruction_identity.clone())
     .with_workflow_size_guideline(workflow_size_guideline_state)
     .with_session_id(main_session_id)
@@ -3090,7 +3095,6 @@ pub fn build_mobile_engine_inner(
     inner.orchestrator.set_cancel_reason(cancel_reason.clone());
     runtime.block_on({
         let message_queue = message_queue.clone();
-        let durable_turns = durable_turns.clone();
         let cancel_reason = cancel_reason.clone();
         async move {
             message_queue
@@ -3653,6 +3657,7 @@ pub fn build_mobile_engine_inner(
         paths: settings_paths,
         active: inner.settings_active.clone(),
         managed: inner.settings_managed.clone(),
+        managed_diagnostics: None,
     });
     let handle = Arc::new(MobileEngineHandle {
         session_cron,

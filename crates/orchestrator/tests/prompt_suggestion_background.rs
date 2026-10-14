@@ -328,6 +328,15 @@ async fn background_pipeline() {
                 ..Default::default()
             })
         }
+
+        fn native_model_validation_context(
+            &self,
+            _: &agent::ModelResolutionContext,
+            _: &Utf16JsonProjection,
+            _: &agent::model_resolution::NativeModelSettingsSnapshot,
+        ) -> agent::model_resolution::NativeModelValidationContext {
+            agent::model_resolution::NativeModelValidationContext::unobserved()
+        }
     }
     #[derive(Default)]
     struct Settings(Mutex<serde_json::Value>);

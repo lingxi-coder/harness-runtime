@@ -225,6 +225,10 @@ async fn commit_peer_queue(
 #[path = "hooks/idle_measure_tests.rs"]
 mod idle_measure_tests;
 
+#[cfg(test)]
+#[path = "hooks/classic_model_switch_mod_dispatch_tests.rs"]
+mod classic_model_switch_mod_dispatch_tests;
+
 /// The Mod's prompt admission decision before the user row is committed.
 pub(super) enum ModPromptScreen {
     Admit {
@@ -1213,36 +1217,98 @@ impl ConversationOrchestrator {
         )
     }
 
-    /// Append Native history rows yielded by UserPromptExpansion after the
-    /// command body has been queued. The raw attachment projection is the
-    /// durable transcript record; model-visible rows share the durable UUID.
-    pub(super) async fn append_native_prompt_expansion_history_rows(
+    /// Queue Native UserPromptExpansion history rows after the command body.
+    /// When the current NAr batch is staged, its finalizer appends these rows
+    /// afterward; outside that request scope they append immediately. The raw
+    /// attachment projection remains the durable record for each visible row.
+    pub(crate) async fn append_native_prompt_expansion_history_rows(
         &self,
         rows: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
     ) {
-        for row in rows {
+        let row_ids = rows.iter().map(|_| MessageId::new()).collect::<Vec<_>>();
+        if crate::request_context::buffer_native_prompt_expansion_rows(rows, &row_ids, false)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let _ = self
+            .append_native_prompt_expansion_history_rows_with_ids(rows, &row_ids, false)
+            .await;
+    }
+
+    /// Queue checkpointed UserPromptExpansion rows with restart-stable UUIDs.
+    /// The NAr finalizer persists them before publishing each live history row;
+    /// UUID/source mismatches fail the pending turn closed.
+    pub(crate) async fn append_native_prompt_expansion_history_rows_once(
+        &self,
+        rows: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+        row_ids: &[MessageId],
+    ) -> Result<(), OrchestratorError> {
+        if rows.len() != row_ids.len() {
+            return Err(OrchestratorError::Internal(format!(
+                "pending prompt hook identity count mismatch: {} rows, {} ids",
+                rows.len(),
+                row_ids.len()
+            )));
+        }
+        if crate::request_context::buffer_native_prompt_expansion_rows(rows, row_ids, true)? {
+            return Ok(());
+        }
+        self.append_native_prompt_expansion_history_rows_with_ids(rows, row_ids, true)
+            .await
+    }
+
+    async fn append_native_prompt_expansion_history_rows_with_ids(
+        &self,
+        rows: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+        row_ids: &[MessageId],
+        durable_once: bool,
+    ) -> Result<(), OrchestratorError> {
+        if rows.len() != row_ids.len() {
+            return Err(OrchestratorError::Internal(format!(
+                "pending prompt hook identity count mismatch: {} rows, {} ids",
+                rows.len(),
+                row_ids.len()
+            )));
+        }
+        for (row, message_id) in rows.iter().zip(row_ids.iter().copied()) {
             if row.string_at("/type") == Some("hook_success")
                 && row.string_at("/hookEvent") == Some("UserPromptExpansion")
             {
-                if let Some(message) =
-                    Self::native_hook_success_message_for_api(MessageId::new(), row)
-                {
-                    let message_id = message.id();
-                    self.persist_hook_attachment_to_jsonl_with_id(message_id, row.clone())
-                        .await;
+                if let Some(message) = Self::native_hook_success_message_for_api(message_id, row) {
+                    if durable_once {
+                        self.persist_pending_prompt_attachment_once(message_id, row.clone())
+                            .await?;
+                    } else {
+                        self.persist_hook_attachment_to_jsonl_with_id(message_id, row.clone())
+                            .await;
+                    }
                     self.register_mod_persisted_attachment(
                         &message,
                         "hook_success",
                         serde_json::json!({"kind":"hook","event":"UserPromptExpansion"}),
                     )
                     .await;
-                    self.session.lock().await.history.push(message);
+                    if durable_once {
+                        self.append_pending_prompt_message_to_history_once(&message)
+                            .await?;
+                    } else {
+                        self.session.lock().await.history.push(message);
+                    }
+                    self.prompt_runtime
+                        .record_current_prompt_upe_attachment_id(message_id);
                     continue;
                 }
             }
 
             if row.string_at("/type") != Some("hook_additional_context") {
-                self.persist_hook_attachment_to_jsonl(row.clone()).await;
+                if durable_once {
+                    self.persist_pending_prompt_attachment_once(message_id, row.clone())
+                        .await?;
+                } else {
+                    self.persist_hook_attachment_to_jsonl_with_id(message_id, row.clone())
+                        .await;
+                }
                 continue;
             }
 
@@ -1256,15 +1322,25 @@ impl ConversationOrchestrator {
                 })
                 .collect::<Vec<_>>();
             if contexts.is_empty() {
-                self.persist_hook_attachment_to_jsonl(row.clone()).await;
+                if durable_once {
+                    self.persist_pending_prompt_attachment_once(message_id, row.clone())
+                        .await?;
+                } else {
+                    self.persist_hook_attachment_to_jsonl_with_id(message_id, row.clone())
+                        .await;
+                }
                 continue;
             }
 
             let hook_name = ExactHookText::from_json_projection(row, "/hookName")
                 .unwrap_or_else(|| ExactHookText::from_text("UserPromptExpansion"));
-            let message_id = MessageId::new();
-            self.persist_hook_attachment_to_jsonl_with_id(message_id, row.clone())
-                .await;
+            if durable_once {
+                self.persist_pending_prompt_attachment_once(message_id, row.clone())
+                    .await?;
+            } else {
+                self.persist_hook_attachment_to_jsonl_with_id(message_id, row.clone())
+                    .await;
+            }
             let message = Self::native_hook_additional_context_message_for_api(message_id, row)
                 .unwrap_or_else(|| {
                     let mut rendered = ExactHookText::from_text("<system-reminder>\n");
@@ -1281,94 +1357,69 @@ impl ConversationOrchestrator {
                 serde_json::json!({"kind":"hook","event":event}),
             )
             .await;
-            self.session.lock().await.history.push(message);
-        }
-    }
-
-    /// Append checkpointed UserPromptExpansion rows with restart-stable UUIDs.
-    /// The durable write completes before the corresponding live history row
-    /// is published; UUID/source mismatches fail the pending turn closed.
-    pub(super) async fn append_native_prompt_expansion_history_rows_once(
-        &self,
-        rows: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
-        row_ids: &[MessageId],
-    ) -> Result<(), OrchestratorError> {
-        if rows.len() != row_ids.len() {
-            return Err(OrchestratorError::Internal(format!(
-                "pending prompt hook identity count mismatch: {} rows, {} ids",
-                rows.len(),
-                row_ids.len()
-            )));
-        }
-        for (row, id) in rows.iter().zip(row_ids.iter().copied()) {
-            if row.string_at("/type") == Some("hook_success")
-                && row.string_at("/hookEvent") == Some("UserPromptExpansion")
-            {
-                if let Some(message) = Self::native_hook_success_message_for_api(id, row) {
-                    self.persist_pending_prompt_attachment_once(id, row.clone())
-                        .await?;
-                    self.register_mod_persisted_attachment(
-                        &message,
-                        "hook_success",
-                        serde_json::json!({"kind":"hook","event":"UserPromptExpansion"}),
-                    )
-                    .await;
-                    self.append_pending_prompt_message_to_history_once(&message)
-                        .await?;
-                    continue;
-                }
-            }
-
-            if row.string_at("/type") != Some("hook_additional_context") {
-                self.persist_pending_prompt_attachment_once(id, row.clone())
+            if durable_once {
+                self.append_pending_prompt_message_to_history_once(&message)
                     .await?;
-                continue;
+            } else {
+                self.session.lock().await.history.push(message);
             }
-
-            let count = row
-                .at_pointer("/content")
-                .and_then(|content| content.array_len())
-                .unwrap_or_default();
-            let contexts = (0..count)
-                .filter_map(|index| {
-                    ExactHookText::from_json_projection(row, &format!("/content/{index}"))
-                })
-                .collect::<Vec<_>>();
-            if contexts.is_empty() {
-                self.persist_pending_prompt_attachment_once(id, row.clone())
-                    .await?;
-                continue;
+            if event == "UserPromptExpansion" {
+                self.prompt_runtime
+                    .record_current_prompt_upe_attachment_id(message_id);
             }
-
-            let hook_name = ExactHookText::from_json_projection(row, "/hookName")
-                .unwrap_or_else(|| ExactHookText::from_text("UserPromptExpansion"));
-            self.persist_pending_prompt_attachment_once(id, row.clone())
-                .await?;
-            let message = Self::native_hook_additional_context_message_for_api(id, row)
-                .unwrap_or_else(|| {
-                    let mut rendered = ExactHookText::from_text("<system-reminder>\n");
-                    rendered.push(&hook_name);
-                    rendered.push_text(" hook additional context: ");
-                    rendered.push(&ExactHookText::join(&contexts, "\n"));
-                    rendered.push_text("\n</system-reminder>");
-                    rendered.to_conversation_message(id, true)
-                });
-            let event = row.string_at("/hookEvent").unwrap_or("UserPromptExpansion");
-            self.register_mod_persisted_attachment(
-                &message,
-                "hook_additional_context",
-                serde_json::json!({"kind":"hook","event":event}),
-            )
-            .await;
-            self.append_pending_prompt_message_to_history_once(&message)
-                .await?;
         }
         Ok(())
     }
 
-    pub(super) async fn append_mod_prompt_context(
+    pub(crate) async fn append_mod_prompt_context(
         &self,
         context: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        if crate::request_context::buffer_mod_prompt_context_after_upe(context).is_some() {
+            return;
+        }
+        self.append_mod_prompt_context_immediately(context, None)
+            .await;
+    }
+
+    pub(crate) async fn flush_buffered_prompt_history_appends(
+        &self,
+    ) -> Result<(), OrchestratorError> {
+        while let Some(append) = crate::request_context::pop_buffered_prompt_history_append() {
+            let result = match &append {
+                crate::request_context::BufferedPromptHistoryAppend::NativePromptExpansion {
+                    row,
+                    row_id,
+                    durable_once,
+                } => {
+                    self.append_native_prompt_expansion_history_rows_with_ids(
+                        std::slice::from_ref(row),
+                        std::slice::from_ref(row_id),
+                        *durable_once,
+                    )
+                    .await
+                }
+                crate::request_context::BufferedPromptHistoryAppend::ModPromptSubmit {
+                    context,
+                    message_id,
+                } => {
+                    self.append_mod_prompt_context_immediately(context, Some(*message_id))
+                        .await;
+                    Ok(())
+                }
+            };
+            if let Err(error) = result {
+                crate::request_context::restore_buffered_prompt_history_append_front(append);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    async fn append_mod_prompt_context_immediately(
+        &self,
+        context: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        message_id: Option<lingxi_core::types::MessageId>,
     ) {
         let count = context
             .at_pointer("")
@@ -1394,7 +1445,7 @@ impl ConversationOrchestrator {
             &body,
             "\n</system-reminder>",
         )
-        .to_conversation_message(MessageId::new(), true);
+        .to_conversation_message(message_id.unwrap_or_else(MessageId::new), true);
         self.register_mod_persisted_attachment(
             &message,
             "hook_additional_context",
@@ -3188,38 +3239,33 @@ impl ConversationOrchestrator {
     /// invoke this method; `auto` and `resume` are Post-only upstream paths.
     pub(crate) async fn run_pre_model_switch_hooks(
         &self,
-        from_model: &str,
-        to_model: &str,
+        from_model: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        to_model: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         requested_model: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        target_route: &str,
         to_profile: Option<&str>,
         source: &str,
     ) -> hooks::response::AggregateHookResult {
-        if !self
-            .hooks
-            .has_hooks_for(&hooks::events::HookEventType::PreModelSwitch)
-            .await
-        {
-            return hooks::response::AggregateHookResult::default();
-        }
         let (context_tokens, prompt_cache_warm, cache_ttl, estimated_cache_write_usd, pricing) =
-            self.model_switch_cache_metadata(to_model, to_profile).await;
+            self.model_switch_cache_metadata(target_route, to_profile)
+                .await;
         let ctx = self.lifecycle_hook_ctx(false).await;
-        self.hooks
-            .execute(
-                HookEvent::PreModelSwitch {
-                    from_model: from_model.to_string(),
-                    to_model: to_model.to_string(),
-                    requested_model: requested_model.cloned(),
-                    source: source.to_string(),
-                    context_tokens,
-                    prompt_cache_warm,
-                    cache_ttl,
-                    estimated_cache_write_usd,
-                    pricing,
-                },
-                ctx,
-            )
-            .await
+        self.execute_model_switch_hook_event(
+            HookEvent::PreModelSwitch {
+                from_model: from_model.clone(),
+                to_model: to_model.clone(),
+                requested_model: requested_model.cloned(),
+                source: source.to_string(),
+                context_tokens,
+                prompt_cache_warm,
+                cache_ttl,
+                estimated_cache_write_usd,
+                pricing,
+            },
+            ctx,
+            hooks::response::ModelSwitchHookPhase::Pre,
+        )
+        .await
     }
 
     /// Fire `PostModelSwitch` after the live model changes. Post hooks are
@@ -3228,28 +3274,22 @@ impl ConversationOrchestrator {
     /// message in the live history for the next model request.
     pub(crate) async fn run_post_model_switch_hooks(
         &self,
-        from_model: &str,
-        to_model: &str,
+        from_model: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        to_model: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         requested_model: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        target_route: &str,
         to_profile: Option<&str>,
         source: &str,
     ) -> hooks::response::AggregateHookResult {
-        if !self
-            .hooks
-            .has_hooks_for(&hooks::events::HookEventType::PostModelSwitch)
-            .await
-        {
-            return hooks::response::AggregateHookResult::default();
-        }
         let (context_tokens, prompt_cache_warm, cache_ttl, estimated_cache_write_usd, pricing) =
-            self.model_switch_cache_metadata(to_model, to_profile).await;
+            self.model_switch_cache_metadata(target_route, to_profile)
+                .await;
         let ctx = self.lifecycle_hook_ctx(false).await;
         let aggregate = self
-            .hooks
-            .execute(
+            .execute_model_switch_hook_event(
                 HookEvent::PostModelSwitch {
-                    from_model: from_model.to_string(),
-                    to_model: to_model.to_string(),
+                    from_model: from_model.clone(),
+                    to_model: to_model.clone(),
                     requested_model: requested_model.cloned(),
                     source: source.to_string(),
                     context_tokens,
@@ -3259,6 +3299,7 @@ impl ConversationOrchestrator {
                     pricing,
                 },
                 ctx,
+                hooks::response::ModelSwitchHookPhase::Post,
             )
             .await;
 
@@ -3287,6 +3328,368 @@ impl ConversationOrchestrator {
             self.session.lock().await.history.push(message);
         }
         aggregate
+    }
+
+    async fn execute_model_switch_hook_event(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        phase: hooks::response::ModelSwitchHookPhase,
+    ) -> hooks::response::AggregateHookResult {
+        let event_type = event.event_type();
+        let event_name = match phase {
+            hooks::response::ModelSwitchHookPhase::Pre => "PreModelSwitch",
+            hooks::response::ModelSwitchHookPhase::Post => "PostModelSwitch",
+        };
+        let mod_event_name = format!("classic.{event_name}");
+        let host = self.hooks.mod_host().await;
+        let Some(host) = host.filter(|host| host.has_event(&mod_event_name)) else {
+            if !self.hooks.has_hooks_for(&event_type).await {
+                return hooks::response::AggregateHookResult::default();
+            }
+            return self.hooks.execute(event, ctx).await;
+        };
+
+        use hooks::registry::HookSourcePartition;
+        let aggregate = self
+            .hooks
+            .execute_partitioned(event.clone(), ctx.clone(), HookSourcePartition::Managed)
+            .await;
+        if aggregate.model_switch_managed_blocks_mod_dispatch(phase) {
+            return aggregate;
+        }
+
+        let Some((_, input)) = hooks::hook_payload::model_switch_event_projection(&event, &ctx)
+        else {
+            tracing::warn!(
+                event_name,
+                "could not construct classic model-switch Mod input"
+            );
+            return aggregate;
+        };
+        // Preserve the original managed partition separately from each
+        // managed-plus-core projection. Native's final `gyt` overlays only
+        // ordinary fields actually present on this managed result.
+        let managed_result = aggregate.clone();
+        let baseline_without_core = match managed_result.model_switch_classic_projection(phase) {
+            Ok(baseline) => baseline,
+            Err(error) => {
+                tracing::warn!(event_name, %error, "could not project managed model-switch baseline");
+                return aggregate;
+            }
+        };
+        let core_result = std::sync::Arc::new(std::sync::Mutex::new(
+            None::<(
+                hooks::response::AggregateHookResult,
+                hooks::response::HookJson,
+            )>,
+        ));
+        let core_result_for_next = core_result.clone();
+        let managed_for_next = managed_result.clone();
+        let event_for_next = event.clone();
+        let ctx_for_next = ctx.clone();
+        let hooks_for_next = self.hooks.clone();
+        let core = move |input: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>| {
+            let core_result = core_result_for_next.clone();
+            let event = event_for_next.clone();
+            let ctx = ctx_for_next.clone();
+            let executor = hooks_for_next.clone();
+            let managed = managed_for_next.clone();
+            async move {
+                let event = match input {
+                    Some(input) => Self::model_switch_event_from_mod_input(&event, &input)
+                        .map_err(hooks::mods::ModError::Hook)?,
+                    None => event,
+                };
+                let core = executor
+                    .execute_partitioned(event, ctx, HookSourcePartition::NonManaged)
+                    .await;
+                let downstream = core
+                    .model_switch_classic_projection(phase)
+                    .map_err(|error| hooks::mods::ModError::Hook(error.to_string()))?;
+                let mut aggregate = managed;
+                aggregate.append_model_switch_partition(phase, core);
+                let baseline = aggregate
+                    .model_switch_classic_projection(phase)
+                    .map_err(|error| hooks::mods::ModError::Hook(error.to_string()))?;
+                // Native f9n writes `b.core = result` on every next() call,
+                // and k9n later reads that single slot. Preserve the last
+                // core aggregate/baseline; earlier next() values remain in
+                // the Mod middleware's local return but are not aggregated.
+                *core_result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some((aggregate, baseline.clone()));
+                // Native's Mod `next(e)` descends to the NonManaged core
+                // partition only; the outer managed wrapper is applied after
+                // the Mod chain returns.
+                Ok(Some(downstream))
+            }
+        };
+
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let dispatch = host
+            .dispatch_with_ui_at_session(
+                &mod_event_name,
+                input,
+                self,
+                core,
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+                },
+            )
+            .await;
+
+        let core_result = core_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let has_core_result = core_result.is_some();
+        let (mut aggregate, baseline) = match core_result {
+            Some((aggregate, baseline)) => (aggregate, baseline),
+            None => (aggregate, baseline_without_core),
+        };
+        match dispatch {
+            Ok(downstream) => {
+                match managed_result.model_switch_classic_managed_overlay(phase, &downstream) {
+                    Ok((final_result, mod_decision)) => {
+                        let result = if has_core_result {
+                            aggregate.apply_model_switch_classic_delta(
+                                phase,
+                                &managed_result,
+                                &baseline,
+                                &final_result,
+                            )
+                        } else {
+                            aggregate.apply_model_switch_classic_direct(
+                                phase,
+                                &managed_result,
+                                &baseline,
+                                &final_result,
+                            )
+                        };
+                        if let Err(error) = result {
+                            tracing::warn!(
+                                event_name,
+                                %error,
+                                "invalid classic model-switch Mod result"
+                            );
+                        } else if let Err(error) =
+                            aggregate.apply_model_switch_classic_mod_decision(phase, mod_decision)
+                        {
+                            tracing::warn!(
+                                event_name,
+                                %error,
+                                "invalid classic model-switch Mod decision"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        event_name,
+                        %error,
+                        "invalid classic model-switch Mod result"
+                    ),
+                }
+            }
+            Err(error) => {
+                tracing::warn!(event_name, %error, "classic model-switch Mod dispatch failed");
+            }
+        }
+        aggregate
+    }
+
+    fn model_switch_event_from_mod_input(
+        original: &HookEvent,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<HookEvent, String> {
+        fn source_projection_field(
+            input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            field: &str,
+            current: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String> {
+            if !input.contains_property(field) {
+                return Ok(current.clone());
+            }
+            let units = input.string_units(&format!("/{field}")).ok_or_else(|| {
+                format!("classic model-switch next(e) field {field} must be a string")
+            })?;
+            lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&units),
+                units,
+            )
+            .map_err(|error| error.to_string())
+        }
+
+        fn string_field(
+            input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            field: &str,
+            current: &str,
+        ) -> Result<String, String> {
+            if !input.contains_property(field) {
+                return Ok(current.to_owned());
+            }
+            let units = input.string_units(&format!("/{field}")).ok_or_else(|| {
+                format!("classic model-switch next(e) field {field} must be a string")
+            })?;
+            String::from_utf16(&units).map_err(|_| {
+                format!("classic model-switch next(e) field {field} is not valid UTF-16")
+            })
+        }
+
+        fn requested_model_field(
+            input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            current: &Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        ) -> Result<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>, String> {
+            if !input.contains_property("requested_model") {
+                return Ok(current.clone());
+            }
+            let value = input.at_pointer("/requested_model").ok_or_else(|| {
+                "classic model-switch next(e) is missing requested_model".to_owned()
+            })?;
+            if value.is_null() {
+                return Ok(None);
+            }
+            let units = value.code_units().ok_or_else(|| {
+                "classic model-switch next(e) requested_model must be a string or null".to_owned()
+            })?;
+            lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(units),
+                units.to_vec(),
+            )
+            .map(Some)
+            .map_err(|error| error.to_string())
+        }
+
+        fn context_tokens_field(
+            input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            current: u64,
+        ) -> Result<u64, String> {
+            if !input.contains_property("context_tokens") {
+                return Ok(current);
+            }
+            let number = input
+                .at_pointer("/context_tokens")
+                .and_then(|value| value.as_number())
+                .filter(|number| {
+                    number.is_finite()
+                        && *number >= 0.0
+                        && number.fract() == 0.0
+                        && *number < 18_446_744_073_709_551_616.0
+                })
+                .ok_or_else(|| {
+                    "classic model-switch next(e) context_tokens must be a non-negative integer"
+                        .to_owned()
+                })?;
+            number.to_string().parse::<u64>().map_err(|_| {
+                "classic model-switch next(e) context_tokens is out of range".to_owned()
+            })
+        }
+
+        fn bool_field(
+            input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            field: &str,
+            current: bool,
+        ) -> Result<bool, String> {
+            if !input.contains_property(field) {
+                return Ok(current);
+            }
+            input
+                .at_pointer(&format!("/{field}"))
+                .and_then(|value| value.as_bool())
+                .ok_or_else(|| {
+                    format!("classic model-switch next(e) field {field} must be a boolean")
+                })
+        }
+
+        fn number_field(
+            input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            field: &str,
+            current: f64,
+        ) -> Result<f64, String> {
+            if !input.contains_property(field) {
+                return Ok(current);
+            }
+            input
+                .at_pointer(&format!("/{field}"))
+                .and_then(|value| value.as_number())
+                .filter(|number| number.is_finite())
+                .ok_or_else(|| {
+                    format!("classic model-switch next(e) field {field} must be a finite number")
+                })
+        }
+
+        if input
+            .at_pointer("")
+            .and_then(|value| value.object_entries())
+            .is_none()
+        {
+            return Err("classic model-switch next(e) input must be an object".into());
+        }
+
+        match original {
+            HookEvent::PreModelSwitch {
+                from_model,
+                to_model,
+                requested_model,
+                source,
+                context_tokens,
+                prompt_cache_warm,
+                cache_ttl,
+                estimated_cache_write_usd,
+                pricing,
+            } => Ok(HookEvent::PreModelSwitch {
+                from_model: source_projection_field(input, "from_model", from_model)?,
+                to_model: source_projection_field(input, "to_model", to_model)?,
+                requested_model: requested_model_field(input, requested_model)?,
+                source: string_field(input, "source", source)?,
+                context_tokens: context_tokens_field(input, *context_tokens)?,
+                prompt_cache_warm: bool_field(input, "prompt_cache_warm", *prompt_cache_warm)?,
+                cache_ttl: string_field(input, "cache_ttl", cache_ttl)?,
+                estimated_cache_write_usd: number_field(
+                    input,
+                    "estimated_cache_write_usd",
+                    *estimated_cache_write_usd,
+                )?,
+                pricing: string_field(input, "pricing", pricing)?,
+            }),
+            HookEvent::PostModelSwitch {
+                from_model,
+                to_model,
+                requested_model,
+                source,
+                context_tokens,
+                prompt_cache_warm,
+                cache_ttl,
+                estimated_cache_write_usd,
+                pricing,
+            } => Ok(HookEvent::PostModelSwitch {
+                from_model: source_projection_field(input, "from_model", from_model)?,
+                to_model: source_projection_field(input, "to_model", to_model)?,
+                requested_model: requested_model_field(input, requested_model)?,
+                source: string_field(input, "source", source)?,
+                context_tokens: context_tokens_field(input, *context_tokens)?,
+                prompt_cache_warm: bool_field(input, "prompt_cache_warm", *prompt_cache_warm)?,
+                cache_ttl: string_field(input, "cache_ttl", cache_ttl)?,
+                estimated_cache_write_usd: number_field(
+                    input,
+                    "estimated_cache_write_usd",
+                    *estimated_cache_write_usd,
+                )?,
+                pricing: string_field(input, "pricing", pricing)?,
+            }),
+            _ => Err("classic model-switch next(e) received a non-model-switch event".into()),
+        }
     }
 
     pub(super) async fn collect_session_start_messages(
@@ -4041,5 +4444,126 @@ mod model_switch_metadata_tests {
         assert!(matches!(ttl.as_str(), "5m" | "1h"));
         assert_eq!(estimate, 0.0028);
         assert_eq!(pricing, "configured");
+    }
+}
+#[cfg(test)]
+mod prompt_expansion_current_id_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use std::sync::Arc;
+
+    fn orch_with_writer(
+        dir: &std::path::Path,
+        path: std::path::PathBuf,
+    ) -> ConversationOrchestrator {
+        let fs: Arc<dyn lingxi_core::host::FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.to_path_buf()));
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path, fs));
+        ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.to_path_buf(),
+        )
+        .with_jsonl_writer(writer)
+    }
+
+    fn row(raw: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw)
+            .expect("test hook row is valid source JSON")
+    }
+
+    #[tokio::test]
+    async fn current_upe_ids_reset_per_query_and_restore_only_checkpointed_visible_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with_writer(dir.path(), dir.path().join("session.jsonl"));
+        let completed_rows = vec![
+            row(
+                r#"{"type":"hook_success","hookEvent":"UserPromptExpansion","hookName":"native","content":"completed success"}"#,
+            ),
+            row(
+                r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"native","content":["completed context"]}"#,
+            ),
+        ];
+        orch.prompt_runtime.begin_native_query();
+        orch.append_native_prompt_expansion_history_rows(&completed_rows)
+            .await;
+        let completed_ids = {
+            let history = orch.session.lock().await.history.clone();
+            history
+                .iter()
+                .map(ConversationMessage::id)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        assert_eq!(completed_ids.len(), 2);
+        assert_eq!(
+            orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+            completed_ids,
+            "fresh append records its generated model-visible row UUIDs"
+        );
+
+        // A fresh model query, including a metadata re-wake, has no current UPE
+        // batch. Durable completed UPE origins remain in history but are not
+        // rediscovered by scanning sidecar event metadata.
+        orch.prompt_runtime.begin_native_query();
+        assert!(orch
+            .prompt_runtime
+            .current_prompt_upe_attachment_ids()
+            .is_empty());
+
+        let pending_ids = vec![
+            lingxi_core::types::MessageId::new(),
+            lingxi_core::types::MessageId::new(),
+            lingxi_core::types::MessageId::new(),
+            lingxi_core::types::MessageId::new(),
+        ];
+        let pending_rows = vec![
+            row(
+                r#"{"type":"hook_success","hookEvent":"UserPromptExpansion","hookName":"native","content":"pending success"}"#,
+            ),
+            row(
+                r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"native","content":["pending context"]}"#,
+            ),
+            row(
+                r#"{"type":"hook_additional_context","hookEvent":"PostModelSwitch","hookName":"switch","content":["not current UPE"]}"#,
+            ),
+            row(
+                r#"{"type":"hook_cancelled","hookEvent":"UserPromptExpansion","hookName":"native","content":"not rendered"}"#,
+            ),
+        ];
+        orch.append_native_prompt_expansion_history_rows_once(&pending_rows, &pending_ids)
+            .await
+            .expect("pending rows use their checkpointed attachment UUIDs");
+        let expected_current = std::collections::HashSet::from([pending_ids[0], pending_ids[1]]);
+        assert_eq!(
+            orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+            expected_current,
+            "only rendered UPE rows join the selector; old UPE and other row kinds stay out"
+        );
+        assert!(expected_current.is_disjoint(&completed_ids));
+        let history_after_pending = orch.session.lock().await.history.clone();
+
+        // Re-enter pending recovery with empty execution-only state. The
+        // durable writer and PendingPromptIdentity still supply exact IDs.
+        orch.prompt_runtime.begin_native_query();
+        orch.append_native_prompt_expansion_history_rows_once(&pending_rows, &pending_ids)
+            .await
+            .expect("already persisted pending rows restore idempotently");
+        assert_eq!(
+            orch.prompt_runtime.current_prompt_upe_attachment_ids(),
+            expected_current
+        );
+        assert_eq!(
+            orch.session.lock().await.history,
+            history_after_pending,
+            "idempotent pending restore does not duplicate rendered rows"
+        );
     }
 }

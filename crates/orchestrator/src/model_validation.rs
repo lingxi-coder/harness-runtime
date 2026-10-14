@@ -1,12 +1,13 @@
-//! Detached helper draft for the Native 2.1.295 `bQn` model-validation boundary.
+//! Production helper for the Native 2.1.295 `bQn` model-validation boundary.
 //!
-//! This module does not perform policy, model-catalog, credential, or network
-//! work. The current selection/resolver owner supplies those decisions and an
-//! optional probe closure. The helper preserves the source model as exact
-//! UTF-16, applies `bQn`'s local ordering, and owns only the source-validated
-//! model-name cache/probe wait lifecycle.
+//! The current selection/resolver owner supplies exact route, policy, settings,
+//! and credential observations. This module preserves source model UTF-16,
+//! applies the observed Native local validation rules in source order, and owns
+//! the validated-name cache and probe wait lifecycle.
 
-use agent::model_resolution::ModelProviderKind;
+use agent::model_resolution::{
+    ModelProviderKind, NativeModelObservation as HostModelObservation, NativeModelValidationContext,
+};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_llm_client::protocol::{
     native_model_suggestion, JsonPayload, NativeModelObservation, NativeModelProvider,
@@ -43,8 +44,9 @@ const NATIVE_KNOWN_MODEL_ALIASES: [&str; 9] = [
 /// `policy_allowed` is the result of the real current model-policy gate (Native
 /// `Kr` plus any already-bound model-access rules). It must be computed before
 /// asking this module about aliases or the validated-name cache. The picker
-/// boolean means Native `yfo(model)` succeeded *and* an option's trimmed name
-/// exactly matched this trimmed source name. `first_party_base_url` is the
+/// observation combines exact `dSe()` option matching with Native
+/// `yfo(model)`; Unobserved is not evidence that no option exists.
+/// `first_party_base_url` is the
 /// source result `bi() || hostname === anthropic.com || hostname ends in
 /// .anthropic.com || hostname appears in the imported first-party host list`;
 /// endpoint parsing/host-list ownership stays with the caller.
@@ -54,11 +56,76 @@ pub struct NativeModelValidationFacts {
     pub force_server_probe: bool,
     pub server_probe: bool,
     pub custom_model_option_matches: bool,
-    pub picker_model_option_is_valid: bool,
+    pub picker_model_option_is_valid: NativeModelObservation<bool>,
     pub provider: ModelProviderKind,
     pub first_party_base_url: bool,
     /// Source facts used only if the provider probe returns a typed 404.
     pub suggestion_facts: NativeModelSuggestionFacts,
+}
+
+/// Combine the observed Native `dSe()` picker options and `yfo(candidate)`.
+/// Missing observations stay Unobserved; only a known exact option with a
+/// positive eligibility result can take the picker fast path.
+#[must_use]
+pub fn native_picker_model_option_is_valid(
+    candidate_source: &Utf16JsonProjection,
+    context: &NativeModelValidationContext,
+) -> NativeModelObservation<bool> {
+    let Ok(candidate) = TrimmedModelSource::from_projection(candidate_source) else {
+        return NativeModelObservation::Unobserved;
+    };
+    let has_exact_picker_option = match &context.picker_options {
+        HostModelObservation::Unobserved => return NativeModelObservation::Unobserved,
+        HostModelObservation::Observed(None) => false,
+        HostModelObservation::Observed(Some(options)) => options.iter().any(|option| {
+            TrimmedModelSource::from_projection(option)
+                .is_ok_and(|option| option.code_units() == candidate.code_units())
+        }),
+    };
+    if !has_exact_picker_option {
+        return NativeModelObservation::Observed(false);
+    }
+    match &context.picker_eligibility {
+        HostModelObservation::Unobserved => NativeModelObservation::Unobserved,
+        HostModelObservation::Observed(eligible) => NativeModelObservation::Observed(*eligible),
+    }
+}
+
+/// Convert current host route facts to SDK suggestion facts without replacing
+/// a missing observation with an empty/default value.
+#[must_use]
+pub fn native_model_suggestion_facts(
+    context: &NativeModelValidationContext,
+) -> NativeModelSuggestionFacts {
+    let effective_model_by_catalog_id = match &context.effective_model_by_catalog_id {
+        HostModelObservation::Unobserved => NativeModelObservation::Unobserved,
+        HostModelObservation::Observed(models) => NativeModelObservation::Observed(
+            models
+                .iter()
+                .filter_map(|(catalog_id, model)| {
+                    projection_string_payload(model).map(|model| (catalog_id.clone(), model))
+                })
+                .collect(),
+        ),
+    };
+    let anthropic_default_opus_model = match &context.anthropic_default_opus_model {
+        HostModelObservation::Unobserved => NativeModelObservation::Unobserved,
+        HostModelObservation::Observed(None) => NativeModelObservation::Observed(None),
+        HostModelObservation::Observed(Some(model)) => projection_string_payload(model)
+            .map(Some)
+            .map(NativeModelObservation::Observed)
+            .unwrap_or(NativeModelObservation::Unobserved),
+    };
+    NativeModelSuggestionFacts {
+        effective_model_by_catalog_id,
+        anthropic_default_opus_model,
+    }
+}
+
+fn projection_string_payload(source: &Utf16JsonProjection) -> Option<JsonPayload> {
+    source
+        .string_units("")
+        .map(|units| JsonPayload::string_from_utf16_code_units(&units))
 }
 
 /// Exact source string after the one Native `String.trim()` operation.
@@ -201,7 +268,10 @@ pub fn prepare_native_model_validation(
         if facts.custom_model_option_matches {
             return Ok(accepted(model, ModelValidationFastPath::CustomModelOption));
         }
-        if facts.picker_model_option_is_valid {
+        if matches!(
+            &facts.picker_model_option_is_valid,
+            NativeModelObservation::Observed(true)
+        ) {
             return Ok(accepted(model, ModelValidationFastPath::PickerOption));
         }
         if cache.contains(model.cache_key()) {
@@ -359,7 +429,7 @@ impl NativeModelValidationCache {
     /// Spawn the host-owned probe. Only successful eventual completion updates
     /// the validated-name cache, even when the caller's 15s wait has expired.
     /// Dropping `NativeModelProbeTask` detaches the Tokio task (JoinHandle's
-    /// native behavior); only `abort_for_host_shutdown` cancels it.
+    /// native behavior); the explicit deadline path uses `abort_and_join`.
     pub fn spawn_probe<F>(
         &self,
         payload: &NativeModelProbePayload,
@@ -389,8 +459,7 @@ impl NativeModelValidationCache {
 }
 
 /// A still-owned validation operation. A wait timeout leaves the task alive;
-/// callers can retain this handle, check it later, or explicitly abort during
-/// host shutdown.
+/// the explicit deadline path can abort and reap it using `abort_and_join`.
 pub struct NativeModelProbeTask {
     model: TrimmedModelSource,
     suggestion_provider: NativeModelObservation<NativeModelProvider>,
@@ -471,6 +540,7 @@ impl NativeModelProbeTask {
 
     /// Reap a completed operation without imposing another timeout. Returns
     /// `None` while the task remains active.
+    #[cfg(test)]
     pub async fn reap_if_finished(&mut self) -> Option<NativeModelProbeWait> {
         if !self.is_finished() {
             return None;
@@ -487,16 +557,6 @@ impl NativeModelProbeTask {
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.handle.as_ref().is_none_or(JoinHandle::is_finished)
-    }
-
-    /// Cancellation is explicit and reserved for the host's shutdown path.
-    /// The ordinary validation wait timeout never calls this method.
-    pub fn abort_for_host_shutdown(&mut self) -> bool {
-        let Some(handle) = self.handle.take() else {
-            return false;
-        };
-        handle.abort();
-        true
     }
 }
 
@@ -1174,8 +1234,8 @@ mod tests {
     use super::*;
     use lingxi_llm_client::protocol::{
         native_static_model_suggestion_defaults, JsonPayload, NativeAnthropicErrorFacts,
-        NativeModelObservation, NativeModelProvider, NativeModelSuggestionFacts, ProtocolFamily,
-        ProviderErrorText, ProviderId,
+        NativeModelObservation, NativeModelSuggestionFacts, ProtocolFamily, ProviderErrorText,
+        ProviderId,
     };
     use tokio::sync::oneshot;
 
@@ -1201,7 +1261,7 @@ mod tests {
             force_server_probe: false,
             server_probe: true,
             custom_model_option_matches: false,
-            picker_model_option_is_valid: false,
+            picker_model_option_is_valid: NativeModelObservation::Unobserved,
             provider,
             first_party_base_url: true,
             suggestion_facts: native_suggestion_facts(provider),
@@ -1259,8 +1319,17 @@ mod tests {
                 thinking_resumption_refused: false,
                 thinking_resumption_beta_requested: None,
                 thinking_resumption_beta_refused: false,
+                native_thinking_binding_controls_beta_requested: None,
+                native_thinking_binding_controls_error_evidence: None,
+                native_hq_model_source: None,
+                native_hq_model_provider_family: None,
+                native_hq_known_error_evidence: None,
+                native_hq_hrn15_evidence: None,
                 response: Some(lingxi_llm_client::protocol::NativeAnthropicErrorResponse {
                     body: lingxi_llm_client::protocol::JsonPayload::parse(body).ok(),
+                    thinking_prefix_mismatch: None,
+                    api_error_name: None,
+                    amzn_error_type: None,
                     unified_representative_claim: representative_claim.map(str::to_owned),
                     unified_overage_disabled_reason: overage_disabled_reason.map(str::to_owned),
                 }),
@@ -1306,6 +1375,155 @@ mod tests {
                 fast_path: ModelValidationFastPath::PreviouslyValidated,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn picker_fastpath_requires_an_observed_positive_source_result() {
+        let cache = NativeModelValidationCache::default();
+        let source = model(&"custom-model".encode_utf16().collect::<Vec<_>>());
+
+        let mut unobserved = facts(ModelProviderKind::FirstParty);
+        unobserved.picker_model_option_is_valid = NativeModelObservation::Unobserved;
+        assert!(matches!(
+            prepare_native_model_validation(&source, unobserved, &cache).unwrap(),
+            NativeModelValidationDecision::ProbeRequired(_)
+        ));
+
+        let mut observed_no_match = facts(ModelProviderKind::FirstParty);
+        observed_no_match.picker_model_option_is_valid = NativeModelObservation::Observed(false);
+        assert!(matches!(
+            prepare_native_model_validation(&source, observed_no_match, &cache).unwrap(),
+            NativeModelValidationDecision::ProbeRequired(_)
+        ));
+
+        let mut observed_match = facts(ModelProviderKind::FirstParty);
+        observed_match.picker_model_option_is_valid = NativeModelObservation::Observed(true);
+        assert!(matches!(
+            prepare_native_model_validation(&source, observed_match, &cache).unwrap(),
+            NativeModelValidationDecision::Accepted {
+                fast_path: ModelValidationFastPath::PickerOption,
+                ..
+            }
+        ));
+    }
+
+    fn host_validation_context(
+        picker_options: HostModelObservation<Option<Vec<Utf16JsonProjection>>>,
+        picker_eligibility: HostModelObservation<bool>,
+    ) -> NativeModelValidationContext {
+        NativeModelValidationContext {
+            effective_model_by_catalog_id: HostModelObservation::Unobserved,
+            picker_options,
+            picker_eligibility,
+            anthropic_default_opus_model: HostModelObservation::Unobserved,
+        }
+    }
+
+    #[test]
+    fn picker_fastpath_requires_observed_options_exact_trim_match_and_yfo() {
+        let candidate = model(&" custom-model ".encode_utf16().collect::<Vec<_>>());
+        let unobserved = host_validation_context(
+            HostModelObservation::Unobserved,
+            HostModelObservation::Observed(true),
+        );
+        assert_eq!(
+            native_picker_model_option_is_valid(&candidate, &unobserved),
+            NativeModelObservation::Unobserved
+        );
+
+        let no_picker = host_validation_context(
+            HostModelObservation::Observed(None),
+            HostModelObservation::Observed(true),
+        );
+        assert_eq!(
+            native_picker_model_option_is_valid(&candidate, &no_picker),
+            NativeModelObservation::Observed(false)
+        );
+
+        let display_label_only = host_validation_context(
+            HostModelObservation::Observed(Some(vec![Utf16JsonProjection::from(
+                "Friendly Claude",
+            )])),
+            HostModelObservation::Observed(true),
+        );
+        assert_eq!(
+            native_picker_model_option_is_valid(&candidate, &display_label_only),
+            NativeModelObservation::Observed(false)
+        );
+
+        let exact_option = Utf16JsonProjection::from("  custom-model  ");
+        let eligible = host_validation_context(
+            HostModelObservation::Observed(Some(vec![exact_option.clone()])),
+            HostModelObservation::Observed(true),
+        );
+        assert_eq!(
+            native_picker_model_option_is_valid(&candidate, &eligible),
+            NativeModelObservation::Observed(true)
+        );
+
+        let eligibility_unobserved = host_validation_context(
+            HostModelObservation::Observed(Some(vec![exact_option.clone()])),
+            HostModelObservation::Unobserved,
+        );
+        assert_eq!(
+            native_picker_model_option_is_valid(&candidate, &eligibility_unobserved),
+            NativeModelObservation::Unobserved
+        );
+
+        let ineligible = host_validation_context(
+            HostModelObservation::Observed(Some(vec![exact_option])),
+            HostModelObservation::Observed(false),
+        );
+        assert_eq!(
+            native_picker_model_option_is_valid(&candidate, &ineligible),
+            NativeModelObservation::Observed(false)
+        );
+
+        let lone_units = vec![0xd800];
+        let lone_candidate = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&lone_units),
+            lone_units.clone(),
+        )
+        .expect("source projection keeps an unpaired code unit");
+        let lone_option =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&lone_units), lone_units)
+                .expect("picker option keeps an unpaired code unit");
+        let exact_lone_option = host_validation_context(
+            HostModelObservation::Observed(Some(vec![lone_option])),
+            HostModelObservation::Observed(true),
+        );
+        assert_eq!(
+            native_picker_model_option_is_valid(&lone_candidate, &exact_lone_option),
+            NativeModelObservation::Observed(true)
+        );
+    }
+
+    #[test]
+    fn suggestion_context_conversion_preserves_empty_opus_source_and_utf16_catalog_values() {
+        let lone_surrogate =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&[0xd800]), vec![0xd800])
+                .expect("root string projection");
+        let mut defaults = std::collections::BTreeMap::new();
+        defaults.insert("opus55".to_owned(), lone_surrogate);
+        let context = NativeModelValidationContext {
+            effective_model_by_catalog_id: HostModelObservation::Observed(defaults),
+            picker_options: HostModelObservation::Observed(None),
+            picker_eligibility: HostModelObservation::Unobserved,
+            anthropic_default_opus_model: HostModelObservation::Observed(Some(
+                Utf16JsonProjection::from(""),
+            )),
+        };
+        let facts = native_model_suggestion_facts(&context);
+        assert!(matches!(
+            facts.effective_model_by_catalog_id,
+            NativeModelObservation::Observed(models)
+                if models.get("opus55").is_some_and(|model| model.root_string_code_units() == Some(vec![0xd800]))
+        ));
+        assert!(matches!(
+            facts.anthropic_default_opus_model,
+            NativeModelObservation::Observed(Some(model))
+                if model.root_string_code_units() == Some(Vec::new())
         ));
     }
 
@@ -1532,7 +1750,7 @@ mod tests {
         );
         assert_eq!(
             classified.message.string_at(""),
-            Some("Model 'claude-sonnet-5' not found. Try 'us.host-current-sonnet-4-6-profile' instead".to_owned())
+            Some("Model 'claude-sonnet-5' not found. Try 'us.host-current-sonnet-4-6-profile' instead")
         );
         assert_eq!(classified.server_refused_model, Some(true));
         assert!(classified.source_gaps.is_empty());

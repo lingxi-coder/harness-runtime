@@ -1034,6 +1034,12 @@ async fn provider_invalid_request_uses_status_gated_native_error_copy() {
                 thinking_resumption_refused: false,
                 thinking_resumption_beta_requested: None,
                 thinking_resumption_beta_refused: false,
+                native_thinking_binding_controls_beta_requested: None,
+                native_thinking_binding_controls_error_evidence: None,
+                native_hq_model_source: None,
+                native_hq_model_provider_family: None,
+                native_hq_known_error_evidence: None,
+                native_hq_hrn15_evidence: None,
                 response: None,
             }),
         }

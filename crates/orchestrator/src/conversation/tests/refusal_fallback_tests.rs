@@ -55,8 +55,51 @@ fn orch_with_refusal_chain(chain: &[&str]) -> (ConversationOrchestrator, MockOut
 #[tokio::test]
 async fn batched_calls_capture_the_live_latch_and_ignore_a_stale_session_target() {
     struct TargetProbe(std::sync::atomic::AtomicUsize);
+    fn target_probe_route(model: &str) -> llm_runtime::MediaRoute {
+        let provider_id = llm_runtime::ProviderId::AnthropicFirstParty;
+        llm_runtime::MediaRoute {
+            main: llm_runtime::ResolvedRoute {
+                provider_id: provider_id.clone(),
+                profile_name: "anthropic".into(),
+                request_model: model.into(),
+                display_model: model.into(),
+                pricing_model: llm_runtime::PricingModelRef {
+                    pricing_provider_id: provider_id,
+                    billing_model: model.into(),
+                    request_model: model.into(),
+                    display_model: model.into(),
+                },
+                capabilities: llm_runtime::Capabilities::default(),
+                connection_chain: Vec::new(),
+                failover: Default::default(),
+            },
+            vision_delegate: None,
+        }
+    }
     #[async_trait::async_trait]
     impl crate::OrchestratorApiClient for TargetProbe {
+        fn resolve_media_route(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+        ) -> Result<llm_runtime::MediaRoute, llm_runtime::LlmError> {
+            if model == "other" && profile == Some("anthropic") {
+                Ok(target_probe_route(model))
+            } else {
+                Err(llm_runtime::LlmError::ModelUnavailable)
+            }
+        }
+
+        fn list_model_listings(&self) -> Vec<lingxi_core::host::ModelListing> {
+            vec![lingxi_core::host::ModelListing {
+                request_model: "other".into(),
+                display_model: "other".into(),
+                provider_id: "anthropic".into(),
+                provider_label: "Anthropic".into(),
+                ..Default::default()
+            }]
+        }
+
         async fn messages_create(
             &self,
             request: crate::OrchestratorApiRequest,
@@ -65,10 +108,17 @@ async fn batched_calls_capture_the_live_latch_and_ignore_a_stale_session_target(
                 panic!("expected main request")
             };
             let context = lingxi_core::host::refusal_driver::current_fallback_target().unwrap();
+            let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(
-                context.is_target(&request.model, str::to_owned),
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                request.model,
+                match call {
+                    0 | 2 => "fallback",
+                    1 => "other",
+                    _ => panic!("unexpected extra request"),
+                },
+                "the explicit SDK pick routes the middle turn to its selected model",
             );
+            assert_eq!(context.is_target(&request.model, str::to_owned), call == 0);
             Ok(crate::test_support::mock_message_response(
                 vec![llm_runtime::ContentBlock::Text {
                     text: "done".into(),
@@ -94,9 +144,23 @@ async fn batched_calls_capture_the_live_latch_and_ignore_a_stale_session_target(
     );
     assert!(orch.maybe_swap_to_refusal_fallback().await);
     assert!(orch.run_turn("first").await.is_ok());
-    lingxi_core::host::OrchestratorHandle::switch_model(&orch, "other", None)
-        .await
-        .unwrap();
+    lingxi_core::host::OrchestratorHandle::select_model(
+        &orch,
+        lingxi_core::host::ModelSelectionRequest::Select {
+            source: lingxi_core::types::utf16_json::Utf16JsonProjection::from("other"),
+            route_hint: Some(lingxi_core::host::ModelRouteAnchor {
+                model: "other".into(),
+                profile: Some("anthropic".into()),
+            }),
+            origin: lingxi_core::host::ModelSelectionOrigin::Sdk,
+            validation: lingxi_core::host::ModelValidationMode::ServerProbeDisabled,
+        },
+    )
+    .await
+    .unwrap();
+    let picked = lingxi_core::host::OrchestratorHandle::get_status_snapshot(&orch).await;
+    assert_eq!(picked.model, "other");
+    assert_eq!(picked.model_profile.as_deref(), Some("anthropic"));
     assert!(orch.run_turn("second").await.is_ok());
     lingxi_core::host::OrchestratorHandle::switch_model(&orch, "fallback", None)
         .await

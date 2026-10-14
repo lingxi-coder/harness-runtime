@@ -673,7 +673,35 @@ impl ConversationOrchestrator {
             None
         };
         if native_nar_ingress {
-            crate::request_context::finalize_prompt_ingress_batch(self, user_cancel).await;
+            crate::request_context::mark_native_request_assembly_accepted();
+            crate::request_context::finalize_prompt_ingress_batch(self, user_cancel).await?;
+
+            // This snapshot predates the NAr finalizer, which flushes the
+            // current UPE and following prompt.submit rows into live history.
+            // Copy only those exact buffered IDs from model-visible history so
+            // the request projection can place the complete tail after NAr.
+            // The finalizer remains the sole durable/live append path.
+            let mut buffered_tail_ids = self.prompt_runtime.current_prompt_upe_attachment_ids();
+            buffered_tail_ids
+                .extend(crate::request_context::finalized_buffered_prompt_submit_row_ids());
+            if !buffered_tail_ids.is_empty() {
+                let snapshot_ids = snapshot
+                    .iter()
+                    .map(ConversationMessage::id)
+                    .collect::<std::collections::HashSet<_>>();
+                let missing_tail_rows = {
+                    let session = self.session.lock().await;
+                    session
+                        .model_context_history()
+                        .into_iter()
+                        .filter(|message| {
+                            let id = message.id();
+                            buffered_tail_ids.contains(&id) && !snapshot_ids.contains(&id)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                snapshot.extend(missing_tail_rows);
+            }
         }
         // Inline `date_change`: prepended AFTER the deferred insert so the final order
         // is [date_change, deferred_tools_delta, …], matching the oracle batch
@@ -1110,6 +1138,16 @@ impl ConversationOrchestrator {
                     transient.push(reminder);
                 }
             }
+            // NAr's primary-model policy producer is staged with the complete
+            // ingress batch, but unlike the individual staged reminder lanes it
+            // has no transient collector. Reattach its current typed rows after
+            // plan-mode rows and before Native's todo/reminder tail.
+            for kind in ["proactivity", "auto_mode", "auto_mode_exit"] {
+                if let Some(reminder) = staged(kind) {
+                    model_reminders.push((transient.len(), reminder));
+                }
+            }
+
             // `todo_reminder_message` already returns a system-reminder envelope.
             let todo_reminder = self.todo_reminder_message().await;
             let todo_reminder_fired = todo_reminder.is_some();
