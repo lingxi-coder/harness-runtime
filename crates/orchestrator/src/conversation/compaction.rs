@@ -3552,26 +3552,17 @@ impl ConversationOrchestrator {
         // the (possibly networked) compaction call. The session's CURRENT model
         // rides along for the threshold resolution below.
         let pending_ingress_prompt_id = crate::request_context::pending_ingress_prompt_id();
-        let (snapshot, compaction_source, current_prompt_tail, last_assistant_at, model) = {
+        let (snapshot, last_assistant_at, model) = {
             let s = self.session.lock().await;
             let snapshot = s.model_context_history();
-            let current_prompt_index = pending_ingress_prompt_id.and_then(|prompt_id| {
-                snapshot
-                    .iter()
-                    .position(|message| message.id() == prompt_id)
-            });
-            let compaction_source = current_prompt_index
-                .map_or_else(|| snapshot.clone(), |index| snapshot[..index].to_vec());
-            let current_prompt_tail =
-                current_prompt_index.map_or_else(Vec::new, |index| snapshot[index..].to_vec());
             (
                 snapshot,
-                compaction_source,
-                current_prompt_tail,
                 s.message_timing.last_assistant_at,
                 s.model.clone(),
             )
         };
+        let prompt_in_compaction_input = pending_ingress_prompt_id
+            .filter(|prompt_id| snapshot.iter().any(|message| message.id() == *prompt_id));
         let estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
 
         // The gate's ceiling belongs to the model, not to the engine:
@@ -3724,7 +3715,7 @@ impl ConversationOrchestrator {
         let compacted = self
             .dispatch_session_compact_mods(
                 "auto",
-                compaction_source,
+                snapshot,
                 pre_compact.additional_instructions.as_ref(),
                 core,
             )
@@ -3738,7 +3729,7 @@ impl ConversationOrchestrator {
         let tracking_after_core = tracking_state.lock().await.clone();
         let turns_since = i64::from(tracking_after_core.turn_counter);
         *self.compaction_runtime.compaction_tracking.lock().await = tracking_after_core;
-        let (mut result, snapshot, compact_duration, core_ran) = match compacted {
+        let (result, snapshot, compact_duration, core_ran) = match compacted {
             Ok(SessionCompactDecision::Continue {
                 result,
                 source_messages,
@@ -3820,37 +3811,39 @@ impl ConversationOrchestrator {
             return;
         }
 
-        // Native compacts the prior model history before assembling the live
-        // prompt's NAr batch. The host has already persisted the active user
-        // row before this pre-call pass, so keep that row and its contiguous
-        // turn-owned suffix outside the summarizer input and splice it onto the
-        // compactor's preserved tail. This keeps the user row available for the
-        // accepted NAr finalizer without summarizing (then duplicating) the
-        // current query in the outgoing request.
-        let mut preserved_ids = result
-            .messages
-            .iter()
-            .chain(&result.messages_to_preserve)
-            .map(lingxi_core::types::ConversationMessage::id)
-            .collect::<HashSet<_>>();
-        for message in current_prompt_tail {
-            if preserved_ids.insert(message.id()) {
-                result.messages_to_preserve.push(message);
+        // Native's ordinary `auto` path summarizes the complete current P,
+        // including an unfinalized ingress user row, and replaces P with the
+        // returned boundary/summary/replacements. Do not move that row back to
+        // the preserved tail; the accepted NAr finalizer records only its
+        // staged attachments and must not resurrect the summarized prompt.
+        // `cancel: None` — the proactive trigger has no user-cancellable
+        // surface. A Some result is the commit evidence required before the
+        // task-local ingress batch may explain a now-missing prompt row.
+        let applied = self
+            .apply_post_compact(
+                result,
+                compaction::CompactTrigger::Auto,
+                estimate,
+                messages_before,
+                bytes_before,
+                compact_started,
+                None,
+            )
+            .await;
+        if applied.is_some() {
+            if let Some(prompt_id) = prompt_in_compaction_input {
+                let prompt_retained = self
+                    .session
+                    .lock()
+                    .await
+                    .history
+                    .iter()
+                    .any(|message| message.id() == prompt_id);
+                if !prompt_retained {
+                    crate::request_context::mark_pending_ingress_prompt_compacted(prompt_id);
+                }
             }
         }
-
-        // `cancel: None` — the proactive trigger has no user-cancellable
-        // surface, so the apply is infallible.
-        self.apply_post_compact(
-            result,
-            compaction::CompactTrigger::Auto,
-            estimate,
-            messages_before,
-            bytes_before,
-            compact_started,
-            None,
-        )
-        .await;
     }
 
     /// Append an SDK/stream-json compact boundary with its structured metadata.

@@ -124,6 +124,11 @@ struct PromptIngressBatch {
     /// Scope cleanup must not persist staged ingress from a prompt rejected
     /// before request assembly, such as a blocking UserPromptSubmit hook.
     native_request_assembly_accepted: bool,
+    /// The ordinary pre-call compact successfully replaced a history snapshot
+    /// that contained this still-pending ingress prompt, and the committed
+    /// history no longer contains its row. This is the sole evidence that lets
+    /// finalization accept a missing current prompt without recreating it.
+    prompt_compacted: bool,
     /// Qe's current history tail is buffered until the NAr rows are committed.
     /// This preserves both JSONL and live session append order.
     buffered_prompt_history_appends: std::collections::VecDeque<BufferedPromptHistoryAppend>,
@@ -770,7 +775,7 @@ async fn finalize_prompt_ingress_batch_with_enabled(
     enabled: bool,
     cancel: Option<&CancellationToken>,
 ) -> Result<(), OrchestratorError> {
-    let Some((prompt_id, mut staged, api_system_rows)) = REQUEST_CONTEXT
+    let Some((prompt_id, mut staged, api_system_rows, prompt_compacted)) = REQUEST_CONTEXT
         .try_with(|context| {
             let batch = context
                 .ingress_batch
@@ -806,6 +811,7 @@ async fn finalize_prompt_ingress_batch_with_enabled(
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
                 staged,
                 api_system_rows,
+                batch.prompt_compacted,
             ))
         })
         .ok()
@@ -825,14 +831,19 @@ async fn finalize_prompt_ingress_batch_with_enabled(
             .history
             .iter()
             .position(|message| message.id() == prompt_id);
-        let Some(current_index) = current_index else {
-            return Err(OrchestratorError::Internal(
-                "accepted prompt-ingress history row is missing during finalization".into(),
-            ));
+        let prior_history = match current_index {
+            Some(index) => session.history[..index].to_vec(),
+            None if prompt_compacted => session.history.clone(),
+            None => {
+                return Err(OrchestratorError::Internal(
+                    "accepted prompt-ingress history row is missing during finalization".into(),
+                ));
+            }
         };
+        let user_message = current_index.map(|index| session.history[index].clone());
         (
-            session.history[..current_index].to_vec(),
-            session.history[current_index].clone(),
+            prior_history,
+            user_message,
             session.model.clone(),
             session.model_profile.clone(),
             session.native_request_history.synthetic_closing_ids.clone(),
@@ -866,7 +877,8 @@ async fn finalize_prompt_ingress_batch_with_enabled(
             raw_attachment_types.insert(id, attachment_type.to_owned());
         }
     }
-    let current_turn_messages = std::iter::once(user_message)
+    let current_turn_messages = user_message
+        .into_iter()
         .chain(staged.iter().map(|attachment| attachment.message.clone()))
         .collect::<Vec<_>>();
     let model_supported = enabled
@@ -1382,6 +1394,46 @@ pub(crate) fn pending_ingress_prompt_id() -> Option<MessageId> {
         .flatten()
 }
 
+/// Mark the current ingress prompt compacted only when its exact ID still owns
+/// this unfinalized task-local batch. The caller must have observed both a
+/// successful compact commit and the prompt's absence from committed history.
+pub(crate) fn mark_pending_ingress_prompt_compacted(prompt_id: MessageId) {
+    let _ = REQUEST_CONTEXT.try_with(|context| {
+        let mut batch = context
+            .ingress_batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if batch.finalized
+            || context
+                .staged_ingress_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            || *context
+                .prompt_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                != prompt_id
+        {
+            return;
+        }
+        batch.prompt_compacted = true;
+    });
+}
+
+/// Whether the exact pending prompt has been removed by a successful compact.
+pub(crate) fn pending_ingress_prompt_was_compacted() -> bool {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            let batch = context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            !batch.finalized && batch.prompt_compacted
+        })
+        .unwrap_or(false)
+}
+
 /// Whether initial ingress producers have already been consumed for this task
 /// scope. This includes a finalized empty batch, so a retry cannot run a
 /// consume-once producer a second time.
@@ -1436,9 +1488,10 @@ pub(crate) async fn wait_for_prompt_ingress_batch_finalized() {
     }
 }
 
-/// Snapshot the conversation strictly before this task-local user's row. Native
-/// NAr producers diff against this prefix; current-turn staged rows must never
-/// become their own prior attachment state.
+/// Snapshot the conversation strictly before this task-local user's row for
+/// Native NAr producers. If a committed pre-call compact consumed that exact
+/// pending prompt, use the complete compacted history as the prior baseline;
+/// otherwise retain the existing empty fallback for an absent/unscoped prompt.
 pub(crate) async fn prior_history_for_current_prompt(
     orchestrator: &ConversationOrchestrator,
 ) -> Vec<ConversationMessage> {
@@ -1454,14 +1507,15 @@ pub(crate) async fn prior_history_for_current_prompt(
         return Vec::new();
     };
     let session = orchestrator.session.lock().await;
-    let Some(current_index) = session
+    let current_index = session
         .history
         .iter()
-        .position(|message| message.id() == prompt_id)
-    else {
-        return Vec::new();
-    };
-    session.history[..current_index].to_vec()
+        .position(|message| message.id() == prompt_id);
+    match current_index {
+        Some(index) => session.history[..index].to_vec(),
+        None if pending_ingress_prompt_was_compacted() => session.history.clone(),
+        None => Vec::new(),
+    }
 }
 
 /// Preserve a reminder's full UTF-16 rendered view as Native's JSONL cache.

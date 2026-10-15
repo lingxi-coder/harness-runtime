@@ -1855,15 +1855,15 @@ fn regular_ingress_has_token_and_later_tool_continuation_uses_false_token_path()
 }
 
 #[test]
-fn finalized_empty_ingress_compaction_stops_protecting_the_prompt() {
+fn auto_compaction_consumes_pending_prompt_before_nar_finalize_without_resurrection() {
     run_with_large_stack(|| async {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        let transcript = root.path().join("empty-ingress-compaction.jsonl");
+        let transcript = root.path().join("compacted-ingress-finalization.jsonl");
         let filesystem: Arc<dyn FileSystem> =
             Arc::new(PosixFileSystem::new(root.path().to_owned()));
-        let orch = orchestrator(&cwd, &transcript, filesystem)
+        let orch = orchestrator(&cwd, &transcript, filesystem.clone())
             .with_compaction(Arc::new(compaction::CompactionOrchestrator::new(1)));
 
         for index in 0..24 {
@@ -1878,24 +1878,41 @@ fn finalized_empty_ingress_compaction_stops_protecting_the_prompt() {
         let prompt_id = prompt.id();
         orch.session.lock().await.history.push(prompt.clone());
         orch.persist_message_to_jsonl(&prompt).await;
+        let nar_attachment = staged_system_attachment("environment", "NAr survives compaction");
+        let nar_id = nar_attachment.message.id();
+        let qe_id = MessageId::new();
+        let qe_row = Utf16JsonProjection::parse(
+            r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"fixture","content":["buffered Qe context"]}"#,
+        )
+        .unwrap();
 
         REQUEST_CONTEXT
             .scope(request_prompt_context(prompt_id), async {
-                // Some(empty) is a real pending regular-user batch: no NAr rows
-                // were produced, but its user row still belongs to this query.
+                // A nonempty current NAr batch and an early Qe history append
+                // both remain owned by this request across pre-call compaction.
                 REQUEST_CONTEXT
                     .try_with(|context| {
                         *context
                             .staged_ingress_attachments
                             .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(vec![nar_attachment.clone()]);
                     })
                     .unwrap();
+                assert!(buffer_native_prompt_expansion_rows(
+                    std::slice::from_ref(&qe_row),
+                    std::slice::from_ref(&qe_id),
+                    true,
+                )
+                .unwrap());
                 assert_eq!(pending_ingress_prompt_id(), Some(prompt_id));
 
                 orch.maybe_compact_before_call(None).await;
                 let pending_history = orch.session.lock().await.model_context_history();
-                assert!(pending_history.iter().any(|row| row.id() == prompt_id));
+                assert!(
+                    !pending_history.iter().any(|row| row.id() == prompt_id),
+                    "successful ordinary auto compaction consumes the pending user row"
+                );
                 assert!(pending_history.iter().any(|row| matches!(
                     row,
                     ConversationMessage::System { content, .. }
@@ -1904,9 +1921,46 @@ fn finalized_empty_ingress_compaction_stops_protecting_the_prompt() {
                 assert!(!pending_history.iter().any(|row| {
                     row.text_content().contains("prior conversation row 0")
                 }));
+                assert!(pending_ingress_prompt_was_compacted());
+                assert_eq!(
+                    prior_history_for_current_prompt(&orch).await,
+                    orch.session.lock().await.history.clone(),
+                    "NAr producer history is the post-compact full history when its prompt was consumed"
+                );
 
-                crate::request_context::finalize_prompt_ingress_batch_for_test(&orch, true).await;
+                crate::request_context::finalize_prompt_ingress_batch_for_test(&orch, false).await;
                 assert_eq!(pending_ingress_prompt_id(), None);
+                let committed_history = orch.session.lock().await.history.clone();
+                assert!(
+                    !committed_history.iter().any(|row| row.id() == prompt_id),
+                    "NAr finalization must not recreate the summarized user row"
+                );
+                let nar_index = committed_history
+                    .iter()
+                    .position(|row| row.id() == nar_id)
+                    .expect("accepted NAr row is appended after the compacted history");
+                let qe_index = committed_history
+                    .iter()
+                    .position(|row| row.id() == qe_id)
+                    .expect("buffered Qe row is flushed after NAr finalization");
+                assert!(nar_index < qe_index, "Qe flush follows the accepted NAr batch");
+                let jsonl = JsonlReader::new(transcript.clone(), filesystem.clone())
+                    .read_all()
+                    .await
+                    .unwrap();
+                let durable_nar_index = jsonl
+                    .iter()
+                    .position(|row| {
+                        row.message_type == "attachment" && row.uuid == nar_id.as_uuid().to_string()
+                    })
+                    .expect("accepted NAr row is durable");
+                let durable_qe_index = jsonl
+                    .iter()
+                    .position(|row| {
+                        row.message_type == "attachment" && row.uuid == qe_id.as_uuid().to_string()
+                    })
+                    .expect("buffered Qe row is durable");
+                assert!(durable_nar_index < durable_qe_index, "JSONL retains NAr before Qe");
 
                 let tool_use_id = lingxi_core::types::ToolUseId::from("toolu_after_ingress_compact");
                 let assistant = ConversationMessage::Assistant {
@@ -1958,8 +2012,60 @@ fn finalized_empty_ingress_compaction_stops_protecting_the_prompt() {
                         .snapshot
                         .iter()
                         .any(|row| row.id() == prompt_id),
-                    "a finalized ingress prompt becomes ordinary prior history and can be compacted on a later tool step"
+                    "the next model step proceeds without reconstructing the compacted ingress prompt"
                 );
+            })
+            .await;
+    });
+}
+
+#[test]
+fn skipped_auto_compaction_does_not_waive_missing_prompt_finalization_error() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("skipped-ingress-compaction.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let orch = orchestrator(&cwd, &transcript, filesystem)
+            .with_compaction(Arc::new(compaction::CompactionOrchestrator::new(u64::MAX)));
+        let prompt = ConversationMessage::user(MessageId::new(), "pending current prompt".into());
+        let prompt_id = prompt.id();
+        orch.session.lock().await.history.push(prompt.clone());
+        orch.persist_message_to_jsonl(&prompt).await;
+
+        REQUEST_CONTEXT
+            .scope(request_prompt_context(prompt_id), async {
+                REQUEST_CONTEXT
+                    .try_with(|context| {
+                        *context
+                            .staged_ingress_attachments
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
+                    })
+                    .unwrap();
+                orch.maybe_compact_before_call(None).await;
+                assert!(!pending_ingress_prompt_was_compacted());
+                assert!(orch
+                    .session
+                    .lock()
+                    .await
+                    .history
+                    .iter()
+                    .any(|row| row.id() == prompt_id));
+
+                mark_native_request_assembly_accepted();
+                orch.session.lock().await.history.retain(|row| row.id() != prompt_id);
+                let error = finalize_prompt_ingress_batch_with_enabled(&orch, false, None)
+                    .await
+                    .expect_err("an unexplained missing ingress row remains a strict failure");
+                assert!(matches!(
+                    error,
+                    OrchestratorError::Internal(message)
+                        if message == "accepted prompt-ingress history row is missing during finalization"
+                ));
+                assert!(!pending_ingress_prompt_was_compacted());
             })
             .await;
     });
