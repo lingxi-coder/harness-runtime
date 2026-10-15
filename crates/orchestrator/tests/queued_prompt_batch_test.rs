@@ -545,6 +545,42 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
                 .map(|kind| (index, kind))
         })
         .collect::<Vec<_>>();
+    let nar_rows = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let attachment = row.attachment_projection.as_ref()?;
+            let kind = attachment.string_at("/type")?;
+            matches!(kind, "session_context" | "date" | "total_tokens_reminder")
+                .then_some((index, kind))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        nar_rows.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
+        ["session_context", "date"],
+        "typed-Skill NAr preserves Native's empty context/date rows without a regular-prompt token reminder"
+    );
+    assert_eq!(nar_rows[0].0, body + 1, "session context follows the body");
+    assert_eq!(nar_rows[1].0, body + 2, "date follows session context");
+    let context_payload = rows[nar_rows[0].0]
+        .attachment_projection
+        .as_ref()
+        .expect("typed session-context row");
+    assert!(context_payload
+        .at_pointer("/context")
+        .is_some_and(|context| {
+            context
+                .object_entries()
+                .is_some_and(|entries| entries.is_empty())
+        }));
+    let current_date = orchestrator::prompt::env_meta::current_date_string();
+    assert_eq!(
+        rows[nar_rows[1].0]
+            .attachment_projection
+            .as_ref()
+            .and_then(|attachment| attachment.string_at("/date")),
+        Some(current_date.as_str())
+    );
     let hook_rows = attachment_rows
         .iter()
         .filter(|(_, kind)| kind.starts_with("hook_"))
@@ -560,6 +596,10 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
     assert!(
         hook_rows.iter().all(|(index, _)| *index > body),
         "each UPE hook row follows the body and preserves yield order"
+    );
+    assert!(
+        hook_rows.iter().all(|(index, _)| *index > nar_rows[1].0),
+        "durable Qe order is header/body, typed NAr context/date, then UPE rows"
     );
     let success_index = hook_rows
         .iter()
@@ -642,41 +682,63 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
     let requests = api.captured_calls().await;
     assert_eq!(requests.len(), 1);
     let captured_messages = &requests[0].messages;
-    let header_request_index = captured_messages
-        .iter()
-        .position(|message| {
-            message
-                .text_content()
-                .starts_with("<command-message>skill-🧪-probe")
-        })
-        .expect("the orchestrator mock observes a distinct pre-SDK command header row");
-    let body_request_index = captured_messages
-        .iter()
-        .position(|message| {
-            message
-                .text_content()
-                .contains("Base directory for this skill")
-        })
-        .expect("the orchestrator mock observes a distinct pre-SDK body row");
-    let success_request_index = captured_messages
-        .iter()
-        .position(|message| message.id() == success_id)
-        .expect("the orchestrator mock observes a distinct pre-SDK hook-success row");
-    let context_request_index = captured_messages
-        .iter()
-        .position(|message| {
-            message.id().as_uuid().to_string() == rows[additional_context_index].uuid
-        })
-        .expect("the orchestrator mock observes a distinct pre-SDK additional-context row");
+    let request_index_for_uuid = |uuid: &str| {
+        captured_messages
+            .iter()
+            .position(|message| message.id().as_uuid().to_string() == uuid)
+            .unwrap_or_else(|| panic!("pre-SDK request omits persisted row {uuid}"))
+    };
+    let context_request_index = request_index_for_uuid(&rows[nar_rows[0].0].uuid);
+    let date_request_index = request_index_for_uuid(&rows[nar_rows[1].0].uuid);
+    let success_request_index = request_index_for_uuid(&rows[success_index].uuid);
+    let upe_context_request_index = request_index_for_uuid(&rows[additional_context_index].uuid);
+    let header_request_index = request_index_for_uuid(&rows[header].uuid);
+    let body_request_index = request_index_for_uuid(&rows[body].uuid);
+    let zjr_indexes = [
+        context_request_index,
+        date_request_index,
+        success_request_index,
+        upe_context_request_index,
+        header_request_index,
+        body_request_index,
+    ];
     assert!(
-        header_request_index < body_request_index
-            && body_request_index < success_request_index
-            && success_request_index < context_request_index,
-        "pre-SDK source rows retain header/body/UPE-yield order"
+        zjr_indexes.windows(2).all(|pair| pair[0] < pair[1]),
+        "Native zjr places typed NAr, then typed UPE, then ordinary header/body rows; got indexes {zjr_indexes:?}"
+    );
+    assert_eq!(body_request_index, header_request_index + 1);
+    assert!(matches!(
+        &captured_messages[context_request_index],
+        ConversationMessage::System {
+            content,
+            subtype: Some(subtype),
+            ..
+        } if content.string_at("").is_some_and(str::is_empty)
+            && subtype == "model_reminder_attachment"
+    ));
+    assert!(matches!(
+        &captured_messages[date_request_index],
+        ConversationMessage::User { is_meta: true, .. }
+    ));
+    let expected_date_text =
+        format!("<system-reminder>\nToday's date is {current_date}.\n</system-reminder>");
+    let expected_date_units = expected_date_text.encode_utf16().collect::<Vec<_>>();
+    assert_eq!(
+        first_user_utf16_units(&captured_messages[date_request_index]),
+        Some(expected_date_units.as_slice()),
+        "the typed date row preserves exact Native UTF-16"
     );
     assert!(matches!(
         &captured_messages[header_request_index],
         ConversationMessage::User { is_meta: false, .. }
+    ));
+    assert!(matches!(
+        &captured_messages[success_request_index],
+        ConversationMessage::User { is_meta: true, .. }
+    ));
+    assert!(matches!(
+        &captured_messages[upe_context_request_index],
+        ConversationMessage::User { is_meta: true, .. }
     ));
     assert!(matches!(
         &captured_messages[body_request_index],
@@ -686,7 +748,7 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
             ..
         }
     ));
-    let batch_user_rows = captured_messages[header_request_index..=context_request_index].to_vec();
+    let batch_user_rows = captured_messages[date_request_index..=body_request_index].to_vec();
     assert!(batch_user_rows
         .iter()
         .all(|message| matches!(message, ConversationMessage::User { .. })));
@@ -698,10 +760,10 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
     );
     let outgoing_text = sdk_normalized[0].text_content();
     assert!(
-        outgoing_text.starts_with(
+        outgoing_text.contains(
             "<command-message>skill-🧪-probe</command-message>\n<command-name>/skill-🧪-probe</command-name>\nBase directory for this skill: /skills/🧪\n\nReturn the body."
         ),
-        "the Native message seam inserts a newline between the command header and body: {outgoing_text:?}"
+        "the normalized Native batch retains the adjacent header/body projection: {outgoing_text:?}"
     );
     assert!(outgoing_text.contains(
         "<system-reminder>\nUserPromptExpansion hook additional context: expanded note\nnested &lt;/system-reminder>\n\u{FFFD}\ntail &lt;\n</system-reminder>"
@@ -932,7 +994,65 @@ async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
                 "UserPromptExpansion",
                 "UserPromptSubmit"
             ],
-            "the UPE rows from Qe remain contiguous immediately after the body and precede host Mod contexts; streaming={streaming}"
+            "typed NAr context/date rows follow the body; source-ordered UPE rows follow NAr and precede host Mod contexts; streaming={streaming}"
+        );
+        let nar_rows = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| {
+                let attachment = record.attachment_projection.as_ref()?;
+                let kind = attachment.string_at("/type")?;
+                matches!(kind, "session_context" | "date" | "total_tokens_reminder")
+                    .then_some((index, kind))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            nar_rows.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
+            ["session_context", "date"],
+            "typed-Skill NAr carries the empty context anchor then date, with no regular-prompt token reminder; streaming={streaming}"
+        );
+        assert_eq!(
+            nar_rows[0].0,
+            body_index + 1,
+            "session context follows body; streaming={streaming}"
+        );
+        assert_eq!(
+            nar_rows[1].0,
+            body_index + 2,
+            "date follows session context; streaming={streaming}"
+        );
+        let context_payload = records[nar_rows[0].0]
+            .attachment_projection
+            .as_ref()
+            .expect("typed session-context row");
+        assert!(context_payload
+            .at_pointer("/context")
+            .is_some_and(|context| {
+                context
+                    .object_entries()
+                    .is_some_and(|entries| entries.is_empty())
+            }));
+        let current_date = orchestrator::prompt::env_meta::current_date_string();
+        assert_eq!(
+            records[nar_rows[1].0]
+                .attachment_projection
+                .as_ref()
+                .and_then(|attachment| attachment.string_at("/date")),
+            Some(current_date.as_str()),
+            "typed date row uses the current Native local date; streaming={streaming}"
+        );
+        let upe_row_indices = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| {
+                let attachment = record.attachment_projection.as_ref()?;
+                (attachment.string_at("/hookEvent") == Some("UserPromptExpansion")).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            upe_row_indices,
+            [body_index + 3, body_index + 4],
+            "the two source-ordered UPE rows follow NAr's typed context/date rows; streaming={streaming}"
         );
         let first_upe_index = records
             .iter()
@@ -943,7 +1063,7 @@ async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
                     .is_some_and(|row| row.string_at("/hookEvent") == Some("UserPromptExpansion"))
             })
             .unwrap();
-        assert_eq!(first_upe_index, body_index + 1);
+        assert_eq!(first_upe_index, body_index + 3);
 
         let outgoing = if streaming {
             streaming_api.captured_calls().await[0].messages.clone()
@@ -1052,20 +1172,39 @@ async fn prompt_submit_mod_screens_each_batch_entry_before_persistence() {
         .unwrap();
     let calls = api.captured_calls().await;
     assert_eq!(calls.len(), 1);
-    let model_text: Vec<_> = calls[0]
-        .messages
+    let outgoing = &calls[0].messages;
+    let rewritten = outgoing
         .iter()
-        .map(ConversationMessage::text_content)
-        .collect();
-    let rewritten = model_text
-        .iter()
-        .position(|text| text == "rewritten bridge")
+        .position(|message| message.text_content() == "rewritten bridge")
         .unwrap();
-    assert!(model_text[rewritten + 1].contains("prompt.submit hook additional context: batch note"));
-    assert_eq!(model_text[rewritten + 2], "timer");
-    assert!(!model_text
+    let submit_context_text =
+        "<system-reminder>\nprompt.submit hook additional context: batch note\n</system-reminder>";
+    let submit_context = outgoing
         .iter()
-        .any(|text| text.contains("plugin text") || text.contains("typed bridge")));
+        .position(|message| message.text_content() == submit_context_text)
+        .expect("typed prompt.submit context reaches the model");
+    let timer = outgoing
+        .iter()
+        .position(|message| message.text_content() == "timer")
+        .expect("scheduled timer remains in the model request");
+    assert!(
+        submit_context < rewritten && rewritten < timer,
+        "zjr places the typed prompt.submit sidecar before the rewritten user row, while timer order stays after it: submit={submit_context}, rewritten={rewritten}, timer={timer}"
+    );
+    assert!(matches!(
+        &outgoing[submit_context],
+        ConversationMessage::User { is_meta: true, .. }
+    ));
+    let expected_submit_units = submit_context_text.encode_utf16().collect::<Vec<_>>();
+    assert_eq!(
+        first_user_utf16_units(&outgoing[submit_context]),
+        Some(expected_submit_units.as_slice()),
+        "the typed prompt.submit user row retains exact UTF-16"
+    );
+    assert!(!outgoing.iter().any(|message| {
+        let text = message.text_content();
+        text.contains("plugin text") || text.contains("typed bridge")
+    }));
     let records = JsonlReader::new(path, fs).read_all().await.unwrap();
     let bridge_record_index = records
         .iter()
@@ -1081,10 +1220,24 @@ async fn prompt_submit_mod_screens_each_batch_entry_before_persistence() {
                 && record
                     .attachment_projection
                     .as_ref()
-                    .and_then(|payload| payload.string_at("/hookName"))
-                    == Some("prompt.submit")
+                    .is_some_and(|payload| {
+                        payload.string_at("/type") == Some("hook_additional_context")
+                            && payload.string_at("/hookName") == Some("prompt.submit")
+                            && payload.string_at("/hookEvent") == Some("UserPromptSubmit")
+                    })
         })
         .expect("the prompt.submit context is persisted as its own attachment");
+    let hook_payload = records[hook_record_index]
+        .attachment_projection
+        .as_ref()
+        .expect("typed prompt.submit attachment payload");
+    assert_eq!(
+        hook_payload
+            .at_pointer("/content")
+            .and_then(|content| content.array_len()),
+        Some(1)
+    );
+    assert_eq!(hook_payload.string_at("/content/0"), Some("batch note"));
     let timer_record_index = records
         .iter()
         .position(|record| {
