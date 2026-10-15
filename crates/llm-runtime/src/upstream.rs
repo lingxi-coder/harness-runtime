@@ -119,7 +119,11 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
             merged.protocol = projected.protocol;
             merged.auth = projected.auth;
             merged.regions = projected.regions;
+            let protocol_profiles = original.connection.protocol_profiles.clone();
+            let default_protocol = original.connection.default_protocol;
             merged.connection = projected.connection;
+            merged.connection.protocol_profiles = protocol_profiles;
+            merged.connection.default_protocol = default_protocol;
             merged.supports_websockets = projected.supports_websockets;
             merged.websocket_connect_timeout_ms = projected.websocket_connect_timeout_ms;
             merged.azure = projected.azure;

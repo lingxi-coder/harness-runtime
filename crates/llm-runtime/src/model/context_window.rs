@@ -162,6 +162,10 @@ fn canonical_name(model: &str) -> String {
     // claude-sonnet-5; binary canonicalization checks `sonnet-5` first —
     // note "claude-sonnet-4-5" does NOT contain "sonnet-5", see tests).
     if name.contains("claude-sonnet-5") {
+        // 2.1.293 native result.modelUsage preserves this more specific model.
+        if name.contains("claude-sonnet-5-5") {
+            return "claude-sonnet-5-5".to_string();
+        }
         return "claude-sonnet-5".to_string();
     }
     if name.contains("claude-sonnet-4-6") {
@@ -394,6 +398,15 @@ pub fn max_thinking_tokens_for_model(model: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_293_sonnet_5_5_retains_identity_and_limits() {
+        assert_eq!(canonical_name("claude-sonnet-5-5"), "claude-sonnet-5-5");
+        assert_eq!(
+            model_max_output_tokens("claude-sonnet-5-5"),
+            (128_000, 128_000)
+        );
+    }
 
     #[test]
     fn default_window_for_unknown_and_known_models() {

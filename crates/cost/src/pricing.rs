@@ -283,6 +283,9 @@ pub fn first_party_name_to_canonical(name: &str) -> String {
         return "claude-sonnet-5-5".into();
     }
     if name.contains("claude-sonnet-5") {
+        if name.contains("claude-sonnet-5-5") {
+            return "claude-sonnet-5-5".into();
+        }
         return "claude-sonnet-5".into();
     }
     if name.contains("claude-sonnet-4-6") {

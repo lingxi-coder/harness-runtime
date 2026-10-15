@@ -1,0 +1,123 @@
+{
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "source_windows": [
+    {
+      "label": "session.append response shape and immutable-message guard",
+      "start": 182727018,
+      "end_exclusive": 182728316,
+      "sha256": "481f4920b5e69666b7f31c884d9869b4b8bf0cc4f219a9c82dd3a6bdff4d13de"
+    },
+    {
+      "label": "assistant content diff, source-block retention, and row merge helpers",
+      "start": 212339434,
+      "end_exclusive": 212344890,
+      "sha256": "44df3543c990b61bc0f06952210285cc98ff497b908235c94d2152888b7b91dc"
+    },
+    {
+      "label": "native content block clone helper",
+      "start": 188334648,
+      "end_exclusive": 188334735,
+      "sha256": "f55199628115b3aa3444ebef9eed0d76f5509c599107172e4a0eb3f1069f3e08"
+    },
+    {
+      "label": "session.append row qualification and original-row through wrapper",
+      "start": 195330200,
+      "end_exclusive": 195331847,
+      "sha256": "90b6d38d60f49c1688b8bcbbe510db76bc3e5f155f33f1700a88f4d8537a65ed"
+    },
+    {
+      "label": "query stores selected row and dispatches its tool_use blocks",
+      "start": 195466181,
+      "end_exclusive": 195469377,
+      "sha256": "380eb29894b93878ef7fc2d3b75c57ffc73b9d331a838520dff9b949e656570c"
+    }
+  ],
+  "probes": {
+    "response_guard": {
+      "contentArrayGuardPasses": true,
+      "immutableMessageFieldsPass": true,
+      "matchingUuidAndNextResultPass": true,
+      "changedUuidRejected": true
+    },
+    "projection": {
+      "hookContent": [
+        {
+          "type": "text",
+          "text": "Mod accepted text only"
+        }
+      ],
+      "storedContent": [
+        {
+          "type": "text",
+          "text": "Mod accepted text only",
+          "citations": null
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_original",
+          "name": "Bash",
+          "input": {
+            "command": "echo original"
+          }
+        }
+      ],
+      "returnedContent": [
+        {
+          "type": "text",
+          "text": "Mod accepted text only",
+          "citations": null
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_original",
+          "name": "Bash",
+          "input": {
+            "command": "echo original"
+          }
+        }
+      ],
+      "storedToolUseCount": 1,
+      "originalToolUse": {
+        "type": "tool_use",
+        "id": "toolu_original",
+        "name": "Bash",
+        "input": {
+          "command": "echo original"
+        }
+      },
+      "retainedToolUseUnchanged": true,
+      "rowObjectMutatedInPlace": true,
+      "outerUuidUnchanged": true,
+      "innerMessageIdUnchanged": true,
+      "timestampUnchanged": true,
+      "usageAndStopReasonUnchanged": true
+    }
+  },
+  "execution_scope": {
+    "native_functions_executed": [
+      "Mt",
+      "dn",
+      "Wi",
+      "D",
+      "L",
+      "b",
+      "z",
+      "q",
+      "C",
+      "ee",
+      "te",
+      "E",
+      "oe",
+      "ne",
+      "lzn"
+    ],
+    "controlled_imports": [
+      "block parser preserving supplied valid Text/tool_use values",
+      "Text block schema acceptance"
+    ],
+    "source_only_pipeline_gaps": [
+      "full Native hook-worker dispatch and durable transcript writer were not launched",
+      "the probe demonstrates the shared-row projection helper, not filesystem commit timing"
+    ]
+  }
+}

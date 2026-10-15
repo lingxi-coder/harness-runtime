@@ -1679,17 +1679,22 @@ fn fusion_tool_result(result: lingxi_core::host::FusionResult) -> ToolCallResult
             })
         })
         .collect();
+    let data = generated_builtin_result(&json!({
+        "runId": result.run_id,
+        "mode": result.mode,
+        "status": status,
+        "analysisFailure": result.analysis_failure,
+        "panels": panels,
+        "usage": result.usage,
+        "timing": result.timing,
+        "egress": result.egress_profiles,
+        // G008: Fusion has no single child agent ID for the orchestrator to
+        // attribute hooks to. Keep the hook ownership marker in data so the
+        // turn-loop chokepoint can skip its duplicate SubagentStart event.
+        "subagentHooksFired": true,
+    }));
     ToolCallResult {
-        data: generated_builtin_result(&json!({
-            "runId": result.run_id,
-            "mode": result.mode,
-            "status": status,
-            "analysisFailure": result.analysis_failure,
-            "panels": panels,
-            "usage": result.usage,
-            "timing": result.timing,
-            "egress": result.egress_profiles,
-        })),
+        data,
         model_content: Some(source_text_projection(&material)),
         new_messages: vec![],
         context_modifier: None,
@@ -1717,12 +1722,16 @@ fn fusion_tool_result_with_settlement(
             settlement,
             lingxi_core::host::FusionAttemptSettlementStatus::Failed { .. }
         ) {
-            let computation_status = output.data.string_at("/status").unwrap_or("unanalyzed");
+            let computation_status = output
+                .data
+                .string_at("/status")
+                .unwrap_or("unanalyzed")
+                .to_owned();
             output
                 .data
                 .set_field(
                     "computationStatus",
-                    source_text_projection(computation_status),
+                    source_text_projection(&computation_status),
                 )
                 .expect("generated Fusion result is an object");
             output
@@ -1736,7 +1745,7 @@ fn fusion_tool_result_with_settlement(
             if let Some(answer) = &mut output.model_content {
                 let mut units = answer
                     .string_units("")
-                    .expect("Fusion model content is a root string");
+                    .expect("Fusion model content retains its source projection");
                 units.extend(
                     "\n\nFusion accounting failed; the computed answer is retained, but accounting remains unavailable."
                         .encode_utf16(),
@@ -5108,12 +5117,13 @@ impl Tool for AgentTool {
                 .expect("generated teammate launch result is an object");
             data.set_field("prompt", prompt_source.clone())
                 .expect("generated teammate launch result is an object");
+            let model_content = source_text_projection(&format!(
+                "Spawned successfully. (This tool result is internal metadata — never quote or paste any part of it, including the ID below, into a user-facing reply.)\nagent_id: {}\nname: {}\nThe agent is now running and will receive instructions via mailbox.",
+                launch.teammate_id, launch.name
+            ));
             return Ok(ToolCallResult {
                 data,
-                model_content: Some(source_text_projection(&format!(
-                    "Spawned successfully. (This tool result is internal metadata — never quote or paste any part of it, including the ID below, into a user-facing reply.)\nagent_id: {}\nname: {}\nThe agent is now running and will receive instructions via mailbox.",
-                    launch.teammate_id, launch.name
-                ))),
+                model_content: Some(model_content),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
@@ -6569,6 +6579,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     "totalDurationMs": total_duration_ms,
                     "totalTokens": total_tokens,
                     "usage": {},
+                    // Internal hook ownership markers consumed by the
+                    // orchestrator chokepoint; model content stays unchanged.
+                    "subagentHooksFired": true,
+                    "subagentStopHooksOwned": terminal_hooks_owned,
                 }));
                 data.set_field("prompt", prompt_source.clone())
                     .expect("generated completed Agent result is an object");

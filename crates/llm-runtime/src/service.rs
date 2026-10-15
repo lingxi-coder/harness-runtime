@@ -2139,6 +2139,13 @@ fn extra_metadata_object_uncached() -> Option<serde_json::Map<String, serde_json
 }
 
 impl ApiService {
+    pub fn hosted_search_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::ResolvedRoute, LlmError> {
+        self.client.hosted_search_route(model, profile)
+    }
     pub fn uses_codex_standalone_search(&self, model: &str, profile: Option<&str>) -> bool {
         self.client
             .search_profile(model, profile)
@@ -8418,9 +8425,8 @@ impl ApiService {
     /// request metadata, remains shared.
     ///
     /// `max_tokens` is `None` for the model-aware ordinary request budget — the
-    /// same signal the main turn passes. For Claude this remains its native
-    /// default; catalog-backed non-Claude routes use a safe 32k default rather
-    /// than treating a hard provider ceiling as a per-turn target. It was
+    /// same signal the main turn passes. The selected route's output ceiling
+    /// is bounded by the available context before dispatch. It was
     /// previously a bare `u32`, which forced every caller to invent a ceiling;
     /// on a reasoning model that invented number silently capped the THINKING
     /// pass as well as the answer. Pass `Some(n)` only where a caller has a real

@@ -17,24 +17,16 @@ pub fn builtin_presets() -> BuiltinCatalog {
         .expect("pinned provider catalog must parse")
         .into_iter()
         .map(|profile| {
-            let provider_id = match profile.protocol {
-                wire::ProtocolFamily::AnthropicMessages
-                    if profile.provider_id.as_str() == "anthropic" =>
-                {
-                    ProviderId::AnthropicFirstParty
-                }
-                wire::ProtocolFamily::OpenAiChat | wire::ProtocolFamily::OpenAiResponses
-                    if profile.provider_id.as_str() == "openai" =>
-                {
-                    ProviderId::OpenAI
-                }
-                wire::ProtocolFamily::GeminiGenerateContent
-                | wire::ProtocolFamily::GeminiInteractions => ProviderId::Gemini,
-                wire::ProtocolFamily::VertexGemini => ProviderId::VertexGemini,
-                wire::ProtocolFamily::VertexClaude => ProviderId::VertexClaude,
-                wire::ProtocolFamily::BedrockClaude => ProviderId::BedrockClaude,
-                wire::ProtocolFamily::FoundryClaude => ProviderId::FoundryClaude,
-                wire::ProtocolFamily::AzureOpenAi => ProviderId::AzureOpenAI,
+            // Provider identity is independent of the caller-selected wire.
+            let provider_id = match (profile.provider_id.as_str(), profile.protocol) {
+                ("anthropic", _) => ProviderId::AnthropicFirstParty,
+                ("openai", _) => ProviderId::OpenAI,
+                ("google", wire::ProtocolFamily::VertexGemini) => ProviderId::VertexGemini,
+                ("google", _) => ProviderId::Gemini,
+                (_, wire::ProtocolFamily::VertexClaude) => ProviderId::VertexClaude,
+                (_, wire::ProtocolFamily::BedrockClaude) => ProviderId::BedrockClaude,
+                (_, wire::ProtocolFamily::FoundryClaude) => ProviderId::FoundryClaude,
+                (_, wire::ProtocolFamily::AzureOpenAi) => ProviderId::AzureOpenAI,
                 _ => ProviderId::OpenAICompatible {
                     name: profile.provider_id.as_str().into(),
                 },
@@ -168,6 +160,7 @@ pub fn builtin_presets() -> BuiltinCatalog {
         })
         .filter(|profile| !profile.models.is_empty())
         .collect();
+    providers.sort_by_key(|profile| profile.connection.hidden);
     // Account login is a host-owned connection; model facts still come from upstream.
     if let Some(mut chatgpt) = providers
         .iter()

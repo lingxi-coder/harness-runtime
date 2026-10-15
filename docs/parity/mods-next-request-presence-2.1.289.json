@@ -1,0 +1,102 @@
+{
+  "result": "PASS",
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "executed": [
+    "Native ozo user/assistant request message mapping",
+    "Native Anthropic SDK beta.messages.create method with fake transport",
+    "Native bound JSON body encoder nR"
+  ],
+  "native_main_path": "lke -> ozo -> Fl.messages -> beta.messages.create",
+  "request_messages": [
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "accepted replacement",
+          "citations": null
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_result",
+          "content": "accepted result"
+        }
+      ]
+    }
+  ],
+  "request_body_json": "{\"model\":\"claude-test\",\"max_tokens\":16,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"accepted replacement\",\"citations\":null}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_result\",\"content\":\"accepted result\"}]}],\"stream\":true}",
+  "request_body_sha256": "6e675d5d8cd36bfb628b44a99143065e4b8b6ca2ecf045f4128abdb1cd43d075",
+  "tool_result_flags": {
+    "absent": {
+      "is_error_present": false,
+      "request_body_json": "{\"model\":\"claude-test\",\"max_tokens\":16,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"accepted replacement\",\"citations\":null}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_result\",\"content\":\"accepted result\"}]}],\"stream\":true}",
+      "request_body_sha256": "6e675d5d8cd36bfb628b44a99143065e4b8b6ca2ecf045f4128abdb1cd43d075"
+    },
+    "false": {
+      "is_error_present": true,
+      "request_body_json": "{\"model\":\"claude-test\",\"max_tokens\":16,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"accepted replacement\",\"citations\":null}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_result\",\"content\":\"accepted result\",\"is_error\":false}]}],\"stream\":true}",
+      "request_body_sha256": "e115500b5876b9fd97481d7785d5b249362fa77fdd8f099b9940740684ed7aa7"
+    },
+    "true": {
+      "is_error_present": true,
+      "request_body_json": "{\"model\":\"claude-test\",\"max_tokens\":16,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"accepted replacement\",\"citations\":null}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_result\",\"content\":\"accepted result\",\"is_error\":true}]}],\"stream\":true}",
+      "request_body_sha256": "648fa06e33586567ac9d3afe5bd77e1da8833e52cdb84661e57c817ea08d2b4e"
+    }
+  },
+  "source_windows": [
+    {
+      "label": "main-query row-to-request builder",
+      "start": 189313301,
+      "end": 189321332,
+      "sha256": "69f76bb5846f681a43a352c9628c1d202334f981e6a29282b0fbc56adc15e544"
+    },
+    {
+      "label": "main-query dispatch of built request",
+      "start": 189351386,
+      "end": 189353602,
+      "sha256": "74fca5f77474f4f2a94c1fb7bb68f7c408cc42751bb7804ad06fd78371957e5a"
+    },
+    {
+      "label": "Native user and assistant content mapping",
+      "start": 189269417,
+      "end": 189270527,
+      "sha256": "14647de5cf5cd1ddfbf92977e5073aeaaa65cc02a1e4c360a0f320b660927d23"
+    },
+    {
+      "label": "Native request message mapper",
+      "start": 189400591,
+      "end": 189402652,
+      "sha256": "cb3193be9dd48d17409b0ca2ac323f217b4cb7a9abad842c164fe8d6645d2982"
+    },
+    {
+      "label": "Anthropic SDK beta messages.create",
+      "start": 185713672,
+      "end": 185714784,
+      "sha256": "40e065e115be82b0133aa8ad5d500eac0b1c0e2fd831693a0d80576414c3fa06"
+    },
+    {
+      "label": "Anthropic SDK JSON body encoder",
+      "start": 185615033,
+      "end": 185615136,
+      "sha256": "977f3f3807f3afb1fb238be74dd4b5cd29dfac47a94fad12f3fe9aef95cd5379"
+    },
+    {
+      "label": "Anthropic SDK body delegation",
+      "start": 185772838,
+      "end": 185773601,
+      "sha256": "4d7868e17f7fa1a92e7d4811e593f274afbf369fc6932f2a4567ffb4d9f2c673"
+    },
+    {
+      "label": "Anthropic SDK binds its body helper",
+      "start": 185760468,
+      "end": 185760512,
+      "sha256": "4aa283df0b7ad6d9ef5d4866c6827982995a718d21fbc084fce6bec24407d8b1"
+    }
+  ],
+  "scope": "No full CLI launch, network request, or provider call; the exact pinned conversion and SDK body functions were executed in isolation."
+}

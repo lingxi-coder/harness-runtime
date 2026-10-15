@@ -5945,6 +5945,7 @@ mod malformed_and_thinking_only_tests {
     async fn malformed_tool_use_first_failure_continues_and_nudges() {
         let orch = orch_with_responses(vec![malformed_tool_use_response()]);
         let mut state = RecoveryState {
+            output_recovery_actions: 2,
             // Pre-seed a non-zero recovery count to prove it gets reset.
             max_output_tokens_recovery_count: 2,
             ..Default::default()

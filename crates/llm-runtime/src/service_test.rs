@@ -12911,6 +12911,8 @@ mod tests {
             )
             .unwrap();
         assert!(request.execution.resolve_native_effort);
+        assert!(adapter.is_first_party_route("claude-sonnet-5-5", None).unwrap());
+        assert!(!adapter.client.fast_account_identity("claude-sonnet-5-5", None).unwrap().first_party);
         let mut prepared = adapter.client.prepare(&request).await.unwrap();
         adapter
             .inject_headers(&mut prepared, DispatchHeaderState::default())

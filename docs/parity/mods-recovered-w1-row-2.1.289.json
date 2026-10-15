@@ -1,0 +1,179 @@
+{
+  "native_version": "2.1.289",
+  "binary": {
+    "path": "/tmp/harness-claude-code-2.1.289-darwin-arm64",
+    "size_bytes": 229616464,
+    "sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69"
+  },
+  "source_windows": [
+    {
+      "label": "AGo full nonstream provider response",
+      "start": 189272780,
+      "end_exclusive": 189275792,
+      "sha256": "8c5767f055b2fe09e9da61a853edfb2d767cb845093b558c65da0de3a39da653"
+    },
+    {
+      "label": "l8e nonstream response normalization and assistant-row yield",
+      "start": 189346377,
+      "end_exclusive": 189349484,
+      "sha256": "b130facacfb390b3d95f6981cb4692a01bc2a33d034a193cd80659e471f5b06d"
+    },
+    {
+      "label": "dwn response content filtering",
+      "start": 189341909,
+      "end_exclusive": 189343263,
+      "sha256": "0a5e6c5014330afce1309b1d3c68e0aee3cec9f513faa18e37981c35e4aa18a3"
+    },
+    {
+      "label": "eFt nonstream content block normalization",
+      "start": 191356656,
+      "end_exclusive": 191359199,
+      "sha256": "e4c70457d8c391da8ceb14bee3706b23783b09f6d511a2cc0f2d93dc95ca81e4"
+    },
+    {
+      "label": "HUt ordered content and batch-tool transform",
+      "start": 184985052,
+      "end_exclusive": 184985387,
+      "sha256": "970be10d39bc63c462c134dbdd64437093d78544f248b0c37145aa7fe084f793"
+    },
+    {
+      "label": "stream error enters the shared nonstream fallback generator",
+      "start": 189390373,
+      "end_exclusive": 189391775,
+      "sha256": "82a9d3ff4707c3767cd7dab5db759d9d012f5adab086019fbe85477b773d98bf"
+    },
+    {
+      "label": "404 stream creation fallback enters the same nonstream generator",
+      "start": 189391900,
+      "end_exclusive": 189393148,
+      "sha256": "adea093332e10571ea048149bde06ff63e0c479c760487e882f728b14b838494"
+    },
+    {
+      "label": "MC row predicate includes assistant and user rows",
+      "start": 194774097,
+      "end_exclusive": 194774244,
+      "sha256": "90a7c47a62578e657003eed20fbaf183f32b1dfd8211bf2a8cbba89c9ebedd01"
+    },
+    {
+      "label": "stream content_block_stop produces one row for one completed block",
+      "start": 189368685,
+      "end_exclusive": 189370128,
+      "sha256": "aa8ce11178f40647830a76867eab1458645b378e24fbe5f6092a9f9042e4df50"
+    },
+    {
+      "label": "MC forwards assistant and user query rows without content-block splitting",
+      "start": 194793235,
+      "end_exclusive": 194795722,
+      "sha256": "9d13f060e3966a8a65a6d4a0d78a9db9004493e8ec48b3c1c2a69724d3b61f5a"
+    },
+    {
+      "label": "query consumer enqueues tool blocks from one assistant row in content order",
+      "start": 195466181,
+      "end_exclusive": 195469377,
+      "sha256": "380eb29894b93878ef7fc2d3b75c57ffc73b9d331a838520dff9b949e656570c"
+    },
+    {
+      "label": "executor stores each tool block with the assistant row object",
+      "start": 195350179,
+      "end_exclusive": 195351516,
+      "sha256": "92b720b6a34784e97521f5d290052a628d34aa365dc8b674d7e6fde78f810b2a"
+    },
+    {
+      "label": "buildSameTurnToolUses source method",
+      "start": 195353804,
+      "end_exclusive": 195354117,
+      "sha256": "813ea3c0b71b8e92bb9097ba2d7d23cc6a3de6f13c4a221af698db96f8bfd835"
+    },
+    {
+      "label": "completed executor entries stay in the same tool array as yielded entries",
+      "start": 195355929,
+      "end_exclusive": 195356509,
+      "sha256": "39bd63336ce18174bef5b3867e0e6b721153fb64194a1ce144cd8418f2aa2bed"
+    },
+    {
+      "label": "executor passes current row separately from earlier sibling context",
+      "start": 195354700,
+      "end_exclusive": 195355020,
+      "sha256": "49f7d225d78efab574e0afb853cfadacad167ff88b4777d39f8611d5c3df15b9"
+    },
+    {
+      "label": "W1 takes current assistant row and supplies sibling rows to permission helper",
+      "start": 188831280,
+      "end_exclusive": 188831680,
+      "sha256": "21cad4d61d3ecdc8f48224da1577da2f005c9eb0ae48f123510c21fd81c1c792"
+    }
+  ],
+  "findings": {
+    "provider_adapter": "AGo requests stream:false and returns the complete provider message object.",
+    "nonstream_fallback_row": "l8e normalizes the whole response content array and creates/pushes/yields one assistant row (apiBlockIndex 0, a fresh outer UUID, and the provider inner message id).",
+    "fallback_entrypoints": [
+      "stream error fallback",
+      "404 stream-creation fallback"
+    ],
+    "content_order_scope": "For surviving ordinary text/tool blocks without batch decomposition or special server-refusal filtering, dwn/eFt/HUt preserve the response array order; special filters/decomposition can remove or expand blocks.",
+    "agent_query_wrapper": "MC forwards a completed assistant row from runQuery as that same row; it does not split message.content into rows.",
+    "streaming_contrast": "The streaming content_block_stop producer wraps one completed block in a row and stamps that block row with apiBlockIndex.",
+    "current_row_and_siblings": "The current tool block and its assistant row are separate W1 arguments. sameTurnToolUses is built from executor queue entries before the current entry, grouped by assistantMessage object identity, with each sibling row cloned to contain only those earlier tool blocks.",
+    "example": "With one row TextA/ToolA/TextB/ToolB, W1 for ToolA gets no prior sibling rows; W1 for ToolB gets a partial clone of the same row containing ToolA only."
+  },
+  "executable_native_helper_probe": {
+    "input_content_order": [
+      "TextA",
+      "tool-a",
+      "TextB",
+      "tool-b"
+    ],
+    "first_tool": {
+      "current_tool_id": "tool-a",
+      "same_turn_tool_uses": []
+    },
+    "second_tool": {
+      "current_tool_id": "tool-b",
+      "same_turn_tool_uses": [
+        {
+          "uuid": "outer-row-1",
+          "message": {
+            "id": "provider-message-1",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "ToolA",
+                "input": {}
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "source_row_after_probe": {
+      "uuid": "outer-row-1",
+      "message": {
+        "id": "provider-message-1",
+        "content": [
+          {
+            "type": "text",
+            "text": "TextA"
+          },
+          {
+            "type": "tool_use",
+            "id": "tool-a",
+            "name": "ToolA",
+            "input": {}
+          },
+          {
+            "type": "text",
+            "text": "TextB"
+          },
+          {
+            "type": "tool_use",
+            "id": "tool-b",
+            "name": "ToolB",
+            "input": {}
+          }
+        ]
+      }
+    }
+  },
+  "evidence_boundary": "The extracted Native sibling builder is executed in a VM. Provider request, l8e generator, query loop, and W1 are pinned and statically inspected, not executed; no provider or CLI session is started."
+}

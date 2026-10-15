@@ -1,0 +1,40 @@
+{
+  "binarySha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "sourceOnlyOracle": true,
+  "externalDependenciesStubbed": [
+    "feature/provider gate inputs",
+    "session transcript lookup",
+    "Zod safeParse contract",
+    "UUID/time/hash/telemetry"
+  ],
+  "markerEnabledForSyntheticFirstPartyConditions": true,
+  "providerComposerOutput": [
+    "native shared base",
+    "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__",
+    "native per-session context"
+  ],
+  "providerComposerWithoutMarker": [
+    "native shared base",
+    "native per-session context"
+  ],
+  "queryPrompt": [
+    "native shared base",
+    "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__",
+    "native per-session context"
+  ],
+  "freshSnapshotAttachment": {
+    "type": "prompt_snapshot",
+    "systemPrompt": [
+      "native shared base",
+      "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__",
+      "native per-session context"
+    ]
+  },
+  "recoveredPrompt": [
+    "native shared base",
+    "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__",
+    "native per-session context"
+  ],
+  "wrapperAttachmentSameReference": true,
+  "sharedBoundaryFieldPresent": false
+}

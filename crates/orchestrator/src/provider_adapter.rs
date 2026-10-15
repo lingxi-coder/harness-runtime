@@ -4117,6 +4117,16 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         use futures::StreamExt;
         use llm_runtime::services::sdk;
         use llm_runtime::HistoryEvent;
+        let route = self
+            .service
+            .hosted_search_route(&input.model, input.profile.as_deref())
+            .map_err(hosted_search_error)?;
+        let require_native_results = matches!(
+            &route.provider_id,
+            llm_runtime::ProviderId::OpenAICompatible { name }
+                | llm_runtime::ProviderId::Custom { name }
+                if name == "deepseek"
+        );
         let query_units = input
             .query
             .string_units("")
@@ -4124,7 +4134,7 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         let codex_standalone_search = self
             .service
             .uses_codex_standalone_search(&input.model, input.profile.as_deref());
-        let mut request = llm_runtime::LlmRequest::new(input.model);
+        let mut request = llm_runtime::LlmRequest::new(route.request_model);
         if !codex_standalone_search {
             let mut prompt_units = "Perform a web search for the query: "
                 .encode_utf16()
@@ -4145,7 +4155,7 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                     native_options: Vec::new(),
                 });
         }
-        request.profile = input.profile;
+        request.profile = Some(route.profile_name);
         request.input.max_tokens = Some(4096);
         request.execution.query_source = Some("web_search_tool".into());
         request.input.system = vec![sdk::protocol::SystemBlock::new(
@@ -4308,6 +4318,15 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             .filter_map(hosted_search_content_source)
             .collect::<Vec<_>>();
         let mut results = sdk::hosted_search::parse_response_content(&search_content);
+        if require_native_results
+            && !results
+                .iter()
+                .any(|entry| matches!(entry, sdk::hosted_search::SearchResultEntry::Hit(_)))
+        {
+            return Err(hosted_search_input_error(
+                "DeepSeek returned no structured web_search_tool_result; native search did not complete",
+            ));
+        }
         let mut observations = metadata
             .payload_at("/llm_client/web_search")
             .filter(lingxi_llm_client::protocol::JsonPayload::is_root_array)
