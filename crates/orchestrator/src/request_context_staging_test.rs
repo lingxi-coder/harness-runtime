@@ -1855,6 +1855,117 @@ fn regular_ingress_has_token_and_later_tool_continuation_uses_false_token_path()
 }
 
 #[test]
+fn finalized_empty_ingress_compaction_stops_protecting_the_prompt() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("empty-ingress-compaction.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let orch = orchestrator(&cwd, &transcript, filesystem)
+            .with_compaction(Arc::new(compaction::CompactionOrchestrator::new(1)));
+
+        for index in 0..24 {
+            let row = ConversationMessage::user(
+                MessageId::new(),
+                format!("prior conversation row {index} with enough text to compact"),
+            );
+            orch.session.lock().await.history.push(row.clone());
+            orch.persist_message_to_jsonl(&row).await;
+        }
+        let prompt = ConversationMessage::user(MessageId::new(), "pending current prompt".into());
+        let prompt_id = prompt.id();
+        orch.session.lock().await.history.push(prompt.clone());
+        orch.persist_message_to_jsonl(&prompt).await;
+
+        REQUEST_CONTEXT
+            .scope(request_prompt_context(prompt_id), async {
+                // Some(empty) is a real pending regular-user batch: no NAr rows
+                // were produced, but its user row still belongs to this query.
+                REQUEST_CONTEXT
+                    .try_with(|context| {
+                        *context
+                            .staged_ingress_attachments
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
+                    })
+                    .unwrap();
+                assert_eq!(pending_ingress_prompt_id(), Some(prompt_id));
+
+                orch.maybe_compact_before_call(None).await;
+                let pending_history = orch.session.lock().await.model_context_history();
+                assert!(pending_history.iter().any(|row| row.id() == prompt_id));
+                assert!(pending_history.iter().any(|row| matches!(
+                    row,
+                    ConversationMessage::System { content, .. }
+                        if content.string_at("") == Some("Conversation compacted")
+                )));
+                assert!(!pending_history.iter().any(|row| {
+                    row.text_content().contains("prior conversation row 0")
+                }));
+
+                crate::request_context::finalize_prompt_ingress_batch_for_test(&orch, true).await;
+                assert_eq!(pending_ingress_prompt_id(), None);
+
+                let tool_use_id = lingxi_core::types::ToolUseId::from("toolu_after_ingress_compact");
+                let assistant = ConversationMessage::Assistant {
+                    per_turn_effort: None,
+                    id: MessageId::new(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: tool_use_id.clone(),
+                        name: "Read".into(),
+                        input: Utf16JsonProjection::parse("{}").unwrap(),
+                        provider_id: None,
+                    }],
+                    stop_reason: Some("tool_use".into()),
+                    resumable: None,
+                };
+                let tool_result = ConversationMessage::User {
+                    api_message_override: None,
+                    id: MessageId::new(),
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id,
+                        content: "read complete".into(),
+                        is_error: Some(false),
+                        provider_tool_use_id: None,
+                        content_blocks: None,
+                    }],
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
+                };
+                for row in [assistant, tool_result] {
+                    orch.session.lock().await.history.push(row.clone());
+                    orch.persist_message_to_jsonl(&row).await;
+                }
+
+                let continuation = orch
+                    .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
+                    .await
+                    .unwrap();
+                assert!(continuation.snapshot.iter().any(|row| matches!(
+                    row,
+                    ConversationMessage::System { content, .. }
+                        if content.string_at("") == Some("Conversation compacted")
+                )));
+                assert!(
+                    !continuation
+                        .snapshot
+                        .iter()
+                        .any(|row| row.id() == prompt_id),
+                    "a finalized ingress prompt becomes ordinary prior history and can be compacted on a later tool step"
+                );
+            })
+            .await;
+    });
+}
+
+#[test]
 fn accepted_upe_rows_commit_after_nar_on_early_scope_exit_and_keep_pending_ids() {
     run_with_large_stack(|| async {
         let root = tempfile::tempdir().unwrap();
