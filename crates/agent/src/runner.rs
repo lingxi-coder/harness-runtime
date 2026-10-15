@@ -1291,6 +1291,30 @@ async fn accumulate_agent_stream_live(
                     // observation in metadata. Do not stage its rejected body.
                     break;
                 }
+                match malformed_tool_input_from_response(&completed) {
+                    Ok(Some(error)) => {
+                        // The current stream accumulator preserves malformed
+                        // tool JSON as typed provider metadata on a complete
+                        // response. Re-enter the same error path used for a
+                        // malformed block observed before the terminal event;
+                        // otherwise the dropped block looks like an ordinary
+                        // tool-free response and the host can issue another
+                        // turn without applying its recovery policy.
+                        partial_response = Some(completed.clone());
+                        response_error = Some((completed.content.clone(), error));
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        // A producer claiming a tool-input issue must provide
+                        // the complete SDK diagnostic shape. Fail closed rather
+                        // than dispatching the remaining response as if the
+                        // omitted call had never existed.
+                        partial_response = Some(completed.clone());
+                        response_error = Some((completed.content.clone(), error));
+                        break;
+                    }
+                }
                 // A client may provide a complete response snapshot instead of
                 // block events. Keep that adapter path complete, while normal
                 // streaming starts each tool at its stop boundary above.
@@ -2419,6 +2443,116 @@ fn classify_api_termination(e: &llm_runtime::LlmError) -> Option<(&'static str, 
         // (errorKind not in CTy), so they surface as `Failed`.
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SdkToolInputIssue {
+    tool_name: String,
+    block_index: u32,
+    input_bytes: usize,
+    // The non-stream response projection carries ToolInputIssue::tool_id;
+    // the stream accumulator's local diagnosis does not. Retain it here so a
+    // response carrying both producer paths can be checked for conflicts.
+    tool_id: Option<String>,
+}
+
+/// Reconstruct the typed parse failure recorded by either current SDK
+/// producer for a complete response. The stream accumulator writes
+/// `/tool_input_issues`; the decoded non-stream response projection writes
+/// `/llm_client/tool_input_issues`. Read typed fields directly from the
+/// source-backed payload so provider metadata and its source carrier stay
+/// intact, and malformed arguments are never projected through
+/// `serde_json::Value`.
+fn malformed_tool_input_from_response(
+    response: &llm_runtime::HistoryResponse,
+) -> Result<Option<LlmError>, LlmError> {
+    let metadata = &response.provider_metadata;
+    let parse_issues = |pointer: &str| -> Result<Option<Vec<SdkToolInputIssue>>, LlmError> {
+        if metadata.raw_source_at(pointer).is_none() {
+            return Ok(None);
+        }
+        let issue_count = metadata
+            .array_len(pointer)
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: format!("SDK {pointer} metadata is not an array"),
+            })?;
+        let mut issues = Vec::with_capacity(issue_count);
+        for index in 0..issue_count {
+            let issue = format!("{pointer}/{index}");
+            let tool_name = metadata
+                .string_at(&format!("{issue}/tool_name"))
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: format!("SDK {pointer} metadata is missing tool_name"),
+                })?;
+            let block_index = metadata
+                .unsigned_integer_at(&format!("{issue}/block_index"))
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: format!("SDK {pointer} metadata has an invalid block_index"),
+                })?;
+            let input_bytes = metadata
+                .unsigned_integer_at(&format!("{issue}/input_bytes"))
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: format!("SDK {pointer} metadata has an invalid input_bytes"),
+                })?;
+            let tool_id_path = format!("{issue}/tool_id");
+            let tool_id_source = metadata.raw_source_at(&tool_id_path);
+            let tool_id = match tool_id_source.as_deref().map(str::trim) {
+                None | Some("null") => None,
+                Some(_) => Some(metadata.string_at(&tool_id_path).ok_or_else(|| {
+                    LlmError::InvalidRequest {
+                        message: format!("SDK {pointer} metadata has an invalid tool_id"),
+                    }
+                })?),
+            };
+            issues.push(SdkToolInputIssue {
+                tool_name,
+                block_index,
+                input_bytes,
+                tool_id,
+            });
+        }
+        Ok(Some(issues))
+    };
+
+    let stream_issues = parse_issues("/tool_input_issues")?;
+    let response_issues = parse_issues("/llm_client/tool_input_issues")?;
+    let issues = match (stream_issues, response_issues) {
+        (Some(stream), Some(response)) if stream != response => {
+            return Err(LlmError::InvalidRequest {
+                message: "conflicting SDK tool_input_issues metadata".into(),
+            });
+        }
+        (Some(stream), Some(_)) | (Some(stream), None) => stream,
+        (None, Some(response)) => response,
+        (None, None) => return Ok(None),
+    };
+    let Some(issue) = issues.first() else {
+        return Ok(None);
+    };
+
+    let has_other_tool_calls = issues.len() > 1
+        || response.content.iter().any(|block| {
+            matches!(
+                block,
+                llm_runtime::ContentBlock::ToolCall { .. }
+                    | llm_runtime::ContentBlock::ServerToolUse { .. }
+                    | llm_runtime::ContentBlock::ToolResult { .. }
+                    | llm_runtime::ContentBlock::AdvisorToolResult { .. }
+            )
+        });
+
+    // The original JsonPayload remains attached to `response` for the existing
+    // transcript/metadata path; only the bounded typed fields above are read.
+    Ok(Some(LlmError::MalformedToolInput {
+        tool_name: issue.tool_name.clone(),
+        block_index: issue.block_index,
+        reason: "invalid JSON tool input".into(),
+        input_bytes: issue.input_bytes,
+        has_other_tool_calls,
+    }))
 }
 
 /// Build the CC 2.1.207 subagent `api_error_partial` result: the normal

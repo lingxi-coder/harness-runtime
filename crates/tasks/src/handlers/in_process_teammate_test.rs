@@ -2555,32 +2555,47 @@ async fn message_received_while_busy_waits_for_the_idle_poll() {
             .chain(" one".encode_utf16())
             .collect::<Vec<_>>();
         let messages = &histories[1];
-        let first_user = messages
+        let initial_prompt =
+            teammate_message_envelope(TEAM_LEAD_NAME, &Utf16JsonProjection::from("initial"))
+                .string_units("")
+                .expect("initial teammate prompt remains a root string projection");
+        let initial_prompt_text = String::from_utf16_lossy(&initial_prompt);
+        let initial_prompt_index = messages
             .iter()
-            .position(|message| {
-                matches!(
-                    message,
-                    lingxi_core::types::ConversationMessage::User { .. }
-                )
+            .position(|message| match message {
+                lingxi_core::types::ConversationMessage::User {
+                    content,
+                    is_meta: false,
+                    ..
+                } => matches!(
+                    content.as_slice(),
+                    [lingxi_core::types::ContentBlock::TextJsUtf16 {
+                        text,
+                        utf16_code_units,
+                        citations: None,
+                    }] if text == &initial_prompt_text
+                        && utf16_code_units.as_slice() == initial_prompt.as_slice()
+                ),
+                _ => false,
             })
             .expect("initial task prompt remains in history");
-        let queued_units = messages
+        let next_user_content = messages
             .iter()
-            .skip(first_user + 1)
+            .skip(initial_prompt_index + 1)
             .find_map(|message| match message {
-                lingxi_core::types::ConversationMessage::User { content, .. } => {
-                    content.iter().find_map(|block| match block {
-                        lingxi_core::types::ContentBlock::TextJsUtf16 {
-                            utf16_code_units, ..
-                        } => Some(utf16_code_units.clone()),
-                        _ => None,
-                    })
-                }
+                lingxi_core::types::ConversationMessage::User { content, .. } => Some(content),
                 _ => None,
-            });
-        assert_eq!(
-            queued_units,
-            Some(expected_units),
+            })
+            .expect("queued teammate message follows the initial assignment");
+        assert!(
+            matches!(
+                next_user_content.as_slice(),
+                [lingxi_core::types::ContentBlock::TextJsUtf16 {
+                    utf16_code_units,
+                    citations: None,
+                    ..
+                }] if utf16_code_units == &expected_units
+            ),
             "the queued UJP message follows the initial prompt with exact UTF-16 history"
         );
     }

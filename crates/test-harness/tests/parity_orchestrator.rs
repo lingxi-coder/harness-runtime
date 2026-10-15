@@ -100,12 +100,28 @@ fn is_exact_plain_prompt_block(
             citations: None,
         }] => text == expected,
         [lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text,
             utf16_code_units,
             citations: None,
             ..
-        }] => utf16_code_units == &expected_units,
+        }] => text == expected && utf16_code_units == &expected_units,
         _ => false,
     }
+}
+
+fn is_exact_utf16_meta_text_block(
+    content: &[lingxi_core::types::ContentBlock],
+    expected: &str,
+) -> bool {
+    let expected_units = expected.encode_utf16().collect::<Vec<_>>();
+    matches!(
+        content,
+        [lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            citations: None,
+        }] if text == expected && utf16_code_units == &expected_units
+    )
 }
 
 // ============================================================================
@@ -244,7 +260,7 @@ async fn single_turn_no_tools_completes_with_end_turn() {
     );
     assert!(
         matches!(&sent[4], ConversationMessage::User { content, is_meta: true, .. }
-        if content == &[ContentBlock::Text { text: date_body, citations: None }])
+        if is_exact_utf16_meta_text_block(content, &date_body))
     );
     assert!(
         matches!(&sent[5], ConversationMessage::User { content, is_meta: false, .. }

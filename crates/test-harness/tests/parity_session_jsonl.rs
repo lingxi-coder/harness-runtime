@@ -72,6 +72,21 @@ fn source_test_view(source: &Utf16JsonProjection) -> Value {
     .expect("these scalar parity fixtures decode as JSON test views")
 }
 
+fn is_exact_utf16_meta_text_block(
+    content: &[lingxi_core::types::ContentBlock],
+    expected: &str,
+) -> bool {
+    let expected_units = expected.encode_utf16().collect::<Vec<_>>();
+    matches!(
+        content,
+        [lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            citations: None,
+        }] if text == expected && utf16_code_units == &expected_units
+    )
+}
+
 fn assert_reader_source_key_order(line: &session::JsonlMessage, raw_line: &str) {
     let raw = Utf16JsonProjection::parse(raw_line).expect("raw JSONL source parses exactly");
     assert!(
@@ -564,7 +579,7 @@ async fn assert_native_single_turn_rows(
         );
     assert!(
         matches!(&sent[4], ConversationMessage::User { content, is_meta: true, .. }
-        if content == &[ContentBlock::Text { text: date_body, citations: None }])
+        if is_exact_utf16_meta_text_block(content, &date_body))
     );
     let expected_prompt_units = "say hi".encode_utf16().collect::<Vec<_>>();
     assert!(matches!(

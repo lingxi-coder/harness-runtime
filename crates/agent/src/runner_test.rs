@@ -9771,6 +9771,29 @@ fn malformed_structured_turn(
     events.into_iter().map(Ok).collect()
 }
 
+fn nonstream_malformed_tool_input_response() -> llm_runtime::HistoryResponse {
+    // Exercise the current decoded ChatResponse -> HistoryResponse projection;
+    // it stores ToolInputIssue under /llm_client/tool_input_issues and includes
+    // the optional tool_id absent from the streaming accumulator's diagnosis.
+    llm_runtime::HistoryResponse::from_model(
+        serde_json::from_value(serde_json::json!({
+            "tool_input_issues": [{
+                "block_index": 0,
+                "tool_name": "StructuredOutput",
+                "tool_id": "call-nonstream-issue",
+                "input_bytes": 13
+            }],
+            "message": { "role": "assistant", "content": [] },
+            "stop_reason": "tool_use",
+            "usage": { "usage": null, "state": "missing" },
+            "model": "gpt-4o"
+        }))
+        .expect("minimal current ChatResponse fixture decodes"),
+        llm_runtime::ProtocolFamily::OpenAiChat,
+    )
+    .expect("non-stream model response projects")
+}
+
 fn valid_design_turn() -> Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>> {
     llm_runtime::stream_accumulator::response_to_stream_events(structured_output_call_response(
         serde_json::json!({"design": {}}),
@@ -10330,6 +10353,104 @@ async fn design_parse_recovery_does_not_dispatch_or_retry_mixed_tool_response() 
             .iter()
             .any(|event| matches!(event, SubagentEvent::Failed { .. })));
     }
+}
+
+#[tokio::test]
+async fn design_parse_recovery_consumes_nonstream_sdk_metadata_after_response_to_stream_events() {
+    let response = nonstream_malformed_tool_input_response();
+    assert_eq!(
+        response
+            .provider_metadata
+            .array_len("/llm_client/tool_input_issues"),
+        Some(1)
+    );
+    assert_eq!(
+        response
+            .provider_metadata
+            .string_at("/llm_client/tool_input_issues/0/tool_id")
+            .as_deref(),
+        Some("call-nonstream-issue"),
+        "retain the current non-stream producer's optional tool id"
+    );
+    assert_eq!(
+        response.provider_metadata.array_len("/tool_input_issues"),
+        None,
+        "the projected SDK response uses its llm_client namespace"
+    );
+
+    // The agent consumes the ordinary response through the same production
+    // conversion used by the current SubagentApiClient adapter.
+    let first = llm_runtime::stream_accumulator::response_to_stream_events(response)
+        .into_iter()
+        .map(Ok)
+        .collect();
+    let api = ResultStreamMockApiClient::new(vec![first, valid_design_turn()]);
+    let mut ctx = loop_ctx(api.clone(), None, 5);
+    enable_design_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+
+    assert_eq!(
+        api.call_count(),
+        2,
+        "one correction request follows the issue"
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Completed { result, usage_complete: false, .. }
+            if projection_matches_json(result, &serde_json::json!({"design": {}}))
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(api.histories.lock().unwrap()[1].iter().any(|message| {
+        user_text(message).is_some_and(|text| text.contains("StructuredOutput JSON correction 1/2"))
+    }));
+}
+
+#[tokio::test]
+async fn conflicting_sdk_tool_input_issue_metadata_fails_closed_without_retry() {
+    let mut response = nonstream_malformed_tool_input_response();
+    response.provider_metadata = json_payload(&serde_json::json!({
+        "tool_input_issues": [{
+            "tool_name": "StructuredOutput",
+            "block_index": 0,
+            "input_bytes": 13
+        }],
+        "llm_client": {
+            "tool_input_issues": [{
+                "tool_name": "Write",
+                "tool_id": "call-conflicting-issue",
+                "block_index": 0,
+                "input_bytes": 13
+            }]
+        }
+    }));
+    let first = llm_runtime::stream_accumulator::response_to_stream_events(response)
+        .into_iter()
+        .map(Ok)
+        .collect();
+    let api = ResultStreamMockApiClient::new(vec![first, valid_design_turn()]);
+    let mut ctx = loop_ctx(api.clone(), None, 5);
+    enable_design_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+
+    assert_eq!(
+        api.call_count(),
+        1,
+        "conflicting diagnostics cannot authorize recovery"
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Failed { error, .. }
+            if error.contains("conflicting SDK tool_input_issues metadata")
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
 }
 
 struct ParseRetryStop {
