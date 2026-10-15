@@ -1,13 +1,13 @@
+use crate::OrchestratorConfig;
 use crate::conversation::ConversationOrchestrator;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
 };
 use crate::turn_loop::dispatch_tool_uses_tracked;
-use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use lingxi_core::host::observer_pairing::ObserverPairings;
 use lingxi_core::types::{ContentBlock, ToolUseId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tool_api::context::ToolUseContext;

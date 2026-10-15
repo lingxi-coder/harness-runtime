@@ -437,7 +437,10 @@ mod read_file_state_tests {
             let content = tokio::fs::read_to_string(&resolved)
                 .await
                 .map_err(|e| ToolError::Io(format!("read {}: {e}", resolved.display())))?;
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({ "content": content }),
                 model_content: None,
                 new_messages: vec![],
@@ -668,9 +671,11 @@ mod read_file_state_tests {
         name: &str,
         input: serde_json::Value,
     ) -> lingxi_core::types::ConversationMessage {
-        lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+        lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
-            content: vec![lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
+            content: vec![lingxi_core::types::ContentBlock::ToolUse {
+                input_projection: None,
                 id: tuid.clone(),
                 name: name.to_string(),
                 input,
@@ -1124,9 +1129,11 @@ mod read_file_state_tests {
             ));
             // A matching tool_result already exists ⇒ resolved.
             s.history
-                .push(lingxi_core::types::ConversationMessage::User { api_message_override: None,
+                .push(lingxi_core::types::ConversationMessage::User {
+                    api_message_override: None,
                     id: lingxi_core::types::MessageId::new(),
-                    content: vec![lingxi_core::types::ContentBlock::ToolResult { content_projection: None,
+                    content: vec![lingxi_core::types::ContentBlock::ToolResult {
+                        content_projection: None,
                         tool_use_id: tuid.clone(),
                         content: "prior".into(),
                         is_error: Some(false),
@@ -1437,7 +1444,10 @@ mod read_file_state_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({ "ok": true }),
                 model_content: None,
                 new_messages: vec![],
@@ -1577,7 +1587,10 @@ mod read_file_state_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({"ran":true}),
                 model_content: None,
                 new_messages: vec![],
@@ -1663,7 +1676,10 @@ mod read_file_state_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({"ran":true}),
                 model_content: None,
                 new_messages: vec![],
@@ -1982,7 +1998,8 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()).map(|projection| &projection.value),
+                .get(uses[0].0.as_str())
+                .map(|projection| &projection.value),
             Some(&json!({
                 "cwd": first_cwd.to_string_lossy(),
                 "root": first_cwd.to_string_lossy(),
@@ -2008,7 +2025,8 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(moved_use[0].0.as_str()).map(|projection| &projection.value),
+                .get(moved_use[0].0.as_str())
+                .map(|projection| &projection.value),
             Some(&json!({
                 "cwd": second_cwd.to_string_lossy(),
                 "root": second_cwd.to_string_lossy(),
@@ -2742,7 +2760,8 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()).map(|projection| &projection.value),
+                .get(uses[0].0.as_str())
+                .map(|projection| &projection.value),
             Some(&json!({"decision":"allow","rule":"Schemic"}))
         );
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
@@ -3037,7 +3056,8 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()).map(|projection| &projection.value),
+                .get(uses[0].0.as_str())
+                .map(|projection| &projection.value),
             Some(&json!("redacted")),
             "the core payload must not reach transcript persistence"
         );
@@ -3182,7 +3202,8 @@ mod read_file_state_tests {
                 suffix.clone(),
             ]
             .concat();
-            let message = ConversationMessage::User { api_message_override: None,
+            let message = ConversationMessage::User {
+                api_message_override: None,
                 id,
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: String::from_utf16_lossy(&units),
@@ -3271,7 +3292,8 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()).map(|projection| &projection.value),
+                .get(uses[0].0.as_str())
+                .map(|projection| &projection.value),
             Some(&json!({"ok":true}))
         );
     }
@@ -3380,7 +3402,8 @@ mod read_file_state_tests {
                     .tool_use_results
                     .lock()
                     .await
-                    .get(uses[0].0.as_str()).map(|projection| &projection.value),
+                    .get(uses[0].0.as_str())
+                    .map(|projection| &projection.value),
                 Some(&json!({"mapped":"direct"}))
             );
         }
@@ -3580,7 +3603,8 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()).map(|projection| &projection.value),
+                .get(uses[0].0.as_str())
+                .map(|projection| &projection.value),
             Some(&json!("<tool_use_error>hidden</tool_use_error>")),
         );
     }
@@ -3632,7 +3656,8 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()).map(|projection| &projection.value),
+                .get(uses[0].0.as_str())
+                .map(|projection| &projection.value),
             Some(&json!("2")),
         );
     }
@@ -3687,7 +3712,8 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()).map(|projection| &projection.value),
+                .get(uses[0].0.as_str())
+                .map(|projection| &projection.value),
             Some(&json!("synthetic replacement")),
         );
     }
@@ -3785,7 +3811,8 @@ mod read_file_state_tests {
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rejected_message_id = Arc::new(std::sync::Mutex::new(None));
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: "Schemic".into(),
                 input: json!({}),
@@ -4416,7 +4443,8 @@ mod read_file_state_tests {
                         ),
                     ));
                 } else {
-                    s.history.push(ConversationMessage::Assistant { per_turn_effort: None,
+                    s.history.push(ConversationMessage::Assistant {
+                        per_turn_effort: None,
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
@@ -4582,7 +4610,8 @@ mod read_file_state_tests {
                         ),
                     ));
                 } else {
-                    s.history.push(ConversationMessage::Assistant { per_turn_effort: None,
+                    s.history.push(ConversationMessage::Assistant {
+                        per_turn_effort: None,
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
@@ -5586,7 +5615,8 @@ mod malformed_and_thinking_only_tests {
     #[tokio::test]
     async fn normal_tool_use_does_not_trigger_malformed_path() {
         let resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: "toolu_1".into(),
                 name: "Nope".into(), // unknown tool → synthetic error, still dispatched
                 input: serde_json::json!({}),
@@ -5629,9 +5659,11 @@ mod malformed_and_thinking_only_tests {
     // ---- #78 nudge guard `!Pt(ce)` (StructuredOutput exchange) -------------
 
     fn so_tool_use_assistant() -> ConversationMessage {
-        ConversationMessage::Assistant { per_turn_effort: None,
+        ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse { input_projection: None,
+            content: vec![ContentBlock::ToolUse {
+                input_projection: None,
                 id: ToolUseId::new(),
                 name: STRUCTURED_OUTPUT_TOOL_NAME.to_string(),
                 input: serde_json::json!({}),
@@ -5642,9 +5674,11 @@ mod malformed_and_thinking_only_tests {
     }
 
     fn tool_result_user() -> ConversationMessage {
-        ConversationMessage::User { api_message_override: None,
+        ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult { content_projection: None,
+            content: vec![ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "Structured output provided successfully".into(),
                 is_error: Some(false),
@@ -5658,7 +5692,8 @@ mod malformed_and_thinking_only_tests {
     }
 
     fn real_user(text: &str) -> ConversationMessage {
-        ConversationMessage::User { api_message_override: None,
+        ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.into(),
@@ -5671,7 +5706,8 @@ mod malformed_and_thinking_only_tests {
     }
 
     fn empty_assistant() -> ConversationMessage {
-        ConversationMessage::Assistant { per_turn_effort: None,
+        ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![],
             stop_reason: None,
@@ -5708,9 +5744,11 @@ mod malformed_and_thinking_only_tests {
     fn pt_false_for_non_structured_output_tool_use() {
         // An assistant that used a DIFFERENT tool is not a match; scanning hits
         // the real user and returns false.
-        let other = ConversationMessage::Assistant { per_turn_effort: None,
+        let other = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse { input_projection: None,
+            content: vec![ContentBlock::ToolUse {
+                input_projection: None,
                 id: ToolUseId::new(),
                 name: "Read".into(),
                 input: serde_json::json!({}),
@@ -6716,7 +6754,10 @@ mod pre_tool_hook_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({ "content": "ECHOED-OUTPUT" }),
                 model_content: None,
                 new_messages: vec![],
@@ -6791,7 +6832,10 @@ mod pre_tool_hook_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!([{ "type": "text", "text": "ENDED" }]),
                 model_content: Some("ENDED".into()),
                 new_messages: vec![],
@@ -6879,7 +6923,10 @@ mod pre_tool_hook_tests {
                 .as_ref()
                 .expect("shared tool registry wired")
                 .register_mcp_tools(self.conn_id, tools);
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({ "content": "refreshed" }),
                 model_content: None,
                 new_messages: vec![],
@@ -6955,7 +7002,10 @@ mod pre_tool_hook_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({ "content": "noop" }),
                 model_content: None,
                 new_messages: vec![],
@@ -7033,7 +7083,10 @@ mod pre_tool_hook_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             *self.captured.lock().unwrap() = Some(ctx.fork_parent_system_prompt.clone());
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
@@ -7181,7 +7234,10 @@ mod pre_tool_hook_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({
                     "content": "TOOL-RESULT",
                     "model_content": "Launching skill: demo",
@@ -7420,7 +7476,8 @@ mod pre_tool_hook_tests {
     async fn injected_message_sources_records_tool_use_id() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tu.to_string(),
                 name: "Inject".into(),
                 input: json!({}),
@@ -7470,7 +7527,8 @@ mod pre_tool_hook_tests {
     async fn normal_tool_records_no_source_and_serializes_no_field() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -7508,7 +7566,8 @@ mod pre_tool_hook_tests {
     async fn new_messages_appended_to_history_after_tool_result() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tu.to_string(),
                 name: "Inject".into(),
                 input: json!({}),
@@ -7824,7 +7883,8 @@ mod pre_tool_hook_tests {
         // ends with stop_reason "hook_stopped" (TS query.ts `{reason:'hook_stopped'}`).
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -7853,7 +7913,8 @@ mod pre_tool_hook_tests {
         // Without continue:false a tool-bearing step keeps looping (Continue).
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -7875,7 +7936,8 @@ mod pre_tool_hook_tests {
     async fn mcp_end_turn_result_ends_the_step_without_a_follow_up_call() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -7991,7 +8053,8 @@ mod pre_tool_hook_tests {
     async fn errored_mcp_result_cannot_end_the_turn() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -8038,9 +8101,11 @@ mod pre_tool_hook_tests {
             assistant_id,
             crate::turn_loop::ToolUseDispatchFacts {
                 query_history: vec![],
-                assistant_message: ConversationMessage::Assistant { per_turn_effort: None,
+                assistant_message: ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: assistant_id,
-                    content: vec![ContentBlock::ToolUse { input_projection: None,
+                    content: vec![ContentBlock::ToolUse {
+                        input_projection: None,
                         id: id.clone(),
                         name: "McpEndTurn".into(),
                         input: json!({}),
@@ -8115,7 +8180,8 @@ mod pre_tool_hook_tests {
                 .tool_use_mcp_meta
                 .lock()
                 .await
-                .get(uses[0].0.as_str()).map(|projection| &projection.value),
+                .get(uses[0].0.as_str())
+                .map(|projection| &projection.value),
             Some(&json!({ "_meta": { "claude/endTurn": true } })),
         );
         assert_eq!(
@@ -8132,7 +8198,8 @@ mod pre_tool_hook_tests {
     #[tokio::test]
     async fn multiple_mcp_end_turn_results_emit_one_event() {
         let calls = (0..2)
-            .map(|_| llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            .map(|_| llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -8189,7 +8256,8 @@ mod pre_tool_hook_tests {
     async fn post_tool_batch_emits_tools_refreshed_mid_turn_when_mcp_count_changes() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tu.to_string(),
                 name: "RefreshMcpTools".into(),
                 input: json!({}),
@@ -8230,7 +8298,8 @@ mod pre_tool_hook_tests {
     async fn tool_requested_end_runs_but_cannot_be_blocked_by_stop_hook() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -9614,7 +9683,10 @@ mod pre_tool_hook_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({"ran":true}),
                 model_content: None,
                 new_messages: vec![],
@@ -9882,7 +9954,10 @@ mod pre_tool_hook_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({"content":"CAPTURED-PREFLIGHT-RAN"}),
                 model_content: None,
                 new_messages: Vec::new(),
@@ -10706,9 +10781,11 @@ mod pre_cancel_tests {
         input: serde_json::Value,
     ) {
         orch.session().lock().await.history.push(
-            lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+            lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
-                content: vec![ContentBlock::ToolUse { input_projection: None,
+                content: vec![ContentBlock::ToolUse {
+                    input_projection: None,
                     id: id.clone(),
                     name: name.into(),
                     input,
@@ -11011,7 +11088,10 @@ mod memdir_index_cap_tests {
             tokio::fs::write(&path, content)
                 .await
                 .map_err(|e| ToolError::Io(e.to_string()))?;
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({ "content": "wrote file" }),
                 model_content: Some("wrote file".into()),
                 new_messages: vec![],

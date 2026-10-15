@@ -33,15 +33,26 @@ impl CompactHandler {
     }
 }
 
-#[async_trait]
-impl BuiltinCommandHandler for CompactHandler {
-    async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+impl CompactHandler {
+    async fn run(
+        &self,
+        args: &ParsedSlashCommand,
+        cancel: Option<lingxi_core::host::CancellationToken>,
+    ) -> CommandResult {
         telemetry::emit_command_started(cmd_evt::COMPACT_STARTED);
-        match self
-            .handle
-            .force_compact_with_instructions(&args.raw_args)
-            .await
-        {
+        let result = match cancel {
+            Some(cancel) => {
+                self.handle
+                    .force_compact_with_instructions_and_cancel(Some(&args.raw_args), cancel)
+                    .await
+            }
+            None => {
+                self.handle
+                    .force_compact_with_instructions(&args.raw_args)
+                    .await
+            }
+        };
+        match result {
             Ok(summary) => {
                 let details = format!(
                     "{{\"messages_before\":{},\"messages_after\":{},\"bytes_saved\":{}}}",
@@ -70,6 +81,20 @@ impl BuiltinCommandHandler for CompactHandler {
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl BuiltinCommandHandler for CompactHandler {
+    async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+        self.run(args, None).await
+    }
+    async fn handle_with_cancel(
+        &self,
+        args: &ParsedSlashCommand,
+        cancel: lingxi_core::host::CancellationToken,
+    ) -> CommandResult {
+        self.run(args, Some(cancel)).await
     }
 
     fn name(&self) -> &str {
@@ -181,6 +206,19 @@ mod tests {
             raw_args: String::new(),
             positional_args: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn foreground_cancel_reaches_compaction_handle() {
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        let handler = CompactHandler::new(mock.clone());
+        let cancel = lingxi_core::host::CancellationToken::new();
+        cancel.cancel();
+        let result = handler.handle_with_cancel(&args(), cancel).await;
+        assert!(
+            matches!(result, CommandResult::Done { display: Some(display) } if display == "Compaction canceled.")
+        );
+        assert!(mock.last_compact_instructions().is_none());
     }
 
     /// `/compact <focus>` must forward its raw args as the summarizer's custom
@@ -309,11 +347,15 @@ mod tests {
         );
         // Manual-path tz errors surface from the marker on.
         assert_eq!(
-            f("compaction failed: internal: Error during compaction: summarization produced empty response"),
+            f(
+                "compaction failed: internal: Error during compaction: summarization produced empty response"
+            ),
             "Error during compaction: summarization produced empty response"
         );
         assert_eq!(
-            f("compaction failed: internal: Failed to generate conversation summary - response did not contain valid text content"),
+            f(
+                "compaction failed: internal: Failed to generate conversation summary - response did not contain valid text content"
+            ),
             "Failed to generate conversation summary - response did not contain valid text content"
         );
         assert_eq!(f("anything else"), "Error compacting conversation");
@@ -370,8 +412,8 @@ mod tests {
         use compaction::CompactionOrchestrator;
         use lingxi_core::types::{ConversationMessage, MessageId};
         use orchestrator::test_support::{
-            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-            StaticMemoryProvider,
+            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+            noop_hook_executor,
         };
         use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 
@@ -406,10 +448,12 @@ mod tests {
                         ),
                     ));
                 } else {
-                    s.history.push(ConversationMessage::Assistant { per_turn_effort: None,
+                    s.history.push(ConversationMessage::Assistant {
+                        per_turn_effort: None,
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
-                            text: format!("reply-{i}"), citations: None,
+                            text: format!("reply-{i}"),
+                            citations: None,
                         }],
                         stop_reason: Some("end_turn".into()),
                     });

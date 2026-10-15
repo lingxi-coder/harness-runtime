@@ -1176,7 +1176,8 @@ impl ToolResultPublication {
             turn_end: None,
             denial_kind: None,
             permission_denial: None,
-            frame: Some(ToolResultFramePublication { projection: None,
+            frame: Some(ToolResultFramePublication {
+                projection: None,
                 tool: tool.to_owned(),
                 model_text: model_text.to_owned(),
                 result,
@@ -1374,7 +1375,11 @@ impl ConversationOrchestrator {
         }
     }
 
-    pub(crate) async fn dispatch_mod_surface_event(&self, event_name: &str, input: serde_json::Value) {
+    pub(crate) async fn dispatch_mod_surface_event(
+        &self,
+        event_name: &str,
+        input: serde_json::Value,
+    ) {
         let Some(registry) = &self.lifecycle_runtime.hook_registry else {
             return;
         };
@@ -1442,7 +1447,12 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             }))
     }
 
-    async fn remote_ui_operation(&self, event: &str, input: lingxi_core::types::utf16_json::Utf16JsonProjection, plugin: &str) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::mods::ModError> {
+    async fn remote_ui_operation(
+        &self,
+        event: &str,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        plugin: &str,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::mods::ModError> {
         self.remote_mod_ui_operation(event, input, plugin).await
     }
 
@@ -1641,9 +1651,11 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
         };
         let plugin = mod_tool_call_hook_caller(context)?;
         let Some(registry) = self.task_registry.as_ref() else {
-            return Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(format!(
-                "{plugin}: $.agent.spawn: no answer within 10 minutes"
-            ))));
+            return Ok(hooks::mods::ModUtf16ValueProjection::plain(
+                mod_tool_call_agent_error(format!(
+                    "{plugin}: $.agent.spawn: no answer within 10 minutes"
+                )),
+            ));
         };
         let outcome = registry
             .wait_for_agent_terminal(
@@ -1660,26 +1672,34 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
 
         use lingxi_core::host::task_registry::{AgentTerminalWaitOutcome, AgentTerminalWaitReason};
         match outcome {
-            AgentTerminalWaitOutcome::Completed(snapshot) => mod_agent_wait_answer_projection(&source, agent_id, &snapshot.native_transcript_text),
+            AgentTerminalWaitOutcome::Completed(snapshot) => mod_agent_wait_answer_projection(
+                &source,
+                agent_id,
+                &snapshot.native_transcript_text,
+            ),
             AgentTerminalWaitOutcome::Failed(snapshot) => {
-                Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(mod_tool_call_agent_failure_text(
-                    &plugin,
-                    "failed",
-                    snapshot
-                        .error
-                        .as_deref()
-                        .or(Some(snapshot.native_transcript_text.as_str())),
-                ))))
+                Ok(hooks::mods::ModUtf16ValueProjection::plain(
+                    mod_tool_call_agent_error(mod_tool_call_agent_failure_text(
+                        &plugin,
+                        "failed",
+                        snapshot
+                            .error
+                            .as_deref()
+                            .or(Some(snapshot.native_transcript_text.as_str())),
+                    )),
+                ))
             }
             AgentTerminalWaitOutcome::Killed(snapshot) => {
-                Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(mod_tool_call_agent_failure_text(
-                    &plugin,
-                    "killed",
-                    snapshot
-                        .error
-                        .as_deref()
-                        .or(Some(snapshot.native_transcript_text.as_str())),
-                ))))
+                Ok(hooks::mods::ModUtf16ValueProjection::plain(
+                    mod_tool_call_agent_error(mod_tool_call_agent_failure_text(
+                        &plugin,
+                        "killed",
+                        snapshot
+                            .error
+                            .as_deref()
+                            .or(Some(snapshot.native_transcript_text.as_str())),
+                    )),
+                ))
             }
             AgentTerminalWaitOutcome::Interrupted { reason, .. } => {
                 let text = match reason {
@@ -1691,14 +1711,18 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
                         format!("{plugin}: $.agent.spawn: no answer within 10 minutes")
                     }
                 };
-                Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(text)))
+                Ok(hooks::mods::ModUtf16ValueProjection::plain(
+                    mod_tool_call_agent_error(text),
+                ))
             }
             AgentTerminalWaitOutcome::Evicted {
                 native_transcript_text: Some(text),
             } if !text.is_empty() => mod_agent_wait_answer_projection(&source, agent_id, &text),
-            AgentTerminalWaitOutcome::Evicted { .. } => Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(format!(
-                "{plugin}: $.agent.spawn: the subagent's record was evicted before its answer was read"
-            )))),
+            AgentTerminalWaitOutcome::Evicted { .. } => Ok(
+                hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(format!(
+                    "{plugin}: $.agent.spawn: the subagent's record was evicted before its answer was read"
+                ))),
+            ),
         }
     }
 
@@ -2132,11 +2156,22 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
     }
 }
 
-fn mod_agent_wait_answer_projection(source: &Utf16JsonProjection, agent_id: &str, text: &str) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
-    let mut result = source.subprojection("/result").map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
-    result.rebase_display_value(mod_tool_call_agent_result(agent_id, &result.value)).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
-    let mut answer = Utf16JsonProjection::plain(serde_json::json!({"result":result.value,"text":text}));
-    answer.set_pointer("/result", result).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+fn mod_agent_wait_answer_projection(
+    source: &Utf16JsonProjection,
+    agent_id: &str,
+    text: &str,
+) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
+    let mut result = source
+        .subprojection("/result")
+        .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+    result
+        .rebase_display_value(mod_tool_call_agent_result(agent_id, &result.value))
+        .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+    let mut answer =
+        Utf16JsonProjection::plain(serde_json::json!({"result":result.value,"text":text}));
+    answer
+        .set_pointer("/result", result)
+        .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
     hooks::mods::ModUtf16ValueProjection::from_core_projection(answer)
 }
 
@@ -2193,7 +2228,9 @@ async fn dispatch_mod_session_tool_call(
     let consent = prepared.consent().map(str::to_owned);
     let input_args = mod_tool_call_arguments(input);
     let mut input_projection = source.clone();
-    input_projection.rebase_display_value(serde_json::Value::Object(input_args.clone())).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+    input_projection
+        .rebase_display_value(serde_json::Value::Object(input_args.clone()))
+        .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
     let tool_use_id = ToolUseId::from(context.virtual_tool_use_id.clone());
     let assistant_message_id = MessageId::parse_prefixed(&context.virtual_assistant_uuid)
         .ok_or_else(|| {
@@ -2251,10 +2288,20 @@ else {
     if stage.denial_kind().is_some() {
         let reason = content.strip_prefix("<tool_use_error>").unwrap_or(&content);
         let reason = reason.strip_suffix("</tool_use_error>").unwrap_or(reason);
-        return Ok(hooks::mods::ModUtf16ValueProjection::plain(serde_json::json!({"deny":reason})));
+        return Ok(hooks::mods::ModUtf16ValueProjection::plain(
+            serde_json::json!({"deny":reason}),
+        ));
     }
-    let mut result = stage.mod_answer_projection(&content).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
-    if is_error.unwrap_or(false) { result.value.as_object_mut().unwrap().insert("isError".into(), serde_json::Value::Bool(true)); }
+    let mut result = stage
+        .mod_answer_projection(&content)
+        .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+    if is_error.unwrap_or(false) {
+        result
+            .value
+            .as_object_mut()
+            .unwrap()
+            .insert("isError".into(), serde_json::Value::Bool(true));
+    }
     hooks::mods::ModUtf16ValueProjection::from_core_projection(result)
 }
 
@@ -2300,7 +2347,12 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
         hooks::mods::ModSessionContext::ui_selection(self.inner.as_ref()).await
     }
 
-    async fn remote_ui_operation(&self, event: &str, input: lingxi_core::types::utf16_json::Utf16JsonProjection, plugin: &str) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::mods::ModError> {
+    async fn remote_ui_operation(
+        &self,
+        event: &str,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        plugin: &str,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::mods::ModError> {
         let cancellation = self.publication_guard.generation_cancellation_token();
         tokio::select! {
             result = self.inner.remote_mod_ui_operation(event, input, plugin) => result,
@@ -3452,7 +3504,8 @@ fn dispatch_facts_for_tool_index(
             tool_uses
                 .iter()
                 .take(tool_index)
-                .map(|(id, name, input, provider_id)| ContentBlock::ToolUse { input_projection: None,
+                .map(|(id, name, input, provider_id)| ContentBlock::ToolUse {
+                    input_projection: None,
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
@@ -3469,22 +3522,39 @@ async fn dispatch_input_projection(
     facts: Option<&ToolUseDispatchFacts>,
     inherited: Option<&ToolUseContext>,
 ) -> Result<Utf16JsonProjection, OrchestratorError> {
-    if let Some(context) = inherited.filter(|context| context.tool_use_id.as_ref() == Some(id) && context.input_projection.is_some()) {
-        return context.projected_input(input).map_err(|error| OrchestratorError::Internal(error.to_string()));
+    if let Some(context) = inherited.filter(|context| {
+        context.tool_use_id.as_ref() == Some(id) && context.input_projection.is_some()
+    }) {
+        return context
+            .projected_input(input)
+            .map_err(|error| OrchestratorError::Internal(error.to_string()));
     }
-    let find = |message: &ConversationMessage| match message {
+    let find = |message: &ConversationMessage| {
+        match message {
         ConversationMessage::Assistant { content, .. } => content.iter().find(|block| matches!(block, ContentBlock::ToolUse { id: candidate, input: original, .. } if candidate == id && original == input)).cloned(),
         _ => None,
+    }
     };
     let source = if let Some(facts) = facts {
         find(&facts.assistant_message)
     } else {
-        orch.session.lock().await.history.iter().rev().find_map(find)
+        orch.session
+            .lock()
+            .await
+            .history
+            .iter()
+            .rev()
+            .find_map(find)
     };
-    source.map_or_else(|| Ok(Utf16JsonProjection::plain(input.clone())), |block| {
-        block.projected_tool_input().map_err(|error| OrchestratorError::Internal(error.to_string()))
-            .map(|projection| projection.expect("selected tool use has input"))
-    })
+    source.map_or_else(
+        || Ok(Utf16JsonProjection::plain(input.clone())),
+        |block| {
+            block
+                .projected_tool_input()
+                .map_err(|error| OrchestratorError::Internal(error.to_string()))
+                .map(|projection| projection.expect("selected tool use has input"))
+        },
+    )
 }
 
 pub(crate) async fn streaming_tool_context_base(
@@ -3513,7 +3583,13 @@ pub(crate) async fn streaming_tool_context_base(
         assistant_message_id: None,
         assistant_message: None,
         same_turn_tool_uses: Vec::new(),
-        agent_id: None,
+        agent_id: if orch.side_chat {
+            Some(lingxi_core::types::AgentId::from_uuid(
+                orch.session.lock().await.session_id.as_uuid(),
+            ))
+        } else {
+            None
+        },
         agent_spawn_provenance: Default::default(),
         nested_memory_triggers: orch.prompt_runtime.nested_memory_triggers.clone(),
         agent_name: None,
@@ -3813,15 +3889,33 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                 // accepts and publishes them.
                                 publication.commit(orch).await;
                             }
-                            let mut result = if let Some(ContentBlock::ToolResult { content, is_error, .. }) = dispatched.results.first() {
-                                let mut result = stage.mod_answer_projection(content).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
-                                if is_error.unwrap_or(false) { result.value.as_object_mut().unwrap().insert("isError".into(), serde_json::Value::Bool(true)); }
-                                result
-                            } else { Utf16JsonProjection::plain(serde_json::json!({"result":null})) };
+                            let mut result =
+                                if let Some(ContentBlock::ToolResult {
+                                    content, is_error, ..
+                                }) = dispatched.results.first()
+                                {
+                                    let mut result =
+                                        stage.mod_answer_projection(content).map_err(|error| {
+                                            hooks::mods::ModError::Protocol(error.to_string())
+                                        })?;
+                                    if is_error.unwrap_or(false) {
+                                        result.value.as_object_mut().unwrap().insert(
+                                            "isError".into(),
+                                            serde_json::Value::Bool(true),
+                                        );
+                                    }
+                                    result
+                                } else {
+                                    Utf16JsonProjection::plain(serde_json::json!({"result":null}))
+                                };
                             let mut completed = completed.lock().await;
                             let index = completed.len() + 1;
                             completed.push(ModCoreRun { dispatched, stage });
-                            result.value.as_object_mut().unwrap().insert("ref".into(), serde_json::json!(index));
+                            result
+                                .value
+                                .as_object_mut()
+                                .unwrap()
+                                .insert("ref".into(), serde_json::json!(index));
                             hooks::mods::ModUtf16ValueProjection::from_core_projection(result)
                         }
                     },
@@ -4005,7 +4099,8 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     &content,
                     serde_json::json!({"error":message}),
                 );
-                publication.tool_use_result = Some((serde_json::json!(format!("Error: {message}"))).into());
+                publication.tool_use_result =
+                    Some((serde_json::json!(format!("Error: {message}"))).into());
                 publish_or_defer_tool_result(
                     orch,
                     publication_fence.as_deref(),
@@ -4013,7 +4108,8 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     publication,
                 )
                 .await;
-                all.results.push(ContentBlock::ToolResult { content_projection: None,
+                all.results.push(ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: id.clone(),
                     content: content.clone(),
                     is_error: Some(true),
@@ -4051,11 +4147,10 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     }) = core.dispatched.results.first_mut()
                     {
                         let original = content.clone();
-                        let original_raw = core
-                            .stage
-                            .tool_use_result
-                            .clone()
-                            .unwrap_or_else(|| serde_json::Value::String(original.clone()).into());
+                        let original_raw =
+                            core.stage.tool_use_result.clone().unwrap_or_else(|| {
+                                serde_json::Value::String(original.clone()).into()
+                            });
                         let selected_raw = answer.subprojection("/result").ok();
                         let changed_result = selected_raw.as_ref().is_some_and(|result| {
                             result.to_json_string().ok() != original_raw.to_json_string().ok()
@@ -4081,7 +4176,11 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                         Some(serde_json::Value::String(new_text.clone()));
                                 }
                             }
-                            let carrier = mod_result_projection(raw.clone(), &new_text, content_blocks.as_ref());
+                            let carrier = mod_result_projection(
+                                raw.clone(),
+                                &new_text,
+                                content_blocks.as_ref(),
+                            );
                             *content_projection = Some(carrier.content.clone());
                             replacement = Some((carrier, new_text));
                         }
@@ -4121,7 +4220,9 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     serde_json::json!({"error":reason}),
                 )
             } else if let Some(result) = answer_value.get("result") {
-                let projected_result = answer.subprojection("/result").map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                let projected_result = answer
+                    .subprojection("/result")
+                    .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
                 let (text, blocks, mapped_error) =
                     map_mod_result_for_model(orch, name, &projected_result, prepared_tool.as_ref());
                 (
@@ -4171,8 +4272,11 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             if completed.lock().await.is_empty() {
                 orch.output.emit_tool_call(id, name, input, None).await;
             }
-            let mut carrier = mod_result_projection(raw_result.clone(), &content, content_blocks.as_ref());
-            if carrier.data.value != frame_result { carrier.data = frame_result.clone().into(); }
+            let mut carrier =
+                mod_result_projection(raw_result.clone(), &content, content_blocks.as_ref());
+            if carrier.data.value != frame_result {
+                carrier.data = frame_result.clone().into();
+            }
             let publication = ToolResultPublication {
                 tool_use_id: id.clone(),
                 tool_use_result: Some(raw_result.into()),
@@ -4180,7 +4284,8 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 turn_end: None,
                 denial_kind: None,
                 permission_denial: None,
-                frame: Some(ToolResultFramePublication { projection: Some(carrier.clone()),
+                frame: Some(ToolResultFramePublication {
+                    projection: Some(carrier.clone()),
                     tool: name.clone(),
                     model_text: content.clone(),
                     result: frame_result,
@@ -4195,7 +4300,8 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             )
             .await;
             let tool_response = serde_json::Value::String(content.clone());
-            all.results.push(ContentBlock::ToolResult { content_projection: Some(carrier.content.clone()),
+            all.results.push(ContentBlock::ToolResult {
+                content_projection: Some(carrier.content.clone()),
                 tool_use_id: id.clone(),
                 content,
                 is_error: Some(is_error),
@@ -4215,17 +4321,39 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
     })
 }
 
-fn mod_result_projection(data: Utf16JsonProjection, text: &str, blocks: Option<&Vec<serde_json::Value>>) -> lingxi_core::host::ToolResultProjection {
-    let model_text = if data.value.as_str() == Some(text) { data.clone() } else {
-        ["/model_content", "/content", "/result"].iter()
+fn mod_result_projection(
+    data: Utf16JsonProjection,
+    text: &str,
+    blocks: Option<&Vec<serde_json::Value>>,
+) -> lingxi_core::host::ToolResultProjection {
+    let model_text = if data.value.as_str() == Some(text) {
+        data.clone()
+    } else {
+        ["/model_content", "/content", "/result"]
+            .iter()
             .filter_map(|path| data.subprojection(path).ok())
             .find(|source| source.value.as_str() == Some(text))
-            .unwrap_or_else(|| Utf16JsonProjection::plain(serde_json::Value::String(text.to_owned())))
+            .unwrap_or_else(|| {
+                Utf16JsonProjection::plain(serde_json::Value::String(text.to_owned()))
+            })
     };
-    let content_value = blocks.map(|blocks| serde_json::Value::Array(blocks.clone())).unwrap_or_else(|| model_text.value.clone());
-    let mut content = if blocks.is_some() && data.value.is_array() { data.clone() } else { model_text.clone() };
-    content.rebase_display_value(content_value).expect("validated Mod result mapping");
-    lingxi_core::host::ToolResultProjection { data, content, model_text: Some(model_text), mcp_meta: None }
+    let content_value = blocks
+        .map(|blocks| serde_json::Value::Array(blocks.clone()))
+        .unwrap_or_else(|| model_text.value.clone());
+    let mut content = if blocks.is_some() && data.value.is_array() {
+        data.clone()
+    } else {
+        model_text.clone()
+    };
+    content
+        .rebase_display_value(content_value)
+        .expect("validated Mod result mapping");
+    lingxi_core::host::ToolResultProjection {
+        data,
+        content,
+        model_text: Some(model_text),
+        mcp_meta: None,
+    }
 }
 
 fn map_mod_result_for_model(
@@ -4242,18 +4370,23 @@ fn map_mod_result_for_model(
         .as_ref()
         .and_then(|tool| tool.map_result_text(result))
         .unwrap_or_else(|| {
-            result
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    if ["model_content", "content", "result"].iter().any(|key| result.get(key).is_some_and(serde_json::Value::is_string)) {
-                        tool_result_to_model_text(result)
+            result.as_str().map(str::to_owned).unwrap_or_else(|| {
+                if ["model_content", "content", "result"]
+                    .iter()
+                    .any(|key| result.get(key).is_some_and(serde_json::Value::is_string))
+                {
+                    tool_result_to_model_text(result)
+                } else {
+                    let json = projected_result
+                        .to_json_string()
+                        .expect("validated Mod result owns exact JSON");
+                    if result.is_array() || result.is_null() {
+                        json
                     } else {
-                        let json = projected_result.to_json_string().expect("validated Mod result owns exact JSON");
-                        if result.is_array() || result.is_null() { json }
-                        else { crate::tool_result_text::normalized_tool_result_json_text(json) }
+                        crate::tool_result_text::normalized_tool_result_json_text(json)
                     }
-                })
+                }
+            })
         });
     let blocks = match tool.as_ref() {
         Some(tool) if tool.is_mcp() => tool_api::tool_result_media::media_content_blocks(result),
@@ -4511,9 +4644,18 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         let tool_dispatch_facts =
             dispatch_facts_for_tool_index(tool_uses, dispatch_facts.as_ref(), tool_index);
         let suppress_virtual_output = active_mod_result_stage_is_virtual().await;
-        let mut input_projection = dispatch_input_projection(orch, tool_use_id, input, tool_dispatch_facts.as_ref(), inherited_context.as_ref()).await?;
+        let mut input_projection = dispatch_input_projection(
+            orch,
+            tool_use_id,
+            input,
+            tool_dispatch_facts.as_ref(),
+            inherited_context.as_ref(),
+        )
+        .await?;
         if !suppress_virtual_output {
-            orch.output.emit_tool_call(tool_use_id, name, input, Some(&input_projection)).await;
+            orch.output
+                .emit_tool_call(tool_use_id, name, input, Some(&input_projection))
+                .await;
         }
 
         // claude-code order (`toolExecution.ts` runToolUse ~401 +
@@ -4569,9 +4711,12 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 &model_text,
                 serde_json::json!({ "error": format!("tool not found: {name}") }),
             );
-            publication.tool_use_result = Some((serde_json::Value::String(format!(
-                "Error: No such tool available: {name}{suffix}"
-            ))).into());
+            publication.tool_use_result = Some(
+                (serde_json::Value::String(format!(
+                    "Error: No such tool available: {name}{suffix}"
+                )))
+                .into(),
+            );
             publish_or_defer_tool_result(
                 orch,
                 publication_fence.as_deref(),
@@ -4623,9 +4768,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // so the detail uses Claude's Zod `zue` grouping and JSON fallback. A
         // malformed tool schema is treated as PASS (logged) — see
         // [`crate::schema_validation::validate_tool_input_schema`].
-        if let Err(schema_error) =
-            crate::schema_validation::validate_tool_schema_projected(tool_handle.as_ref(), &input_projection)
-        {
+        if let Err(schema_error) = crate::schema_validation::validate_tool_schema_projected(
+            tool_handle.as_ref(),
+            &input_projection,
+        ) {
             let detail = &schema_error.display;
             tool_handle
                 .on_input_schema_rejected(
@@ -4636,7 +4782,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 .await;
             let model_text =
                 format!("<tool_use_error>InputValidationError: {detail}</tool_use_error>");
-            let result_block = ContentBlock::ToolResult { content_projection: None,
+            let result_block = ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: tool_use_id.clone(),
                 content: model_text.clone(),
                 is_error: Some(true),
@@ -4651,10 +4798,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 &model_text,
                 serde_json::json!({ "error": detail }),
             );
-            publication.tool_use_result = Some((serde_json::Value::String(format!(
-                "InputValidationError: {}",
-                schema_error.raw
-            ))).into());
+            publication.tool_use_result = Some(
+                (serde_json::Value::String(format!("InputValidationError: {}", schema_error.raw)))
+                    .into(),
+            );
             publish_or_defer_tool_result(
                 orch,
                 publication_fence.as_deref(),
@@ -4711,7 +4858,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // pre-hook context to fold.
         if let Err(tool_api::ValidationError(msg)) = tool_handle.validate_input(input, &ctx).await {
             let model_text = format!("<tool_use_error>{msg}</tool_use_error>");
-            let result_block = ContentBlock::ToolResult { content_projection: None,
+            let result_block = ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: tool_use_id.clone(),
                 content: model_text.clone(),
                 is_error: Some(true),
@@ -4727,7 +4875,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 &model_text,
                 serde_json::json!({ "error": msg }),
             );
-            publication.tool_use_result = Some((serde_json::Value::String(format!("Error: {msg}"))).into());
+            publication.tool_use_result =
+                Some((serde_json::Value::String(format!("Error: {msg}"))).into());
             publish_or_defer_tool_result(
                 orch,
                 publication_fence.as_deref(),
@@ -4747,7 +4896,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // and `continue` without pushing to `post_tool_batch_calls` (tool
         // didn't run). A `None` cancel token → guard never fires.
         if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
-            let result_block = ContentBlock::ToolResult { content_projection: None,
+            let result_block = ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: tool_use_id.clone(),
                 content: CANCEL_MESSAGE.to_string(),
                 is_error: Some(true),
@@ -4767,7 +4917,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 serde_json::json!({ "error": CANCEL_MESSAGE }),
             );
             publication.denial_kind = Some("cancelled".into());
-            publication.tool_use_result = Some((serde_json::Value::String(CANCEL_MESSAGE.into())).into());
+            publication.tool_use_result =
+                Some((serde_json::Value::String(CANCEL_MESSAGE.into())).into());
             if let Some(frame) = publication.frame.as_mut() {
                 frame.denial_kind = Some("cancelled".into());
             }
@@ -5125,7 +5276,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 duration_ms = pre_dur_ms,
             );
             let model_text = format!("PreToolUse:{name} hook error: {reason}");
-            let result_block = ContentBlock::ToolResult { content_projection: None,
+            let result_block = ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: tool_use_id.clone(),
                 content: model_text.clone(),
                 is_error: Some(true),
@@ -6109,22 +6261,24 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // record (every tool). The path argument is the `getPath` twin: the
         // edit tools' `file_path` / NotebookEdit's `notebook_path` from the
         // input the decision was made on. Byte-noop when OTEL is off.
-        telemetry::otel::record_tool_permission_decision(
-            name,
-            tool_use_id.as_str(),
-            effective_input
-                .get("file_path")
-                .or_else(|| effective_input.get("notebook_path"))
-                .and_then(serde_json::Value::as_str),
-            if matches!(decision, PermissionDecision::Allow) {
-                "accept"
-            } else {
-                "reject"
-            },
-            decision_otel_source,
-            tool_handle.is_mcp(),
-            Some(&effective_input),
-        );
+        if !orch.side_chat {
+            telemetry::otel::record_tool_permission_decision(
+                name,
+                tool_use_id.as_str(),
+                effective_input
+                    .get("file_path")
+                    .or_else(|| effective_input.get("notebook_path"))
+                    .and_then(serde_json::Value::as_str),
+                if matches!(decision, PermissionDecision::Allow) {
+                    "accept"
+                } else {
+                    "reject"
+                },
+                decision_otel_source,
+                tool_handle.is_mcp(),
+                Some(&effective_input),
+            );
+        }
         match decision {
             PermissionDecision::Allow => {}
             PermissionDecision::Deny { reason } => {
@@ -6137,7 +6291,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 // denied." — built by the gate via `deny_reason_string`, or the
                 // tool's explicit `explanation`), NOT wrapped in a
                 // "Permission denied: " prefix.
-                let result_block = ContentBlock::ToolResult { content_projection: None,
+                let result_block = ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: tool_use_id.clone(),
                     content: reason.clone(),
                     is_error: Some(true),
@@ -6395,7 +6550,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             // gates. Validate the exact input that is about to execute.
             let final_validation = match crate::schema_validation::validate_tool_schema_projected(
                 tool_handle.as_ref(),
-                &ctx.projected_input(&effective_input).map_err(|error| OrchestratorError::Internal(error.to_string()))?,
+                &ctx.projected_input(&effective_input)
+                    .map_err(|error| OrchestratorError::Internal(error.to_string()))?,
             ) {
                 Err(error) => Err(tool_api::ToolError::InvalidInput(format!(
                     "InputValidationError: {}",
@@ -6480,7 +6636,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         let (content, is_error, emit_payload, is_abort, tool_use_result, mcp_meta, turn_end) =
             match tool_outcome {
                 Ok(result) => {
-                    result.validate_projection().map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                    result
+                        .validate_projection()
+                        .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
                     // The 2.1.286 AGENTS plugin wraps successful Read calls, not
                     // text-read state. Its context is a durable tool.call hook
                     // attachment, rendered beside the result and retained in live
@@ -6530,32 +6688,77 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         .model_content
                         .clone()
                         .unwrap_or_else(|| tool_result_to_model_text(&result.data));
-                    let data_projection = result.data_projection.clone()
+                    let data_projection = result
+                        .data_projection
+                        .clone()
                         .unwrap_or_else(|| Utf16JsonProjection::plain(result.data.clone()));
                     if data_projection.value != result.data {
-                        return Err(OrchestratorError::Internal("tool result data projection association changed".into()));
+                        return Err(OrchestratorError::Internal(
+                            "tool result data projection association changed".into(),
+                        ));
                     }
-                    data_projection.validate().map_err(|error| OrchestratorError::Internal(error.to_string()))?;
-                    if result.model_content.is_none() && !data_projection.value.is_string()
-                        && !["model_content", "content", "result"].iter().any(|key| data_projection.value.get(key).is_some_and(serde_json::Value::is_string)) {
-                        let json = data_projection.to_json_string().map_err(|error| OrchestratorError::Internal(error.to_string()))?;
-                        text = if data_projection.value.is_array() || data_projection.value.is_null() { json }
-                            else { crate::tool_result_text::normalized_tool_result_json_text(json) };
+                    data_projection
+                        .validate()
+                        .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                    if result.model_content.is_none()
+                        && !data_projection.value.is_string()
+                        && !["model_content", "content", "result"].iter().any(|key| {
+                            data_projection
+                                .value
+                                .get(key)
+                                .is_some_and(serde_json::Value::is_string)
+                        })
+                    {
+                        let json = data_projection
+                            .to_json_string()
+                            .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                        text = if data_projection.value.is_array()
+                            || data_projection.value.is_null()
+                        {
+                            json
+                        } else {
+                            crate::tool_result_text::normalized_tool_result_json_text(json)
+                        };
                     }
-                    let model_projection = result.model_content_projection.clone()
-                        .or_else(|| (data_projection.value.as_str() == Some(text.as_str())).then(|| data_projection.clone()))
-                        .or_else(|| ["/model_content", "/content", "/result"].iter().filter_map(|path| data_projection.subprojection(path).ok()).find(|field| field.value.as_str() == Some(text.as_str())))
-                        .unwrap_or_else(|| Utf16JsonProjection::plain(serde_json::Value::String(text.clone())));
+                    let model_projection = result
+                        .model_content_projection
+                        .clone()
+                        .or_else(|| {
+                            (data_projection.value.as_str() == Some(text.as_str()))
+                                .then(|| data_projection.clone())
+                        })
+                        .or_else(|| {
+                            ["/model_content", "/content", "/result"]
+                                .iter()
+                                .filter_map(|path| data_projection.subprojection(path).ok())
+                                .find(|field| field.value.as_str() == Some(text.as_str()))
+                        })
+                        .unwrap_or_else(|| {
+                            Utf16JsonProjection::plain(serde_json::Value::String(text.clone()))
+                        });
                     if model_projection.value != serde_json::Value::String(text.clone()) {
-                        return Err(OrchestratorError::Internal("tool result model content projection association changed".into()));
+                        return Err(OrchestratorError::Internal(
+                            "tool result model content projection association changed".into(),
+                        ));
                     }
-                    model_projection.validate().map_err(|error| OrchestratorError::Internal(error.to_string()))?;
-                    let exact_meta = result.mcp_meta.as_ref().map(|meta| result.mcp_meta_projection.clone().unwrap_or_else(|| meta.clone().into()));
-                    accepted_projection = Some(lingxi_core::host::ToolResultProjection { model_text: Some(model_projection.clone()), mcp_meta: exact_meta.clone(),
+                    model_projection
+                        .validate()
+                        .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                    let exact_meta = result.mcp_meta.as_ref().map(|meta| {
+                        result
+                            .mcp_meta_projection
+                            .clone()
+                            .unwrap_or_else(|| meta.clone().into())
+                    });
+                    accepted_projection = Some(lingxi_core::host::ToolResultProjection {
+                        model_text: Some(model_projection.clone()),
+                        mcp_meta: exact_meta.clone(),
                         data: data_projection.clone(),
                         content: if tool_handle.is_mcp() && result.data.is_array() {
                             data_projection.clone()
-                        } else { model_projection },
+                        } else {
+                            model_projection
+                        },
                     });
                     // SKILLEXEC.3 (Part A): stash any tool-injected conversation
                     // messages so the caller can append them after this batch's
@@ -7271,13 +7474,16 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         } else {
             (persistence.content, content_blocks)
         };
-        let final_value = content_blocks.as_ref().map(|blocks| serde_json::Value::Array(blocks.clone()))
+        let final_value = content_blocks
+            .as_ref()
+            .map(|blocks| serde_json::Value::Array(blocks.clone()))
             .unwrap_or_else(|| serde_json::Value::String(final_content.clone()));
         let content_projection = accepted_projection.and_then(|projected| {
             (!mutated && !persistence.replaced && projected.content.value == final_value)
                 .then_some(projected.content)
         });
-        results.push(ContentBlock::ToolResult { content_projection,
+        results.push(ContentBlock::ToolResult {
+            content_projection,
             tool_use_id: tool_use_id.clone(),
             content: final_content,
             is_error: Some(is_error),
@@ -7665,7 +7871,8 @@ mod final_input_validation_tests {
             }),
         )));
         let response = crate::test_support::mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: "toolu_cooperative".into(),
                 name: "input_spy".into(),
                 input: json!({"action":"wait"}),
@@ -7883,7 +8090,6 @@ mod native_tool_check_metadata_tests {
     }
 }
 
-
 #[cfg(test)]
 mod rich_mod_result_projection_tests {
     use super::*;
@@ -7892,9 +8098,15 @@ mod rich_mod_result_projection_tests {
     fn model_result_field_preserves_lone_units_and_raw_object_keys() {
         let source = Utf16JsonProjection::parse(r#"{"\ud800":"key","content":"A\udfff"}"#).unwrap();
         let result = mod_result_projection(source, "A�", None);
-        assert_eq!(result.data.to_json_string().unwrap(), r#"{"\ud800":"key","content":"A\udfff"}"#);
+        assert_eq!(
+            result.data.to_json_string().unwrap(),
+            r#"{"\ud800":"key","content":"A\udfff"}"#
+        );
         assert_eq!(result.content.to_json_string().unwrap(), r#""A\udfff""#);
-        assert_eq!(result.model_text.unwrap().to_json_string().unwrap(), r#""A\udfff""#);
+        assert_eq!(
+            result.model_text.unwrap().to_json_string().unwrap(),
+            r#""A\udfff""#
+        );
     }
 
     #[test]
@@ -7902,6 +8114,9 @@ mod rich_mod_result_projection_tests {
         let source = Utf16JsonProjection::parse(r#""A\udfff""#).unwrap();
         let result = mod_result_projection(source, "new", None);
         assert_eq!(result.content.to_json_string().unwrap(), r#""new""#);
-        assert_eq!(result.model_text.unwrap().to_json_string().unwrap(), r#""new""#);
+        assert_eq!(
+            result.model_text.unwrap().to_json_string().unwrap(),
+            r#""new""#
+        );
     }
 }

@@ -7,22 +7,31 @@ use ::configuration_admin::settings_bridge::{
 use client::adapter::ClientEventSink;
 use client::protocol::commands::{PermissionBehaviorDto, WritableScopeDto};
 
-
 pub(super) struct MobileModSettingsReader {
     paths: ::configuration_admin::settings_bridge::SettingsPaths,
 }
 
 impl MobileModSettingsReader {
     pub(super) fn new(lingxi_home: std::path::PathBuf, project_dir: std::path::PathBuf) -> Self {
-        Self { paths: ::configuration_admin::settings_bridge::SettingsPaths { lingxi_home, project_dir } }
+        Self {
+            paths: ::configuration_admin::settings_bridge::SettingsPaths {
+                lingxi_home,
+                project_dir,
+            },
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl hooks::mods::ModSettingsReader for MobileModSettingsReader {
-    async fn read(&self, input: serde_json::Value) -> Result<serde_json::Value, hooks::mods::ModError> {
+    async fn read(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, hooks::mods::ModError> {
         if !input.is_object() || input.get("source").is_some() {
-            return Err(hooks::mods::ModError::Protocol("mobile settings reader requires the effective view".into()));
+            return Err(hooks::mods::ModError::Protocol(
+                "mobile settings reader requires the effective view".into(),
+            ));
         }
         let snapshot = build_snapshot(&self.paths, Default::default(), Default::default());
         serde_json::to_value(snapshot.effective)
@@ -106,7 +115,11 @@ impl MobileEngineHandle {
         match apply_patch(&context.paths, destination, patch) {
             Ok(()) => {
                 if let Some(enabled) = suggestion_setting {
-                    let _ = self.inner.orchestrator.prompt_suggestion_setting_changed(enabled).await;
+                    let _ = self
+                        .inner
+                        .orchestrator
+                        .prompt_suggestion_setting_changed(enabled)
+                        .await;
                 }
                 self.emit_settings_snapshot(sink).await;
             }

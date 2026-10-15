@@ -1800,9 +1800,13 @@ mod tests {
             panic!("Native retains an all-Allow compound tree: {reason:?}");
         };
         assert_eq!(reasons.len(), 2);
-        assert!(reasons.values().all(|child| matches!(child.as_ref(),
+        assert!(reasons.values().all(|child| matches!(
+            child.as_ref(),
             PermissionResult::Allow {
-                reason: PermissionDecisionReason::PermissionMode { mode: PermissionMode::AcceptEdits }, ..
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
             }
         )));
     }
@@ -1937,8 +1941,14 @@ mod tests {
         let PermissionDecisionReason::SubcommandResults { reasons } = reason else {
             panic!("the unmatched curl stays in the compound tree: {reason:?}");
         };
-        assert!(matches!(reasons["mkdir foo"].as_ref(), PermissionResult::Allow { .. }));
-        assert!(matches!(reasons["curl https://x"].as_ref(), PermissionResult::Ask { .. }));
+        assert!(matches!(
+            reasons["mkdir foo"].as_ref(),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            reasons["curl https://x"].as_ref(),
+            PermissionResult::Ask { .. }
+        ));
         assert_eq!(prompt.message, "This Bash command contains multiple operations. The following part requires approval: curl https://x");
     }
 
@@ -4126,8 +4136,10 @@ mod tests {
                     reason,
                     PermissionDecisionReason::MatchedRule { .. }
                 ));
-                assert_eq!(explanation.as_deref(),
-                    Some("Permission to use Bash with command cat secret.env has been denied."));
+                assert_eq!(
+                    explanation.as_deref(),
+                    Some("Permission to use Bash with command cat secret.env has been denied.")
+                );
             }
             other => panic!("expected Read-deny command-path deny, got {other:?}"),
         }

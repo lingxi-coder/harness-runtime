@@ -2310,6 +2310,8 @@ impl BuiltinCommandHandler for DesktopWorktreeCommandHandler {
 }
 
 pub struct DesktopRuntime {
+    /// Ready lightweight child recipe; never calls the full host builder.
+    pub side_chat_factory: Arc<dyn crate::side_chat::SideChatFactory>,
     /// Startup producers withheld until a cold-resume host has mounted history
     /// and initialized its output/control transport.
     deferred_startup: tokio::sync::Mutex<Option<DeferredDesktopStartup>>,
@@ -5772,3 +5774,5 @@ use permission_config::fold_managed_otel_env_overrides;
 
 #[cfg(test)]
 use permission_config::load_boot_permission_tiers;
+
+mod side_chat;

@@ -1,9 +1,9 @@
+use crate::OrchestratorConfig;
 use crate::conversation::ConversationOrchestrator;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, StaticMemoryProvider, noop_hook_executor,
 };
 use crate::turn_loop::dispatch_tool_uses_tracked;
-use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use lingxi_core::host::permission_gate::{
     PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
@@ -244,7 +244,10 @@ async fn an_allowed_tool_is_not_recorded_as_a_denial() {
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!("fine"),
                 model_content: None,
                 new_messages: vec![],

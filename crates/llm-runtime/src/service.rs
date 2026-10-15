@@ -1735,6 +1735,36 @@ impl ApiService {
         }
     }
 
+    /// Fork a conversation adapter over the ready route/transport recipe.
+    /// Request IDs, retries, thinking recovery, websocket sessions, cache
+    /// overage and effort storage are newly allocated for this child.
+    #[must_use]
+    pub fn fork_independent(&self) -> Self {
+        let mut child = Self::new_with_routing(
+            self.client.clone(), self.transport.clone(), self.subscriber.clone(),
+            self.ua.clone(), self.version.clone(), None, None,
+            self.estimator.clone(), self.fallback_overrides.clone(),
+            self.settings_max_retries, self.settings_backoff_ms,
+        );
+        child.fallback_models = self.fallback_models.clone();
+        child.subscription = self.subscription.clone();
+        child.aws_auth = self.aws_auth.clone();
+        child.custom_cli_betas = self.custom_cli_betas.clone();
+        child.interactive_session = self.interactive_session;
+        child.anthropic_compatible_version = self.anthropic_compatible_version.clone();
+        child.native_system_prefix = self.native_system_prefix.clone();
+        child.native_thinking_display = self.native_thinking_display.clone();
+        child.anthropic_client_metadata = self.anthropic_client_metadata.clone();
+        child.request_metadata = self.request_metadata.clone();
+        child.effort_settings_source = self.effort_settings_source.clone();
+        child.inherited_effort_settings = self.inherited_effort_settings.clone();
+        child.prompt_cache_ttl_settings_source = self.prompt_cache_ttl_settings_source.clone();
+        child.effort_table_options = self.effort_table_options.clone();
+        child.fast_policy = self.fast_policy.clone();
+        child.set_thinking(self.thinking());
+        child
+    }
+
     /// Attach the AWS auth-refresh driver (2.1.198 `awsAuthRefresh` flow).
     /// Builder-style; the default is `None` (no refresh, errors stay terminal).
     #[must_use]

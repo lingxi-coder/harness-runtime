@@ -113,7 +113,7 @@ pub use config::{
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
     OrchestratorApiClient, OrchestratorApiRequest, SessionMemoryHandle, StreamingApiClient,
-    TurnOutcome, TurnExecutionMetrics,
+    TurnOutcome, TurnExecutionMetrics, SideChatParentSnapshot,
 };
 pub use conversation::{
     realtime_history, QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,

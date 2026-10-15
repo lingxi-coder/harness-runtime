@@ -1,9 +1,9 @@
+use crate::OrchestratorConfig;
 use crate::conversation::ConversationOrchestrator;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
 };
 use crate::turn_loop::dispatch_tool_uses_tracked;
-use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use hooks::events::HookEventType;
 use lingxi_core::host::permission_gate::{
@@ -11,7 +11,7 @@ use lingxi_core::host::permission_gate::{
 };
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker};
 use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, MessageId, ToolUseId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tool_api::context::ToolUseContext;
@@ -129,10 +129,11 @@ async fn monitor_websocket_classifier_allow_does_not_ask_again() {
         )),
         Arc::new(NoPrompt),
     );
-    assert!(gate
-        .loop_classifier_handle()
-        .set(classifier.clone())
-        .is_ok());
+    assert!(
+        gate.loop_classifier_handle()
+            .set(classifier.clone())
+            .is_ok()
+    );
     let called = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(Monitor(called.clone())) as Arc<dyn Tool>);
@@ -514,26 +515,30 @@ async fn physical_request_history_and_raw_row_facts_reach_the_tool_context() {
     let prior_tool_id = ToolUseId::new();
     let first_input = json!({ "timeout": 7 });
     let second_input = json!({ "timeout": 8 });
-    let first_tool = ContentBlock::ToolUse { input_projection: None,
+    let first_tool = ContentBlock::ToolUse {
+        input_projection: None,
         id: first_tool_id.clone(),
         name: "Seam".into(),
         input: first_input.clone(),
         provider_id: Some("provider-first".into()),
     };
-    let second_tool = ContentBlock::ToolUse { input_projection: None,
+    let second_tool = ContentBlock::ToolUse {
+        input_projection: None,
         id: second_tool_id.clone(),
         name: "Seam".into(),
         input: second_input.clone(),
         provider_id: Some("provider-second".into()),
     };
-    let prior_tool = ContentBlock::ToolUse { input_projection: None,
+    let prior_tool = ContentBlock::ToolUse {
+        input_projection: None,
         id: prior_tool_id,
         name: "Read".into(),
         input: json!({ "file_path": "prior.txt" }),
         provider_id: Some("provider-prior".into()),
     };
     let assistant_id = MessageId::new();
-    let raw_assistant_row = ConversationMessage::Assistant { per_turn_effort: None,
+    let raw_assistant_row = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![first_tool.clone(), second_tool],
         stop_reason: Some("tool_use".into()),

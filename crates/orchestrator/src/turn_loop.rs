@@ -1,6 +1,6 @@
 //! Inner turn-by-turn loop helpers. Private to `ConversationOrchestrator`.
 
-use crate::conversation::{classify_api_error, ConversationOrchestrator, ModelCallPath};
+use crate::conversation::{ConversationOrchestrator, ModelCallPath, classify_api_error};
 use crate::error::OrchestratorError;
 use hooks::attachment::HookPublicationGuard;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
@@ -26,8 +26,8 @@ mod response;
 pub(crate) mod tool_dispatch;
 mod tool_results;
 mod visible_response;
-pub(crate) use api_recovery::call_api_with_ptl_recovery;
 pub(crate) use api_recovery::PtlCallOutcome;
+pub(crate) use api_recovery::call_api_with_ptl_recovery;
 pub(crate) use batch_hooks::append_tool_injected_messages;
 pub(crate) use batch_hooks::apply_model_context_modifiers;
 pub(crate) use batch_hooks::apply_model_context_state;
@@ -37,6 +37,11 @@ pub(crate) use batch_hooks::resolve_model_context_modifier;
 pub(crate) use batch_hooks::run_post_tool_batch_hooks;
 pub(crate) use batch_hooks::run_post_tool_batch_hooks_after_turn_end;
 pub(crate) use batch_hooks::{PostToolBatchDispatch, PostToolBatchOutcome};
+#[cfg(test)]
+use error_reporting::GOAL_CLEAR_CONDITION_WIDTH;
+#[cfg(test)]
+use error_reporting::GoalClearBucket;
+pub(crate) use error_reporting::GoalClearReason;
 pub(crate) use error_reporting::clear_goal_after_unrecoverable_error;
 #[cfg(test)]
 use error_reporting::goal_clear_bucket;
@@ -52,17 +57,13 @@ pub(crate) use error_reporting::surface_prompt_too_long;
 pub(crate) use error_reporting::surface_rapid_refill_thrashing;
 pub(crate) use error_reporting::surface_terminal_api_error;
 pub(crate) use error_reporting::terminal_api_error_text;
-#[cfg(test)]
-use error_reporting::GoalClearBucket;
-pub(crate) use error_reporting::GoalClearReason;
-#[cfg(test)]
-use error_reporting::GOAL_CLEAR_CONDITION_WIDTH;
 use response::handle_malformed_tool_use;
 use response::handle_max_output_tokens;
 use response::handle_thinking_only;
 use response::has_visible_text;
 pub(crate) use response::prior_assistant_used_structured_output;
 pub(crate) use response::translate_response_blocks;
+pub(crate) use tool_dispatch::ToolUseDispatchFacts;
 #[cfg(test)]
 use tool_dispatch::accumulate_code_change;
 pub(crate) use tool_dispatch::dispatch_streaming_tool_use;
@@ -76,11 +77,10 @@ pub(crate) use tool_dispatch::normalize_lexically;
 use tool_dispatch::rule_decision_otel_source;
 #[cfg(test)]
 use tool_dispatch::tool_denial_kind;
-pub(crate) use tool_dispatch::ToolUseDispatchFacts;
-pub(crate) use tool_dispatch::{dispatch_streaming_tool_use_owned, streaming_tool_context_base};
 pub(crate) use tool_dispatch::{
     DeferredToolDispatch, ToolResultFramePublication, ToolResultPublication,
 };
+pub(crate) use tool_dispatch::{dispatch_streaming_tool_use_owned, streaming_tool_context_base};
 #[cfg(test)]
 use tool_results::apply_tool_result_persistence;
 #[cfg(test)]
@@ -624,6 +624,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         &mut guarded_async_hook_reminders,
                         &context_announcements,
                         cost_scope.as_ref(),
+                        None,
                     ),
                 )
                 .await
@@ -638,6 +639,17 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                 response,
                 request_history,
             } => (response, request_history),
+            PtlCallOutcome::Cancelled => {
+                return Ok((
+                    TurnStepOutcome::Ended {
+                        final_message_id: MessageId::new(),
+                        stop_reason: "aborted_streaming".into(),
+                        allow_budget_continuation: false,
+                        tool_requested_end: false,
+                    },
+                    0,
+                ));
+            }
             PtlCallOutcome::PromptTooLong => {
                 let assistant_id = surface_prompt_too_long(orch).await;
                 // SLASH-04: `w4v` maps `prompt_too_long` to `context_limit`.

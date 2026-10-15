@@ -1279,6 +1279,9 @@ pub(crate) struct ModSessionMeasureSnapshot {
 }
 
 pub struct ConversationOrchestrator {
+    /// Lightweight child state never publishes process-wide session flags.
+    pub(crate) side_chat: bool,
+    pub(crate) side_chat_model_refs: Option<Vec<String>>,
     pub(crate) config: OrchestratorConfig,
     pub(crate) api: Arc<dyn OrchestratorApiClient>,
     /// Streaming-path API client. Wired by `new_with_streaming`; the
@@ -1710,3 +1713,7 @@ impl StreamingApiClient for NoStreamingApiClient {
         })
     }
 }
+
+#[path = "conversation/side_chat.rs"]
+mod side_chat_impl;
+pub use side_chat_impl::SideChatParentSnapshot;

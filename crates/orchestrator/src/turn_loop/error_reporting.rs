@@ -343,7 +343,8 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
         .and_then(crate::api_error_copy::automatic_compaction_failed_text)
         .unwrap_or_else(|| PROMPT_TOO_LONG_ERROR_MESSAGE.to_string());
     let assistant_id = MessageId::new();
-    let assistant_msg = ConversationMessage::Assistant { per_turn_effort: None,
+    let assistant_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![ContentBlock::Text {
             text: text.clone(),
@@ -376,7 +377,8 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
 /// message + emit), so the turn ends cleanly.
 pub(crate) async fn surface_rapid_refill_thrashing(orch: &ConversationOrchestrator) -> MessageId {
     let assistant_id = MessageId::new();
-    let assistant_msg = ConversationMessage::Assistant { per_turn_effort: None,
+    let assistant_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![ContentBlock::Text {
             text: compaction::RAPID_REFILL_THRASHING_MESSAGE.to_string(),
@@ -463,7 +465,9 @@ pub(crate) fn terminal_api_error_text(
                     // — DOUBLE `\n` separators (od -c verified on 2.1.195 @206804081;
                     // the `strings` dump misled an earlier pass into single `\n`).
                     // `<brand>` is the LingXi rebrand.
-                    format!("API Error: {a} LingXi can't respond to this request with {label}.\n\n{m}\n\n{f}")
+                    format!(
+                        "API Error: {a} LingXi can't respond to this request with {label}.\n\n{m}\n\n{f}"
+                    )
                 }
                 None => {
                     // NO-LABEL branch.
@@ -585,7 +589,8 @@ pub(crate) async fn surface_terminal_api_error(
         stop_details,
     )?;
     let assistant_id = MessageId::new();
-    let assistant_msg = ConversationMessage::Assistant { per_turn_effort: None,
+    let assistant_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![ContentBlock::Text {
             text: text.clone(),
@@ -767,7 +772,8 @@ pub(crate) async fn surface_api_error_notice(
         error_text.to_string()
     };
     let assistant_id = MessageId::new();
-    let assistant_msg = ConversationMessage::Assistant { per_turn_effort: None,
+    let assistant_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![ContentBlock::Text {
             text: text.clone(),

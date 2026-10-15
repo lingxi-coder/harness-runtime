@@ -61,9 +61,11 @@ pub(super) async fn handle_max_output_tokens(
 /// — the #78 "visible output" predicate (claude-code `bin/claude.exe` offset
 /// ~202946760). `false` = a thinking-only / text-empty response.
 pub(super) fn has_visible_text(blocks: &[ContentBlock]) -> bool {
-    blocks
-        .iter()
-        .any(|block| block.visible_text().is_some_and(|text| !text.trim().is_empty()))
+    blocks.iter().any(|block| {
+        block
+            .visible_text()
+            .is_some_and(|text| !text.trim().is_empty())
+    })
 }
 
 /// Port of claude-code's `Pt(ce)` (query module, `bin/claude.exe` offset
@@ -133,11 +135,15 @@ pub(super) async fn handle_malformed_tool_use(
         // assistant response — two assistant messages in a row, matching the
         // binary. (The port previously persisted a USER message here.) Shape
         // mirrors `surface_model_error`'s assistant-api-error message.
-        orch.output.emit_text(MALFORMED_TOOL_USE_RETRY_FAILED, None).await;
-        let failed_msg = ConversationMessage::Assistant { per_turn_effort: None,
+        orch.output
+            .emit_text(MALFORMED_TOOL_USE_RETRY_FAILED, None)
+            .await;
+        let failed_msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(), citations: None,
+                text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
+                citations: None,
             }],
             stop_reason: Some("stop_sequence".to_string()),
         };

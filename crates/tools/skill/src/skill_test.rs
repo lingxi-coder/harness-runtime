@@ -49,6 +49,28 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn side_rejects_fork_before_shell_and_keeps_inline_broad_grants() {
+        let mut context = shell_test_ctx(dummy_out());
+        context.side_chat = true;
+        let mut desc = prompt_desc("forker");
+        desc.context = Some("fork".into());
+        desc.body = "!`must-not-execute`".into();
+        let tool = SkillTool::with_loader(context.clone(), Arc::new(FixedLoader(Some(desc))));
+        let error = tool
+            .call(json!({"skill":"forker"}), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unavailable in Side Chat"));
+        let mut inline = prompt_desc("inline");
+        inline.allowed_tools = vec!["*".into()];
+        let tool = SkillTool::with_loader(context, Arc::new(FixedLoader(Some(inline))));
+        assert!(tool
+            .call(json!({"skill":"inline"}), fresh_ctx(), fresh_tx())
+            .await
+            .is_ok());
+    }
+
     #[test]
     fn constants_locked() {
         assert_eq!(SKILL_TOOL_NAME, "Skill");

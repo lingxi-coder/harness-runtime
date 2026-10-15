@@ -141,7 +141,7 @@ pub(super) fn process_visible_response<'a>(
         // predicate in the OTEL monitoring module (H-BIN-06), which parses the var
         // with the byte-faithful `ct` truthy semantics (1/true/yes/on, trimmed,
         // case-insensitive). Default (var unset) keeps the locked turn fixtures OFF.
-        if telemetry::otel::logs::assistant_responses_enabled() {
+        if !orch.side_chat && telemetry::otel::logs::assistant_responses_enabled() {
             let text: String = assistant_blocks
                 .iter()
                 .filter_map(ContentBlock::visible_text)

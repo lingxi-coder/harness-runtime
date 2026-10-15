@@ -343,6 +343,7 @@ pub(super) async fn dispatch(
                         &mut params.guarded_async_hook_reminders,
                         &params.context_announcements,
                         params.cost_scope.as_ref(),
+                        None,
                     ),
                 ),
             )
@@ -470,6 +471,7 @@ pub(super) async fn dispatch(
                     &mut params.guarded_async_hook_reminders,
                     &params.context_announcements,
                     params.cost_scope.as_ref(),
+                    None,
                 ),
             )
             .await?;
