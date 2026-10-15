@@ -4954,7 +4954,10 @@ pub async fn build_with_credential_stack(
     }
     if let Some(ctx) = local_app_tool_ctx {
         let store = crate::local_apps::shared_store(ctx.fs.clone(), &cfg.lingxi_home);
-        crate::local_apps::register_tool(&mut tools_inner, ctx, store);
+        let visualizations = cfg
+            .inline_visualization
+            .then(|| crate::inline_visualization::shared_store(ctx.fs.clone(), &cfg.lingxi_home));
+        crate::local_apps::register_tool(&mut tools_inner, ctx, store, visualizations);
     }
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`

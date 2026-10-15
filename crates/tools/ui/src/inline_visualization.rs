@@ -153,14 +153,23 @@ impl VisualizationTool {
 
     /// The root session that owns what this call publishes.
     async fn owner(&self, ctx: &ToolUseContext) -> Option<uuid::Uuid> {
-        if let Some(origin) = ctx.origin_session_id {
-            return Some(origin.as_uuid());
-        }
-        if let Some(session) = ctx.session.as_ref() {
-            return Some(session.lock().await.session_id.as_uuid());
-        }
-        self.ctx.session_id.map(|session| session.as_uuid())
+        root_session(&self.ctx, ctx).await
     }
+}
+
+/// The root session that owns a call's visualizations: a subagent's call
+/// resolves to the conversation it works for.
+pub(crate) async fn root_session(
+    tool: &BuiltinToolContext,
+    ctx: &ToolUseContext,
+) -> Option<uuid::Uuid> {
+    if let Some(origin) = ctx.origin_session_id {
+        return Some(origin.as_uuid());
+    }
+    if let Some(session) = ctx.session.as_ref() {
+        return Some(session.lock().await.session_id.as_uuid());
+    }
+    tool.session_id.map(|session| session.as_uuid())
 }
 
 #[async_trait]

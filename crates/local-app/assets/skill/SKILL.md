@@ -30,6 +30,10 @@ Build the app as ONE self-contained HTML document and publish it with the `Local
 - For an app made earlier, call `LocalApp` with `action: "list"` to find its `id`, then `action: "read"` with that `id` to get the current document. Change it and publish with the same `id`.
 - Keep stored data readable by the new version: keep the keys, or store a schema version next to the data and convert old data when the app starts.
 
+## Saving a visualization as an app
+
+When the user wants to keep a visualization from this conversation as an app, call `LocalApp` with its `visualization_id` instead of writing a document. The app gets the visualization's code and the state the user saved in it, keeps its own data from then on, and works after the conversation is gone. Pass `name` when the visualization's title is longer than 60 characters. To change such an app later, `read` returns its fragment: change the fragment and publish it with the app's `id` in `fragment`.
+
 ## Rules
 
 - **Offline.** No CDN scripts, web fonts, remote images or other network resources. Inline everything. Use plain JavaScript and CSS: no frameworks, packages or build step.

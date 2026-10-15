@@ -17,6 +17,19 @@ const RUNTIME_TEMPLATE: &str = include_str!(concat!(env!("OUT_DIR"), "/visualize
 const FRAGMENT_PLACEHOLDER: &str = "<!--__INLINE_VISUALIZATION_FRAGMENT__-->";
 const ASSET_BASE_PLACEHOLDER: &str = "{{ASSET_BASE}}";
 
+/// The library loads of the derived template, as `build.rs` rewrites them.
+const FLOATING_UI_CORE_TAG: &str =
+    "<script src=\"{{ASSET_BASE}}floating-ui.core.umd.min.js\"></script>";
+const FLOATING_UI_DOM_TAG: &str =
+    "<script src=\"{{ASSET_BASE}}floating-ui.dom.umd.min.js\"></script>";
+const LUCIDE_TAG: &str =
+    "<script id=\"codex-visualization-lucide\" async src=\"{{ASSET_BASE}}lucide.min.js\"></script>";
+/// Frame of an app document: the widget fills the screen, clear of the notch
+/// and the home indicator.
+const APP_FRAME_CSS: &str = "html>body{padding:max(16px,env(safe-area-inset-top)) \
+max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) \
+max(16px,env(safe-area-inset-left))}";
+
 /// Path prefix of every library asset under the host origin.
 pub const ASSET_PATH: &str = "/asset/";
 /// Path prefix of content documents under the host origin.
@@ -306,6 +319,74 @@ pub fn render_content_document(params: &DocumentParams<'_>) -> String {
     )
 }
 
+/// Whether the fragment draws Lucide icons (`data-lucide`, `lucide.…`).
+fn uses_lucide(fragment: &str) -> bool {
+    fragment.contains("lucide")
+}
+
+/// A bundled library's source, for inlining.
+fn library(path: &str) -> &'static str {
+    let asset = assets::find(path).expect("bundled library asset");
+    std::str::from_utf8(asset.bytes).expect("bundled libraries are UTF-8")
+}
+
+fn inline_script(path: &str) -> String {
+    format!("<script>{}</script>", library(path))
+}
+
+/// The complete document of an app saved from a visualization.
+///
+/// It is the content document without a host: the same template and styles,
+/// the libraries the fragment uses inlined (an app has no asset origin), and
+/// the app runtime in place of the content runtime. `boot` is the JavaScript
+/// expression `window.__lingxiAppBoot` starts as; the app library puts the
+/// saved state there when it serves the document, so the stored document
+/// never carries it. The third-party notices ride along in a comment because
+/// the document is a copy of the bundled libraries.
+#[must_use]
+pub fn render_standalone_document(title: &str, fragment: &str, boot: &str) -> String {
+    let lucide = if uses_lucide(fragment) {
+        format!(
+            "<script id=\"codex-visualization-lucide\">{}</script>",
+            library("/asset/lucide.min.js")
+        )
+    } else {
+        String::new()
+    };
+    // The fragment goes in last, so markup in it is never mistaken for one
+    // of the template's library loads.
+    let runtime = RUNTIME_TEMPLATE
+        .replacen(
+            FLOATING_UI_CORE_TAG,
+            &inline_script("/asset/floating-ui.core.umd.min.js"),
+            1,
+        )
+        .replacen(
+            FLOATING_UI_DOM_TAG,
+            &inline_script("/asset/floating-ui.dom.umd.min.js"),
+            1,
+        )
+        .replacen(LUCIDE_TAG, &lucide, 1)
+        .replacen(FRAGMENT_PLACEHOLDER, fragment, 1);
+    let d3 = if uses_d3(fragment) {
+        inline_script(&format!("{ASSET_PATH}{}", assets::D3))
+    } else {
+        String::new()
+    };
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">\
+<meta name=\"referrer\" content=\"no-referrer\">\
+<title>{title}</title><style>{css}\n{APP_FRAME_CSS}</style>\
+<script>window.__lingxiAppBoot={boot};</script>\
+<script>{app_runtime}</script>{d3}<!--\n{notices}--></head><body>{runtime}</body></html>",
+        title = escape_html(title),
+        css = assets::VISUALIZE_CSS,
+        app_runtime = assets::APP_RUNTIME_JS,
+        notices = assets::third_party_notices(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +489,91 @@ mod tests {
         assert!(
             !document("<script>const ad3x = 1; let d30 = 2</script>").contains("/asset/d3.min.js")
         );
+    }
+
+    const BOOT: &str = "/*boot*/null";
+
+    fn external_urls(html: &str) -> Vec<&str> {
+        html.split(['"', '\'', ' ', '(', ')', '\n'])
+            .filter(|part| part.starts_with("http://") || part.starts_with("https://"))
+            .filter(|part| !part.starts_with("http://www.w3.org/"))
+            .collect()
+    }
+
+    #[test]
+    fn standalone_document_inlines_what_the_fragment_uses() {
+        let fragment = "<div id=\"widget\"><i data-lucide=\"star\"></i></div>\
+<script>d3.select('#widget'); lingxi.saveState({modelContent: 1});</script>";
+        let html = render_standalone_document("Q3 <sales>", fragment, BOOT);
+        assert!(html.starts_with("<!doctype html><html><head><meta charset=\"utf-8\">"));
+        assert!(html.contains("viewport-fit=cover"));
+        assert!(html.contains("<title>Q3 &lt;sales&gt;</title>"));
+        assert!(html.contains("<script>window.__lingxiAppBoot=/*boot*/null;</script>"));
+        assert!(html.contains(assets::APP_RUNTIME_JS));
+        assert!(
+            !html.contains("__lingxiVisualizationBoot"),
+            "no content runtime"
+        );
+        assert!(html.contains(".viz-controls"), "canonical control styles");
+        let notices = assets::third_party_notices();
+        assert!(html.contains(&notices), "notices ride along");
+        let mut ours = html.replace(&notices, "");
+        for path in [
+            "/asset/floating-ui.core.umd.min.js",
+            "/asset/floating-ui.dom.umd.min.js",
+            "/asset/lucide.min.js",
+            "/asset/d3.min.js",
+        ] {
+            assert!(html.contains(library(path)), "{path} inlined");
+            ours = ours.replace(library(path), "");
+        }
+        assert!(html.contains("<script id=\"codex-visualization-lucide\">"));
+        assert!(html.contains("<div id=\"widget\">"));
+        assert_eq!(html.matches(fragment).count(), 1);
+        assert!(!html.contains("{{ASSET_BASE}}"));
+        assert!(
+            !html.contains("<script src="),
+            "nothing loads from an origin"
+        );
+        assert!(
+            !html.contains("Content-Security-Policy"),
+            "the app policy applies"
+        );
+        assert_eq!(
+            external_urls(&ours),
+            Vec::<&str>::new(),
+            "only the vendored sources and their notices name URLs"
+        );
+    }
+
+    #[test]
+    fn standalone_document_leaves_out_unused_libraries() {
+        let html = render_standalone_document("t", "<p>plain</p>", BOOT);
+        assert!(!html.contains(library("/asset/d3.min.js")));
+        assert!(!html.contains(library("/asset/lucide.min.js")));
+        assert!(!html.contains("<script id=\"codex-visualization-lucide\""));
+        assert!(html.contains(library("/asset/floating-ui.dom.umd.min.js")));
+        assert!(html.contains("<p>plain</p>"));
+    }
+
+    #[test]
+    fn inlined_scripts_and_notices_cannot_end_their_element() {
+        let mut sources: Vec<&str> = [
+            "/asset/floating-ui.core.umd.min.js",
+            "/asset/floating-ui.dom.umd.min.js",
+            "/asset/lucide.min.js",
+            "/asset/d3.min.js",
+        ]
+        .into_iter()
+        .map(library)
+        .collect();
+        sources.push(assets::APP_RUNTIME_JS);
+        for source in sources {
+            let lower = source.to_ascii_lowercase();
+            assert!(!lower.contains("</script") && !lower.contains("<!--"));
+        }
+        let notices = assets::third_party_notices();
+        assert!(!notices.contains("-->") && !notices.contains("--!>"));
     }
 
     #[test]
