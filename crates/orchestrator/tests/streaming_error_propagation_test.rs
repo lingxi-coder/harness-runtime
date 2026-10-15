@@ -15,8 +15,8 @@ use tool_api::registry::ToolRegistry;
 fn orch(
     streaming: Arc<MockStreamingApiClient>,
     output: Arc<MockOutputStream>,
-) -> ConversationOrchestrator {
-    ConversationOrchestrator::new_with_streaming(
+) -> Arc<ConversationOrchestrator> {
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
         streaming,
@@ -26,7 +26,7 @@ fn orch(
         output,
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    )
+    ))
 }
 
 /// #10 (faithful port of `query.ts:955-997` catch): a mid-stream model/runtime
