@@ -8154,6 +8154,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn side_fork_keeps_native_thinking_overlay_without_generic_projection() {
+        use crate::model::{thinking::ThinkingConfig, thinking_state::NativeIntegerNumber};
+
+        let parent = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        )
+        .with_thinking(ThinkingConfig::Adaptive);
+        // Native Main accepts wider JS integer overlays than the generic API.
+        parent.set_max_thinking_tokens_override(NativeIntegerNumber::new(-1.0));
+        assert!(parent.thinking().is_err());
+        let child = parent.fork_independent();
+        assert!(child.thinking().is_err());
+        child.set_max_thinking_tokens_override(None);
+        assert_eq!(child.thinking().unwrap(), ThinkingConfig::Adaptive);
+        assert!(
+            parent.thinking().is_err(),
+            "child overlay changes must stay private"
+        );
+    }
+
     #[tokio::test]
     async fn side_fork_preserves_explicit_native_endpoint_admission() {
         use lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata;

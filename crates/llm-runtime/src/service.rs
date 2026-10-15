@@ -3218,7 +3218,7 @@ impl ApiService {
         child.prompt_cache_ttl_settings_source = self.prompt_cache_ttl_settings_source.clone();
         child.effort_table_options = self.effort_table_options.clone();
         child.fast_policy = self.fast_policy.clone();
-        child.set_thinking(self.thinking());
+        child.thinking = RwLock::new(self.thinking_state());
         child
     }
 

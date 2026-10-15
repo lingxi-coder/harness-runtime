@@ -871,15 +871,16 @@ impl ConversationOrchestrator {
                 session.user_model_setting = binding.clone();
                 session.user_model_setting_provenance = provenance;
             }
+            // Publish both owners under the snapshot's session lock. A side
+            // snapshot must not freeze a new session binding with an old
+            // configured source. The synchronous source guard ends here,
+            // before any subsequent await.
+            *self
+                .model_runtime
+                .configured_model_source
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = binding;
         }
-        // The source is the current configured value even while a session
-        // selection temporarily owns the route. That selection gate prevents
-        // it from being used until the user returns to Configured.
-        *self
-            .model_runtime
-            .configured_model_source
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = binding;
         *self
             .model_runtime
             .main_model_restriction

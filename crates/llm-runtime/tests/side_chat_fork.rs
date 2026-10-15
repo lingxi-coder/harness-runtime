@@ -95,8 +95,8 @@ async fn side_fork_owns_request_retry_effort_and_thinking_state() {
     assert_eq!(parent.last_request_id().unwrap(), parent_id);
     assert_eq!(parent.last_retry_count(), 1);
     assert_eq!(child.last_retry_count(), 0);
-    assert_eq!(parent.thinking(), ThinkingConfig::Adaptive);
-    assert_eq!(child.thinking(), ThinkingConfig::Disabled);
+    assert_eq!(parent.thinking().unwrap(), ThinkingConfig::Adaptive);
+    assert_eq!(child.thinking().unwrap(), ThinkingConfig::Disabled);
     assert!(
         matches!(parent.effort_command_snapshot(MODEL,None).unwrap().unwrap().session,SessionEffort::Level(value) if value==json!("high"))
     );
