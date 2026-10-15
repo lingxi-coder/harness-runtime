@@ -1,0 +1,4 @@
+# Deep debug-mode async runtime tests exceed Rust's default test-thread stack.
+# Keep normal cargo test runs reproducible without machine-specific paths.
+[env]
+RUST_MIN_STACK = { value = "16777216", force = false }
