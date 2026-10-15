@@ -653,7 +653,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         instructions.as_ref(),
                         (token_gap > 0).then_some(token_gap),
                     );
-                    if let Some(cancel) = side_token.as_ref() {
+                    if let Some(cancel) = cancel.as_ref() {
                         tokio::select! {
                             biased;
                             () = cancel.cancelled() => return Err(hooks::mods::ModError::Native("compaction cancelled".into())),

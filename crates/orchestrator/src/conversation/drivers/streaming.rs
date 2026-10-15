@@ -1386,6 +1386,16 @@ impl StreamingTurnDriver<'_> {
                     Ok(StreamErrorFallback::Declined(message_id)) => {
                         return Ok(OpenStreamingOutcome::Complete(message_id));
                     }
+                    Ok(StreamErrorFallback::Cancelled) => {
+                        let cost = orch.snapshot_cost_real().await;
+                        orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                        if orch.cancel_reason_now()
+                            != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
+                        {
+                            orch.inject_user_message(INTERRUPT_MESSAGE).await;
+                        }
+                        return Ok(OpenStreamingOutcome::Complete(assistant_id));
+                    }
                     Err(error) if crate::turn_loop::is_carveout_propagated(&error) => {
                         return Err(error);
                     }

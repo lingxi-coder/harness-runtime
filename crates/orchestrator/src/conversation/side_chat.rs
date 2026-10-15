@@ -105,7 +105,8 @@ impl ConversationOrchestrator {
         };
         drop(session);
         if let Some(prompt) = self.prompt_runtime.prompt_snapshot.lock().await.as_ref() {
-            snapshot.config.system_prompt_override = Some(prompt.system_prompt.join("\n\n"));
+            snapshot.config.system_prompt_override =
+                Some(ConversationOrchestrator::system_prompt_source_text(prompt));
         }
         snapshot.memory_files = self.memory.load(&snapshot.cwd).await;
         snapshot

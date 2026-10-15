@@ -183,7 +183,6 @@ pub(super) async fn apply_tool_result_persistence_with_process_output(
     use crate::tool_result_persistence as trp;
     if orch.side_chat {
         return PersistenceOutcome {
-            utf16_code_units: None,
             content,
             replaced: false,
         };
