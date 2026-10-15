@@ -31,7 +31,7 @@ pub(super) async fn handle_max_output_tokens(
     state: &mut RecoveryState,
     malformed_tool: bool,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
-    if state.output_recovery_actions < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
+    if state.max_output_tokens_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
         // Inject the "resume directly" nudge as a META user message. CC 2.1.207
         // builds it via `createUserMessage({…, isMeta:!0})`, so it persists with
         // top-level `isMeta:true` and is skipped by title / first-prompt /
@@ -201,6 +201,7 @@ pub(super) async fn handle_malformed_tool_use(
     }
     orch.persist_message_to_jsonl(&nudge_msg).await;
     // TS resets the recovery counters on the retry transition.
+    state.reset_max_output_tokens_recovery();
     state.output_recovery_actions += 1;
     state.malformed_tool_use_retried = true;
     Ok(TurnStepOutcome::Continue(

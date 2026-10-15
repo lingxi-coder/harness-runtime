@@ -2374,6 +2374,7 @@ impl ConversationOrchestrator {
                 // TS resets the recovery counters on the retry transition so
                 // the continued turn starts a fresh max-output-tokens
                 // escalation episode.
+                loop_state.recovery.reset_max_output_tokens_recovery();
                 loop_state.recovery.output_recovery_actions += 1;
                 loop_state.malformed_tool_use_retried = true;
                 Ok(StreamingIterationDisposition::Continue(
@@ -2385,10 +2386,7 @@ impl ConversationOrchestrator {
             // nudge user message, increment the counter, and Continue
             // (TS `query.ts:1223-1252`). On exhaustion, fall through to the
             // generic terminal below (end with stop_reason `max_tokens`).
-            Some("max_tokens")
-                if loop_state.recovery.output_recovery_actions
-                    < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT =>
-            {
+            Some("max_tokens") => {
                 let native_resume_eligible = loop_state
                     .recovery
                     .last_generation
@@ -2396,8 +2394,6 @@ impl ConversationOrchestrator {
                     .filter(|_| {
                         loop_state.recovery.max_output_tokens_recovery_count
                             < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
-                            && loop_state.recovery.output_recovery_actions
-                                < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
                     })
                     .is_some_and(|frozen| {
                         let resumable = pumped
@@ -2465,6 +2461,8 @@ impl ConversationOrchestrator {
                     && can_repeat_original
                     && no_hosted_effects
                     && !loop_state.recovery.max_output_tokens_escalated
+                    && loop_state.recovery.max_output_tokens_recovery_count
+                        < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
                 {
                     if let (Some(usage), Some(frozen)) = (
                         pumped.usage.as_ref(),

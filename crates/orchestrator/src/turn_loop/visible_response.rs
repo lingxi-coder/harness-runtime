@@ -724,7 +724,6 @@ pub(super) fn process_visible_response<'a>(
                         .filter(|_| {
                             state.max_output_tokens_recovery_count
                                 < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
-                                && state.output_recovery_actions < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
                         })
                         .is_some_and(|frozen| {
                             crate::output_recovery::native_thinking_resumption_eligible(
@@ -777,7 +776,7 @@ pub(super) fn process_visible_response<'a>(
                             == Some(true)
                         && no_hosted_effects
                         && !state.max_output_tokens_escalated
-                        && state.output_recovery_actions < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+                        && state.max_output_tokens_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
                     {
                         if let Some(frozen) = state.last_generation.as_ref() {
                             if let Some(next) = orch

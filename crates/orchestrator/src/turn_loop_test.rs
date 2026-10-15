@@ -6195,6 +6195,10 @@ mod malformed_and_thinking_only_tests {
             state.max_output_tokens_recovery_count, 0,
             "recovery reset on retry transition"
         );
+        assert_eq!(
+            state.output_recovery_actions, 3,
+            "malformed repair spends the shared turn recovery allowance"
+        );
 
         let h = history(&orch).await;
         assert_eq!(
