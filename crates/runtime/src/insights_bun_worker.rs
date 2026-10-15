@@ -47,9 +47,9 @@ pub struct BunInsightsSourceExecutor {
     worker: Arc<BunInsightsWorker>,
 }
 
-/// The executor owns one persistent worker. The process-wide registry below
-/// stores only Weak references, so the worker and its private bundle shut down
-/// when the last service using this executable is dropped.
+/// The executor owns one persistent worker. The weak registry reuses workers
+/// only within the same Tokio runtime, and the worker plus its private bundle
+/// shut down when the last service using them is dropped.
 struct BunInsightsWorker {
     executable: PathBuf,
     session: Mutex<BunWorkerSession>,
@@ -62,6 +62,7 @@ struct BunInsightsWorker {
 /// canceled or malformed exchange leaves `poisoned` set until the old child
 /// has been killed and reaped.
 struct BunWorkerSession {
+    runtime_id: Option<tokio::runtime::Id>,
     process: Option<BunWorkerProcess>,
     bundle: Option<PrivateWorkerBundle>,
     poisoned: bool,
@@ -72,6 +73,7 @@ struct BunWorkerSession {
 impl Default for BunWorkerSession {
     fn default() -> Self {
         Self {
+            runtime_id: None,
             process: None,
             bundle: None,
             poisoned: false,
@@ -79,6 +81,72 @@ impl Default for BunWorkerSession {
             next_request_id: 1,
         }
     }
+}
+
+impl BunWorkerSession {
+    fn bind_to_current_runtime(&mut self) -> Result<(), Source> {
+        let runtime_id = current_runtime_id()
+            .ok_or_else(|| error_source("Insights Bun worker requires an active Tokio runtime"))?;
+        if self
+            .runtime_id
+            .as_ref()
+            .is_some_and(|bound_runtime_id| bound_runtime_id != &runtime_id)
+        {
+            // Do not let ChildStdin/ChildStdout cross runtime drivers. If the
+            // old process is still present, synchronously kill and reap it
+            // before its pipe handles are dropped on this runtime.
+            self.poisoned = true;
+            self.preflight_verified = false;
+            let stopped = match self.process.as_mut() {
+                Some(process) => terminate_child_sync(&mut process.child),
+                None => true,
+            };
+            if stopped {
+                self.process.take();
+                self.bundle.take();
+                self.poisoned = false;
+            }
+            return Err(error_source(
+                "Insights Bun worker cannot be reused from a different Tokio runtime",
+            ));
+        }
+
+        if self.runtime_id.is_none() {
+            self.runtime_id = Some(runtime_id);
+        }
+        Ok(())
+    }
+}
+
+fn current_runtime_id() -> Option<tokio::runtime::Id> {
+    tokio::runtime::Handle::try_current()
+        .ok()
+        .map(|handle| handle.id())
+}
+
+fn worker_for_current_runtime(executable: PathBuf) -> Arc<BunInsightsWorker> {
+    let Some(runtime_id) = current_runtime_id() else {
+        // Construction is also used by synchronous host setup. An unbound
+        // worker is deliberately not placed in the shared registry; its first
+        // async use binds it to that call's runtime.
+        return Arc::new(BunInsightsWorker::new(executable, None));
+    };
+
+    type WorkerKey = (PathBuf, tokio::runtime::Id);
+    static WORKERS: OnceLock<StdMutex<HashMap<WorkerKey, Weak<BunInsightsWorker>>>> =
+        OnceLock::new();
+    let workers = WORKERS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut workers = workers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    workers.retain(|_, worker| worker.strong_count() > 0);
+    let key = (executable.clone(), runtime_id);
+    if let Some(worker) = workers.get(&key).and_then(Weak::upgrade) {
+        return worker;
+    }
+    let worker = Arc::new(BunInsightsWorker::new(executable, Some(runtime_id)));
+    workers.insert(key, Arc::downgrade(&worker));
+    worker
 }
 
 /// A failed or canceled wire exchange cannot leave the process available for
@@ -131,19 +199,9 @@ impl BunInsightsSourceExecutor {
     /// or installed source-tree path is consulted.
     pub fn new_from_host_environment() -> Result<Self, Source> {
         let executable = resolve_bun_executable()?;
-        static WORKERS: OnceLock<StdMutex<HashMap<PathBuf, Weak<BunInsightsWorker>>>> =
-            OnceLock::new();
-        let workers = WORKERS.get_or_init(|| StdMutex::new(HashMap::new()));
-        let mut workers = workers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        workers.retain(|_, worker| worker.strong_count() > 0);
-        if let Some(worker) = workers.get(&executable).and_then(Weak::upgrade) {
-            return Ok(Self { worker });
-        }
-        let worker = Arc::new(BunInsightsWorker::new(executable.clone()));
-        workers.insert(executable, Arc::downgrade(&worker));
-        Ok(Self { worker })
+        Ok(Self {
+            worker: worker_for_current_runtime(executable),
+        })
     }
 
     /// Validate the worker lazily. Desktop registers the provider only when a
@@ -160,10 +218,14 @@ impl BunInsightsSourceExecutor {
 }
 
 impl BunInsightsWorker {
-    fn new(executable: PathBuf) -> Self {
+    fn new(executable: PathBuf, runtime_id: Option<tokio::runtime::Id>) -> Self {
+        let session = BunWorkerSession {
+            runtime_id,
+            ..Default::default()
+        };
         Self {
             executable,
-            session: Mutex::new(BunWorkerSession::default()),
+            session: Mutex::new(session),
             #[cfg(test)]
             test_entry_override: None,
         }
@@ -172,6 +234,7 @@ impl BunInsightsWorker {
     #[cfg(test)]
     fn with_test_entry(executable: PathBuf, entry: PathBuf) -> Self {
         let mut session = BunWorkerSession::default();
+        session.runtime_id = current_runtime_id();
         session.bundle = Some(
             PrivateWorkerBundle::test_only()
                 .expect("test worker gets a private home/config/temp root"),
@@ -186,6 +249,7 @@ impl BunInsightsWorker {
     #[cfg(test)]
     async fn preflight(&self) -> Result<(), Source> {
         let mut session = self.session.lock().await;
+        session.bind_to_current_runtime()?;
         self.ensure_preflight(&mut session).await
     }
 
@@ -374,6 +438,7 @@ impl BunInsightsWorker {
 
     async fn call(&self, action: &str, payload: Source) -> Result<Source, Source> {
         let mut session = self.session.lock().await;
+        session.bind_to_current_runtime()?;
         if action != "ping" {
             self.ensure_preflight(&mut session).await?;
         }
@@ -1445,6 +1510,95 @@ for await (const line of lines) {
                 Some((parts.next()?.parse().ok()?, parts.next()?.to_owned()))
             })
             .collect()
+    }
+
+    #[test]
+    fn worker_registry_is_runtime_scoped_and_stale_workers_fail_closed() {
+        let root = test_root();
+        let executable = root.join("bun");
+
+        // Host setup is synchronous in some callers. Such a worker remains
+        // unregistered until use instead of being shared as a runtime-neutral
+        // process connection.
+        let constructed_without_runtime = worker_for_current_runtime(executable.clone());
+
+        let runtime_a = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let runtime_a_id = runtime_a.handle().id();
+        let first = runtime_a.block_on(async { worker_for_current_runtime(executable.clone()) });
+        let reused_in_a =
+            runtime_a.block_on(async { worker_for_current_runtime(executable.clone()) });
+        assert!(Arc::ptr_eq(&first, &reused_in_a));
+        assert!(!Arc::ptr_eq(&first, &constructed_without_runtime));
+        runtime_a.shutdown_background();
+
+        let runtime_b = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_ne!(runtime_b.handle().id(), runtime_a_id);
+        let second = runtime_b.block_on(async { worker_for_current_runtime(executable) });
+        assert!(!Arc::ptr_eq(&first, &second));
+
+        let error = runtime_b
+            .block_on(first.preflight())
+            .expect_err("a worker from a stopped runtime must be rejected before I/O");
+        assert_eq!(
+            source_string(&error).as_deref(),
+            Some("Insights Bun worker cannot be reused from a different Tokio runtime")
+        );
+        assert!(first
+            .session
+            .try_lock()
+            .expect("worker session is not held")
+            .process
+            .is_none());
+
+        drop((first, reused_in_a, second, constructed_without_runtime));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_mismatch_reaps_the_old_child_before_rejecting_reuse() {
+        let root = test_root();
+        let (entry, event_path, _) = create_fake_worker(&root, "normal");
+        let runtime_a = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let worker =
+            runtime_a.block_on(async { BunInsightsWorker::with_test_entry(test_bun(), entry) });
+        runtime_a
+            .block_on(worker.preflight())
+            .expect("fake worker should start in its owning runtime");
+        assert!(worker.session.try_lock().unwrap().process.is_some());
+        runtime_a.shutdown_background();
+
+        let runtime_b = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime_b
+            .block_on(worker.preflight())
+            .expect_err("stale worker pipes must not cross Tokio runtimes");
+        assert_eq!(
+            source_string(&error).as_deref(),
+            Some("Insights Bun worker cannot be reused from a different Tokio runtime")
+        );
+        let session = worker.session.try_lock().unwrap();
+        assert!(session.process.is_none(), "old child must be reaped");
+        assert!(
+            session.bundle.is_none(),
+            "old private bundle can now be removed"
+        );
+        assert_eq!(startup_count(&events(&event_path)), 1);
+
+        drop(session);
+        drop(worker);
+        runtime_b.shutdown_background();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

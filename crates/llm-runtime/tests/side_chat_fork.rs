@@ -39,7 +39,9 @@ impl Transport for Fixture {
 }
 #[tokio::test(start_paused = true)]
 async fn side_fork_owns_request_retry_effort_and_thinking_state() {
-    let config:ClientConfig=serde_json::from_value(json!({"providers":[{"provider_id":"anthropic_first_party","profile_name":"ready","base_url":"https://fixture.invalid","protocol":"anthropic_messages","auth":"none","credential":{"type":"none"},"models":[{"display_model":MODEL,"request_model":MODEL,"billing_model":MODEL,"capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":true,"structured_output":false}}]}]})).unwrap();
+    // The fake transport intercepts all sends; the official endpoint lets the
+    // command snapshot exercise the Native Anthropic effort policy.
+    let config:ClientConfig=serde_json::from_value(json!({"providers":[{"provider_id":"anthropic_first_party","profile_name":"ready","base_url":"https://api.anthropic.com","protocol":"anthropic_messages","auth":"none","credential":{"type":"none"},"models":[{"display_model":MODEL,"request_model":MODEL,"billing_model":MODEL,"capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":true,"structured_output":false}}]}]})).unwrap();
     let transport = Arc::new(Fixture(Mutex::new(0)));
     let parent = ApiService::new_with_routing(
         Arc::new(ModelRuntime::from_config(config).unwrap()),

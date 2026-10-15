@@ -4466,8 +4466,8 @@ mod prompt_expansion_current_id_tests {
     ) -> ConversationOrchestrator {
         let fs: Arc<dyn lingxi_core::host::FileSystem> =
             Arc::new(platform_posix::fs::PosixFileSystem::new(dir.to_path_buf()));
-        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path, fs));
-        ConversationOrchestrator::new(
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
+        let orch = ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(Vec::new())),
             Arc::new(tool_api::registry::ToolRegistry::new()),
@@ -4477,7 +4477,22 @@ mod prompt_expansion_current_id_tests {
             Arc::new(StaticMemoryProvider::empty()),
             dir.to_path_buf(),
         )
-        .with_jsonl_writer(writer)
+        .with_jsonl_writer(writer.clone());
+        let state_root = dir.join("durable-state");
+        std::fs::create_dir_all(&state_root).expect("create durable test state");
+        writer.set_durable_lock(Arc::new(
+            session::jsonl::DurableTranscriptWriter::open(&state_root)
+                .expect("open durable test writer"),
+        ));
+        let session_id = orch
+            .session
+            .try_lock()
+            .expect("new test session")
+            .session_id;
+        writer
+            .activate_session_target(session_id, path, dir.to_path_buf())
+            .expect("bind test transcript to its current session");
+        orch
     }
 
     fn row(raw: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {

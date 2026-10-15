@@ -295,6 +295,11 @@ async fn capture_anthropic(
     let _native_assume = EnvRestore::set(NATIVE_ASSUME_FIRST_PARTY_ENV, None);
     let _bare = EnvRestore::set(NATIVE_BARE_ENV, Some("1"));
     let base_url = format!("http://{address}");
+    // Native's TBC predicate reads ANTHROPIC_BASE_URL from the process
+    // environment. The explicit service endpoint selects the loopback route
+    // for HTTP, but does not replace that independent source input.
+    let _native_base_url =
+        native_endpoint.then(|| EnvRestore::set("ANTHROPIC_BASE_URL", Some(&base_url)));
     let service = service(
         runtime(
             &base_url,
