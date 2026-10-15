@@ -1742,6 +1742,53 @@ mod tests {
             .is_none());
         manager.shutdown().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn mismatched_turn_cancel_does_not_cancel_running_turn() {
+        let entered = Arc::new(Notify::new());
+        let manager = SideChatManager::new(
+            parent(),
+            Arc::new(GatedFactory(entered.clone())),
+            Arc::new(Sink::default()),
+        );
+        let id = manager
+            .create("create".into(), Some("first input".into()), None, None)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), entered.notified())
+            .await
+            .unwrap();
+
+        let side = manager.side(&id).await.unwrap();
+        let (running_id, running_cancel) = {
+            let state = side.state.lock().await;
+            let running = state.running.as_ref().unwrap();
+            (running.id, running.cancel.clone())
+        };
+        assert_eq!(running_id, Some(1));
+
+        manager
+            .submit(
+                &id,
+                "stale-stop".into(),
+                ClientCommand::Cancel { turn_id: Some(2) },
+            )
+            .await
+            .unwrap();
+
+        assert!(!running_cancel.is_cancelled());
+        assert_eq!(
+            side.state
+                .lock()
+                .await
+                .running
+                .as_ref()
+                .and_then(|running| running.id),
+            Some(1)
+        );
+        manager.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn create_dedup_and_end_tombstone_never_resurrect() {
         let sink = Arc::new(Sink::default());

@@ -112,14 +112,15 @@ impl Tool for CaptureShellInput {
     }
 }
 
-fn first_user_utf16_units(message: &ConversationMessage) -> Option<&[u16]> {
+fn first_user_utf16_units(message: &ConversationMessage) -> Option<Vec<u16>> {
     let ConversationMessage::User { content, .. } = message else {
         return None;
     };
     match content.first()? {
+        ContentBlock::Text { text, .. } => Some(text.encode_utf16().collect()),
         ContentBlock::TextJsUtf16 {
             utf16_code_units, ..
-        } => Some(utf16_code_units),
+        } => Some(utf16_code_units.clone()),
         _ => None,
     }
 }
@@ -560,8 +561,38 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
         ["session_context", "date"],
         "typed-Skill NAr preserves Native's empty context/date rows without a regular-prompt token reminder"
     );
-    assert_eq!(nar_rows[0].0, body + 1, "session context follows the body");
-    assert_eq!(nar_rows[1].0, body + 2, "date follows session context");
+    let attachment_types = attachment_rows
+        .iter()
+        .map(|(_, kind)| *kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attachment_types,
+        [
+            "environment",
+            "model",
+            "hook_success",
+            "hook_system_message",
+            "hook_additional_context",
+            "session_context",
+            "date",
+        ],
+        "durable rows keep NAr, Qe hook-yield, then separately persisted context order"
+    );
+    let attachment_indices = attachment_rows
+        .iter()
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attachment_indices,
+        (body + 1..=body + 7).collect::<Vec<_>>(),
+        "the complete attachment batch is contiguous after the command body"
+    );
+    assert_eq!(
+        nar_rows[0].0,
+        body + 6,
+        "session context follows NAr and Qe rows"
+    );
+    assert_eq!(nar_rows[1].0, body + 7, "date follows session context");
     let context_payload = rows[nar_rows[0].0]
         .attachment_projection
         .as_ref()
@@ -598,8 +629,8 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
         "each UPE hook row follows the body and preserves yield order"
     );
     assert!(
-        hook_rows.iter().all(|(index, _)| *index > nar_rows[1].0),
-        "durable Qe order is header/body, typed NAr context/date, then UPE rows"
+        hook_rows.iter().all(|(index, _)| *index < nar_rows[0].0),
+        "NAr and Qe hook-yield rows are durable before separately persisted context announcements"
     );
     let success_index = hook_rows
         .iter()
@@ -627,7 +658,7 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
         .expect("nonempty UPE success is visible in hot model history");
     assert_eq!(
         first_user_utf16_units(hot_success),
-        Some(expected_success_units.as_slice())
+        Some(expected_success_units.clone())
     );
     let additional_context_index = hook_rows
         .iter()
@@ -654,7 +685,7 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
     expected_context_units.extend("\ntail &lt;\n</system-reminder>".encode_utf16());
     assert_eq!(
         first_user_utf16_units(restored_context),
-        Some(expected_context_units.as_slice()),
+        Some(expected_context_units.clone()),
         "cold UPE additional-context rendering preserves escaped source UTF-16"
     );
     assert!(history
@@ -666,7 +697,7 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
         .expect("hot UPE additional context is visible in model history");
     assert_eq!(
         first_user_utf16_units(hot_context),
-        Some(expected_context_units.as_slice()),
+        Some(expected_context_units.clone()),
         "hot and cold UPE additional-context rendering use identical UTF-16"
     );
     let restored_success = restored
@@ -676,7 +707,7 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
         .expect("cold restoration renders the same UPE success row");
     assert_eq!(
         first_user_utf16_units(restored_success),
-        Some(expected_success_units.as_slice()),
+        Some(expected_success_units.clone()),
         "hot and cold rendering preserve the Native UTF-16 payload"
     );
     let requests = api.captured_calls().await;
@@ -725,7 +756,7 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
     let expected_date_units = expected_date_text.encode_utf16().collect::<Vec<_>>();
     assert_eq!(
         first_user_utf16_units(&captured_messages[date_request_index]),
-        Some(expected_date_units.as_slice()),
+        Some(expected_date_units.clone()),
         "the typed date row preserves exact Native UTF-16"
     );
     assert!(matches!(
@@ -994,7 +1025,7 @@ async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
                 "UserPromptExpansion",
                 "UserPromptSubmit"
             ],
-            "typed NAr context/date rows follow the body; source-ordered UPE rows follow NAr and precede host Mod contexts; streaming={streaming}"
+            "source-ordered UPE hooks precede the host prompt.submit hook; streaming={streaming}"
         );
         let nar_rows = records
             .iter()
@@ -1011,14 +1042,41 @@ async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
             ["session_context", "date"],
             "typed-Skill NAr carries the empty context anchor then date, with no regular-prompt token reminder; streaming={streaming}"
         );
+        let attachment_types = records
+            .iter()
+            .filter_map(|record| record.attachment_projection.as_ref()?.string_at("/type"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attachment_types,
+            [
+                "environment",
+                "model",
+                "hook_system_message",
+                "hook_additional_context",
+                "hook_additional_context",
+                "session_context",
+                "date",
+            ],
+            "durable rows keep NAr, Qe UPE, prompt.submit, then separately persisted context order; streaming={streaming}"
+        );
+        let attachment_indices = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| record.attachment_projection.as_ref().map(|_| index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attachment_indices,
+            (body_index + 1..=body_index + 7).collect::<Vec<_>>(),
+            "the complete attachment batch is contiguous after the command body; streaming={streaming}"
+        );
         assert_eq!(
             nar_rows[0].0,
-            body_index + 1,
-            "session context follows body; streaming={streaming}"
+            body_index + 6,
+            "session context follows durable NAr and hook rows; streaming={streaming}"
         );
         assert_eq!(
             nar_rows[1].0,
-            body_index + 2,
+            body_index + 7,
             "date follows session context; streaming={streaming}"
         );
         let context_payload = records[nar_rows[0].0]
@@ -1052,7 +1110,7 @@ async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
         assert_eq!(
             upe_row_indices,
             [body_index + 3, body_index + 4],
-            "the two source-ordered UPE rows follow NAr's typed context/date rows; streaming={streaming}"
+            "the two source-ordered UPE rows follow the persisted NAr rows; streaming={streaming}"
         );
         let first_upe_index = records
             .iter()
@@ -1198,7 +1256,7 @@ async fn prompt_submit_mod_screens_each_batch_entry_before_persistence() {
     let expected_submit_units = submit_context_text.encode_utf16().collect::<Vec<_>>();
     assert_eq!(
         first_user_utf16_units(&outgoing[submit_context]),
-        Some(expected_submit_units.as_slice()),
+        Some(expected_submit_units.clone()),
         "the typed prompt.submit user row retains exact UTF-16"
     );
     assert!(!outgoing.iter().any(|message| {

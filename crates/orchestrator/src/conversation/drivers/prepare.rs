@@ -438,6 +438,15 @@ impl ConversationOrchestrator {
         // with `defer_loading:true`. Computing it ADVANCES the announced-set
         // tracking, so it is computed ONCE here and reattached on re-snapshot.
         let ingress_batch_finalized = crate::request_context::prompt_ingress_batch_finalized();
+        let mut deferred_wire_tool_names = self
+            .tools
+            .tool_search_view()
+            .entries()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        deferred_wire_tool_names.sort();
+        deferred_wire_tool_names.dedup();
         let mut current_wire_tool_names = wire_tools
             .iter()
             .map(|tool| tool.name.clone())
@@ -445,13 +454,7 @@ impl ConversationOrchestrator {
         // The final wire excludes undiscovered deferred schemas. NAr receives
         // the active tool pool before that projection, so reconstruct its
         // identity set from the exact shared deferred registry view.
-        current_wire_tool_names.extend(
-            self.tools
-                .tool_search_view()
-                .entries()
-                .into_iter()
-                .map(|entry| entry.name),
-        );
+        current_wire_tool_names.extend(deferred_wire_tool_names.iter().cloned());
         current_wire_tool_names.sort();
         current_wire_tool_names.dedup();
         let cached_deferred_attachment = native_nar_ingress
@@ -536,6 +539,68 @@ impl ConversationOrchestrator {
         } else {
             Vec::new()
         };
+        let projection_scope = self.native_tool_search_scope_snapshot();
+        let projection_latches = projection_scope.native_tool_search_state();
+        let projection_beta_rejections = projection_scope.beta_rejections();
+        let mctc_beta =
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges;
+        let mcs_beta =
+            lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationSystem;
+        let mctc_supported = self.api.native_mid_conversation_tool_change_supported(
+            &prepared_call.model,
+            prepared_call.model_profile.as_deref(),
+        ) == Some(true);
+        let surface_late_tool_additions = mctc_supported
+            && !projection_beta_rejections.rejected(mctc_beta)
+            && !projection_beta_rejections.rejected(mcs_beta)
+            && !projection_latches.tool_change_header_refused
+            && self.tools.deferral().keeps_deferred_tools();
+        let by_value_tool_definition_names = |message: &ConversationMessage| {
+            let ConversationMessage::System {
+                api_system: Some(api_system),
+                ..
+            } = message
+            else {
+                return Vec::new();
+            };
+            api_system
+                .content
+                .iter()
+                .filter_map(|block| {
+                    let lingxi_core::types::ContentBlock::ProviderContent { protocol, value } =
+                        block
+                    else {
+                        return None;
+                    };
+                    (protocol == "anthropic_messages"
+                        && value.string_at("/type") == Some("tool_addition")
+                        && value.string_at("/tool/type") == Some("tool_definition"))
+                    .then(|| value.string_at("/tool/definition/name").map(str::to_owned))
+                    .flatten()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut inline_tool_definition_names = snapshot
+            .iter()
+            .chain(turn_reminders.iter())
+            .chain(context_announcements.messages.iter())
+            .chain(native_tool_change_api_system_rows.iter())
+            .flat_map(by_value_tool_definition_names)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        inline_tool_definition_names.sort();
+        let inline_tool_definition_names =
+            (!inline_tool_definition_names.is_empty()).then_some(inline_tool_definition_names);
+        let deferred_tools_projection_facts =
+            crate::request_context::DeferredToolsProjectionFacts {
+                surface_late_tool_additions,
+                inline_tool_definition_names,
+                deferred_wire_tool_names,
+            };
+        crate::request_context::set_deferred_tools_projection_facts(
+            deferred_tools_projection_facts.clone(),
+        );
         if native_nar_ingress {
             let scope = self.native_tool_search_scope_snapshot();
             let latches = scope.native_tool_search_state();
@@ -671,7 +736,20 @@ impl ConversationOrchestrator {
                 // renderer returns `[]`; it still carries typed replay state.
                 self.persist_staged_prompt_ingress_reminder(&row).await;
             }
-            (keep && has_rendered_reminder).then_some(row.message)
+            if keep {
+                let cached_rendered_count = row.rendered.array_len("").unwrap_or_default();
+                crate::request_context::render_deferred_tools_delta_for_request(
+                    row.message.id(),
+                    &row.payload,
+                    (cached_rendered_count > 0).then_some(&row.message),
+                    cached_rendered_count,
+                    deferred_tools_projection_facts.clone(),
+                    crate::request_context::staged_name_only_announcement_uuids()
+                        .contains(&row.message.id().to_string()),
+                )
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -696,12 +774,21 @@ impl ConversationOrchestrator {
                     .filter(|row| row.rendered.array_len("").is_some_and(|length| length > 0))
                     .map(|row| row.message.id())
                     .collect::<std::collections::HashSet<_>>();
+                let deferred_ingress_ids = accepted_ingress
+                    .iter()
+                    .filter(|row| row.payload.string_at("/type") == Some("deferred_tools_delta"))
+                    .map(|row| row.message.id())
+                    .collect::<std::collections::HashSet<_>>();
+                let request_history_ids = model_visible_ingress_ids
+                    .union(&deferred_ingress_ids)
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>();
                 let accepted_history = {
                     let session = self.session.lock().await;
                     session
                         .model_context_history()
                         .into_iter()
-                        .filter(|row| model_visible_ingress_ids.contains(&row.id()))
+                        .filter(|row| request_history_ids.contains(&row.id()))
                         .map(|row| (row.id(), row))
                         .collect::<std::collections::HashMap<_, _>>()
                 };
@@ -718,6 +805,7 @@ impl ConversationOrchestrator {
                         .rendered
                         .array_len("")
                         .is_some_and(|length| length > 0)
+                        || attachment.payload.string_at("/type") == Some("deferred_tools_delta")
                     {
                         if let Some(message) = accepted_history.remove(&attachment.message.id()) {
                             snapshot.push(message);
@@ -800,6 +888,7 @@ impl ConversationOrchestrator {
             crate::request_context::clear_turn_projection();
         }
         crate::request_context::attach(&mut snapshot);
+        self.project_deferred_tools_request_view(&mut snapshot, deferred_tools_projection_facts);
         self.project_typed_attachment_order(
             &mut snapshot,
             &turn_reminders,
@@ -834,7 +923,9 @@ impl ConversationOrchestrator {
         self.prepend_leading_context(&mut snapshot, &context_announcements)
             .await;
         if let Some(reminder) = deferred_reminder.clone() {
-            self.prepend_transient_leading_context(&mut snapshot, reminder);
+            if !snapshot.iter().any(|message| message.id() == reminder.id()) {
+                self.prepend_transient_leading_context(&mut snapshot, reminder);
+            }
         }
         if let Some(reminder) = date_change_reminder.clone() {
             self.prepend_transient_leading_context(&mut snapshot, reminder);
@@ -1642,3 +1733,7 @@ mod prompt_ingress_classifier_tests {
 #[cfg(test)]
 #[path = "prepare_tool_result_reminder_tests.rs"]
 mod tool_result_reminder_tests;
+
+#[cfg(test)]
+#[path = "deferred_tools_projection_tests.rs"]
+mod deferred_tools_projection_tests;

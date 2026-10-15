@@ -12,6 +12,14 @@ use lingxi_core::types::{
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
+#[path = "request_context/deferred_tools_projection.rs"]
+mod deferred_tools_projection;
+
+pub(crate) use deferred_tools_projection::{
+    cached_rendered_row_count, render_deferred_tools_delta_for_request,
+    DeferredToolsProjectionFacts,
+};
+
 /// A prompt-ingress attachment row with the exact rendered cache Native writes
 /// beside its typed payload. The message ID is reused as the JSONL attachment
 /// UUID so retries and cold resume retain one identity.
@@ -94,6 +102,9 @@ struct PromptContext {
     /// A host-stamped DirectBash source applies only to the next model-step
     /// preparation, then falls back to the ordinary history classifier.
     next_model_step_ingress_kind: std::sync::Mutex<Option<PromptIngressKind>>,
+    /// Source-backed gates for Native's late-tool sidecar projection. These
+    /// facts are captured from the same prepared request as its tool snapshot.
+    deferred_tools_projection_facts: std::sync::Mutex<Option<DeferredToolsProjectionFacts>>,
 }
 
 #[derive(Default)]
@@ -206,6 +217,7 @@ impl ConversationOrchestrator {
                     staged_ingress_attachments: std::sync::Mutex::new(None),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
+                    deferred_tools_projection_facts: std::sync::Mutex::new(None),
                 },
                 async {
                     let outcome = self
@@ -241,6 +253,7 @@ impl ConversationOrchestrator {
                     staged_ingress_attachments: std::sync::Mutex::new(None),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
+                    deferred_tools_projection_facts: std::sync::Mutex::new(None),
                 },
                 async {
                     let outcome = self
@@ -313,6 +326,7 @@ pub(crate) async fn scope_if_missing<T, F: Future<Output = Result<T, Orchestrato
                     staged_ingress_attachments: std::sync::Mutex::new(None),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
+                    deferred_tools_projection_facts: std::sync::Mutex::new(None),
                 },
                 async {
                     let output = future.await;
@@ -324,6 +338,52 @@ pub(crate) async fn scope_if_missing<T, F: Future<Output = Result<T, Orchestrato
             )
             .await
     }
+}
+
+pub(crate) fn set_deferred_tools_projection_facts(facts: DeferredToolsProjectionFacts) {
+    let _ = REQUEST_CONTEXT.try_with(|context| {
+        *context
+            .deferred_tools_projection_facts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(facts);
+    });
+}
+
+pub(crate) fn deferred_tools_projection_facts() -> Option<DeferredToolsProjectionFacts> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            context
+                .deferred_tools_projection_facts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+        .ok()
+        .flatten()
+}
+
+/// UUIDs whose deferred delta was recorded as a ToolSearch name-only
+/// announcement in the current staged NAr batch. This keeps the initial
+/// request's projection behind Native's per-UUID latch as well as the durable
+/// sidecar gate used after acceptance and cold resume.
+pub(crate) fn staged_name_only_announcement_uuids() -> std::collections::HashSet<String> {
+    staged_prompt_ingress_attachments()
+        .unwrap_or_default()
+        .iter()
+        .filter(|row| row.payload.string_at("/type") == Some("deferred_tools_record"))
+        .flat_map(|row| {
+            (0..row
+                .payload
+                .array_len("/nameOnlyAnnouncements")
+                .unwrap_or_default())
+                .filter_map(|index| {
+                    row.payload
+                        .string_at(&format!("/nameOnlyAnnouncements/{index}"))
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 async fn finalize_prompt_context_output<T>(
@@ -1737,6 +1797,7 @@ mod prompt_ingress_kind_tests {
             next_model_step_ingress_kind: std::sync::Mutex::new(Some(
                 PromptIngressKind::DirectBash,
             )),
+            deferred_tools_projection_facts: std::sync::Mutex::new(None),
         };
         REQUEST_CONTEXT
             .scope(context, async {

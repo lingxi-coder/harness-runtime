@@ -5389,11 +5389,11 @@ async fn build_surfaces_provider_availability_and_adapter() {
     );
     // The concrete routing adapter is surfaced.
     assert!(Arc::strong_count(&rt.provider_adapter) >= 1);
-    // Sonnet 4.6 is intentionally absent from this bare-id lookup because the
-    // current SDK catalog exposes that request model through multiple provider
-    // profiles. Mythos 5.1 is first-party-only, so it remains unambiguous.
+    // Mythos 5.1 is not in this default assembled provider set. Opus 4.1 is
+    // explicitly registered by anthropic_models_for as a first-party route;
+    // the provider+routing test below also proves its single-profile source.
     assert_eq!(
-        rt.model_providers.get("claude-mythos-5-1"),
+        rt.model_providers.get("claude-opus-4-1-20250805"),
         Some(&("anthropic".to_string(), "Anthropic".to_string())),
     );
 }
@@ -5632,10 +5632,48 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
         "user provider model must group under its own profile; got: {:?}",
         rt.model_providers
     );
+    let mythos_profiles: Vec<_> = assembled
+        .client_config
+        .providers
+        .iter()
+        .filter(|provider| {
+            provider
+                .models
+                .iter()
+                .any(|model| model.request_model == "claude-mythos-5-1")
+        })
+        .map(|provider| provider.profile_name.as_str())
+        .collect();
+    assert!(
+        mythos_profiles.is_empty(),
+        "default Anthropic defaults and pinned SDK profiles do not register Mythos 5.1: {mythos_profiles:?}"
+    );
+    assert!(
+        !rt.model_providers.contains_key("claude-mythos-5-1"),
+        "an unregistered model must not receive a bare provider mapping"
+    );
+
+    let opus41_profiles: Vec<_> = assembled
+        .client_config
+        .providers
+        .iter()
+        .filter(|provider| {
+            provider
+                .models
+                .iter()
+                .any(|model| model.request_model == "claude-opus-4-1-20250805")
+        })
+        .map(|provider| provider.profile_name.as_str())
+        .collect();
     assert_eq!(
-        rt.model_providers.get("claude-mythos-5-1"),
+        opus41_profiles,
+        vec!["anthropic"],
+        "the exact Opus 4.1 request ID has one assembled first-party route"
+    );
+    assert_eq!(
+        rt.model_providers.get("claude-opus-4-1-20250805"),
         Some(&("anthropic".to_string(), "Anthropic".to_string())),
-        "unambiguous first-party model must group under anthropic"
+        "unique first-party model must group under anthropic"
     );
     let sonnet_profiles: Vec<_> = assembled
         .client_config

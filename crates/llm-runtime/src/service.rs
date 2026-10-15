@@ -4148,17 +4148,32 @@ impl ApiService {
             return;
         }
         let admitted = self.beta_context(prepared).afk_mode;
-        let provider = match prepared.route.protocol {
+        Self::append_native_afk_beta_to_headers(
+            prepared.route.protocol,
+            prepared.anthropic_request_kind,
+            admitted,
+            &mut prepared.provider_request.headers,
+        );
+    }
+
+    fn append_native_afk_beta_to_headers(
+        protocol: crate::ProtocolFamily,
+        request_kind: lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
+        admitted: bool,
+        headers: &mut std::collections::BTreeMap<String, String>,
+    ) {
+        if request_kind
+            != lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+        {
+            return;
+        }
+        let provider = match protocol {
             crate::ProtocolFamily::FoundryClaude => Provider::Foundry,
             crate::ProtocolFamily::AnthropicMessages => Provider::Anthropic,
             crate::ProtocolFamily::VertexClaude => Provider::Vertex,
             _ => return,
         };
-        crate::model::betas::append_afk_mode_after_thinking_display(
-            &mut prepared.provider_request.headers,
-            provider,
-            admitted,
-        );
+        crate::model::betas::append_afk_mode_after_thinking_display(headers, provider, admitted);
     }
 
     fn has_native_per_turn_effort_marker(body: &lingxi_llm_client::protocol::JsonPayload) -> bool {
@@ -4532,6 +4547,102 @@ impl ApiService {
             }
         }
         betas
+    }
+
+    fn capture_native_beta_rejection_candidates(
+        &self,
+        prepared: &mut crate::PreparedLlmCall,
+        provider: Option<Provider>,
+        endpoint: Endpoint,
+        context_hint_beta: bool,
+        display_updates_applied: bool,
+    ) -> Result<(), LlmError> {
+        if !Self::is_main_anthropic_beta_request(prepared) || provider.is_none() {
+            prepared.native_beta_rejection_candidates.clear();
+            return Ok(());
+        }
+
+        // Native's `oT` is computed before spreading caller extra-body fields.
+        // Recompute it from Host's exact provider/model context even when a
+        // caller `betas` field suppresses the generated wire header. The
+        // existing provider helper owns the beta admission algorithm; the SDK
+        // owns parsing and rejection classification.
+        // The provider helper only reads the request header map. Start with an
+        // empty request so neither profile.extra.headers nor any other
+        // caller-owned beta header is mistaken for Native's computed list.
+        let mut candidate_request = crate::ProviderRequest::default();
+        if let Some(provider) = provider {
+            let context = self.beta_context(prepared).with_context_hint(
+                context_hint_beta
+                    || lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                        &prepared.provider_request.body_json,
+                        &["context_hint"],
+                    ),
+            );
+            // Native calls `zdr` before it materializes Ww/oT, so an admitted
+            // structured-output beta belongs in this snapshot. The SDK's
+            // fixed `iNe` registry still decides whether it can be rejected.
+            let custom_betas = self.custom_cli_betas_for_header(prepared);
+            apply_beta_header_with_auth_and_custom(
+                &mut candidate_request,
+                provider,
+                endpoint,
+                &context,
+                self.effective_subscriber().is_subscriber,
+                &custom_betas,
+            );
+        }
+
+        let fast_identity =
+            self.fast_rejection_identity(&prepared.route.resolved_route.request_model);
+        let model_unsupported_identity = self.model_unsupported_identity(prepared);
+        candidate_request.body_json = lingxi_llm_client::protocol::JsonPayload::parse("{}")
+            .expect("empty candidate body is valid JSON");
+        lingxi_llm_client::providers::anthropic::beta_repair::apply_rejections(
+            &mut candidate_request.headers,
+            &mut candidate_request.body_json,
+            &prepared.beta_rejection_state,
+            Some(&fast_identity),
+            Some(&model_unsupported_identity),
+            &lingxi_llm_client::providers::anthropic::beta_repair::ModelBetaRejections::for_process(
+            ),
+        )
+        .map_err(crate::upstream::error)?;
+
+        if display_updates_applied {
+            use lingxi_llm_client::providers::anthropic::beta_repair;
+            let mut betas = beta_repair::request_betas(&candidate_request.headers);
+            betas.retain(|beta| beta != crate::model::betas::REDACT_THINKING);
+            if !betas.iter().any(|beta| {
+                beta == lingxi_llm_client::providers::anthropic::thinking_display::UPDATES_BETA
+            }) {
+                betas.push(
+                    lingxi_llm_client::providers::anthropic::thinking_display::UPDATES_BETA.into(),
+                );
+            }
+            lingxi_llm_client::providers::anthropic::request_policy::set_header(
+                &mut candidate_request.headers,
+                "anthropic-beta",
+                &betas.join(","),
+            );
+        }
+
+        let afk_admitted = self.beta_context(prepared).afk_mode;
+        Self::append_native_afk_beta_to_headers(
+            prepared.route.protocol,
+            prepared.anthropic_request_kind,
+            afk_admitted,
+            &mut candidate_request.headers,
+        );
+        prepared.native_beta_rejection_candidates =
+            lingxi_llm_client::providers::anthropic::beta_repair::request_betas(
+                &candidate_request.headers,
+            );
+        Ok(())
+    }
+
+    fn native_beta_rejection_candidates(prepared: &crate::PreparedLlmCall) -> Vec<String> {
+        prepared.native_beta_rejection_candidates.clone()
     }
 
     fn request_header_beta_tokens(prepared: &crate::PreparedLlmCall) -> Vec<String> {
@@ -5261,9 +5372,10 @@ impl ApiService {
             return false;
         }
         let sent = Self::request_beta_tokens(prepared);
+        let candidates = Self::native_beta_rejection_candidates(prepared);
         use lingxi_llm_client::providers::anthropic::beta_repair;
         let model_key = self.fast_rejection_identity(&prepared.route.resolved_route.request_model);
-        let named = beta_repair::request_rejections(status, body, &sent)
+        let named = beta_repair::request_rejections(status, body, &candidates)
             .into_iter()
             // Native's `iNe` registry omits TBC; its refusals are handled by
             // the QEE-specific typed evidence path below, never generic named
@@ -5276,7 +5388,7 @@ impl ApiService {
                 )
             })
             .collect::<Vec<_>>();
-        let model_unsupported = beta_repair::model_unsupported_rejection(status, body, &sent);
+        let model_unsupported = beta_repair::model_unsupported_rejection(status, body, &candidates);
         let mctc_header_refused = named
             .iter()
             .any(|rejection| rejection.beta == beta_repair::Beta::MidConversationToolChanges);
@@ -5316,8 +5428,7 @@ impl ApiService {
         let admission = thinking_display::probe_admission(
             status,
             body,
-            prepared
-                .computed_beta_headers
+            candidates
                 .iter()
                 .any(|beta| beta == thinking_display::UPDATES_BETA),
             Self::direct_anthropic_api_route(prepared),
@@ -5686,12 +5797,12 @@ impl ApiService {
     fn apply_automatic_thinking_display(
         &self,
         prepared: &mut crate::PreparedLlmCall,
-    ) -> Result<(), LlmError> {
+    ) -> Result<bool, LlmError> {
         use lingxi_llm_client::providers::anthropic::thinking_display::{self, UpdatesAdmission};
         // Native's rVe gate admits Foundry for automatic updates even though
         // its separate display-error probe remains limited to first-party API.
         if !Self::is_main_thinking_display_updates_call(prepared) {
-            return Ok(());
+            return Ok(false);
         }
         let fast_identity =
             self.fast_rejection_identity(&prepared.route.resolved_route.request_model);
@@ -5707,7 +5818,7 @@ impl ApiService {
         )
         .map_err(crate::upstream::error)?;
         if crate::model::thinking_binding_controls::native_b6_disabled() {
-            return Ok(());
+            return Ok(false);
         }
         let model = &prepared.route.resolved_route.request_model;
         let canonical = crate::model::thinking::canonical(model);
@@ -5739,7 +5850,7 @@ impl ApiService {
                 extra_has_thinking,
             )
             .map_err(crate::upstream::error)?;
-            return Ok(());
+            return Ok(false);
         }
         let mode = thinking_display::connector_mode(None, false, show_summaries, updates);
         thinking_display::apply_request_updates(
@@ -5756,8 +5867,7 @@ impl ApiService {
             &prepared.beta_rejection_state,
             &prepared.thinking_display_probe,
         )
-        .map_err(crate::upstream::error)?;
-        Ok(())
+        .map_err(crate::upstream::error)
     }
 
     /// Apply the main/side extra-body policy after automatic fields and beta
@@ -6070,8 +6180,15 @@ impl ApiService {
             );
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
-        self.apply_automatic_thinking_display(prepared)?;
+        let display_updates_applied = self.apply_automatic_thinking_display(prepared)?;
         self.append_native_afk_beta_after_display(prepared);
+        self.capture_native_beta_rejection_candidates(
+            prepared,
+            beta_provider,
+            Endpoint::MessagesCreate,
+            dispatch.context_hint_beta,
+            display_updates_applied,
+        )?;
         self.merge_extra_body(prepared)?;
         // Final resolved-route guard. `CLAUDE_CODE_EXTRA_BODY` is merged above,
         // so this must run last to prevent it from reintroducing first-party
@@ -6137,8 +6254,15 @@ impl ApiService {
             );
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
-        self.apply_automatic_thinking_display(prepared)?;
+        let display_updates_applied = self.apply_automatic_thinking_display(prepared)?;
         self.append_native_afk_beta_after_display(prepared);
+        self.capture_native_beta_rejection_candidates(
+            prepared,
+            beta_provider,
+            Endpoint::MessagesCreateStream,
+            dispatch.context_hint_beta,
+            display_updates_applied,
+        )?;
         self.merge_extra_body(prepared)?;
         self.enforce_fast_route(prepared)?;
         self.update_native_thinking_binding_controls_beta_fact(prepared);

@@ -96,6 +96,11 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
                 model.foundry = source.foundry.clone();
                 model.pricing = source.pricing.clone();
                 model.billing_mode = source.billing_mode;
+                // Application output budgets are SDK execution policy, not
+                // host-published display metadata. Preserve this SDK-only
+                // setting while the host remains authoritative for display facts.
+                model.metadata.application_output_tokens =
+                    source.metadata.application_output_tokens;
                 // The host owns its six conversation capability switches. Keep
                 // newer SDK capability flags instead of resetting them to unknown.
                 if let Some(host) = &mut model.capability_support {

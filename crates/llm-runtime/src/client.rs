@@ -873,6 +873,17 @@ impl ModelRuntime {
             })
             && resolved_route.provider_id == ProviderId::AnthropicFirstParty
             && effective_protocol == ProtocolFamily::AnthropicMessages;
+        // Select effort from the current request/environment before the first
+        // credential await. Authentication may have host-side effects, but it
+        // must not change the controls selected for this preparation.
+        let effort_policy = crate::model::effort::prepare(
+            request,
+            effective_protocol,
+            &resolved_route.provider_id,
+            &entry.profile,
+            &resolved_route.request_model,
+            native_route_admitted,
+        );
         let host_failure = Arc::new(Mutex::new(None));
         let authenticator = Arc::new(
             crate::execution::HostAuthenticator::for_request(
@@ -949,14 +960,6 @@ impl ModelRuntime {
             &resolved_route.request_model,
             resolved_route.capabilities.structured_output,
             extra_body.as_ref(),
-        );
-        let effort_policy = crate::model::effort::prepare(
-            request,
-            effective_protocol,
-            &resolved_route.provider_id,
-            &entry.profile,
-            &resolved_route.request_model,
-            native_route_admitted,
         );
         let native_per_turn_effort = should_project_native_per_turn_effort(
             &resolved_route.provider_id,
@@ -1375,6 +1378,7 @@ impl ModelRuntime {
             prompt_cache: prepared_prompt_cache,
             thinking_display_probe: Default::default(),
             computed_beta_headers: Vec::new(),
+            native_beta_rejection_candidates: Vec::new(),
             planned_native_beta_context: None,
             context_1m_beta_suppressed: request.execution.context_1m_beta_suppressed,
             native_thinking_binding_controls_beta_requested: request
@@ -2060,6 +2064,10 @@ pub struct PreparedLlmCall {
     pub(crate) thinking_display_probe:
         lingxi_llm_client::providers::anthropic::thinking_display::DisplayProbe,
     pub(crate) computed_beta_headers: Vec<String>,
+    /// Native-computed beta header snapshot captured before the extra-body
+    /// spread. Error repair classifies against this snapshot, even if that
+    /// later spread removes a candidate from the wire request.
+    pub(crate) native_beta_rejection_candidates: Vec<String>,
     /// Exact header and host-generated Bedrock body beta lists before custom
     /// extra-body fields are merged.  Used by Native's `DJe`/`Tp` refusal
     /// classifier; it must not be inferred from `request_beta_tokens`.

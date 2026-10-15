@@ -11,6 +11,13 @@ fn with_explicit_output_budget(mut request: llm_runtime::LlmRequest) -> llm_runt
     request
 }
 
+fn has_header_beta(headers: &[(String, String)], beta: &str) -> bool {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+        .is_some_and(|(_, value)| value.split(',').any(|token| token == beta))
+}
+
 #[tokio::test(start_paused = true)]
 async fn named_rejection_lifetime_priority_and_model_isolation_reach_both_drivers() {
     // Strong named refusals populate the process model cache, whose Native
@@ -172,7 +179,109 @@ async fn named_rejection_lifetime_priority_and_model_isolation_reach_both_driver
     assert!(!scope
         .beta_rejections()
         .rejected(Beta::ThinkingDisplayUpdates));
+    // Native EZe classifies against its pre-spread `oT` snapshot. A caller
+    // beta replacement can remove the generated beta from the wire while the
+    // named rejection still teaches the request-scoped beta state.
+    variable(
+        "CLAUDE_CODE_EXTRA_BODY",
+        Some(r#"{"betas":["caller-extra-only"]}"#),
+    );
+    let model = "claude-opus-4-7-auto-beta-removed-by-extra";
+    let capture = captures(vec![
+        Action::Rejection("thinking.adaptive.display: Input should be omitted"),
+        Action::Success,
+    ]);
+    let api = service(capture.clone(), true, false, model).with_interactive_session(true);
+    let scope = Default::default();
+    assert!(
+        run(
+            &api,
+            with_explicit_output_budget(request(&scope, model, false)),
+            true
+        )
+        .await
+    );
+    assert!(scope
+        .beta_rejections()
+        .rejected(Beta::ThinkingDisplayUpdates));
+    let rows = capture.requests.lock().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0["thinking"]["display"], "updates");
+    assert!(
+        !has_beta(&rows[0].1),
+        "caller replacement removed the wire beta"
+    );
+    assert!(rows[1].0["thinking"]["display"] != "updates");
+    assert!(!has_beta(&rows[1].1));
+    drop(rows);
+
+    // Native computes ordinary registry betas before the caller extra-body
+    // spread. The extra betas replace the wire list, but an error against that
+    // request still retires the computed token-count candidate.
+    variable("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", None);
+    variable(
+        "CLAUDE_CODE_EXTRA_BODY",
+        Some(r#"{"betas":["caller-extra-only"]}"#),
+    );
+    let model = "claude-opus-4-7-auto-token-count-replaced";
+    let capture = captures(vec![
+        Action::Rejection("invalid beta flag"),
+        Action::Success,
+    ]);
+    let api = service(capture.clone(), true, false, model).with_interactive_session(true);
+    let scope = Default::default();
+    assert!(
+        run(
+            &api,
+            with_explicit_output_budget(request(&scope, model, false)),
+            false
+        )
+        .await
+    );
+    assert!(scope.beta_rejections().rejected(Beta::ThinkingTokenCount));
+    let rows = capture.requests.lock().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(has_header_beta(&rows[0].1, "caller-extra-only"));
+    assert!(!has_header_beta(
+        &rows[0].1,
+        Beta::ThinkingTokenCount.header()
+    ));
+    assert!(!has_header_beta(
+        &rows[1].1,
+        Beta::ThinkingTokenCount.header()
+    ));
+    drop(rows);
+
+    // Conversely, a caller-only token-count beta is not part of Native's
+    // pre-spread candidate list when the host's ordinary beta gate is off.
+    variable("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", Some("true"));
+    variable(
+        "CLAUDE_CODE_EXTRA_BODY",
+        Some(r#"{"betas":["thinking-token-count-2026-05-13"]}"#),
+    );
+    let model = "claude-opus-4-6-caller-token-count-only";
+    let capture = captures(vec![Action::Rejection("invalid beta flag")]);
+    let api = service(capture.clone(), true, false, model).with_interactive_session(true);
+    let scope = Default::default();
+    assert!(
+        !run(
+            &api,
+            with_explicit_output_budget(request(&scope, model, false)),
+            false
+        )
+        .await
+    );
+    assert!(!scope.beta_rejections().rejected(Beta::ThinkingTokenCount));
+    let rows = capture.requests.lock().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(has_header_beta(
+        &rows[0].1,
+        Beta::ThinkingTokenCount.header()
+    ));
+    drop(rows);
+
     variable("CLAUDE_CODE_EXTRA_BODY", None);
+    variable("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", None);
     assert_eq!(
         DisplayProbeBudget::for_process().failures(),
         initial_failures

@@ -126,13 +126,33 @@ fn current_eligibility_probe(probe: &Value) -> bool {
 }
 
 fn schema_request() -> LlmRequest {
-    let mut request = LlmRequest::new("claude-sonnet-4-6").with_user_text("Return the result");
+    let mut request = policy_request_with_budget("claude-sonnet-4-6", "Return the result");
     request.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
         name: "response".into(),
         schema: lingxi_llm_client::protocol::JsonPayload::from_generated_value(&json!({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false})).unwrap(),
         strict: true,
     };
     request
+}
+
+/// Policy fixtures may select names outside the SDK's default-budget catalog.
+/// Keep those cases focused on policy by supplying a budget explicitly; tests
+/// of the default-budget contract use `LlmRequest` directly.
+fn policy_request_with_budget(model: &str, prompt: &str) -> LlmRequest {
+    let mut request = LlmRequest::new(model).with_user_text(prompt);
+    request.input.max_tokens = Some(4096);
+    request
+}
+
+fn assert_fixture_http_400(error: llm_runtime::LlmError, context: &str) {
+    assert!(
+        matches!(
+            error.classification_source(),
+            llm_runtime::LlmError::InvalidRequest { message }
+                if message == "400 fixture rejection"
+        ),
+        "{context}: expected the capture transport's HTTP 400, got {error:?}"
+    );
 }
 
 #[derive(Default)]
@@ -152,6 +172,20 @@ impl Transport for Capture {
             })),
         })
     }
+}
+
+fn assert_capture_http_400(
+    error: llm_runtime::LlmError,
+    capture: &Capture,
+    expected_requests: usize,
+    context: &str,
+) {
+    assert_fixture_http_400(error, context);
+    assert_eq!(
+        capture.0.lock().unwrap().len(),
+        expected_requests,
+        "{context}: expected one additional request to reach the capture transport"
+    );
 }
 
 #[tokio::test]
@@ -193,26 +227,34 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             ProtocolFamily::VertexClaude,
             ProtocolFamily::FoundryClaude,
         ] {
-            let provider = match protocol {
-                ProtocolFamily::AnthropicMessages => "firstParty",
-                ProtocolFamily::BedrockClaude => "anthropicAws",
-                ProtocolFamily::VertexClaude => "anthropicGoogleCloud",
-                ProtocolFamily::FoundryClaude => "foundry",
+            // The Native source providers anthropicAws and
+            // anthropicGoogleCloud are not H provider identities. H's
+            // BedrockClaude and VertexClaude routes intentionally have no
+            // Native HUn equivalent and disable automatic schema output.
+            let eligible = match protocol {
+                ProtocolFamily::BedrockClaude | ProtocolFamily::VertexClaude => false,
+                ProtocolFamily::AnthropicMessages | ProtocolFamily::FoundryClaude => {
+                    let provider = if protocol == ProtocolFamily::AnthropicMessages {
+                        "firstParty"
+                    } else {
+                        "foundry"
+                    };
+                    wire_fixture["cases"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|probe| {
+                            probe["input"]["provider"] == provider
+                                && probe["input"]["model"] == "claude-sonnet-4-6"
+                                && probe["input"]["env"] == case["input"]["env"]
+                                && current_eligibility_probe(probe)
+                        })
+                        .unwrap()["expected"]["eligible"]
+                        .as_bool()
+                        .unwrap()
+                }
                 _ => unreachable!(),
             };
-            let eligible = wire_fixture["cases"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|probe| {
-                    probe["input"]["provider"] == provider
-                        && probe["input"]["model"] == "claude-sonnet-4-6"
-                        && probe["input"]["env"] == case["input"]["env"]
-                        && current_eligibility_probe(probe)
-                })
-                .unwrap()["expected"]["eligible"]
-                .as_bool()
-                .unwrap();
             let client = ModelRuntime::from_config(ClientConfig {
                 providers: vec![profile(protocol, !disabled)],
             })
@@ -241,19 +283,32 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         }
     }
 
+    let mut unrepresented_aws_rows = 0;
+    let mut unrepresented_google_rows = 0;
     for probe in wire_fixture["cases"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|probe| current_eligibility_probe(probe))
     {
-        let protocol = match probe["input"]["provider"].as_str().unwrap() {
-            "firstParty" => ProtocolFamily::AnthropicMessages,
-            "anthropicAws" => ProtocolFamily::BedrockClaude,
-            "anthropicGoogleCloud" => ProtocolFamily::VertexClaude,
-            "foundry" => ProtocolFamily::FoundryClaude,
-            _ => continue,
-        };
+        let (protocol, source_identity_is_equivalent) =
+            match probe["input"]["provider"].as_str().unwrap() {
+                "firstParty" => (ProtocolFamily::AnthropicMessages, true),
+                "foundry" => (ProtocolFamily::FoundryClaude, true),
+                // Keep and account for every Source AWS/GCP row, but run it against
+                // the H transport counterpart only as an H-policy check. These are
+                // not equivalent provider identities and their Native eligibility
+                // must not be asserted against H's Bedrock/Vertex policy.
+                "anthropicAws" => {
+                    unrepresented_aws_rows += 1;
+                    (ProtocolFamily::BedrockClaude, false)
+                }
+                "anthropicGoogleCloud" => {
+                    unrepresented_google_rows += 1;
+                    (ProtocolFamily::VertexClaude, false)
+                }
+                _ => continue,
+            };
         match probe["input"]["env"].as_str() {
             Some(value) => std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", value),
             None => std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"),
@@ -273,16 +328,29 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             request.stream = stream;
             let prepared = client.prepare(&request).await.unwrap();
             let wire = json_payload_value(&prepared.provider_request.body_json);
+            let expected = if source_identity_is_equivalent {
+                probe["expected"]["eligible"].as_bool().unwrap()
+            } else {
+                false
+            };
             assert_eq!(
                 wire.get("output_config")
                     .and_then(|config| config.get("format"))
                     .is_some(),
-                probe["expected"]["eligible"].as_bool().unwrap(),
-                "{:?}",
-                probe["input"]
+                expected,
+                "H route {protocol:?}; Native identity {:?} remains a separate source case",
+                probe["input"]["provider"]
             );
         }
     }
+    assert!(
+        unrepresented_aws_rows > 0,
+        "preserve Native anthropicAws cases explicitly"
+    );
+    assert!(
+        unrepresented_google_rows > 0,
+        "preserve Native anthropicGoogleCloud cases explicitly"
+    );
     std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1");
     let mut json_object = request.clone();
     json_object.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonObject;
@@ -370,11 +438,12 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
     }))
     .with_thinking(ThinkingConfig::Disabled);
     // All public side-query paths reach the SDK transport without a schema.
-    service
+    let error = service
         .execute_side_query_request(primary.clone())
         .await
         .unwrap_err();
-    service
+    assert_capture_http_400(error, &capture, 1, "side-query schema suppression");
+    let error = service
         .stream_json_schema(
             "claude-sonnet-4-6",
             Some("anthropic"),
@@ -387,7 +456,8 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         .await
         .err()
         .expect("fixture error");
-    service
+    assert_capture_http_400(error, &capture, 2, "stream-json-schema schema suppression");
+    let error = service
         .stream_json_schema_with_thinking(
             "claude-sonnet-4-6",
             Some("anthropic"),
@@ -404,6 +474,12 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         .await
         .err()
         .expect("fixture error");
+    assert_capture_http_400(
+        error,
+        &capture,
+        3,
+        "stream-json-schema-with-thinking schema suppression",
+    );
     for wire in capture.0.lock().unwrap().iter() {
         let body: Value = serde_json::from_slice(&wire.body).unwrap();
         assert!(body.get("output_config").is_none(), "{body}");
@@ -418,13 +494,15 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         "CLAUDE_CODE_EXTRA_BODY",
         r#"{"output_config":{"format":{"type":"explicit_fixture"},"effort":"low"}}"#,
     );
-    service
+    let error = service
         .execute_side_query_request(primary)
         .await
         .unwrap_err();
+    assert_capture_http_400(error, &capture, 4, "side-query explicit output_config");
     {
         let wires = capture.0.lock().unwrap();
-        let body: Value = serde_json::from_slice(&wires.last().unwrap().body).unwrap();
+        assert_eq!(wires.len(), 4);
+        let body: Value = serde_json::from_slice(&wires[3].body).unwrap();
         assert_eq!(
             body["output_config"],
             json!({"format":{"type":"explicit_fixture"},"effort":"low"})
@@ -478,7 +556,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             let mut request = schema_request().with_profile("anthropic");
             request.execution.anthropic_request_kind = kind;
             let before = capture.0.lock().unwrap().len();
-            schema_service
+            let error = schema_service
                 .execute_non_stream_request(
                     request,
                     llm_runtime::NonStreamingRequestClass::Auxiliary,
@@ -486,6 +564,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                 )
                 .await
                 .unwrap_err();
+            assert_capture_http_400(error, &capture, before + 1, "typed output_config matrix");
             let wires = capture.0.lock().unwrap();
             assert_eq!(wires.len(), before + 1, "must reach SDK transport");
             let body: Value = serde_json::from_slice(&wires.last().unwrap().body).unwrap();
@@ -517,7 +596,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         json!({"output_config":"💥"}).to_string(),
     );
     let before = capture.0.lock().unwrap().len();
-    schema_service
+    let error = schema_service
         .execute_non_stream_request(
             schema_request().with_profile("anthropic"),
             llm_runtime::NonStreamingRequestClass::Auxiliary,
@@ -525,6 +604,12 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         )
         .await
         .unwrap_err();
+    assert_capture_http_400(
+        error,
+        &capture,
+        before + 1,
+        "malformed output_config normalization",
+    );
     {
         let wires = capture.0.lock().unwrap();
         assert_eq!(wires.len(), before + 1);
@@ -572,14 +657,15 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             "CLAUDE_CODE_EXTRA_BODY",
             "\u{FEFF}{\"anthropic_beta\":[\"AFK-MODE\",\"custom\"],\"metadata\":{\"user_id\":\"{\\\"tk\\\":\\\"secret\\\",\\\"id\\\":\\\"new\\\"}\"}}",
         );
-        service
+        let error = service
             .execute_non_stream_request(
-                LlmRequest::new("claude-sonnet-4-6").with_user_text("hi"),
+                policy_request_with_budget("claude-sonnet-4-6", "hi"),
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
                 Default::default(),
             )
             .await
             .unwrap_err();
+        assert_capture_http_400(error, &capture, 1, &format!("BOM extra body {protocol:?}"));
         {
             let requests = capture.0.lock().unwrap();
             assert_eq!(requests.len(), 1, "{protocol:?}");
@@ -593,7 +679,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"betas":{"toString":null}}"#);
         assert!(matches!(
             client
-                .prepare(&LlmRequest::new("claude-sonnet-4-6").with_user_text("hi"))
+                .prepare(&policy_request_with_budget("claude-sonnet-4-6", "hi"))
                 .await,
             Err(llm_runtime::LlmError::InvalidRequest { .. })
         ));
@@ -646,7 +732,8 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                 json!({"betas":betas,"user_profile_id":" profile ","workspace_id":" workspace "})
                     .to_string(),
             );
-            service
+            let before = capture.0.lock().unwrap().len();
+            let error = service
                 .execute_non_stream_request(
                     schema_request(),
                     llm_runtime::NonStreamingRequestClass::Auxiliary,
@@ -654,8 +741,14 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                 )
                 .await
                 .unwrap_err();
+            assert_capture_http_400(
+                error,
+                &capture,
+                before + 1,
+                &format!("explicit beta list {protocol:?}"),
+            );
             let requests = capture.0.lock().unwrap();
-            let request = requests.last().unwrap();
+            let request = &requests[before];
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             for key in ["betas", "user_profile_id", "workspace_id"] {
                 assert!(body.get(key).is_none(), "{protocol:?} {body}");
@@ -716,14 +809,15 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         }))
         .with_thinking(ThinkingConfig::Disabled);
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", json!({"output_format":{"type":"json_schema","schema":{"type":"object"}},"output_config":{"effort":"low"}}).to_string());
-        service
+        let error = service
             .execute_non_stream_request(
-                LlmRequest::new("claude-sonnet-4-6").with_user_text("hi"),
+                policy_request_with_budget("claude-sonnet-4-6", "hi"),
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
                 Default::default(),
             )
             .await
             .unwrap_err();
+        assert_capture_http_400(error, &capture, 1, "format compatibility extra body");
         {
             let requests = capture.0.lock().unwrap();
             assert_eq!(requests.len(), 1, "{protocol:?}");
@@ -745,7 +839,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         );
         let error = service
             .execute_non_stream_request(
-                LlmRequest::new("claude-sonnet-4-6").with_user_text("hi"),
+                policy_request_with_budget("claude-sonnet-4-6", "hi"),
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
                 Default::default(),
             )
@@ -796,13 +890,13 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         }))
         .with_thinking(ThinkingConfig::Disabled);
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", json!({"numbers":{"large":1e21,"small":1e-7,"zero":-0.0,"integer":u64::MAX,"2":1.0,"0":-0.0,"01":2.0}}).to_string());
-        let request = LlmRequest::new("claude-sonnet-4-6").with_user_text("hi");
+        let request = policy_request_with_budget("claude-sonnet-4-6", "hi");
         let prepared = client.prepare(&request).await.unwrap();
         assert_eq!(
             prepared.provider_request.json_encoding,
             lingxi_llm_client::exact_json::JsonEncoding::JavaScript
         );
-        service
+        let error = service
             .execute_non_stream_request(
                 request,
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
@@ -810,6 +904,12 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             )
             .await
             .unwrap_err();
+        assert_capture_http_400(
+            error,
+            &capture,
+            1,
+            &format!("numeric extra body {protocol:?}"),
+        );
         let requests = capture.0.lock().unwrap();
         assert_eq!(requests.len(), 1);
         let wire = std::str::from_utf8(&requests[0].body).unwrap();
@@ -826,7 +926,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         })
         .unwrap();
         let prepared = client
-            .prepare(&LlmRequest::new("claude-sonnet-4-6").with_user_text("hi"))
+            .prepare(&policy_request_with_budget("claude-sonnet-4-6", "hi"))
             .await
             .unwrap();
         assert_eq!(
@@ -869,7 +969,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         }))
         .with_thinking(ThinkingConfig::Disabled);
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", json!({"metadata":{"user_id":r#"{"tk":"secret","id":"\ud800","\udc00":"value"}"#},"extension":true}).to_string());
-        let mut request = LlmRequest::new("claude-sonnet-4-6").with_user_text("hi");
+        let mut request = policy_request_with_budget("claude-sonnet-4-6", "hi");
         request.input.metadata = lingxi_llm_client::protocol::JsonPayload::from_generated_value(
             &json!({"user_id":"base-identity"}),
         )
@@ -878,7 +978,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             .input
             .system
             .push(lingxi_llm_client::protocol::SystemBlock::new("WIRE_SYSTEM"));
-        service
+        let error = service
             .execute_non_stream_request(
                 request,
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
@@ -886,6 +986,12 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             )
             .await
             .unwrap_err();
+        assert_capture_http_400(
+            error,
+            &capture,
+            1,
+            &format!("metadata extra body {protocol:?}"),
+        );
         let requests = capture.0.lock().unwrap();
         assert_eq!(requests.len(), 1);
         let wire = &requests[0];
@@ -961,7 +1067,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             "CLAUDE_CODE_EXTRA_BODY",
             r#"{"stream":false,"extension":true}"#,
         );
-        let request = LlmRequest::new("claude-sonnet-4-6").with_user_text("hi");
+        let request = policy_request_with_budget("claude-sonnet-4-6", "hi");
         if let Ok(stream) = service.stream_request(request).await {
             let _events = stream.collect::<Vec<_>>().await;
         }
@@ -1050,18 +1156,24 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                     } else {
                         std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
                     }
-                    let mut attempt = LlmRequest::new(model).with_user_text("hi");
+                    let mut attempt = policy_request_with_budget(model, "hi");
                     if side {
                         attempt.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
                     }
-                    service
+                    let error = service
                         .execute_non_stream_request(
                             attempt,
                             llm_runtime::NonStreamingRequestClass::Auxiliary,
                             Default::default(),
                         )
                         .await
-                        .unwrap_err();
+                        .expect_err("capture transport returns the fixture HTTP 400");
+                    assert_capture_http_400(
+                        error,
+                        &capture,
+                        1,
+                        &format!("{native_provider} {model} side={side} explicit={explicit}"),
+                    );
                     let wires = capture.0.lock().unwrap();
                     assert_eq!(wires.len(), 1);
                     let header = wires[0]
@@ -1282,7 +1394,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         }))
         .with_thinking(ThinkingConfig::Disabled)
         .with_interactive_session(false);
-        let mut attempt = LlmRequest::new(model).with_user_text("hi");
+        let mut attempt = policy_request_with_budget(model, "hi");
         if let Some(level) = primary {
             attempt.set_effort(Some(json!(level))).unwrap();
         }
@@ -1295,14 +1407,20 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             attempt.execution.anthropic_request_kind=lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         }
         let original = attempt.input.thinking.clone();
-        service
+        let error = service
             .execute_non_stream_request(
                 attempt.clone(),
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
                 Default::default(),
             )
             .await
-            .unwrap_err();
+            .expect_err("capture transport returns the fixture HTTP 400");
+        assert_capture_http_400(
+            error,
+            &capture,
+            1,
+            &format!("env={env:?} model={model} side={side}"),
+        );
         assert_eq!(attempt.input.thinking, original);
         let wires = capture.0.lock().unwrap();
         assert_eq!(wires.len(), 1);
@@ -1379,14 +1497,16 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             capture.0.lock().unwrap().len() == index,
             "command query must not use transport"
         );
-        service
+        let before = capture.0.lock().unwrap().len();
+        let error = service
             .execute_non_stream_request(
-                LlmRequest::new("claude-sonnet-4-6").with_user_text("snapshot"),
+                policy_request_with_budget("claude-sonnet-4-6", "snapshot"),
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
                 Default::default(),
             )
             .await
             .unwrap_err();
+        assert_capture_http_400(error, &capture, before + 1, "credential effort snapshot");
     }
     assert_eq!(credentials.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     let wires = capture.0.lock().unwrap();
@@ -1545,9 +1665,14 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         std::fs::write(&user_path, document).unwrap();
         admitted.store(allow, std::sync::atomic::Ordering::SeqCst);
         std::env::set_var("LINGXI_EFFORT_LEVEL", env);
-        let request = LlmRequest::new("sonnet").with_user_text("admitted settings");
-        if stream {
-            service.stream_request(request).await.err().unwrap();
+        let request = policy_request_with_budget("sonnet", "admitted settings");
+        let before = capture.0.lock().unwrap().len();
+        let error = if stream {
+            service
+                .stream_request(request)
+                .await
+                .err()
+                .expect("capture transport returns the fixture HTTP 400")
         } else {
             service
                 .execute_non_stream_request(
@@ -1556,10 +1681,16 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
                     Default::default(),
                 )
                 .await
-                .unwrap_err();
-        }
+                .unwrap_err()
+        };
+        assert_capture_http_400(
+            error,
+            &capture,
+            before + 1,
+            &format!("admitted effort settings stream={stream}"),
+        );
         let wires = capture.0.lock().unwrap();
-        let body: Value = serde_json::from_slice(&wires.last().unwrap().body).unwrap();
+        let body: Value = serde_json::from_slice(&wires[before].body).unwrap();
         assert_eq!(
             body.pointer("/output_config/effort")
                 .and_then(Value::as_str),
@@ -1614,16 +1745,17 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             )])
         }))
         .unwrap();
-        service
+        let error = service
             .execute_non_stream_request(
-                LlmRequest::new("production-deployment").with_user_text("underlying identity"),
+                policy_request_with_budget("production-deployment", "underlying identity"),
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
                 Default::default(),
             )
             .await
             .unwrap_err();
+        assert_capture_http_400(error, &capture, 1, "Foundry deployment effort profile");
         let wires = capture.0.lock().unwrap();
-        let body: Value = serde_json::from_slice(&wires.last().unwrap().body).unwrap();
+        let body: Value = serde_json::from_slice(&wires[0].body).unwrap();
         assert_eq!(body["model"], "production-deployment");
         assert_eq!(
             body.pointer("/output_config/effort")
@@ -1754,14 +1886,15 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         ),
     ] {
         inherit_service.set_session_effort(state);
-        let mut request = LlmRequest::new(model).with_user_text("session selection");
+        let mut request = policy_request_with_budget(model, "session selection");
         if side {
             request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         }
         if let Some(level) = supplied {
             request.set_effort(Some(json!(level))).unwrap();
         }
-        inherit_service
+        let before = inherit_capture.0.lock().unwrap().len();
+        let error = inherit_service
             .execute_non_stream_request(
                 request,
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
@@ -1769,8 +1902,9 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             )
             .await
             .unwrap_err();
+        assert_capture_http_400(error, &inherit_capture, before + 1, "session effort table");
         let wires = inherit_capture.0.lock().unwrap();
-        let body: Value = serde_json::from_slice(&wires.last().unwrap().body).unwrap();
+        let body: Value = serde_json::from_slice(&wires[before].body).unwrap();
         assert_eq!(
             body.pointer("/output_config/effort")
                 .and_then(Value::as_str),
@@ -1804,16 +1938,23 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             Some(value) => std::env::set_var("LINGXI_EFFORT_LEVEL", value),
             None => std::env::remove_var("LINGXI_EFFORT_LEVEL"),
         }
-        inherit_service
+        let before = inherit_capture.0.lock().unwrap().len();
+        let error = inherit_service
             .execute_non_stream_request(
-                LlmRequest::new("sonnet").with_user_text("snapshot and live caps"),
+                policy_request_with_budget("sonnet", "snapshot and live caps"),
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
                 Default::default(),
             )
             .await
             .unwrap_err();
+        assert_capture_http_400(
+            error,
+            &inherit_capture,
+            before + 1,
+            "effort settings refresh",
+        );
         let wires = inherit_capture.0.lock().unwrap();
-        let body: Value = serde_json::from_slice(&wires.last().unwrap().body).unwrap();
+        let body: Value = serde_json::from_slice(&wires[before].body).unwrap();
         assert_eq!(
             body.pointer("/output_config/effort")
                 .and_then(Value::as_str),
@@ -1824,16 +1965,16 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
     std::env::remove_var("LINGXI_EFFORT_LEVEL");
     std::fs::write(&user_path, r#"{"effortLevel":"low"}"#).unwrap();
     let (fresh, fresh_capture) = make_settings_service(TableOptions::default());
-    fresh
+    let error = fresh
         .execute_non_stream_request(
-            LlmRequest::new("older").with_user_text("first start excludes root effort"),
+            policy_request_with_budget("older", "first start excludes root effort"),
             llm_runtime::NonStreamingRequestClass::Auxiliary,
             Default::default(),
         )
         .await
         .unwrap_err();
-    let body: Value =
-        serde_json::from_slice(&fresh_capture.0.lock().unwrap().last().unwrap().body).unwrap();
+    assert_capture_http_400(error, &fresh_capture, 1, "initial session effort defaults");
+    let body: Value = serde_json::from_slice(&fresh_capture.0.lock().unwrap()[0].body).unwrap();
     assert_eq!(body["output_config"]["effort"], "high");
     std::fs::write(
         &user_path,
@@ -1841,16 +1982,16 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
     )
     .unwrap();
     let (fresh, fresh_capture) = make_settings_service(TableOptions::default());
-    fresh
+    let error = fresh
         .execute_non_stream_request(
-            LlmRequest::new("sonnet").with_user_text("new session captures current defaults"),
+            policy_request_with_budget("sonnet", "new session captures current defaults"),
             llm_runtime::NonStreamingRequestClass::Auxiliary,
             Default::default(),
         )
         .await
         .unwrap_err();
-    let body: Value =
-        serde_json::from_slice(&fresh_capture.0.lock().unwrap().last().unwrap().body).unwrap();
+    assert_capture_http_400(error, &fresh_capture, 1, "fresh model settings defaults");
+    let body: Value = serde_json::from_slice(&fresh_capture.0.lock().unwrap()[0].body).unwrap();
     assert_eq!(body["output_config"]["effort"], "low");
     let mut fallback_profile = profile(ProtocolFamily::OpenAiChat, true);
     std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "true");
@@ -2119,7 +2260,7 @@ async fn catalog_effort_facts_reach_controls_and_transport() {
             None,
         );
         service.set_session_effort(SessionEffort::Default);
-        let mut request = LlmRequest::new(model).with_user_text("observed effort facts");
+        let mut request = policy_request_with_budget(model, "observed effort facts");
         if let Some(level) = primary {
             request.set_effort(Some(json!(level))).unwrap();
         }
@@ -2127,7 +2268,7 @@ async fn catalog_effort_facts_reach_controls_and_transport() {
         if index == 10 {
             request.execution.effort_state.catalog_default = Some(json!("high"));
         }
-        service
+        let error = service
             .execute_non_stream_request(
                 request,
                 llm_runtime::NonStreamingRequestClass::Auxiliary,
@@ -2135,6 +2276,7 @@ async fn catalog_effort_facts_reach_controls_and_transport() {
             )
             .await
             .unwrap_err();
+        assert_capture_http_400(error, &capture, 1, &format!("catalog effort case {index}"));
         let wires = capture.0.lock().unwrap();
         assert_eq!(wires.len(), 1);
         let body: Value = serde_json::from_slice(&wires[0].body).unwrap();
@@ -2197,7 +2339,7 @@ async fn current_fast_catalog_reaches_transport() {
             }))
             .with_thinking(ThinkingConfig::Disabled);
             for stream in [false, true] {
-                let mut request = LlmRequest::new(model).with_user_text("fast fixture");
+                let mut request = policy_request_with_budget(model, "fast fixture");
                 request.set_speed(Some("fast".into())).unwrap();
                 let request_result = if stream {
                     match service.stream_request(request).await {
@@ -2322,14 +2464,11 @@ async fn current_fast_environment_reaches_transport() {
         );
         for stream in [false, true] {
             capture.0.lock().unwrap().clear();
-            let mut request = LlmRequest::new(model).with_user_text("fast environment fixture");
+            let mut request = policy_request_with_budget(model, "fast environment fixture");
             request.set_speed(Some("fast".into())).unwrap();
             // Unknown custom models need an explicit budget before the
             // provider request can be prepared. That budget is independent
             // from Native fast-mode admission, which this fixture still tests.
-            if model == "unknown-model" {
-                request.input.max_tokens = Some(4096);
-            }
             let request_result = if stream {
                 match service.stream_request(request).await {
                     Ok(stream) => Ok(stream
@@ -2437,7 +2576,7 @@ async fn fast_environment_is_refreshed_for_physical_retry() {
         })
     }))
     .with_thinking(ThinkingConfig::Disabled);
-    let mut request = LlmRequest::new("claude-opus-4-7").with_user_text("retry fast fixture");
+    let mut request = policy_request_with_budget("claude-opus-4-7", "retry fast fixture");
     request.set_speed(Some("fast".into())).unwrap();
     let request_result = service
         .execute_non_stream_request(

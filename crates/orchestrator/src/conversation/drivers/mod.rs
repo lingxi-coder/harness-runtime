@@ -2386,7 +2386,10 @@ impl ConversationOrchestrator {
             // nudge user message, increment the counter, and Continue
             // (TS `query.ts:1223-1252`). On exhaustion, fall through to the
             // generic terminal below (end with stop_reason `max_tokens`).
-            Some("max_tokens") => {
+            Some("max_tokens")
+                if loop_state.recovery.max_output_tokens_recovery_count
+                    < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT =>
+            {
                 let native_resume_eligible = loop_state
                     .recovery
                     .last_generation

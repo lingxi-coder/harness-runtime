@@ -82,12 +82,10 @@ fn inner_text(line: &JsonlMessage) -> String {
     }
 }
 
-/// Native's empty-context announcements, with the total-token row included
-/// only when a new user turn collects its ingress batch. A pre-request auto
-/// compact reuses the already-collected turn and does not rerun NAr's regular
-/// user ingress producer; it therefore emits only the fresh context/date rows.
-/// Only the machine's local date is replaced; payloads and rendered bytes
-/// follow the pinned Native helpers.
+/// Native's empty-context announcements, with the exact staged total-token row
+/// included when the persisted prompt-ingress batch owns one. Only the machine's
+/// local date is replaced; payloads and rendered bytes follow the pinned Native
+/// context-announcement fixture.
 fn assert_native_context_announcements<'a>(
     rows: &'a [JsonlMessage],
     hot_history: &[ConversationMessage],
@@ -393,13 +391,12 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         Some(&Value::Bool(true))
     );
 
-    // Native Br emits fresh session_context/date when the compacted model
-    // history has no announcement baseline. A new user request also emits
-    // environment/model ingress and a total-token reminder. In the full-auto
-    // case compaction occurs after that turn's NAr ingress batch was collected,
-    // so only context/date are regenerated. Each row advances the JSONL chain.
-    // Full auto replaces all pre-compact history. Manual compact preserves the
-    // final API-round group, which here is the last assistant reply.
+    // The current prompt's ingress batch is staged before pre-call automatic
+    // compaction and committed after the compact boundary. Its total-token row
+    // remains in that exact post-boundary sequence; context/date are generated
+    // from compacted history with no announcement baseline. Each row advances
+    // the JSONL chain. Full auto replaces all pre-compact history. Manual compact
+    // preserves the final API-round group, which here is the last assistant reply.
     let expected_post_types = if manual {
         vec![
             "system",
@@ -413,7 +410,14 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
             "assistant",
         ]
     } else {
-        vec!["system", "user", "attachment", "attachment", "assistant"]
+        vec![
+            "system",
+            "user",
+            "attachment",
+            "attachment",
+            "attachment",
+            "assistant",
+        ]
     };
     assert_eq!(
         lines[boundary_idx..]
@@ -500,25 +504,25 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
             "full automatic compaction does not preserve a verbatim tail"
         );
         let last_announcement = assert_native_context_announcements(
-            &lines[boundary_idx + 2..boundary_idx + 4],
+            &lines[boundary_idx + 2..boundary_idx + 5],
             &hot_history,
             &summary.uuid,
-            false,
+            true,
         );
-        let reply = &lines[boundary_idx + 4];
+        let reply = &lines[boundary_idx + 5];
         assert_eq!(reply.message_type, "assistant");
         assert_eq!(inner_text(reply), "final reply");
         assert_eq!(
             reply.parent_uuid.as_deref(),
             Some(last_announcement.uuid.as_str()),
-            "full auto follows summary, session_context, date, and reply in order"
+            "full auto follows summary, staged total-token row, session_context, date, and reply"
         );
-        assert_eq!(hot_history.len(), 5);
+        assert_eq!(hot_history.len(), 6);
         assert!(matches!(
-            &hot_history[4],
+            &hot_history[5],
             ConversationMessage::Assistant { .. }
         ));
-        assert_eq!(hot_history[4].text_content(), "final reply");
+        assert_eq!(hot_history[5].text_content(), "final reply");
     }
     assert!(
         lines[..boundary_idx]
@@ -542,7 +546,7 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
     let post_attachment_range = if manual {
         boundary_idx + 3..boundary_idx + 8
     } else {
-        boundary_idx + 2..boundary_idx + 4
+        boundary_idx + 2..boundary_idx + 5
     };
     let post_attachment_rows = &lines[post_attachment_range];
     let cold_attachment_rows = chain

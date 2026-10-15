@@ -1724,10 +1724,22 @@ fn rendered_prompt_ingress_message_for_api(
     let role = message.extra.string_at("/renderedRole")?;
     let attachment = attachment_projection(message)?;
     let is_meta = crate::request_context::request_context_attachment_is_meta(&attachment, role);
+    let id = MessageId::from_uuid(message_uuid);
+    if attachment.string_at("/type") == Some("deferred_tools_delta")
+        && message.extra.array_len("/rendered") == Some(0)
+    {
+        // Preserve the raw deferred sidecar's UUID and transcript slot in cold
+        // history. The request-view projector either renders it from its
+        // source payload or removes this internal placeholder before API send.
+        let mut placeholder = ConversationMessage::user_meta(id, String::new());
+        if let ConversationMessage::User { content, .. } = &mut placeholder {
+            content.clear();
+        }
+        return Some(placeholder);
+    }
     let rendered = message.extra.subprojection("/rendered/0/content").ok()?;
     let text = rendered.string_at("")?.to_owned();
     let units = rendered.string_units("")?;
-    let id = MessageId::from_uuid(message_uuid);
     match role {
         "system" => Some(ConversationMessage::user_meta_js_utf16(id, text, units)),
         "user" => {

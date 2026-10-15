@@ -2579,24 +2579,48 @@ async fn message_received_while_busy_waits_for_the_idle_poll() {
                 _ => false,
             })
             .expect("initial task prompt remains in history");
-        let next_user_content = messages
+        let expected_display = String::from_utf16_lossy(&expected_units);
+        let later_user_messages = messages
             .iter()
+            .enumerate()
             .skip(initial_prompt_index + 1)
-            .find_map(|message| match message {
-                lingxi_core::types::ConversationMessage::User { content, .. } => Some(content),
+            .filter_map(|(index, message)| match message {
+                lingxi_core::types::ConversationMessage::User {
+                    content, is_meta, ..
+                } => Some((index, *is_meta, content, message.text_content())),
                 _ => None,
             })
-            .expect("queued teammate message follows the initial assignment");
-        assert!(
-            matches!(
-                next_user_content.as_slice(),
-                [lingxi_core::types::ContentBlock::TextJsUtf16 {
-                    utf16_code_units,
-                    citations: None,
-                    ..
-                }] if utf16_code_units == &expected_units
-            ),
-            "the queued UJP message follows the initial prompt with exact UTF-16 history"
+            .collect::<Vec<_>>();
+        let display_queued_message_indices = later_user_messages
+            .iter()
+            .filter_map(|(index, is_meta, _, display)| {
+                (!*is_meta && display == &expected_display).then_some(*index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            display_queued_message_indices.len(),
+            1,
+            "the queued message display must occur once after the initial prompt, including lossy text carriers; later user messages: {later_user_messages:#?}"
+        );
+        let exact_queued_message_indices = later_user_messages
+            .iter()
+            .filter_map(|(index, is_meta, content, _)| {
+                (!*is_meta
+                    && matches!(
+                        content.as_slice(),
+                        [lingxi_core::types::ContentBlock::TextJsUtf16 {
+                            text,
+                            utf16_code_units,
+                            citations: None,
+                        }] if text == &expected_display && utf16_code_units == &expected_units
+                    ))
+                .then_some(*index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            exact_queued_message_indices.len(),
+            1,
+            "the exact queued UJP message must occur once after the initial prompt; later user messages: {later_user_messages:#?}"
         );
     }
     handler.kill(&handle.task_id, c).await.unwrap();

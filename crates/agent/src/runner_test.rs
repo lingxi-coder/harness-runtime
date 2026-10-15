@@ -10385,7 +10385,8 @@ async fn design_parse_recovery_consumes_nonstream_sdk_metadata_after_response_to
         .map(Ok)
         .collect();
     let api = ResultStreamMockApiClient::new(vec![first, valid_design_turn()]);
-    let mut ctx = loop_ctx(api.clone(), None, 5);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 5);
     enable_design_parse_recovery(&mut ctx);
     let (_tx, rx) = mpsc::channel(8);
     let (out, events) = mpsc::channel(64);
@@ -10397,10 +10398,18 @@ async fn design_parse_recovery_consumes_nonstream_sdk_metadata_after_response_to
         2,
         "one correction request follows the issue"
     );
-    assert!(events.iter().any(|event| matches!(event,
-        SubagentEvent::Completed { result, usage_complete: false, .. }
-            if projection_matches_json(result, &serde_json::json!({"design": {}}))
-    )));
+    assert_eq!(
+        invoker.call_count(),
+        0,
+        "the synthetic StructuredOutput tool is validated as the result, not dispatched"
+    );
+    assert!(
+        events.iter().any(|event| matches!(event,
+            SubagentEvent::Completed { result, usage_complete: false, .. }
+                if projection_matches_json(result, &serde_json::json!({"design": {}}))
+        )),
+        "expected completed correction result with incomplete usage; emitted events: {events:#?}"
+    );
     assert!(!events
         .iter()
         .any(|event| matches!(event, SubagentEvent::Failed { .. })));

@@ -338,7 +338,7 @@ impl ModelRegistry {
         requested: &str,
         profile: Option<&str>,
     ) -> Result<ResolvedRoute, LlmError> {
-        let resolved=self.resolver.resolve_in_prefer_native(requested,profile).map_err(|error|match error {
+        let resolved=self.resolver.resolve_in_for_connection_failover(requested,profile).map_err(|error|match error {
             lingxi_llm_client::ResolveError::UnknownModel {..}=>LlmError::ModelUnavailable,
             lingxi_llm_client::ResolveError::AmbiguousAcrossGroups {model,groups}=>LlmError::InvalidRequest {message:format!("model reference '{model}' is ambiguous across profiles: {} — qualify it, e.g. {}",groups.join(", "),groups.iter().map(|g|format!("{g}/{model}")).collect::<Vec<_>>().join(", "))},
             other=>LlmError::InvalidRequest {message:other.to_string()},

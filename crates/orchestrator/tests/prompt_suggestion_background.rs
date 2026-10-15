@@ -638,6 +638,10 @@ async fn background_pipeline() {
         1,
         "unfocused bg may show a classifier-backed reply"
     );
+    assert!(
+        client.classifiers.lock().unwrap().is_empty(),
+        "native question preclassification skips provider classifier requests"
+    );
 
     let changed_query = client.suggestion_query_count() + 1;
     let changed_output = output.row_count() + 1;
@@ -669,10 +673,6 @@ async fn background_pipeline() {
     assert!(
         saved.get("suggestedReply").is_none(),
         "reply never persists over changed needs"
-    );
-    assert!(
-        client.classifiers.lock().unwrap().is_empty(),
-        "native question preclassification skips provider classifier requests"
     );
     for denied in [false, true] {
         if denied {

@@ -189,6 +189,7 @@ fn request_prompt_context(prompt_id: MessageId) -> PromptContext {
         staged_ingress_attachments: std::sync::Mutex::new(None),
         ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
         next_model_step_ingress_kind: std::sync::Mutex::new(None),
+        deferred_tools_projection_facts: std::sync::Mutex::new(None),
     }
 }
 
@@ -488,6 +489,7 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
                     staged_ingress_attachments: std::sync::Mutex::new(None),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
+                    deferred_tools_projection_facts: std::sync::Mutex::new(None),
                 },
                 async {
                     persist_prompt_ingress_after_user(
@@ -898,6 +900,7 @@ fn complete_ingress_batch_is_selected_once_before_first_append_and_retried_by_id
                     ])),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
+                    deferred_tools_projection_facts: std::sync::Mutex::new(None),
                 },
                 async {
                     orch.append_accepted_prompt_ingress_reminder(&environment)
@@ -1302,6 +1305,7 @@ fn multiple_staged_environment_rows_keep_their_source_order_in_the_request() {
                         ..PromptIngressBatch::default()
                     }),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
+                    deferred_tools_projection_facts: std::sync::Mutex::new(None),
                 },
                 async {
                     let prepared = orch
@@ -1364,6 +1368,7 @@ fn cancelled_fallback_append_finishes_before_catching_up_the_transcript_tip() {
                     staged_ingress_attachments: std::sync::Mutex::new(Some(Vec::new())),
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
+                    deferred_tools_projection_facts: std::sync::Mutex::new(None),
                 },
                 async {
                     let cancel = lingxi_core::host::CancellationToken::new();
@@ -1865,6 +1870,12 @@ fn auto_compaction_consumes_pending_prompt_before_nar_finalize_without_resurrect
             Arc::new(PosixFileSystem::new(root.path().to_owned()));
         let orch = orchestrator(&cwd, &transcript, filesystem.clone())
             .with_compaction(Arc::new(compaction::CompactionOrchestrator::new(1)));
+        bind_test_durable_transcript_target(
+            &orch,
+            &cwd,
+            &root.path().join("durable-state"),
+            &transcript,
+        );
 
         for index in 0..24 {
             let row = ConversationMessage::user(

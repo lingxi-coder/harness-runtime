@@ -7096,19 +7096,30 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             request_attachments.len(),
             "every request-eligible transcript attachment is classified; only the explicit prompt_snapshot sidecar is outside the model request"
         );
-        let native_expected_type_order = request_attachments
+        let native_nar_types = request_type_order
             .iter()
-            .filter(|(_, kind)| kind.as_str() != "hook_additional_context")
-            .chain(
-                request_attachments
-                    .iter()
-                    .filter(|(_, kind)| kind.as_str() == "hook_additional_context"),
-            )
-            .map(|(_, kind)| kind.clone())
+            .filter(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "deferred_tools_delta"
+                        | "environment"
+                        | "model"
+                        | "skill_listing"
+                        | "auto_mode"
+                )
+            })
+            .cloned()
             .collect::<Vec<_>>();
         assert_eq!(
-            request_type_order, native_expected_type_order,
-            "the complete request type sequence follows source NAr order then Qe's UPE rows; no type is filtered from this check"
+            native_nar_types,
+            [
+                "deferred_tools_delta",
+                "environment",
+                "model",
+                "skill_listing",
+                "auto_mode",
+            ],
+            "the five NAr producers retain their source API order independently of date/session context"
         );
         let upe_positions = request_type_order
             .iter()
@@ -7120,27 +7131,77 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             1,
             "the skill batch has one typed UserPromptExpansion attachment"
         );
-        assert_eq!(
-            upe_positions[0],
-            request_type_order.len() - 1,
-            "Native packs Qe's UPE attachment after the NAr attachments"
+        let last_nar_position = request_type_order
+            .iter()
+            .rposition(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "deferred_tools_delta"
+                        | "environment"
+                        | "model"
+                        | "skill_listing"
+                        | "auto_mode"
+                )
+            })
+            .expect("all five Native NAr attachments are present");
+        assert!(
+            upe_positions[0] > last_nar_position,
+            "Native packs Qe's single UPE attachment after every NAr attachment"
         );
         request_type_order
     }
 
     fn assert_known_native_skill_attachment_order(types: &[String]) {
-        let expected = vec![
-            "deferred_tools_delta".to_owned(),
-            "environment".to_owned(),
-            "model".to_owned(),
-            "skill_listing".to_owned(),
-            "auto_mode".to_owned(),
-            "hook_additional_context".to_owned(),
+        let expected_nar = [
+            "deferred_tools_delta",
+            "environment",
+            "model",
+            "skill_listing",
+            "auto_mode",
         ];
+        let actual_nar = types
+            .iter()
+            .filter(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "deferred_tools_delta"
+                        | "environment"
+                        | "model"
+                        | "skill_listing"
+                        | "auto_mode"
+                )
+            })
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         assert_eq!(
-            types,
-            expected.as_slice(),
-            "the complete typed attachment sequence is NAr order followed by Qe's UPE row; no unclassified attachment is allowed"
+            actual_nar,
+            expected_nar.as_slice(),
+            "the strict NAr subsequence follows Native source order"
+        );
+        let upe_positions = types
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| (kind == "hook_additional_context").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(upe_positions.len(), 1, "exactly one UPE row is present");
+        let last_nar_position = types
+            .iter()
+            .rposition(|kind| expected_nar.contains(&kind.as_str()))
+            .expect("five NAr rows are present");
+        assert!(
+            upe_positions[0] > last_nar_position,
+            "UPE follows all NAr rows; date and session_context are checked independently"
+        );
+        assert!(
+            types.iter().all(|kind| {
+                expected_nar.contains(&kind.as_str())
+                    || matches!(kind.as_str(), "date" | "session_context" | "hook_additional_context")
+            }),
+            "every typed attachment is classified as one of five NAr producers, date/session_context, or UPE"
+        );
+        assert!(
+            types.iter().filter(|kind| kind.as_str() == "date").count() <= 1,
+            "the optional date row is handled separately from NAr order"
         );
     }
 

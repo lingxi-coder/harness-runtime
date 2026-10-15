@@ -6613,6 +6613,31 @@ mod tests {
             &prepared.provider_request.headers,
             crate::model::betas::STRUCTURED_OUTPUTS,
         ));
+
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"betas":["caller-only"]}"#);
+        let mut prepared = adapter
+            .client
+            .prepare(&make_schema_request())
+            .await
+            .expect("Native output format is present before the caller beta spread");
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        assert!(
+            prepared
+                .native_beta_rejection_candidates
+                .iter()
+                .any(|beta| beta == crate::model::betas::STRUCTURED_OUTPUTS),
+            "structured beta is in Native's pre-spread Ww/oT candidate snapshot"
+        );
+        assert!(!prepared
+            .native_beta_rejection_candidates
+            .iter()
+            .any(|beta| beta == "caller-only"));
+        assert!(!request_header_has_beta(
+            &prepared.provider_request.headers,
+            crate::model::betas::STRUCTURED_OUTPUTS,
+        ));
     }
 
     #[tokio::test]

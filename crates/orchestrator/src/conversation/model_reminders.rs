@@ -457,13 +457,9 @@ impl ConversationOrchestrator {
         &self,
         row: &crate::request_context::PromptIngressAttachment,
     ) {
-        // deferred_tools_delta is a durable typed sidecar plus a transient
-        // leading request row. Keeping its rendering out of live history avoids
-        // replaying it once from history and once from the prepared suffix.
-        if row.payload.string_at("/type") == Some("deferred_tools_delta") {
-            return;
-        }
         let id = row.message.id();
+        let has_rendered_row = row.rendered.array_len("").is_some_and(|length| length > 0);
+        let is_deferred_delta = row.payload.string_at("/type") == Some("deferred_tools_delta");
         {
             let mut session = self.session.lock().await;
             self.transcript
@@ -471,8 +467,22 @@ impl ConversationOrchestrator {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(id, row.payload.clone());
-            if !session.history.iter().any(|message| message.id() == id) {
-                session.history.push(row.message.clone());
+            // Deferred tools need their durable source sidecar in hot history
+            // as well as cold JSONL so every request can project the same row
+            // through its current tool pool. A deferred delta with an empty
+            // render cache keeps an internal empty placeholder for identity
+            // and ordering; request projection removes it if NQe produces no
+            // visible row, so it never becomes an empty provider user message.
+            if (has_rendered_row || is_deferred_delta)
+                && !session.history.iter().any(|message| message.id() == id)
+            {
+                let mut message = row.message.clone();
+                if is_deferred_delta && !has_rendered_row {
+                    if let ConversationMessage::User { content, .. } = &mut message {
+                        content.clear();
+                    }
+                }
+                session.history.push(message);
             }
         }
     }

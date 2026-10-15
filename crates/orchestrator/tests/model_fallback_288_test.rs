@@ -179,12 +179,42 @@ fn variable(name: &str, value: Option<&str>) {
 }
 fn config() -> ClientConfig {
     let model = |id: &str, label: &str| json!({"display_model":label,"request_model":id,"billing_model":id,"capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":true,"structured_output":false}});
-    let mut remote_model = model("remote/model", "Other Model");
-    remote_model["metadata"] = json!({"applicationOutputTokens":4096});
-    serde_json::from_value(json!({"providers":[
+    let remote_model = model("remote/model", "Other Model");
+    let mut config: ClientConfig = serde_json::from_value(json!({"providers":[
         {"provider_id":"anthropic_first_party","profile_name":"direct","base_url":"https://api.anthropic.com","protocol":"anthropic_messages","auth":"none","credential":{"type":"none"},"models":[model(PRIMARY,"Opus 4.7"),model(FALLBACK,"Sonnet 4.6"),model(FAST_FALLBACK,"Opus 4.8")]},
         {"provider_id":{"custom":{"name":"other"}},"profile_name":"other","base_url":"https://second.fixture.invalid","protocol":"anthropic_messages","auth":"none","credential":{"type":"none"},"models":[remote_model]}
-    ]})).unwrap()
+    ]})).unwrap();
+    let wire_profile: lingxi_llm_client::protocol::ProviderProfile =
+        serde_json::from_value(json!({
+            "provider_id":"other",
+            "profile_name":"other",
+            "base_url":"https://second.fixture.invalid",
+            "protocol":"anthropic_messages",
+            "auth":"none",
+            "regions":["international"],
+            "models":[{
+                "display_model":"Other Model",
+                "request_model":"remote/model",
+                "billing_model":"remote/model",
+                "metadata":{"applicationOutputTokens":4096},
+                "capability_support":{
+                    "streaming":"supported",
+                    "tools":"supported",
+                    "vision":"unsupported",
+                    "documents":"unsupported",
+                    "reasoning":"supported",
+                    "structured_output":"unsupported"
+                }
+            }]
+        }))
+        .unwrap();
+    config
+        .providers
+        .iter_mut()
+        .find(|profile| profile.profile_name == "other")
+        .expect("remote model profile")
+        .wire_profile = Some(wire_profile);
+    config
 }
 fn make(
     capture: Arc<Capture>,
@@ -780,9 +810,24 @@ async fn current_configured_fallback_budget_route_notice_and_resume_lifecycle() 
                 (2, 3)
             );
         }
-        let remaining = capture.actions.lock().unwrap().len();
-        assert_eq!(remaining, 0, "{name}");
         let requests = capture.requests.lock().unwrap().clone();
+        let request_models = requests
+            .iter()
+            .map(|(_, body)| body["model"].as_str().unwrap_or("<non-string>").to_owned())
+            .collect::<Vec<_>>();
+        let remaining_action_models = capture
+            .actions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(model, _)| model.clone())
+            .collect::<Vec<_>>();
+        let remaining = remaining_action_models.len();
+        assert_eq!(
+            remaining,
+            0,
+            "{name}; request models={request_models:?}; unconsumed action models={remaining_action_models:?}"
+        );
         if name == "http-chain-fast-rejection" {
             assert_eq!(requests.len(), 3);
             assert_eq!(requests[1].1["speed"], "fast");
@@ -801,6 +846,7 @@ async fn current_configured_fallback_budget_route_notice_and_resume_lifecycle() 
                     url.starts_with("https://second.fixture.invalid"),
                     "{name}: {url}"
                 );
+                assert_eq!(body["max_tokens"], 4096, "{name}: SDK wire budget");
             }
             if body["model"] != PRIMARY {
                 assert!(

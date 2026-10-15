@@ -1327,6 +1327,59 @@ impl ConversationOrchestrator {
         messages.insert(index, reminder);
     }
 
+    /// Refresh deferred-tool request rows from their durable raw sidecars.
+    /// The history row remains the source of identity and placement; this
+    /// replaces only its outgoing message view for the current tool pool.
+    pub(crate) fn project_deferred_tools_request_view(
+        &self,
+        messages: &mut Vec<ConversationMessage>,
+        facts: crate::request_context::DeferredToolsProjectionFacts,
+    ) {
+        let attachments = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let name_only_announcement_uuids = attachments
+            .values()
+            .filter(|payload| payload.string_at("/type") == Some("deferred_tools_record"))
+            .flat_map(|payload| {
+                (0..payload
+                    .array_len("/nameOnlyAnnouncements")
+                    .unwrap_or_default())
+                    .filter_map(|index| {
+                        payload
+                            .string_at(&format!("/nameOnlyAnnouncements/{index}"))
+                            .map(str::to_owned)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let mut projected = Vec::with_capacity(messages.len());
+        for message in std::mem::take(messages) {
+            let id = message.id();
+            let Some(source) = attachments
+                .get(&id)
+                .filter(|payload| payload.string_at("/type") == Some("deferred_tools_delta"))
+            else {
+                projected.push(message);
+                continue;
+            };
+            if let Some(message) = crate::request_context::render_deferred_tools_delta_for_request(
+                id,
+                source,
+                Some(&message),
+                crate::request_context::cached_rendered_row_count(&message),
+                facts.clone(),
+                name_only_announcement_uuids.contains(&id.to_string()),
+            ) {
+                projected.push(message);
+            }
+        }
+        *messages = projected;
+    }
+
     /// Native's provider projection reorders typed attachments throughout the
     /// history, including earlier turns. Keep durable append order unchanged so
     /// live and cold-resumed requests derive the same stable physical prefix.
@@ -1520,6 +1573,10 @@ impl ConversationOrchestrator {
         let model_supports_mid_conversation_system = self
             .api
             .supports_native_mid_conversation_system(&model, profile.as_deref());
+        self.project_deferred_tools_request_view(
+            messages,
+            crate::request_context::deferred_tools_projection_facts().unwrap_or_default(),
+        );
         self.project_typed_attachment_order(
             messages,
             turn_reminders,
@@ -1530,7 +1587,9 @@ impl ConversationOrchestrator {
         self.prepend_leading_context(messages, context_announcements)
             .await;
         if let Some(reminder) = deferred_tools_reminder {
-            self.prepend_transient_leading_context(messages, reminder.clone());
+            if !messages.iter().any(|message| message.id() == reminder.id()) {
+                self.prepend_transient_leading_context(messages, reminder.clone());
+            }
         }
         if let Some(reminder) = date_change_reminder {
             self.prepend_transient_leading_context(messages, reminder.clone());

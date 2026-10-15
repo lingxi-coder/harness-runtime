@@ -142,12 +142,14 @@ impl Transport for Capture {
     }
 }
 
-fn protocol(provider: &str) -> Option<ProtocolFamily> {
+fn protocol(provider: &str) -> Option<(ProtocolFamily, bool)> {
     Some(match provider {
-        "firstParty" => ProtocolFamily::AnthropicMessages,
-        "anthropicAws" => ProtocolFamily::BedrockClaude,
-        "anthropicGoogleCloud" => ProtocolFamily::VertexClaude,
-        "foundry" => ProtocolFamily::FoundryClaude,
+        "firstParty" => (ProtocolFamily::AnthropicMessages, true),
+        "foundry" => (ProtocolFamily::FoundryClaude, true),
+        // Native AWS/GCP identities are retained as source inputs, while the
+        // H Bedrock/Vertex routes are tested separately under H's false gate.
+        "anthropicAws" => (ProtocolFamily::BedrockClaude, false),
+        "anthropicGoogleCloud" => (ProtocolFamily::VertexClaude, false),
         _ => return None,
     })
 }
@@ -186,15 +188,26 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/structured_output_2_1_288.json")).unwrap();
     let mut preparations = 0;
+    let mut unrepresented_aws_rows = 0;
+    let mut unrepresented_google_rows = 0;
     for row in fixture["cases"].as_array().unwrap() {
         let input = &row["input"];
-        let Some(protocol) = protocol(input["provider"].as_str().unwrap()) else {
+        let Some((protocol, source_identity_is_equivalent)) =
+            protocol(input["provider"].as_str().unwrap())
+        else {
             continue;
         };
         if input["hipaa"] == true || row["expected"].get("main").is_none() {
             continue;
         }
         apply(input);
+        if !source_identity_is_equivalent {
+            match input["provider"].as_str().unwrap() {
+                "anthropicAws" => unrepresented_aws_rows += 1,
+                "anthropicGoogleCloud" => unrepresented_google_rows += 1,
+                provider => unreachable!("unexpected unrepresented source provider {provider}"),
+            }
+        }
         let model = input["model"].as_str().unwrap();
         let mut profile = profile(protocol, input["capability"].as_bool().unwrap());
         profile.models[0].request_model = model.into();
@@ -205,18 +218,18 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
         })
         .unwrap();
         for side in [false, true] {
+            if input["explicit"] == true {
+                std::env::set_var(
+                    "CLAUDE_CODE_EXTRA_BODY",
+                    r#"{"output_config":{"format":{"type":"explicit_fixture"},"effort":"low"}}"#,
+                );
+            } else {
+                std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+            }
             let mut request = schema_request();
             request.input.model = model.into();
             if side {
                 request.execution.anthropic_request_kind=lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
-            }
-            if input["explicit"] == true {
-                std::env::set_var(
-                    "CLAUDE_CODE_EXTRA_BODY",
-                    r#"{"output_config":{"format":{"type":"explicit_fixture"}}}"#,
-                );
-            } else {
-                std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
             }
             let prepared = client.prepare(&request).await.unwrap();
             let expected = if side {
@@ -224,15 +237,25 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
             } else {
                 &row["expected"]["main"]
             };
-            let automatic = expected["config"]["format"]["type"] == "json_schema";
+            let expected_format_type = if !side && input["explicit"] == true {
+                // `ModelRuntime::prepare` evaluates the caller extra-body
+                // format for admission but does not merge it onto the body.
+                // `explicit_fixture` is asserted at the physical wire below.
+                None
+            } else if source_identity_is_equivalent {
+                expected["config"]["format"]["type"].as_str()
+            } else {
+                None
+            };
             assert_eq!(
                 prepared
                     .provider_request
                     .body_json
-                    .payload_at("/output_config/format")
-                    .is_some(),
-                automatic,
-                "{input}, side={side}"
+                    .string_at("/output_config/format/type")
+                    .as_deref(),
+                expected_format_type,
+                "H route {protocol:?}, source identity {:?}, side={side}",
+                input["provider"]
             );
             assert!(matches!(
                 request.input.output_format,
@@ -242,6 +265,14 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
         }
     }
     assert_eq!(preparations, 36000);
+    assert!(
+        unrepresented_aws_rows > 0,
+        "preserve Native anthropicAws cases explicitly"
+    );
+    assert!(
+        unrepresented_google_rows > 0,
+        "preserve Native anthropicGoogleCloud cases explicitly"
+    );
     let mut captures = 0;
     for protocol in [
         ProtocolFamily::AnthropicMessages,
@@ -296,16 +327,25 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
                         assert!(calls[0].headers.iter().any(|(name, value)| name
                             .eq_ignore_ascii_case("anthropic-version")
                             && value == "2023-06-01"));
+                        let native_hun_route = matches!(
+                            protocol,
+                            ProtocolFamily::AnthropicMessages | ProtocolFamily::FoundryClaude
+                        );
+                        // The Native side builder composes its automatic
+                        // output_config and beta first, then spreads the
+                        // caller's extra body. The explicit format replaces
+                        // the side schema on the wire while its beta stays.
+                        let expected_format = if explicit {
+                            Some("explicit_fixture")
+                        } else if native_hun_route && !disabled {
+                            Some("json_schema")
+                        } else {
+                            None
+                        };
                         assert_eq!(
                             body.pointer("/output_config/format/type")
                                 .and_then(Value::as_str),
-                            if explicit {
-                                Some("explicit_fixture")
-                            } else if disabled {
-                                None
-                            } else {
-                                Some("json_schema")
-                            },
+                            expected_format,
                             "{protocol:?} disabled={disabled} side={side} explicit={explicit}"
                         );
                         let beta = calls[0]
@@ -314,7 +354,11 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
                             .find(|(n, _)| n.eq_ignore_ascii_case("anthropic-beta"))
                             .map(|(_, v)| v.as_str())
                             .unwrap_or("");
-                        assert_eq!(beta.contains("structured-outputs-2025-12-15"),!disabled && (side || !explicit),"{protocol:?} disabled={disabled} side={side} explicit={explicit}: {beta}");
+                        assert_eq!(
+                            beta.contains("structured-outputs-2025-12-15"),
+                            native_hun_route && !disabled && (side || !explicit),
+                            "{protocol:?} disabled={disabled} side={side} explicit={explicit}: {beta}"
+                        );
                         captures += 1;
                     }
                 }
