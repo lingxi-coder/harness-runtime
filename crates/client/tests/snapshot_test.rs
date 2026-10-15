@@ -87,7 +87,6 @@ use client::protocol::tool_display::{
     ToolVerbDto,
 };
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::HashMap;
 
 /// Directory holding the checked-in goldens.
@@ -147,9 +146,9 @@ where
 
     // The golden must also be a faithful, deserializable representation of the
     // value — round-trips through the on-disk JSON byte-stably (decision §0.1).
-    let parsed: Value = serde_json::from_str(&got)
-        .unwrap_or_else(|e| panic!("golden `{filename}` is not valid JSON: {e}"));
-    let back: T = serde_json::from_value(parsed)
+    // Deserialize directly into T so its source-aware string carriers can
+    // preserve escaped lone UTF-16 units that serde_json::Value cannot hold.
+    let back: T = serde_json::from_str(&got)
         .unwrap_or_else(|e| panic!("golden `{filename}` does not deserialize back: {e}"));
     if &back != value {
         failures.push(format!(
@@ -1852,10 +1851,13 @@ fn goldened_wire_tags<T: Serialize>(goldens: &[(&'static str, T)]) -> BTreeSet<S
     goldens
         .iter()
         .map(|(filename, value)| {
-            let json = serde_json::to_value(value)
+            // Keep this as raw JSON text. Going through `Value` requires Rust
+            // Unicode strings and rejects the exact escaped surrogate units
+            // carried by `ClientTextDto` in command snapshots.
+            let json = serde_json::to_string(value)
                 .unwrap_or_else(|e| panic!("serialize golden instance for {filename}: {e}"));
-            json.get("type")
-                .and_then(Value::as_str)
+            json.strip_prefix(r#"{"type":""#)
+                .and_then(|tagged| tagged.split_once('"').map(|(tag, _)| tag))
                 .unwrap_or_else(|| panic!("golden {filename} is not internally tagged on `type`"))
                 .to_string()
         })

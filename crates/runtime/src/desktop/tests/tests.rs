@@ -5389,10 +5389,11 @@ async fn build_surfaces_provider_availability_and_adapter() {
     );
     // The concrete routing adapter is surfaced.
     assert!(Arc::strong_count(&rt.provider_adapter) >= 1);
-    // The default `model_providers` map groups a built-in Anthropic model
-    // under the anthropic profile.
+    // Sonnet 4.6 is intentionally absent from this bare-id lookup because the
+    // current SDK catalog exposes that request model through multiple provider
+    // profiles. Mythos 5.1 is first-party-only, so it remains unambiguous.
     assert_eq!(
-        rt.model_providers.get("claude-sonnet-4-6"),
+        rt.model_providers.get("claude-mythos-5-1"),
         Some(&("anthropic".to_string(), "Anthropic".to_string())),
     );
 }
@@ -5632,9 +5633,29 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
         rt.model_providers
     );
     assert_eq!(
-        rt.model_providers.get("claude-sonnet-4-6"),
+        rt.model_providers.get("claude-mythos-5-1"),
         Some(&("anthropic".to_string(), "Anthropic".to_string())),
-        "built-in anthropic model must group under anthropic"
+        "unambiguous first-party model must group under anthropic"
+    );
+    let sonnet_profiles: Vec<_> = assembled
+        .client_config
+        .providers
+        .iter()
+        .filter(|provider| {
+            provider
+                .models
+                .iter()
+                .any(|model| model.request_model == "claude-sonnet-4-6")
+        })
+        .map(|provider| provider.profile_name.as_str())
+        .collect();
+    assert!(
+        sonnet_profiles.len() > 1,
+        "current SDK should expose shared Sonnet 4.6 request ids through multiple profiles: {sonnet_profiles:?}"
+    );
+    assert!(
+        !rt.model_providers.contains_key("claude-sonnet-4-6"),
+        "ambiguous request ids must not be assigned to one provider: {sonnet_profiles:?}"
     );
     // A built-in preset with a unique request id is also grouped. Some current
     // presets deliberately share request ids (for example DeepSeek's chat and

@@ -7505,6 +7505,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
 
             let expected_prefix_markers = [
                 "The following deferred tools",
+                "Today's date is ",
                 "# Environment",
                 "You are powered by the model",
                 "The following skills are available for use with the Skill tool:",
@@ -7551,14 +7552,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 1,
                 "the request keeps its model-reminder marker"
             );
-            let date_user_row_index = first_user_rows
-                .iter()
-                .position(|row| {
-                    row.text_utf16.as_deref().is_some_and(|units| {
-                        contains_utf16(units, "Today's date is ")
-                    })
-                })
-                .expect("date metadata remains in the outgoing request");
+            let date_user_row_index = 1;
             let date_message_index = first_calls[0]
                 .messages
                 .iter()
@@ -7570,7 +7564,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 "the model-reminder marker stays immediately before the date context"
             );
 
-            let listing_row_index = 3;
+            let listing_row_index = 4;
             let upe_row_index = first_user_rows
                 .iter()
                 .position(|row| {

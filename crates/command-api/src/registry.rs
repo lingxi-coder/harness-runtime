@@ -2493,17 +2493,29 @@ mod tests {
     }
     #[test]
     fn side_chat_palette_keeps_opaque_inline_skill_names() {
+        fn inline_skill(name: &str) -> SlashCommand {
+            let mut command = markdown_cmd(name, vec![]);
+            command.kind = SlashCommandKind::Markdown {
+                file_path: std::path::PathBuf::from(format!("{name}.md")),
+                frontmatter: Default::default(),
+                prompt_template: "".into(),
+            };
+            command
+        }
+
         let mut registry = CommandRegistry::new();
         registry.set_side_chat(true);
         let units = vec![b'x' as u16, 0xd800];
-        let mut inline = markdown_cmd("display", vec![]);
+        let mut inline = inline_skill("display");
         inline.name = projection_from_units(units.clone());
         registry.register_command(inline);
-        registry.register_command(markdown_cmd("loop", vec![]));
+        registry.register_command(inline_skill("loop"));
         let commands = registry.palette_commands();
-        assert!(commands
-            .iter()
-            .any(|command| command.name.string_units("") == Some(units.clone())));
+        assert!(commands.iter().any(|command| {
+            command.source == CommandSource::Settings(lingxi_core::types::SettingsScope::Project)
+                && matches!(&command.kind, SlashCommandKind::Markdown { .. })
+                && command.name.string_units("") == Some(units.clone())
+        }));
         assert!(!commands
             .iter()
             .any(|command| command.name.string_at("") == Some("loop")));
