@@ -2609,25 +2609,34 @@ mod tests {
             .scope(
                 scheduled.clone(),
                 crate::query_model::ROUTE.scope(Some(route), async {
-                    let _ = adapter
-                        .stream(
-                            "caller-cannot-override-scheduled",
-                            None,
-                            None,
-                            Vec::new(),
-                            Vec::new(),
-                            "sdk",
-                            false,
-                            None,
-                        )
-                        .await;
-                    let request = llm_runtime::MessagesCreateRequest::new(
+                    let _ = StreamingApiClient::stream_with_effort_override(
+                        &adapter,
+                        "caller-cannot-override-scheduled",
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        Some(4096),
+                        None,
+                        Vec::new(),
+                        "sdk",
+                        false,
+                        None,
+                        None,
+                        None,
+                        Default::default(),
+                        Default::default(),
+                        None,
+                    )
+                    .await;
+                    let mut request = llm_runtime::MessagesCreateRequest::new(
                         "caller-cannot-override-scheduled",
                         None,
                         None,
                         Vec::new(),
                         Vec::new(),
                     );
+                    request.opts.max_output_tokens = Some(4096);
                     let _ = adapter
                         .messages_create(crate::OrchestratorApiRequest::Main(request))
                         .await;
@@ -3909,16 +3918,16 @@ mod tests {
             None,
             Some(estimator),
         )));
+        let mut request = llm_runtime::MessagesCreateRequest::new(
+            "claude-future-9999",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        request.opts.max_output_tokens = Some(4096);
         let resp = adapter
-            .messages_create(crate::OrchestratorApiRequest::Main(
-                llm_runtime::MessagesCreateRequest::new(
-                    "claude-future-9999",
-                    None,
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                ),
-            ))
+            .messages_create(crate::OrchestratorApiRequest::Main(request))
             .await
             .expect("ok");
         assert!(

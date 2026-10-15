@@ -527,16 +527,17 @@ async fn background_pipeline() {
         release: Semaphore::new(0),
     });
     let settings = Arc::new(Settings::default());
-    // Three heuristic turns, two model-route checks, and two UTF-16 needs
-    // cases each require their own scripted assistant response.
-    let turns = (0..7)
+    // The initial assistant turn warms the conversation gate. Three heuristic
+    // turns, two model-route checks, and two UTF-16 needs cases then each need
+    // their own scripted response.
+    let turns = (0..8)
         .map(|i| {
             vec![
                 message_start(&format!("reply-{i}"), "claude-sonnet-4-6"),
                 content_block_start_text(0),
                 text_delta(
                     0,
-                    if i < 3 {
+                    if (1..4).contains(&i) {
                         "Which option do you prefer?"
                     } else {
                         "The implementation consists of two components."
@@ -590,6 +591,12 @@ async fn background_pipeline() {
     })
     .await
     .unwrap();
+    // Native suppresses prompt suggestions until the conversation has at
+    // least two assistant turns; this fixture turn advances that gate without
+    // starting a classifier or suggestion query.
+    orch.run_turn_streaming("Warm up suggestion history")
+        .await
+        .unwrap();
     let first_query = client.suggestion_query_count() + 1;
     orch.run_turn_streaming("Prepare alternatives")
         .await

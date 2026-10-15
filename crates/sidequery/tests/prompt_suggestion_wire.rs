@@ -156,9 +156,12 @@ async fn prompt_suggestion_main_transition_keeps_identity_but_ordinary_side_quer
     );
     let client = ProviderSideQueryClient::from_service(service);
 
+    let mut suggestion_request =
+        identity_policy_request(QuerySource::PromptSuggestion, "suggestion parent system");
+    suggestion_request.max_tokens = None;
     client
         .query_fork(
-            identity_policy_request(QuerySource::PromptSuggestion, "suggestion parent system"),
+            suggestion_request,
             sidequery::ForkedSideQueryOptions::default(),
         )
         .await
@@ -175,6 +178,15 @@ async fn prompt_suggestion_main_transition_keeps_identity_but_ordinary_side_quer
     assert_eq!(captured.len(), 2);
     let suggestion_wire: Value = serde_json::from_str(&captured[0]).unwrap();
     let suggestion_system = system_texts(&suggestion_wire);
+    assert_eq!(
+        suggestion_wire["max_tokens"].as_u64(),
+        Some(
+            llm_runtime::model::context_window::default_output_tokens_for_model(
+                "claude-sonnet-4-6",
+            )
+        ),
+        "ProviderSideQueryClient must preserve the unset override and let the SDK prepare the current model-directory default"
+    );
     assert_eq!(suggestion_system.len(), 3);
     assert!(suggestion_system[0].starts_with("x-anthropic-billing-header:"));
     assert_eq!(suggestion_system[1], HOST_IDENTITY);
