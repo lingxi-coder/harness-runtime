@@ -107,8 +107,11 @@ impl ModelRegistry {
         model: &str,
         profile: Option<&str>,
     ) -> Result<lingxi_llm_client::client::OutputTokenLimits, LlmError> {
-        self.resolver.output_token_limits_in(model, profile).map_err(|error|
-            LlmError::InvalidRequest { message: error.to_string() })
+        self.resolver
+            .output_token_limits_in(model, profile)
+            .map_err(|error| LlmError::InvalidRequest {
+                message: error.to_string(),
+            })
     }
     pub(crate) fn profile_pricing_config(&self, profile: &str) -> Option<crate::PricingConfig> {
         self.config

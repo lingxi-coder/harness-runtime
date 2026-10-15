@@ -22,28 +22,59 @@ impl ConversationOrchestrator {
         memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
         cwd: std::path::PathBuf,
     ) -> Self {
-        Self::new_with_streaming_scope(config, api, streaming_api, tools, hooks, perms, output, memory, cwd, false)
+        Self::new_with_streaming_scope(
+            config,
+            api,
+            streaming_api,
+            tools,
+            hooks,
+            perms,
+            output,
+            memory,
+            cwd,
+            false,
+        )
     }
 
     /// Construct an isolated child without changing process-global session flags.
     #[allow(clippy::too_many_arguments)]
     pub fn new_side_chat(
-        config: OrchestratorConfig, api: Arc<dyn OrchestratorApiClient>,
-        streaming_api: Arc<dyn StreamingApiClient>, tools: Arc<ToolRegistry>,
-        hooks: Arc<HookExecutor>, perms: Arc<dyn PermissionGate>,
-        output: Arc<dyn OutputStream>, memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
+        config: OrchestratorConfig,
+        api: Arc<dyn OrchestratorApiClient>,
+        streaming_api: Arc<dyn StreamingApiClient>,
+        tools: Arc<ToolRegistry>,
+        hooks: Arc<HookExecutor>,
+        perms: Arc<dyn PermissionGate>,
+        output: Arc<dyn OutputStream>,
+        memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
         cwd: std::path::PathBuf,
     ) -> Self {
-        Self::new_with_streaming_scope(config, api, streaming_api, tools, hooks, perms, output, memory, cwd, true)
+        Self::new_with_streaming_scope(
+            config,
+            api,
+            streaming_api,
+            tools,
+            hooks,
+            perms,
+            output,
+            memory,
+            cwd,
+            true,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn new_with_streaming_scope(
-        config: OrchestratorConfig, api: Arc<dyn OrchestratorApiClient>,
-        streaming_api: Arc<dyn StreamingApiClient>, tools: Arc<ToolRegistry>,
-        hooks: Arc<HookExecutor>, perms: Arc<dyn PermissionGate>,
-        output: Arc<dyn OutputStream>, memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
-        cwd: std::path::PathBuf, side_chat: bool,
+        config: OrchestratorConfig,
+        api: Arc<dyn OrchestratorApiClient>,
+        streaming_api: Arc<dyn StreamingApiClient>,
+        tools: Arc<ToolRegistry>,
+        hooks: Arc<HookExecutor>,
+        perms: Arc<dyn PermissionGate>,
+        output: Arc<dyn OutputStream>,
+        memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
+        cwd: std::path::PathBuf,
+        side_chat: bool,
     ) -> Self {
         // M5-14 Task 10: emit release markers once per process lifetime.
         telemetry::emit_release_markers_once();
@@ -54,7 +85,11 @@ impl ConversationOrchestrator {
         // prompt/request semantics are distinct from the permission-gate
         // transport, so TUI/REPL sessions can carry interactive guidance even
         // when `interactive_permissions` remains on the headless default.
-        if !side_chat { lingxi_core::host::session_flags::set_non_interactive_session(!config.interactive_session); }
+        if !side_chat {
+            lingxi_core::host::session_flags::set_non_interactive_session(
+                !config.interactive_session,
+            );
+        }
         // claude-code `Dx(()=>HR(rt()))` — publish the session main-loop model
         // the `OO()` todo/task tool gate reads back through `J$e()`. This init
         // value is the launch model; `build_wire_tools` republishes it from the
@@ -72,10 +107,11 @@ impl ConversationOrchestrator {
         // per-request assembly refreshes it once the model/profile are known, so
         // any side query fired before the first main-loop turn still sees the
         // session's mode+provider decision rather than the bare `false` default.
-        if !side_chat { lingxi_core::host::session_flags::set_tool_search_enabled(
-            tools.deferral().mode().is_enabled()
-                && tool_search_supported_for_request(api.as_ref(), &config.model, None, None),
-        );
+        if !side_chat {
+            lingxi_core::host::session_flags::set_tool_search_enabled(
+                tools.deferral().mode().is_enabled()
+                    && tool_search_supported_for_request(api.as_ref(), &config.model, None, None),
+            );
         }
         let session = SessionState::empty(SessionId::new(), config.model.clone());
         let main_reports = super::main_reports_impl::MainReportInbox::new(session.session_id);

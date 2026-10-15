@@ -124,11 +124,9 @@ mod beta_tests {
         assert!(probe.on_success(&captured));
         captured.reject(Beta::ThinkingTokenCount);
         assert!(captured.rejected(Beta::ThinkingDisplayUpdates));
-        assert!(
-            !scope
-                .beta_rejections()
-                .rejected(Beta::ThinkingDisplayUpdates)
-        );
+        assert!(!scope
+            .beta_rejections()
+            .rejected(Beta::ThinkingDisplayUpdates));
         assert!(!scope.beta_rejections().rejected(Beta::ThinkingTokenCount));
         assert!(scope.stripped());
     }

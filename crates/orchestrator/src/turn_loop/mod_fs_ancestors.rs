@@ -1,7 +1,7 @@
 //! Host implementation of the Mod `fs.ancestors` operation.
 
 use hooks::mods::ModError;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -289,13 +289,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            found
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["dir"] == temp.path().to_string_lossy().as_ref())
-        );
+        assert!(found
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["dir"] == temp.path().to_string_lossy().as_ref()));
     }
 
     #[tokio::test]
@@ -324,37 +322,31 @@ mod tests {
             json!(["/AGENTS.md"]),
             json!(["AGENTS.txt"]),
         ] {
-            assert!(
-                run(
-                    json!({"names":names}),
-                    temp.path().to_path_buf(),
-                    false,
-                    None
-                )
-                .await
-                .is_err()
-            );
+            assert!(run(
+                json!({"names":names}),
+                temp.path().to_path_buf(),
+                false,
+                None
+            )
+            .await
+            .is_err());
         }
-        assert!(
-            run(
-                json!({"names":["AGENTS.md"],"of":"//server/path"}),
-                temp.path().to_path_buf(),
-                false,
-                None
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            run(
-                json!({"names":["AGENTS.md"],"below":""}),
-                temp.path().to_path_buf(),
-                false,
-                None
-            )
-            .await
-            .is_err()
-        );
+        assert!(run(
+            json!({"names":["AGENTS.md"],"of":"//server/path"}),
+            temp.path().to_path_buf(),
+            false,
+            None
+        )
+        .await
+        .is_err());
+        assert!(run(
+            json!({"names":["AGENTS.md"],"below":""}),
+            temp.path().to_path_buf(),
+            false,
+            None
+        )
+        .await
+        .is_err());
     }
 
     #[test]

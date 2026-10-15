@@ -775,7 +775,7 @@ mod tests {
             apply_resumed_agent_model: true,
 
             ..OrchestratorConfig::default()
-};
+        };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.max_turns, 5);
@@ -911,7 +911,10 @@ mod tests {
 
     #[test]
     fn no_fixed_output_escalation_setting_is_serialized() {
-        assert!(serde_json::to_value(OrchestratorConfig::default()).unwrap().get("escalate_max_output_tokens").is_none());
+        assert!(serde_json::to_value(OrchestratorConfig::default())
+            .unwrap()
+            .get("escalate_max_output_tokens")
+            .is_none());
     }
 
     #[test]

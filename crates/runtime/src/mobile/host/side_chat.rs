@@ -303,7 +303,7 @@ impl MobileEngineHandle {
 mod tests {
     use super::*;
     use crate::mobile::test_support::{
-        CollectingPermissionSink, FakeListener, HostFakePlatform, test_config,
+        test_config, CollectingPermissionSink, FakeListener, HostFakePlatform,
     };
 
     #[test]
@@ -399,11 +399,9 @@ mod tests {
                 .await
                 .unwrap();
             let replies = child_listener.received.lock().await;
-            assert!(
-                replies
-                    .iter()
-                    .any(|event| matches!(event, ClientEvent::SlashCommandCatalog { .. }))
-            );
+            assert!(replies
+                .iter()
+                .any(|event| matches!(event, ClientEvent::SlashCommandCatalog { .. })));
             drop(replies);
             // Ending a memory conversation never performs file rollback.
             let edited = root.path().join("edited.txt");

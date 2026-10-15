@@ -5,7 +5,7 @@ use lingxi_core::{
     types::{ConversationMessage, MessageId},
 };
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig, StreamingApiClient};
 use std::{sync::Arc, time::Duration};
@@ -140,12 +140,10 @@ async fn fixed_legal_busy_context_ready_models_and_global_flags() {
     assert!(!lingxi_core::host::session_flags::is_non_interactive_session());
     assert!(lingxi_core::host::session_flags::tool_search_enabled());
     assert!(parent.switch_model("keyless-current", None).await.is_ok());
-    assert!(
-        parent
-            .switch_model_with_source("unconnected-model", Some("other-profile"), "command")
-            .await
-            .is_err()
-    );
+    assert!(parent
+        .switch_model_with_source("unconnected-model", Some("other-profile"), "command")
+        .await
+        .is_err());
     assert_eq!(
         parent.list_available_models().await,
         vec!["keyless-current"]
@@ -383,26 +381,22 @@ async fn cancelled_proactive_and_reactive_summaries_finish_without_committing_hi
             })
             .unwrap()
             .unwrap();
-        assert!(
-            output
-                .compaction_phase_snapshot()
-                .await
-                .iter()
-                .any(|phase| phase == "cancelled")
-        );
-        assert!(
-            engine
-                .side_chat_parent_snapshot()
-                .await
-                .history
-                .iter()
-                .all(|message| !matches!(
-                    message,
-                    ConversationMessage::User {
-                        is_compact_summary: true,
-                        ..
-                    }
-                ))
-        );
+        assert!(output
+            .compaction_phase_snapshot()
+            .await
+            .iter()
+            .any(|phase| phase == "cancelled"));
+        assert!(engine
+            .side_chat_parent_snapshot()
+            .await
+            .history
+            .iter()
+            .all(|message| !matches!(
+                message,
+                ConversationMessage::User {
+                    is_compact_summary: true,
+                    ..
+                }
+            )));
     }
 }

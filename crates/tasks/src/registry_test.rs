@@ -3857,9 +3857,15 @@ async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
     let TaskState::LocalFusion(fusion) = state else {
         panic!("expected LocalFusion state");
     };
-    let strategy = fusion.strategy.as_ref().expect("captured strategy is published with task");
+    let strategy = fusion
+        .strategy
+        .as_ref()
+        .expect("captured strategy is published with task");
     assert_eq!(strategy.name, "Review");
-    assert_eq!(strategy.reference.scope, lingxi_core::types::WritableScope::Project);
+    assert_eq!(
+        strategy.reference.scope,
+        lingxi_core::types::WritableScope::Project
+    );
     let persisted = serde_json::to_value(&fusion).expect("task serializes");
     assert_eq!(persisted["strategy"]["reference"]["id"], "review");
     assert!(

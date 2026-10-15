@@ -705,7 +705,10 @@ mod tests {
         // An operator who has to re-run to discover the next gap will conclude
         // the wizard is broken, so the message must list them together.
         let rendered = error.to_string();
-        for key in ["fusion.strategies[].config.panelModels", "fusion.strategies[].config.analystModel"] {
+        for key in [
+            "fusion.strategies[].config.panelModels",
+            "fusion.strategies[].config.analystModel",
+        ] {
             assert!(rendered.contains(key), "{rendered}");
         }
         assert!(rendered.contains("/fusion setup"), "{rendered}");
@@ -771,7 +774,10 @@ mod tests {
         // Running the other two and reporting success would bill for an
         // ensemble the operator never approved and hide the typo indefinitely.
         assert!(rendered.contains("openai/gpt-5.6-typo"), "{rendered}");
-        assert!(rendered.contains("fusion.strategies[].config.panelModels"), "{rendered}");
+        assert!(
+            rendered.contains("fusion.strategies[].config.panelModels"),
+            "{rendered}"
+        );
         assert!(matches!(error, FusionError::InvalidConfiguration(_)));
     }
 
@@ -897,7 +903,10 @@ mod tests {
         config.analyst_model = Some(FusionModelChoice::new("openai", "gpt-5.6-ghost"));
         let error = resolve(&req(), &config, &three_provider_catalog()).unwrap_err();
         let rendered = error.to_string();
-        assert!(rendered.contains("fusion.strategies[].config.analystModel"), "{rendered}");
+        assert!(
+            rendered.contains("fusion.strategies[].config.analystModel"),
+            "{rendered}"
+        );
         assert!(rendered.contains("openai/gpt-5.6-ghost"), "{rendered}");
     }
 

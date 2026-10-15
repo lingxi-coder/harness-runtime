@@ -1540,7 +1540,10 @@ async fn pump_stream_inner(
                 if completion.message_started
                     && completion.is_complete(&turn)
                     && (pending_tool_json_error.is_none()
-                        || matches!(turn.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")))
+                        || matches!(
+                            turn.stop_reason.as_deref(),
+                            Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")
+                        ))
                     && complete_response_error(&e, &turn)
                     && !pump
                         .as_ref()
@@ -1987,13 +1990,19 @@ async fn pump_stream_inner(
             HistoryEvent::ContentBlockStop { index } => Some(*index),
             _ => None,
         };
-        if matches!(&event, HistoryEvent::WebSearch { .. }) { turn.hosted_tool_observed = true; }
+        if matches!(&event, HistoryEvent::WebSearch { .. }) {
+            turn.hosted_tool_observed = true;
+        }
         if let HistoryEvent::ContentBlockStart {
             index,
             content_block,
         } = &event
         {
-            if matches!(content_block, llm_runtime::ContentBlock::ServerToolUse { .. } | llm_runtime::ContentBlock::ProviderContent { .. }) {
+            if matches!(
+                content_block,
+                llm_runtime::ContentBlock::ServerToolUse { .. }
+                    | llm_runtime::ContentBlock::ProviderContent { .. }
+            ) {
                 turn.hosted_tool_observed = true;
             }
             if creates_assistant_row(content_block) {
@@ -2019,7 +2028,8 @@ async fn pump_stream_inner(
             Ok(a) => a,
             Err(e @ crate::sse::StreamingError::ToolUseJsonParse { .. }) => {
                 if let crate::sse::StreamingError::ToolUseJsonParse { index, buffer, .. } = &e {
-                    turn.tool_input_issues.push(serde_json::json!({"block_index":index,"input_bytes":buffer.len()}));
+                    turn.tool_input_issues
+                        .push(serde_json::json!({"block_index":index,"input_bytes":buffer.len()}));
                 }
                 pending_tool_json_error.get_or_insert(e);
                 RouterAction::Continue
@@ -2332,7 +2342,10 @@ async fn pump_stream_inner(
                 .await;
             }
             RouterAction::EndOfStream => {
-                if !matches!(turn.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")) {
+                if !matches!(
+                    turn.stop_reason.as_deref(),
+                    Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")
+                ) {
                     if let Some(error) = pending_tool_json_error.take() {
                         poll_ready_stream_tool_results(&mut pump).await;
                         return Err(build_failure(
@@ -2366,7 +2379,10 @@ async fn pump_stream_inner(
     // message_stop is lost. Later block events invalidate that terminal state.
     if completion.is_complete_at_eof(&turn)
         && (pending_tool_json_error.is_none()
-            || matches!(turn.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")))
+            || matches!(
+                turn.stop_reason.as_deref(),
+                Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")
+            ))
         && !pump
             .as_ref()
             .is_some_and(|p| p.user_cancel.is_some_and(CancellationToken::is_cancelled))
@@ -2386,10 +2402,10 @@ async fn pump_stream_inner(
     }
     // A non-recoverable JSON failure still applies if the final message_stop
     // was lost. Preserve its bounded diagnostic instead of masking it as EOF.
-    let error = pending_tool_json_error.map_or(
-        OrchestratorError::StreamEndedWithoutStop,
-        |error| OrchestratorError::StreamingProtocol(error.to_string()),
-    );
+    let error = pending_tool_json_error
+        .map_or(OrchestratorError::StreamEndedWithoutStop, |error| {
+            OrchestratorError::StreamingProtocol(error.to_string())
+        });
     Err(build_failure(
         turn,
         &acc,

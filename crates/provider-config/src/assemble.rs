@@ -139,23 +139,39 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
         };
         // Only declared formats with the same upstream credential, region and
         // billing product share this account's host credential slot.
-        let root = preset.wire_profile.as_ref().and_then(|wire| {
-            std::iter::once(&preset).chain(catalog.providers.iter())
-                .filter(|candidate| {
-                    candidate.profile_name == preset.profile_name ||
-                    wire.connection.protocol_profiles.values().any(|name| name == &candidate.profile_name)
-                })
-                .filter(|candidate| candidate.wire_profile.as_ref().is_some_and(|other|
-                    !other.connection.hidden && other.provider_id == wire.provider_id
-                    && other.credential == wire.credential && other.regions == wire.regions
-                    && other.pricing.billing_mode == wire.pricing.billing_mode))
-                .min_by(|a, b| a.profile_name.cmp(&b.profile_name))
-                .map(|candidate| candidate.profile_name.clone())
-        }).unwrap_or_else(|| preset.profile_name.clone());
+        let root = preset
+            .wire_profile
+            .as_ref()
+            .and_then(|wire| {
+                std::iter::once(&preset)
+                    .chain(catalog.providers.iter())
+                    .filter(|candidate| {
+                        candidate.profile_name == preset.profile_name
+                            || wire
+                                .connection
+                                .protocol_profiles
+                                .values()
+                                .any(|name| name == &candidate.profile_name)
+                    })
+                    .filter(|candidate| {
+                        candidate.wire_profile.as_ref().is_some_and(|other| {
+                            !other.connection.hidden
+                                && other.provider_id == wire.provider_id
+                                && other.credential == wire.credential
+                                && other.regions == wire.regions
+                                && other.pricing.billing_mode == wire.pricing.billing_mode
+                        })
+                    })
+                    .min_by(|a, b| a.profile_name.cmp(&b.profile_name))
+                    .map(|candidate| candidate.profile_name.clone())
+            })
+            .unwrap_or_else(|| preset.profile_name.clone());
         let id = if root == "anthropic" {
             // The compatibility API requires an API key; never attach OAuth.
             "anthropic-api-key".to_owned()
-        } else { root };
+        } else {
+            root
+        };
         preset.credential = CredentialConfig::Static { id: id.clone() };
         credential_sources.push(CredentialSource {
             provider_id: preset.provider_id.clone(),
@@ -223,27 +239,38 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
 
     // Defaults select a documented format on this account. Keep the other
     // formats available for explicit auxiliary operations such as web search.
-    if let Some(defaults) = inputs.routing.as_ref()
+    if let Some(defaults) = inputs
+        .routing
+        .as_ref()
         .and_then(|routing| routing.get("defaultProtocols"))
         .and_then(serde_json::Value::as_object)
     {
         for (name, value) in defaults {
-            if value.is_null() { continue; }
+            if value.is_null() {
+                continue;
+            }
             let format = serde_json::from_value::<llm_runtime::ProtocolFamily>(value.clone());
             let Some(index) = providers.iter().position(|p| p.profile_name == *name) else {
-                warnings.push(format!("routing.defaultProtocols[{name:?}]: unavailable account; skipped"));
+                warnings.push(format!(
+                    "routing.defaultProtocols[{name:?}]: unavailable account; skipped"
+                ));
                 continue;
             };
             let source = &providers[index];
             let valid = format.as_ref().is_ok_and(|format| {
-                source.protocol == *format || source.wire_profile.as_ref()
-                    .and_then(|wire| wire.connection.protocol_profiles.get(format))
-                    .and_then(|target| providers.iter().find(|p| p.profile_name == *target))
-                    .is_some_and(|target| target.protocol == *format
-                        && target.provider_id == source.provider_id
-                        && target.credential == source.credential
-                        && target.auth == source.auth
-                        && target.pricing.billing_mode == source.pricing.billing_mode)
+                source.protocol == *format
+                    || source
+                        .wire_profile
+                        .as_ref()
+                        .and_then(|wire| wire.connection.protocol_profiles.get(format))
+                        .and_then(|target| providers.iter().find(|p| p.profile_name == *target))
+                        .is_some_and(|target| {
+                            target.protocol == *format
+                                && target.provider_id == source.provider_id
+                                && target.credential == source.credential
+                                && target.auth == source.auth
+                                && target.pricing.billing_mode == source.pricing.billing_mode
+                        })
             });
             if valid {
                 if let Some(wire) = &mut providers[index].wire_profile {
@@ -254,7 +281,6 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
             }
         }
     }
-
 
     // 4. Routing: aliases (fold) + fallback (validate).
     let (mut chains, raw_fallback, routing_warns) = parse_routing(inputs.routing.as_ref());
@@ -324,16 +350,40 @@ mod tests {
             "deepseek": "open_ai_responses", "openai-chatgpt": "open_ai_chat"
         }}));
         let assembled = assemble(inputs);
-        let registry = llm_runtime::ModelRegistry::from_config(assembled.client_config.clone()).unwrap();
-        let route = registry.resolve_in("deepseek-flash", Some("deepseek")).unwrap();
+        let registry =
+            llm_runtime::ModelRegistry::from_config(assembled.client_config.clone()).unwrap();
+        let route = registry
+            .resolve_in("deepseek-flash", Some("deepseek"))
+            .unwrap();
         assert_eq!(route.profile_name, "deepseek-responses");
-        let credential = |name: &str| assembled.client_config.providers.iter()
-            .find(|p| p.profile_name == name).unwrap().credential.clone();
+        let credential = |name: &str| {
+            assembled
+                .client_config
+                .providers
+                .iter()
+                .find(|p| p.profile_name == name)
+                .unwrap()
+                .credential
+                .clone()
+        };
         assert_eq!(credential("deepseek"), credential("deepseek-responses"));
         assert_eq!(credential("deepseek"), credential("deepseek-search"));
-        assert!(assembled.warnings.iter().any(|w| w.contains("chatgpt") && w.contains("not authorized")));
-        assert!(assembled.client_config.providers.iter().find(|p| p.profile_name == "openai-chatgpt")
-            .unwrap().wire_profile.as_ref().unwrap().connection.default_protocol.is_none());
+        assert!(assembled
+            .warnings
+            .iter()
+            .any(|w| w.contains("chatgpt") && w.contains("not authorized")));
+        assert!(assembled
+            .client_config
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "openai-chatgpt")
+            .unwrap()
+            .wire_profile
+            .as_ref()
+            .unwrap()
+            .connection
+            .default_protocol
+            .is_none());
     }
 
     #[test]
@@ -343,7 +393,10 @@ mod tests {
         inputs.anthropic_has_oauth = true;
         inputs.routing = Some(json!({"defaultProtocols": {"anthropic": "open_ai_chat"}}));
         let assembled = assemble(inputs);
-        assert!(assembled.warnings.iter().any(|w| w.contains("not authorized")));
+        assert!(assembled
+            .warnings
+            .iter()
+            .any(|w| w.contains("not authorized")));
     }
 
     #[test]
@@ -410,9 +463,23 @@ mod tests {
     fn deepseek_native_search_uses_the_conversation_credential_reference() {
         let out = assemble(anthropic_only_inputs());
         for name in ["deepseek", "deepseek-search"] {
-            let profile = out.client_config.providers.iter().find(|profile| profile.profile_name == name).unwrap();
-            assert_eq!(profile.credential, CredentialConfig::Static { id: "deepseek".into() });
-            let source = out.credential_sources.iter().find(|source| source.profile_name == name).unwrap();
+            let profile = out
+                .client_config
+                .providers
+                .iter()
+                .find(|profile| profile.profile_name == name)
+                .unwrap();
+            assert_eq!(
+                profile.credential,
+                CredentialConfig::Static {
+                    id: "deepseek".into()
+                }
+            );
+            let source = out
+                .credential_sources
+                .iter()
+                .find(|source| source.profile_name == name)
+                .unwrap();
             assert_eq!(source.credential_id, "deepseek");
             assert_eq!(source.env_var.as_deref(), Some("DEEPSEEK_API_KEY"));
         }
@@ -421,22 +488,57 @@ mod tests {
     #[test]
     fn declared_formats_share_credentials_without_crossing_regions_or_products() {
         let out = assemble(anthropic_only_inputs());
-        for (root, alternate) in [("openai", "openai-chat"), ("deepseek", "deepseek-responses"),
-            ("minimax-intl", "minimax-chat-intl"), ("gemini", "gemini-chat"),
-            ("qwen-intl", "qwen-anthropic-intl"), ("openrouter", "openrouter-responses"),
-            ("minimax-intl", "minimax-responses-intl"), ("kimi-intl", "kimi-anthropic-intl"),
-            ("kimi-code", "kimi-code-responses"), ("kimi-code", "kimi-code-anthropic"),
-            ("zai-coding", "zai-coding-chat"), ("zai-coding", "zai-coding-responses")] {
-            let find = |name: &str| out.client_config.providers.iter().find(|p| p.profile_name == name).unwrap();
-            assert_eq!(find(root).credential, find(alternate).credential, "{alternate}");
+        for (root, alternate) in [
+            ("openai", "openai-chat"),
+            ("deepseek", "deepseek-responses"),
+            ("minimax-intl", "minimax-chat-intl"),
+            ("gemini", "gemini-chat"),
+            ("qwen-intl", "qwen-anthropic-intl"),
+            ("openrouter", "openrouter-responses"),
+            ("minimax-intl", "minimax-responses-intl"),
+            ("kimi-intl", "kimi-anthropic-intl"),
+            ("kimi-code", "kimi-code-responses"),
+            ("kimi-code", "kimi-code-anthropic"),
+            ("zai-coding", "zai-coding-chat"),
+            ("zai-coding", "zai-coding-responses"),
+        ] {
+            let find = |name: &str| {
+                out.client_config
+                    .providers
+                    .iter()
+                    .find(|p| p.profile_name == name)
+                    .unwrap()
+            };
+            assert_eq!(
+                find(root).credential,
+                find(alternate).credential,
+                "{alternate}"
+            );
         }
-        let find = |name: &str| out.client_config.providers.iter().find(|p| p.profile_name == name).unwrap();
-        let mainland = assemble_for_region(anthropic_only_inputs(), llm_runtime::Region::ChinaMainland);
-        let china = |name: &str| mainland.client_config.providers.iter().find(|p| p.profile_name == name).unwrap();
+        let find = |name: &str| {
+            out.client_config
+                .providers
+                .iter()
+                .find(|p| p.profile_name == name)
+                .unwrap()
+        };
+        let mainland =
+            assemble_for_region(anthropic_only_inputs(), llm_runtime::Region::ChinaMainland);
+        let china = |name: &str| {
+            mainland
+                .client_config
+                .providers
+                .iter()
+                .find(|p| p.profile_name == name)
+                .unwrap()
+        };
         assert_ne!(china("minimax").credential, find("minimax-intl").credential);
         assert_ne!(china("qwen").credential, find("qwen-intl").credential);
         assert_ne!(china("kimi-code").credential, china("kimi").credential);
-        assert_eq!(find("anthropic").provider_id, find("anthropic-chat").provider_id);
+        assert_eq!(
+            find("anthropic").provider_id,
+            find("anthropic-chat").provider_id
+        );
         assert_eq!(find("gemini").provider_id, find("gemini-chat").provider_id);
     }
 

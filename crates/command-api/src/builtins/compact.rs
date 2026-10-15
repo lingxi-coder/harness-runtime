@@ -415,8 +415,8 @@ mod tests {
         use compaction::CompactionOrchestrator;
         use lingxi_core::types::{ConversationMessage, MessageId};
         use orchestrator::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
         use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 

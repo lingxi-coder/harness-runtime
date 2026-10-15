@@ -1011,7 +1011,7 @@ pub fn response_to_stream_events(resp: HistoryResponse) -> Vec<HistoryEvent> {
 
 #[tokio::test]
 async fn resumable_response_round_trip_preserves_exact_source() {
-    use futures::{StreamExt, stream};
+    use futures::{stream, StreamExt};
 
     let source = r#"{"opaque":{"value":"\ud800"},"number":1e400}"#;
     let response = HistoryResponse {
@@ -2214,10 +2214,8 @@ mod tests {
             provider_metadata["tool_input_issues"][0]["tool_name"],
             "Write"
         );
-        assert!(
-            !serde_json::to_string(&response)
-                .unwrap()
-                .contains("unfinished_secret_html")
-        );
+        assert!(!serde_json::to_string(&response)
+            .unwrap()
+            .contains("unfinished_secret_html"));
     }
 }

@@ -266,7 +266,10 @@ impl ModelRuntime {
         profile: Option<&str>,
     ) -> Result<bool, LlmError> {
         let route = self.registry.resolve_in(model, profile)?;
-        let entry = self.routes.get(&route.profile_name).ok_or(LlmError::ModelUnavailable)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
         Ok(route.provider_id == ProviderId::AnthropicFirstParty
             && entry.protocol == ProtocolFamily::AnthropicMessages)
     }
@@ -472,19 +475,25 @@ impl ModelRuntime {
         // The caller chooses a format supporting native search from the SDK's
         // declared alternatives. SDK resolution validates provider/account identity.
         let catalog = lingxi_llm_client::client::RoutingCatalog::new(
-            self.routes.values().map(|entry| entry.profile.clone()).collect(),
+            self.routes
+                .values()
+                .map(|entry| entry.profile.clone())
+                .collect(),
             lingxi_llm_client::protocol::Region::International,
         );
         for format in source.profile.connection.protocol_profiles.keys() {
             if let Ok(selected) = catalog.resolve_in_with_protocol(
-                &route.request_model, Some(&route.profile_name), Some(*format),
+                &route.request_model,
+                Some(&route.profile_name),
+                Some(*format),
             ) {
                 if let Some(target) = self.routes.get(&selected.profile_name) {
                     if target.credential == source.credential
-                        && lingxi_llm_client::hosted_search::supports(&target.profile) {
-                        return self.registry.resolve_in(
-                            &selected.request_model, Some(&selected.profile_name),
-                        );
+                        && lingxi_llm_client::hosted_search::supports(&target.profile)
+                    {
+                        return self
+                            .registry
+                            .resolve_in(&selected.request_model, Some(&selected.profile_name));
                     }
                 }
             }

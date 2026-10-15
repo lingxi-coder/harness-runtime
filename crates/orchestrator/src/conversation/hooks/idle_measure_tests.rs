@@ -1,8 +1,8 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use hooks::mods::{ModHost, ModSessionContext};
 use std::sync::Arc;
 

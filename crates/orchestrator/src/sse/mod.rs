@@ -68,5 +68,7 @@ pub enum StreamingError {
 
 // Diagnostic formatting must not expose partial source or credentials.
 impl std::fmt::Debug for StreamingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { std::fmt::Display::fmt(self, f) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
