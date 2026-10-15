@@ -1,4 +1,5 @@
-//! Deterministic publish-time checks on an app document.
+//! Deterministic publish-time checks on an app document, and on the fragment
+//! of an app saved from a visualization.
 //!
 //! An app runs offline in a WebView at its own origin, with no native bridge,
 //! Web Workers or device permissions. The checks reject what can never work
@@ -161,7 +162,64 @@ pub fn check_document(html: &str) -> DocumentReport {
         );
     }
 
-    let loads = network_loads(html, &lower);
+    warn_about_app_limits(html, &lower, &mut report);
+    report
+}
+
+/// Largest fragment of an app saved from a visualization: the visualization
+/// limit.
+pub const MAX_FRAGMENT_BYTES: usize = 2 * 1024 * 1024;
+
+/// Check the fragment of an app saved from a visualization. The app wraps it
+/// in its own document, so it must stay a fragment; beyond that it gets the
+/// warnings a document gets, plus the `lingxi` calls that need a
+/// conversation.
+#[must_use]
+pub fn check_fragment(fragment: &str) -> DocumentReport {
+    let mut report = DocumentReport::default();
+    if fragment.len() > MAX_FRAGMENT_BYTES {
+        report.errors.push(format!(
+            "The fragment is {} bytes; the limit is {MAX_FRAGMENT_BYTES} bytes (2 MiB).",
+            fragment.len()
+        ));
+        return report;
+    }
+    if fragment.trim().is_empty() {
+        report.errors.push("The fragment is empty.".to_string());
+        return report;
+    }
+    if fragment.contains('\0') {
+        report
+            .errors
+            .push("The fragment contains a NUL character.".to_string());
+        return report;
+    }
+    let lower = fragment.to_ascii_lowercase();
+    for tag in ["!doctype", "html", "head", "body"] {
+        if tag_present(&lower, tag) {
+            report.errors.push(format!(
+                "Remove the <{tag}> element: this app keeps only its fragment and wraps it in the app's document itself."
+            ));
+        }
+    }
+    warn_about_app_limits(fragment, &lower, &mut report);
+    if fragment.contains("draftFollowup") {
+        report.warnings.push(
+            "lingxi.draftFollowup needs a conversation; in an app it throws, so hide what calls it."
+                .to_string(),
+        );
+    }
+    if fragment.contains("requestExpand") {
+        report.warnings.push(
+            "lingxi.requestExpand does nothing in an app, which is always full screen.".to_string(),
+        );
+    }
+    report
+}
+
+/// Warnings for what breaks offline or is blocked in every app.
+fn warn_about_app_limits(html: &str, lower: &str, report: &mut DocumentReport) {
+    let loads = network_loads(html, lower);
     if !loads.is_empty() {
         report.warnings.push(format!(
             "These load from the network, so the app breaks offline ({}). Inline the CSS, JavaScript and images instead.",
@@ -176,7 +234,7 @@ pub fn check_document(html: &str) -> DocumentReport {
             ));
         }
     }
-    for at in word_hits(&lower, "<form") {
+    for at in word_hits(lower, "<form") {
         let tag_end = lower[at..].find('>').map_or(lower.len(), |end| at + end);
         let tag = &lower[at..tag_end];
         if tag.contains("action=") {
@@ -186,7 +244,6 @@ pub fn check_document(html: &str) -> DocumentReport {
             ));
         }
     }
-    report
 }
 
 #[cfg(test)]
@@ -245,6 +302,26 @@ mod tests {
         assert!(check_document("<!doctype html><form id=f></form>")
             .warnings
             .is_empty());
+    }
+
+    #[test]
+    fn fragments_must_stay_fragments_and_get_the_app_warnings() {
+        assert_eq!(
+            check_fragment("<div id=\"w\"></div><script>lingxi.saveState({})</script>"),
+            DocumentReport::default()
+        );
+        let wrapped = check_fragment("<!doctype html><html><body>x</body></html>");
+        assert_eq!(wrapped.errors.len(), 3, "{:?}", wrapped.errors);
+        for fragment in ["  ", "<p>\0</p>"] {
+            assert!(!check_fragment(fragment).is_publishable(), "{fragment:?}");
+        }
+        assert!(!check_fragment(&"a".repeat(MAX_FRAGMENT_BYTES + 1)).is_publishable());
+        let report = check_fragment(
+            "<button onclick=\"lingxi.draftFollowup('more')\">Ask</button>\
+<script>new Worker('w.js'); lingxi.requestExpand(); fetch('https://x.test')</script>",
+        );
+        assert!(report.is_publishable());
+        assert_eq!(report.warnings.len(), 4, "{:?}", report.warnings);
     }
 
     #[test]

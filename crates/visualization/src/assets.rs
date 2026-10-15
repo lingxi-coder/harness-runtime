@@ -6,6 +6,9 @@
 pub const VISUALIZE_CSS: &str = include_str!("../vendor/codex/visualize.css");
 /// LingXi content runtime, inlined into each document ahead of the fragment.
 pub const CONTENT_RUNTIME_JS: &str = include_str!("../assets/content-runtime.js");
+/// The same `lingxi` global for an app saved from a visualization, which runs
+/// on its own origin without a conversation.
+pub const APP_RUNTIME_JS: &str = include_str!("../assets/app-runtime.js");
 
 /// File name of the bundled D3 build under `/asset/`.
 pub const D3: &str = "d3.min.js";
@@ -153,8 +156,8 @@ mod tests {
                 "{asset}"
             );
         }
-        assert!(
-            !CONTENT_RUNTIME_JS.contains("http://") && !CONTENT_RUNTIME_JS.contains("https://")
-        );
+        for runtime in [CONTENT_RUNTIME_JS, APP_RUNTIME_JS] {
+            assert!(!runtime.contains("http://") && !runtime.contains("https://"));
+        }
     }
 }

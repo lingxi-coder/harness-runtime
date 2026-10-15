@@ -8,7 +8,28 @@
 
 use std::sync::Arc;
 
-use crate::store::{AppSummary, LocalAppId, LocalAppStore, StoreError};
+use crate::store::{AppSummary, LocalAppId, LocalAppStore, SourceFormat, StoreError};
+
+/// What `window.__lingxiAppBoot` starts as in a document rendered from a
+/// fragment. Serving the document puts the app's initial state in its place.
+pub const BOOT_PLACEHOLDER: &str = "/*lingxi-app-boot*/null";
+
+/// JSON text safe to place inside a `<script>` element.
+fn script_json(value: &serde_json::Value) -> String {
+    let json = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    let mut escaped = String::with_capacity(json.len());
+    for character in json.chars() {
+        match character {
+            '<' => escaped.push_str("\\u003c"),
+            '>' => escaped.push_str("\\u003e"),
+            '&' => escaped.push_str("\\u0026"),
+            '\u{2028}' => escaped.push_str("\\u2028"),
+            '\u{2029}' => escaped.push_str("\\u2029"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
 
 /// The policy every app document is served with. The same sandbox and
 /// sources as installed market apps, plus `data:` and `blob:` for `fetch`,
@@ -84,7 +105,9 @@ impl LocalAppService {
 
     /// Answer one request of app `id` for `path` (the URL path, without
     /// query or fragment). An app is one document: `/` and `/index.html`
-    /// serve its current revision, anything else is a 404.
+    /// serve its current revision, anything else is a 404. A document
+    /// rendered from a fragment gets the app's initial state, which its
+    /// runtime uses on the first launch only.
     pub async fn serve(&self, id: &str, path: &str) -> HostResponse {
         let Some(id) = LocalAppId::parse(id) else {
             return HostResponse::not_found();
@@ -92,10 +115,23 @@ impl LocalAppService {
         if path != "/" && path != "/index.html" {
             return HostResponse::not_found();
         }
-        match self.store.read_current(&id).await {
-            Ok(app) => HostResponse::document(app.html),
-            Err(_) => HostResponse::not_found(),
+        let Ok(app) = self.store.read_current(&id).await else {
+            return HostResponse::not_found();
+        };
+        let mut html = app.html;
+        if app.summary.format == SourceFormat::Fragment {
+            let state = self
+                .store
+                .read_initial_state(&id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+            if let Some(state) = state {
+                html = html.replacen(BOOT_PLACEHOLDER, &script_json(&state), 1);
+            }
         }
+        HostResponse::document(html)
     }
 
     /// Every app, most recently updated first.
@@ -181,5 +217,64 @@ mod tests {
         assert!(service.delete(id.as_str()).await.unwrap());
         assert_eq!(service.serve(id.as_str(), "/").await.status, 404);
         assert!(!service.delete("Bad Id").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn fragment_apps_are_served_with_their_initial_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
+        let store = Arc::new(LocalAppStore::new(fs, dir.path().to_path_buf()));
+        let document =
+            format!("<!doctype html><script>window.__lingxiAppBoot={BOOT_PLACEHOLDER};</script>");
+        let state =
+            r#"{"version":2,"modelContent":"</script><script>x()</script>","privateContent":null}"#;
+        let id = store
+            .publish_revision(
+                None,
+                Some("Chart"),
+                None,
+                crate::store::NewRevision {
+                    document: &document,
+                    fragment: Some("<p>f</p>"),
+                    saved_from: None,
+                    initial_state: Some(state),
+                },
+                0,
+            )
+            .await
+            .unwrap()
+            .id;
+        let service = LocalAppService::new(store.clone());
+        let served = String::from_utf8(service.serve(id.as_str(), "/").await.body).unwrap();
+        let boot = served
+            .split("window.__lingxiAppBoot=")
+            .nth(1)
+            .and_then(|rest| rest.split(";</script>").next())
+            .unwrap();
+        assert!(!boot.contains('<'), "{boot}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(boot).unwrap(),
+            serde_json::from_str::<serde_json::Value>(state).unwrap()
+        );
+        assert!(
+            !store
+                .read_current(&id)
+                .await
+                .unwrap()
+                .html
+                .contains("modelContent"),
+            "the stored document never carries the state"
+        );
+
+        // A document app keeps the text as written.
+        let plain = store
+            .publish(None, Some("Plain"), None, &document, 0)
+            .await
+            .unwrap()
+            .id;
+        let served = service.serve(plain.as_str(), "/").await.body;
+        assert_eq!(served, document.as_bytes());
     }
 }

@@ -34,8 +34,13 @@ pub fn register_tool(
     registry: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
     store: Arc<LocalAppStore>,
+    visualizations: Option<Arc<visualization::VisualizationStore>>,
 ) {
-    registry.register_builtin(Arc::new(tool_ui::LocalAppTool::new(ctx, store)));
+    let mut tool = tool_ui::LocalAppTool::new(ctx, store);
+    if let Some(visualizations) = visualizations {
+        tool = tool.with_visualizations(visualizations);
+    }
+    registry.register_builtin(Arc::new(tool));
 }
 
 struct LocalAppPrompt(String);

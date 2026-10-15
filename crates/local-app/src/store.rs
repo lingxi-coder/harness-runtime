@@ -2,8 +2,10 @@
 //!
 //! ```text
 //! <config-home>/local-apps/
-//!   index.json        # id → name, summary, kept revisions, created_at
-//!   <id>/<rev>.html   # one immutable document per revision
+//!   index.json                # id → name, summary, kept revisions, created_at
+//!   <id>/<rev>.html           # one immutable document per revision
+//!   <id>/<rev>.source.html    # the fragment a fragment revision was rendered from
+//!   <id>/initial-state.json   # state an app saved from a visualization starts with
 //! ```
 //!
 //! Unlike visualizations, apps belong to the device rather than to a
@@ -12,6 +14,13 @@
 //! publish never leaves the app without a document. Every write goes through
 //! [`FileSystem::write_file_rooted_atomic`] (staged, synced, renamed) and
 //! writers are serialized in-process and across processes by an advisory lock.
+//!
+//! An app saved from a visualization is a *fragment* app: each revision keeps
+//! the visualization fragment it was rendered from, which is what the agent
+//! reads and changes, and the app keeps the confirmed visualization state as
+//! its initial state. That state is never part of a document: the service
+//! injects it when it serves one, so a document can leave the device without
+//! the user's data.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +45,7 @@ pub const MAX_SUMMARY_CHARS: usize = 160;
 
 const INDEX: &str = "index.json";
 const LOCK: &str = ".lock";
+const INITIAL_STATE: &str = "initial-state.json";
 const INDEX_SCHEMA: u32 = 1;
 
 /// An app id. The store makes them (`a` + 10 hex digits); only lowercase
@@ -99,12 +109,87 @@ impl From<FsError> for StoreError {
     }
 }
 
+/// How a revision was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceFormat {
+    /// A complete HTML document, stored as written.
+    #[default]
+    Document,
+    /// A visualization fragment: the document was rendered from it, and the
+    /// fragment is kept next to it as the revision's source.
+    Fragment,
+}
+
+impl SourceFormat {
+    fn is_document(&self) -> bool {
+        *self == Self::Document
+    }
+}
+
+/// The visualization revision an app's code was last saved from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisualizationOrigin {
+    /// Root session that owns the visualization.
+    pub root_session: String,
+    /// Visualization id.
+    pub id: String,
+    /// Visualization revision.
+    pub revision: u32,
+    /// Version of the confirmed visualization state at the save.
+    pub state_version: u64,
+}
+
+/// One revision to store.
+#[derive(Debug, Clone)]
+pub struct NewRevision<'a> {
+    /// The complete document the app serves.
+    pub document: &'a str,
+    /// For a fragment app, the fragment `document` was rendered from.
+    pub fragment: Option<&'a str>,
+    /// The visualization revision the code comes from, when it does.
+    pub saved_from: Option<VisualizationOrigin>,
+    /// For a new app saved from a visualization, the state it starts with
+    /// (JSON). Only a new app takes one.
+    pub initial_state: Option<&'a str>,
+}
+
+impl<'a> NewRevision<'a> {
+    /// A revision written as a complete document.
+    #[must_use]
+    pub fn document(document: &'a str) -> Self {
+        Self {
+            document,
+            fragment: None,
+            saved_from: None,
+            initial_state: None,
+        }
+    }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RevisionMeta {
     rev: u32,
     bytes: u64,
     created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "SourceFormat::is_document")]
+    format: SourceFormat,
+    /// Size of the kept fragment of a fragment revision.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    source_bytes: u64,
+}
+
+impl RevisionMeta {
+    /// Bytes this revision keeps on disk.
+    fn stored_bytes(&self) -> u64 {
+        self.bytes.saturating_add(self.source_bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +201,21 @@ struct AppEntry {
     created_at_ms: u64,
     /// Kept revisions, oldest first; the last one is the app.
     revisions: Vec<RevisionMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saved_from: Option<VisualizationOrigin>,
+    /// Size of `initial-state.json`, when the app has one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    initial_state_bytes: u64,
+}
+
+impl AppEntry {
+    /// Bytes the app keeps on disk.
+    fn stored_bytes(&self) -> u64 {
+        self.revisions
+            .iter()
+            .map(RevisionMeta::stored_bytes)
+            .fold(self.initial_state_bytes, u64::saturating_add)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +260,8 @@ pub struct AppSummary {
     pub revision: u32,
     /// Size of the current document.
     pub bytes: u64,
+    /// How the current revision was written.
+    pub format: SourceFormat,
     /// First publish, Unix milliseconds.
     pub created_at_ms: u64,
     /// Publish of the current revision, Unix milliseconds.
@@ -218,6 +320,7 @@ fn summarize(id: &str, entry: &AppEntry) -> Option<AppSummary> {
         summary: entry.summary.clone(),
         revision: current.rev,
         bytes: current.bytes,
+        format: current.format,
         created_at_ms: entry.created_at_ms,
         updated_at_ms: current.created_at_ms,
     })
@@ -259,6 +362,37 @@ impl LocalAppStore {
         Path::new(id.as_str()).join(format!("{revision}.html"))
     }
 
+    fn source_path(id: &LocalAppId, revision: u32) -> PathBuf {
+        Path::new(id.as_str()).join(format!("{revision}.source.html"))
+    }
+
+    fn initial_state_path(id: &LocalAppId) -> PathBuf {
+        Path::new(id.as_str()).join(INITIAL_STATE)
+    }
+
+    async fn delete_file(&self, tail: &Path) -> Result<(), StoreError> {
+        match self
+            .fs
+            .delete_file_rooted_no_follow(&self.config_home, &Self::relative(tail))
+            .await
+        {
+            Ok(()) | Err(FsError::NotFound(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn read_text(&self, tail: &Path) -> Result<Option<String>, StoreError> {
+        match self
+            .fs
+            .read_file_rooted_no_follow(&self.config_home, &Self::relative(tail))
+            .await
+        {
+            Ok(file) => Ok(Some(file.content)),
+            Err(FsError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn read_index(&self) -> Result<Index, StoreError> {
         match self
             .fs
@@ -290,16 +424,9 @@ impl LocalAppStore {
         revisions: &[RevisionMeta],
     ) -> Result<(), StoreError> {
         for meta in revisions {
-            match self
-                .fs
-                .delete_file_rooted_no_follow(
-                    &self.config_home,
-                    &Self::relative(&Self::document_path(id, meta.rev)),
-                )
-                .await
-            {
-                Ok(()) | Err(FsError::NotFound(_)) => {}
-                Err(error) => return Err(error.into()),
+            self.delete_file(&Self::document_path(id, meta.rev)).await?;
+            if meta.format == SourceFormat::Fragment {
+                self.delete_file(&Self::source_path(id, meta.rev)).await?;
             }
         }
         Ok(())
@@ -320,13 +447,39 @@ impl LocalAppStore {
         html: &str,
         now_ms: u64,
     ) -> Result<Published, StoreError> {
+        self.publish_revision(id, name, summary, NewRevision::document(html), now_ms)
+            .await
+    }
+
+    /// [`publish`](Self::publish) for any [`NewRevision`]: a fragment
+    /// revision also keeps its fragment, a revision saved from a
+    /// visualization records where it came from, and a new app may start
+    /// with an initial state.
+    ///
+    /// # Errors
+    /// As [`publish`](Self::publish), and [`StoreError::Invalid`] for an
+    /// initial state on an existing app.
+    pub async fn publish_revision(
+        &self,
+        id: Option<&LocalAppId>,
+        name: Option<&str>,
+        summary: Option<&str>,
+        new: NewRevision<'_>,
+        now_ms: u64,
+    ) -> Result<Published, StoreError> {
         let name = name.map(normalize_name).transpose()?;
         let summary = summary.map(normalize_summary).transpose()?;
+        let html = new.document;
         if html.len() > MAX_DOCUMENT_BYTES {
             return Err(StoreError::Quota(format!(
                 "the document is {} bytes; the limit is {MAX_DOCUMENT_BYTES} bytes (25 MiB)",
                 html.len()
             )));
+        }
+        if id.is_some() && new.initial_state.is_some() {
+            return Err(StoreError::Invalid(
+                "only a new app starts with an initial state".into(),
+            ));
         }
         let _serial = self.writer.lock().await;
         let _lock = self
@@ -363,12 +516,16 @@ impl LocalAppStore {
                         summary: String::new(),
                         created_at_ms: now_ms,
                         revisions: Vec::new(),
+                        saved_from: None,
+                        initial_state_bytes: 0,
                     },
                 );
                 id
             }
         };
         let bytes = html.len() as u64;
+        let source_bytes = new.fragment.map_or(0, |fragment| fragment.len() as u64);
+        let initial_state_bytes = new.initial_state.map_or(0, |state| state.len() as u64);
         let entry = index
             .apps
             .get_mut(id.as_str())
@@ -376,12 +533,14 @@ impl LocalAppStore {
         let pruned_count = (entry.revisions.len() + 1).saturating_sub(KEPT_REVISIONS);
         let freed: u64 = entry.revisions[..pruned_count]
             .iter()
-            .map(|meta| meta.bytes)
+            .map(RevisionMeta::stored_bytes)
             .sum();
         let total = index
             .total_bytes
             .saturating_sub(freed)
-            .saturating_add(bytes);
+            .saturating_add(bytes)
+            .saturating_add(source_bytes)
+            .saturating_add(initial_state_bytes);
         if total > MAX_LIBRARY_BYTES {
             return Err(StoreError::Quota(format!(
                 "the app library already stores {} bytes; the limit is {MAX_LIBRARY_BYTES}",
@@ -396,16 +555,43 @@ impl LocalAppStore {
                 html,
             )
             .await?;
+        if let Some(fragment) = new.fragment {
+            self.fs
+                .write_file_rooted_atomic(
+                    &self.config_home,
+                    &Self::relative(&Self::source_path(&id, revision)),
+                    fragment,
+                )
+                .await?;
+        }
+        if let Some(state) = new.initial_state {
+            self.fs
+                .write_file_rooted_atomic(
+                    &self.config_home,
+                    &Self::relative(&Self::initial_state_path(&id)),
+                    state,
+                )
+                .await?;
+            entry.initial_state_bytes = initial_state_bytes;
+        }
         if let Some(name) = name {
             entry.name = name;
         }
         if let Some(summary) = summary {
             entry.summary = summary;
         }
+        // Only code saved unchanged from a visualization stays tied to it.
+        entry.saved_from = new.saved_from;
         entry.revisions.push(RevisionMeta {
             rev: revision,
             bytes,
             created_at_ms: now_ms,
+            format: if new.fragment.is_some() {
+                SourceFormat::Fragment
+            } else {
+                SourceFormat::Document
+            },
+            source_bytes,
         });
         let pruned: Vec<RevisionMeta> = entry.revisions.drain(..pruned_count).collect();
         let name = entry.name.clone();
@@ -465,6 +651,54 @@ impl LocalAppStore {
         Ok(StoredApp { summary, html })
     }
 
+    /// The fragment of an app's current revision; `None` for a document app.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the library has no such app.
+    pub async fn read_current_fragment(
+        &self,
+        id: &LocalAppId,
+    ) -> Result<Option<(AppSummary, String)>, StoreError> {
+        let summary = self.get(id).await?;
+        if summary.format != SourceFormat::Fragment {
+            return Ok(None);
+        }
+        let fragment = self
+            .read_text(&Self::source_path(id, summary.revision))
+            .await?
+            .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
+        Ok(Some((summary, fragment)))
+    }
+
+    /// The state an app saved from a visualization starts with (JSON), if
+    /// it has one.
+    ///
+    /// # Errors
+    /// Filesystem failure.
+    pub async fn read_initial_state(&self, id: &LocalAppId) -> Result<Option<String>, StoreError> {
+        self.read_text(&Self::initial_state_path(id)).await
+    }
+
+    /// The app whose current code is `origin`'s visualization revision,
+    /// saved unchanged; the state version is not compared.
+    ///
+    /// # Errors
+    /// Filesystem failure or a corrupt index.
+    pub async fn find_saved(
+        &self,
+        origin: &VisualizationOrigin,
+    ) -> Result<Option<AppSummary>, StoreError> {
+        let index = self.read_index().await?;
+        Ok(index.apps.iter().find_map(|(id, entry)| {
+            let saved = entry.saved_from.as_ref()?;
+            (saved.root_session == origin.root_session
+                && saved.id == origin.id
+                && saved.revision == origin.revision)
+                .then(|| summarize(id, entry))
+                .flatten()
+        }))
+    }
+
     /// Remove an app and every kept revision. `false` when it was not there.
     ///
     /// # Errors
@@ -479,10 +713,12 @@ impl LocalAppStore {
         let Some(entry) = index.apps.remove(id.as_str()) else {
             return Ok(false);
         };
-        let freed: u64 = entry.revisions.iter().map(|meta| meta.bytes).sum();
-        index.total_bytes = index.total_bytes.saturating_sub(freed);
+        index.total_bytes = index.total_bytes.saturating_sub(entry.stored_bytes());
         self.write_index(&index).await?;
         self.delete_documents(id, &entry.revisions).await?;
+        if entry.initial_state_bytes > 0 {
+            self.delete_file(&Self::initial_state_path(id)).await?;
+        }
         Ok(true)
     }
 }
@@ -654,6 +890,162 @@ mod tests {
         )
         .unwrap();
         assert_eq!(index.total_bytes, 0);
+    }
+
+    fn origin(revision: u32) -> VisualizationOrigin {
+        VisualizationOrigin {
+            root_session: "s1".into(),
+            id: "chart".into(),
+            revision,
+            state_version: 4,
+        }
+    }
+
+    fn index_of(dir: &Path) -> Index {
+        serde_json::from_str(&std::fs::read_to_string(dir.join("local-apps/index.json")).unwrap())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fragment_apps_keep_their_fragment_and_initial_state() {
+        let (dir, store) = store();
+        let state = r#"{"version":4,"modelContent":1,"privateContent":null}"#;
+        let first = store
+            .publish_revision(
+                None,
+                Some("Chart"),
+                None,
+                NewRevision {
+                    document: DOC,
+                    fragment: Some("<p>f1</p>"),
+                    saved_from: Some(origin(2)),
+                    initial_state: Some(state),
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let id = first.id;
+        let app_dir = dir.path().join("local-apps").join(id.as_str());
+        assert!(app_dir.join("1.html").exists() && app_dir.join("1.source.html").exists());
+        let (summary, fragment) = store.read_current_fragment(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (summary.format, fragment.as_str()),
+            (SourceFormat::Fragment, "<p>f1</p>")
+        );
+        assert_eq!(
+            store.read_initial_state(&id).await.unwrap().as_deref(),
+            Some(state)
+        );
+        assert_eq!(
+            index_of(dir.path()).total_bytes,
+            (DOC.len() + "<p>f1</p>".len() + state.len()) as u64
+        );
+        assert_eq!(
+            store
+                .find_saved(&origin(2))
+                .await
+                .unwrap()
+                .map(|app| app.id),
+            Some(id.clone())
+        );
+        assert!(store.find_saved(&origin(3)).await.unwrap().is_none());
+
+        // Any other publish unties the app from the visualization revision.
+        store
+            .publish(Some(&id), None, None, "<!doctype html>v2", 1)
+            .await
+            .unwrap();
+        assert!(store.read_current_fragment(&id).await.unwrap().is_none());
+        assert!(store.find_saved(&origin(2)).await.unwrap().is_none());
+        assert_eq!(
+            store.read_initial_state(&id).await.unwrap().as_deref(),
+            Some(state),
+            "the initial state belongs to the app, not to a revision"
+        );
+
+        assert!(store.delete(&id).await.unwrap());
+        assert_eq!(std::fs::read_dir(&app_dir).unwrap().count(), 0);
+        assert_eq!(index_of(dir.path()).total_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn pruned_fragment_revisions_take_their_fragment_along() {
+        let (dir, store) = store();
+        let fragment = |n: u32| NewRevision {
+            document: DOC,
+            fragment: Some("<p>f</p>"),
+            saved_from: Some(origin(n)),
+            initial_state: None,
+        };
+        let id = store
+            .publish_revision(None, Some("Chart"), None, fragment(1), 0)
+            .await
+            .unwrap()
+            .id;
+        for n in 2..=(KEPT_REVISIONS as u32 + 1) {
+            store
+                .publish_revision(Some(&id), None, None, fragment(n), 0)
+                .await
+                .unwrap();
+        }
+        let app_dir = dir.path().join("local-apps").join(id.as_str());
+        assert!(!app_dir.join("1.html").exists() && !app_dir.join("1.source.html").exists());
+        assert!(app_dir.join("2.source.html").exists());
+        assert_eq!(
+            index_of(dir.path()).total_bytes,
+            (KEPT_REVISIONS * (DOC.len() + "<p>f</p>".len())) as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_new_app_takes_an_initial_state() {
+        let (_dir, store) = store();
+        let id = store
+            .publish(None, Some("App"), None, DOC, 0)
+            .await
+            .unwrap()
+            .id;
+        let error = store
+            .publish_revision(
+                Some(&id),
+                None,
+                None,
+                NewRevision {
+                    initial_state: Some("{}"),
+                    ..NewRevision::document(DOC)
+                },
+                0,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn libraries_written_before_fragment_apps_still_read() {
+        let (dir, store) = store();
+        let root = dir.path().join("local-apps");
+        std::fs::create_dir_all(root.join("a1")).unwrap();
+        std::fs::write(root.join("a1/1.html"), DOC).unwrap();
+        std::fs::write(
+            root.join("index.json"),
+            r#"{"schema":1,"totalBytes":40,"apps":{"a1":{"name":"Old","createdAtMs":1,"revisions":[{"rev":1,"bytes":40,"createdAtMs":1}]}}}"#,
+        )
+        .unwrap();
+        let app = &store.list().await.unwrap()[0];
+        assert_eq!(
+            (app.name.as_str(), app.format),
+            ("Old", SourceFormat::Document)
+        );
+        let id = LocalAppId::parse("a1").unwrap();
+        assert_eq!(store.read_current(&id).await.unwrap().html, DOC);
+        // A document publish writes none of the new fields.
+        store.publish(Some(&id), None, None, DOC, 2).await.unwrap();
+        let index = std::fs::read_to_string(root.join("index.json")).unwrap();
+        for field in ["format", "sourceBytes", "savedFrom", "initialStateBytes"] {
+            assert!(!index.contains(field), "{field}");
+        }
     }
 
     #[test]
