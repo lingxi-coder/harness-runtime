@@ -1953,6 +1953,16 @@ mod tests {
     #[async_trait]
     impl ProcessRunner for CancellationProcessRunner {
         async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            // Snapshot and repository probes precede the owned command. Only
+            // the actual prompt-shell child participates in cancellation.
+            if command.process_owner().is_none() {
+                return Ok(ProcessOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    timed_out: false,
+                });
+            }
             *self.owner.lock().unwrap() = command.process_owner().map(str::to_owned);
             self.started.notify_one();
             self.killed.cancelled().await;

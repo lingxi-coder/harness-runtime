@@ -2199,22 +2199,33 @@ async fn current_fast_catalog_reaches_transport() {
             for stream in [false, true] {
                 let mut request = LlmRequest::new(model).with_user_text("fast fixture");
                 request.set_speed(Some("fast".into())).unwrap();
-                if stream {
-                    let _ = service.stream_request(request).await;
+                let request_result = if stream {
+                    match service.stream_request(request).await {
+                        Ok(stream) => Ok(stream
+                            .collect::<Vec<_>>()
+                            .await
+                            .into_iter()
+                            .filter_map(Result::err)
+                            .map(|error| error.to_string())
+                            .collect::<Vec<_>>()),
+                        Err(error) => Err(error.to_string()),
+                    }
                 } else {
-                    let _ = service
+                    service
                         .execute_non_stream_request(
                             request,
                             llm_runtime::NonStreamingRequestClass::Auxiliary,
                             llm_runtime::NonStreamingRetryOptions::default(),
                         )
-                        .await;
-                }
+                        .await
+                        .map(|_| Vec::new())
+                        .map_err(|error| error.to_string())
+                };
                 let requests = capture.0.lock().unwrap();
                 assert_eq!(
                     requests.len(),
                     if stream { 2 } else { 1 },
-                    "{model}, direct={direct}"
+                    "{model}, direct={direct}, request result={request_result:?}"
                 );
                 let wire = requests.last().unwrap();
                 let body: Value = serde_json::from_slice(&wire.body).unwrap();
@@ -2313,22 +2324,39 @@ async fn current_fast_environment_reaches_transport() {
             capture.0.lock().unwrap().clear();
             let mut request = LlmRequest::new(model).with_user_text("fast environment fixture");
             request.set_speed(Some("fast".into())).unwrap();
-            if stream {
-                let _ = service.stream_request(request).await;
+            // Unknown custom models need an explicit budget before the
+            // provider request can be prepared. That budget is independent
+            // from Native fast-mode admission, which this fixture still tests.
+            if model == "unknown-model" {
+                request.input.max_tokens = Some(4096);
+            }
+            let request_result = if stream {
+                match service.stream_request(request).await {
+                    Ok(stream) => Ok(stream
+                        .collect::<Vec<_>>()
+                        .await
+                        .into_iter()
+                        .filter_map(Result::err)
+                        .map(|error| error.to_string())
+                        .collect::<Vec<_>>()),
+                    Err(error) => Err(error.to_string()),
+                }
             } else {
-                let _ = service
+                service
                     .execute_non_stream_request(
                         request,
                         llm_runtime::NonStreamingRequestClass::Auxiliary,
                         Default::default(),
                     )
-                    .await;
-            }
+                    .await
+                    .map(|_| Vec::new())
+                    .map_err(|error| error.to_string())
+            };
             let requests = capture.0.lock().unwrap();
             assert_eq!(
                 requests.len(),
                 1,
-                "one physical SDK capture, stream={stream}: {row}"
+                "one physical SDK capture, stream={stream}: {row}; request result={request_result:?}"
             );
             let wire = &requests[0];
             let body: Value = serde_json::from_slice(&wire.body).unwrap();
@@ -2411,15 +2439,21 @@ async fn fast_environment_is_refreshed_for_physical_retry() {
     .with_thinking(ThinkingConfig::Disabled);
     let mut request = LlmRequest::new("claude-opus-4-7").with_user_text("retry fast fixture");
     request.set_speed(Some("fast".into())).unwrap();
-    let _ = service
+    let request_result = service
         .execute_non_stream_request(
             request,
             llm_runtime::NonStreamingRequestClass::Auxiliary,
             Default::default(),
         )
-        .await;
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string());
     let requests = capture.0.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests.len(),
+        2,
+        "physical retry requests; result={request_result:?}"
+    );
     for (index, wire) in requests.iter().enumerate() {
         let body: Value = serde_json::from_slice(&wire.body).unwrap();
         assert_eq!(

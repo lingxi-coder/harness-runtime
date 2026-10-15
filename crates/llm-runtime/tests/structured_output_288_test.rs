@@ -114,6 +114,7 @@ fn profile(protocol: ProtocolFamily, structured_output: bool) -> ProviderProfile
 
 fn schema_request() -> LlmRequest {
     let mut request = LlmRequest::new("claude-sonnet-4-6").with_user_text("Return the result");
+    request.input.max_tokens = Some(4096);
     request.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
         name: "response".into(),
         schema: lingxi_llm_client::protocol::JsonPayload::from_generated_value(&json!({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false})).unwrap(),

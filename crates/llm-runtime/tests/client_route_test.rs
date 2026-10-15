@@ -939,20 +939,20 @@ async fn response_format_is_rejected_when_selected_model_lacks_structured_output
 #[tokio::test]
 async fn aliases_sharing_a_wire_id_keep_the_selected_rows_inference_contract() {
     use lingxi_llm_client::protocol::{CapabilitySupport, ReasoningEffort};
-    let mut profile = llm_runtime::builtin_presets()
+    let mut base_profile = llm_runtime::builtin_presets()
         .providers
         .into_iter()
         .find(|p| p.profile_name == "openai")
         .unwrap();
-    profile.auth = AuthStrategy::None;
-    profile.credential = CredentialConfig::None;
-    let model = profile
+    base_profile.auth = AuthStrategy::None;
+    base_profile.credential = CredentialConfig::None;
+    let base_model = base_profile
         .models
         .iter()
         .find(|m| m.request_model == "gpt-5.6-sol")
         .unwrap()
         .clone();
-    let source = profile
+    let base_source_model = base_profile
         .wire_profile
         .as_ref()
         .unwrap()
@@ -961,27 +961,36 @@ async fn aliases_sharing_a_wire_id_keep_the_selected_rows_inference_contract() {
         .find(|m| m.request_model == "gpt-5.6-sol")
         .unwrap()
         .clone();
-    profile.models.clear();
-    profile.wire_profile.as_mut().unwrap().models.clear();
-    for (name, effort) in [
-        ("low-row", ReasoningEffort::Low),
-        ("high-row", ReasoningEffort::High),
-    ] {
-        let mut model = model.clone();
+    // The current resolver rejects duplicate wire IDs within one profile. Keep
+    // the same inference-contract case with one alias row per profile: both
+    // rows still send the same wire ID, while each selected profile owns one
+    // unambiguous capability row.
+    let alias_profile = |name: &str, effort: ReasoningEffort| {
+        let mut profile = base_profile.clone();
+        profile.profile_name = format!("openai-{name}");
+        let mut model = base_model.clone();
         model.display_model = name.into();
         model.aliases = vec![name.into()];
-        let mut source = source.clone();
+        profile.models = vec![model];
+        let mut source = base_source_model.clone();
         source.display_model = name.into();
         source.aliases = vec![name.into()];
         source.info.features.effort.support = CapabilitySupport::Supported;
         source.info.features.effort.levels = Some(vec![effort]);
-        profile.models.push(model);
-        profile.wire_profile.as_mut().unwrap().models.push(source);
-    }
+        profile.wire_profile.as_mut().unwrap().models = vec![source];
+        profile
+    };
     let client = ModelRuntime::from_config(ClientConfig {
-        providers: vec![profile],
+        providers: vec![
+            alias_profile("low-row", ReasoningEffort::Low),
+            alias_profile("high-row", ReasoningEffort::High),
+        ],
     })
     .unwrap();
+    assert!(matches!(
+        client.prepare(&LlmRequest::new("gpt-5.6-sol")).await,
+        Err(LlmError::InvalidRequest { message }) if message.contains("ambiguous across profiles")
+    ));
     let mut request = LlmRequest::new("low-row").with_user_text("hello");
     request.set_effort(Some(serde_json::json!("low"))).unwrap();
     let prepared = client.prepare(&request).await.unwrap();

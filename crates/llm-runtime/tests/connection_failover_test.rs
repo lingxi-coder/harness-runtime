@@ -71,6 +71,13 @@ fn ok_body() -> serde_json::Value {
     })
 }
 
+fn messages_request(model: &str, profile: Option<&str>) -> llm_runtime::MessagesCreateRequest {
+    let mut request =
+        llm_runtime::MessagesCreateRequest::new(model, profile, None, Vec::new(), Vec::new());
+    request.opts.max_output_tokens = Some(4096);
+    request
+}
+
 impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
     fn execute<'a>(
         &'a self,
@@ -196,13 +203,7 @@ async fn a_rate_limited_connection_hands_the_request_to_the_next_one() {
     let api = service(transport.clone());
 
     let response = api
-        .messages_create(llm_runtime::MessagesCreateRequest::new(
-            "shared-model",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-        ))
+        .messages_create(messages_request("shared-model", None))
         .await
         .expect("the second connection must serve the request");
 
@@ -226,13 +227,7 @@ async fn a_request_scoped_to_a_connection_still_fails_over() {
     let api = service(transport.clone());
 
     let _ = api
-        .messages_create(llm_runtime::MessagesCreateRequest::new(
-            "shared-model",
-            Some("grouped:intl"),
-            None,
-            Vec::new(),
-            Vec::new(),
-        ))
+        .messages_create(messages_request("shared-model", Some("grouped:intl")))
         .await;
 
     assert_eq!(
@@ -250,13 +245,14 @@ async fn the_streaming_connect_phase_also_fails_over() {
     let api = service(transport.clone());
 
     let _ = api
-        .stream(
+        .stream_with_opts(
             "shared-model",
             None,
             None,
             Vec::new(),
             Vec::new(),
             None,
+            Some(4096),
             None,
         )
         .await;
@@ -293,13 +289,7 @@ async fn a_single_connection_provider_does_not_fail_over() {
     );
 
     let _ = api
-        .messages_create(llm_runtime::MessagesCreateRequest::new(
-            "shared-model",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-        ))
+        .messages_create(messages_request("shared-model", None))
         .await;
 
     let hops = transport.connections();
@@ -333,6 +323,7 @@ async fn cross_protocol_failover_adapts_cached_history_for_both_drivers() {
             None,
         );
         let mut request = llm_runtime::LlmRequest::new("shared-model").with_user_text("hello");
+        request.input.max_tokens = Some(4096);
         request
             .input
             .prompt_cache
@@ -397,17 +388,12 @@ async fn cross_protocol_model_fallback_rebuilds_history_cache_policy() {
         None,
     );
     api.messages_create({
-        let mut request = llm_runtime::MessagesCreateRequest::new(
-            "claude-opus-4-6",
+        let mut request = messages_request("claude-opus-4-6", None);
+        request.system = Some(llm_runtime::SystemPromptInput::source_vector(
+            vec!["cached system".into()],
             None,
-            Some(llm_runtime::SystemPromptInput::source_vector(
-                vec!["cached system".into()],
-                None,
-                None,
-            )),
-            vec![],
-            vec![],
-        );
+            None,
+        ));
         request.opts.fallback = match Some("shared-model") {
             Some(models) => llm_runtime::FallbackPolicy::from_models_csv(models),
             None => llm_runtime::FallbackPolicy::Configured,

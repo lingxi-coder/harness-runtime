@@ -230,6 +230,12 @@ fn client_with(
     .expect("client")
 }
 
+fn explicit_messages_request(model: &str) -> LlmRequest {
+    let mut request = LlmRequest::new(model);
+    request.input.max_tokens = Some(4096);
+    request
+}
+
 #[tokio::test]
 async fn api_key_strategy_uses_provider_specific_headers() {
     std::env::set_var("LLM_CLIENT_AUTH_TEST_ANTHROPIC", "anthropic-secret");
@@ -243,7 +249,7 @@ async fn api_key_strategy_uses_provider_specific_headers() {
         },
     );
     let prepared = client
-        .prepare(&LlmRequest::new("p-model"))
+        .prepare(&explicit_messages_request("p-model"))
         .await
         .expect("prepare");
     assert_eq!(
@@ -316,7 +322,7 @@ async fn oauth_bearer_on_anthropic_adds_oauth_beta_header() {
     );
 
     let prepared = client
-        .prepare(&LlmRequest::new("p-model"))
+        .prepare(&explicit_messages_request("p-model"))
         .await
         .expect("prepare");
 
@@ -471,7 +477,7 @@ async fn sigv4_without_signing_config_fails_at_prepare() {
     .with_credential_provider(Arc::new(SigV4Store));
 
     let err = client
-        .prepare(&LlmRequest::new("p-model"))
+        .prepare(&explicit_messages_request("p-model"))
         .await
         .unwrap_err();
     assert!(
@@ -804,7 +810,7 @@ async fn sigv4_null_body_content_sha256_via_client() {
     let fixed_time = UNIX_EPOCH + Duration::from_secs(1_440_938_160); // 20150830T123600Z
 
     let prepared = client
-        .prepare_at(&LlmRequest::new("p-model"), fixed_time)
+        .prepare_at(&explicit_messages_request("p-model"), fixed_time)
         .await
         .expect("prepare must succeed");
 
@@ -946,7 +952,7 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
     let fixed_time = UNIX_EPOCH + Duration::from_secs(1_440_938_160);
 
     // Prepare the request with the fixed clock.
-    let request = LlmRequest::new("p-model");
+    let request = explicit_messages_request("p-model");
     let prepared = client
         .prepare_at(&request, fixed_time)
         .await
@@ -1062,7 +1068,7 @@ async fn foundry_claude_api_key_uses_x_api_key_header_and_messages_url() {
         },
     );
     let prepared = client
-        .prepare(&LlmRequest::new("p-model"))
+        .prepare(&explicit_messages_request("p-model"))
         .await
         .expect("prepare");
 
@@ -1116,7 +1122,7 @@ async fn foundry_claude_aad_token_uses_bearer_header() {
         },
     );
     let prepared = client
-        .prepare(&LlmRequest::new("p-model"))
+        .prepare(&explicit_messages_request("p-model"))
         .await
         .expect("prepare");
 

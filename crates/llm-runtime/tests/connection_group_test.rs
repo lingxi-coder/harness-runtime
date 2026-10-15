@@ -617,9 +617,95 @@ fn kimi_presets_are_one_group_with_disjoint_models() {
 fn ungrouped_presets_are_untouched() {
     for profile in llm_runtime::builtin_presets().providers {
         let upstream = profile.wire_profile.as_ref().expect("upstream facts");
-        assert_eq!(
-            serde_json::to_value(&profile.connection).unwrap(),
-            serde_json::to_value(&upstream.connection).unwrap()
-        );
+        let host = serde_json::to_value(&profile.connection).unwrap();
+        let source = serde_json::to_value(&upstream.connection).unwrap();
+        for field in ["group", "connection_id", "order", "hidden", "failover"] {
+            assert_eq!(
+                host.get(field),
+                source.get(field),
+                "host-owned connection field {field:?} remains unchanged for {}",
+                profile.profile_name
+            );
+        }
     }
+}
+
+/// The host connection DTO does not own SDK-only alternate-protocol mappings.
+/// A trusted built-in profile must preserve those source facts through runtime
+/// projection, and the actual SDK resolver must still follow the declared route.
+#[test]
+fn trusted_anthropic_preset_preserves_and_resolves_its_chat_protocol() {
+    use lingxi_llm_client::protocol::{ProtocolFamily as WireProtocol, Region};
+
+    let providers = llm_runtime::builtin_presets().providers;
+    let anthropic = providers
+        .iter()
+        .find(|profile| profile.profile_name == "anthropic")
+        .expect("Anthropic preset")
+        .clone();
+    let source = anthropic.wire_profile.as_ref().expect("source profile");
+    let source_protocol_profiles = source.connection.protocol_profiles.clone();
+    let source_default_protocol = source.connection.default_protocol.clone();
+    assert_eq!(
+        source_protocol_profiles
+            .get(&WireProtocol::OpenAiChat)
+            .map(String::as_str),
+        Some("anthropic-chat")
+    );
+
+    let runtime = llm_runtime::client::ModelRuntime::from_config(ClientConfig { providers })
+        .expect("built-in presets form a runtime");
+    let service_profiles = runtime.provider_service_profiles();
+    let projected = service_profiles
+        .iter()
+        .find(|profile| profile.profile_name == "anthropic")
+        .expect("projected Anthropic service profile");
+    assert_eq!(
+        projected.connection.protocol_profiles, source_protocol_profiles,
+        "trusted source-only protocol mappings survive runtime projection"
+    );
+    assert_eq!(
+        projected.connection.default_protocol,
+        source_default_protocol
+    );
+
+    let routing =
+        lingxi_llm_client::client::RoutingCatalog::new(service_profiles, Region::International);
+    let route = routing
+        .resolve_in_with_protocol(
+            "claude-fable-5",
+            Some("anthropic"),
+            Some(WireProtocol::OpenAiChat),
+        )
+        .expect("the declared same-provider chat route resolves");
+    assert_eq!(route.profile_name, "anthropic-chat");
+    assert_eq!(route.request_model, "claude-fable-5");
+
+    // A changed endpoint is a different trust boundary: the host DTO cannot
+    // authorize an upstream alternate that could forward its credential.
+    let mut proxy = anthropic;
+    proxy.profile_name = "anthropic-proxy".into();
+    proxy.base_url = "https://proxy.example/v1".into();
+    let proxy_runtime = llm_runtime::client::ModelRuntime::from_config(ClientConfig {
+        providers: vec![proxy],
+    })
+    .expect("custom endpoint profile");
+    let proxy_profiles = proxy_runtime.provider_service_profiles();
+    let proxy_profile = proxy_profiles
+        .iter()
+        .find(|profile| profile.profile_name == "anthropic-proxy")
+        .expect("projected proxy profile");
+    assert!(
+        proxy_profile.connection.protocol_profiles.is_empty(),
+        "a custom endpoint does not inherit the source endpoint's alternate route"
+    );
+    let proxy_routing =
+        lingxi_llm_client::client::RoutingCatalog::new(proxy_profiles, Region::International);
+    assert!(proxy_routing
+        .resolve_in_with_protocol(
+            "claude-fable-5",
+            Some("anthropic-proxy"),
+            Some(WireProtocol::OpenAiChat),
+        )
+        .is_err());
 }

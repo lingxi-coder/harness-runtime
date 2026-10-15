@@ -97,7 +97,10 @@ mod tests {
             .call(source_json!({"skill":"forker"}), fresh_ctx(), fresh_tx())
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("unavailable in Side Chat"));
+        assert!(error
+            .model_facing_message()
+            .string_at("")
+            .is_some_and(|message| message.contains("unavailable in Side Chat")));
         let mut inline = prompt_desc("inline");
         inline.allowed_tools = vec!["*".into()];
         let tool = SkillTool::with_loader(context, Arc::new(FixedLoader(Some(inline))));

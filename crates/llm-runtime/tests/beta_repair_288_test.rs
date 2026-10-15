@@ -6,6 +6,11 @@ use lingxi_llm_client::providers::anthropic::{
     beta_repair::Beta, thinking_display::DisplayProbeBudget,
 };
 
+fn with_explicit_output_budget(mut request: llm_runtime::LlmRequest) -> llm_runtime::LlmRequest {
+    request.input.max_tokens = Some(4096);
+    request
+}
+
 #[tokio::test(start_paused = true)]
 async fn named_rejection_lifetime_priority_and_model_isolation_reach_both_drivers() {
     // Strong named refusals populate the process model cache, whose Native
@@ -54,12 +59,27 @@ async fn named_rejection_lifetime_priority_and_model_isolation_reach_both_driver
             let api = service(capture.clone(), true, false, &model)
                 .with_interactive_session(true);
             let scope=Default::default();
-            assert!(!run(&api,request(&scope,&model,false),streaming).await);
+            assert!(!run(
+                &api,
+                with_explicit_output_budget(request(&scope, &model, false)),
+                streaming
+            )
+            .await);
             assert!(scope.beta_rejections().rejected(Beta::ThinkingDisplayUpdates));
             // Retirement precedes trial success; failure must not restore it.
-            assert!(run(&api,request(&scope,&model,false),streaming).await);
+            assert!(run(
+                &api,
+                with_explicit_output_budget(request(&scope, &model, false)),
+                streaming
+            )
+            .await);
             let isolated=Default::default();
-            assert!(run(&api,request(&isolated,&model,false),streaming).await);
+            assert!(run(
+                &api,
+                with_explicit_output_budget(request(&isolated, &model, false)),
+                streaming
+            )
+            .await);
             let rows=capture.requests.lock().unwrap();assert_eq!(rows.len(),4);
             for (row,expected) in rows.iter().zip([true,false,false,!strong]) {
                 assert_eq!(has_beta(&row.1),expected,"{message}");
@@ -83,7 +103,12 @@ async fn named_rejection_lifetime_priority_and_model_isolation_reach_both_driver
         ]);
         let api = service(capture.clone(), true, false, &model).with_interactive_session(true);
         let scope = Default::default();
-        let succeeded = run(&api, request(&scope, &model, false), streaming).await;
+        let succeeded = run(
+            &api,
+            with_explicit_output_budget(request(&scope, &model, false)),
+            streaming,
+        )
+        .await;
         let request_projection = capture
             .requests
             .lock()
@@ -135,7 +160,14 @@ async fn named_rejection_lifetime_priority_and_model_isolation_reach_both_driver
     )]);
     let api = service(capture.clone(), true, false, model).with_interactive_session(true);
     let scope = Default::default();
-    assert!(!run(&api, request(&scope, model, false), true).await);
+    assert!(
+        !run(
+            &api,
+            with_explicit_output_budget(request(&scope, model, false)),
+            true
+        )
+        .await
+    );
     assert_eq!(capture.requests.lock().unwrap().len(), 1);
     assert!(!scope
         .beta_rejections()

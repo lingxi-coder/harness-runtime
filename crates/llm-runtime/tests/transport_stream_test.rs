@@ -201,6 +201,12 @@ fn streaming_request() -> LlmRequest {
     request
 }
 
+fn anthropic_streaming_request() -> LlmRequest {
+    let mut request = streaming_request();
+    request.input.max_tokens = Some(4096);
+    request
+}
+
 fn append_user_text(request: &mut LlmRequest, text: &str) {
     request
         .input
@@ -407,7 +413,7 @@ async fn execute_stream_decodes_anthropic_event_sequence() {
     let client = anthropic_client();
 
     let mut stream = client
-        .execute_stream(&streaming_request(), transport.clone())
+        .execute_stream(&anthropic_streaming_request(), transport.clone())
         .await
         .expect("stream");
     let (events, error) = collect_events(&mut stream).await;
@@ -761,7 +767,7 @@ async fn error_status_drains_frames_into_taxonomy() {
     let client = anthropic_client();
 
     let error = client
-        .execute_stream(&streaming_request(), transport.clone())
+        .execute_stream(&anthropic_streaming_request(), transport.clone())
         .await
         .err()
         .expect("error status");
@@ -788,7 +794,7 @@ async fn mid_stream_transport_error_preserves_original_cause() {
     let client = anthropic_client();
 
     let mut stream = client
-        .execute_stream(&streaming_request(), transport.clone())
+        .execute_stream(&anthropic_streaming_request(), transport.clone())
         .await
         .expect("stream");
 
@@ -814,7 +820,7 @@ async fn failure_before_any_event_stays_transport() {
     let client = anthropic_client();
 
     let mut stream = client
-        .execute_stream(&streaming_request(), transport.clone())
+        .execute_stream(&anthropic_streaming_request(), transport.clone())
         .await
         .expect("stream");
 

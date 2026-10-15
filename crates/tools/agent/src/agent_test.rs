@@ -2097,9 +2097,13 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             ));
             fusion.state.store(2, std::sync::atomic::Ordering::SeqCst);
             let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+            let message = match error {
+                ToolError::InvalidInput(message) => source_text(&message),
+                other => panic!("a failed review must reject as InvalidInput: {other:?}"),
+            };
             assert!(
-                error.to_string().contains("current permission review"),
-                "{error}"
+                message.contains("current permission review"),
+                "{message}"
             );
             assert!(inner.requests.lock().unwrap().is_empty());
         }
@@ -2132,9 +2136,13 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 cancel.cancel();
             }
             let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+            let message = match error {
+                ToolError::InvalidInput(message) => source_text(&message),
+                other => panic!("a cancelled or expired review must reject as InvalidInput: {other:?}"),
+            };
             assert!(
-                error.to_string().contains("current permission review"),
-                "{error}"
+                message.contains("current permission review"),
+                "{message}"
             );
             assert!(fusion.requests.lock().unwrap().is_empty());
             assert!(tool.fusion_permission_strategies.lock().unwrap().is_empty());
@@ -2163,9 +2171,13 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.tool_use_id = Some("denied-fusion-0".into());
         let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+        let message = match error {
+            ToolError::InvalidInput(message) => source_text(&message),
+            other => panic!("an evicted review must reject as InvalidInput: {other:?}"),
+        };
         assert!(
-            error.to_string().contains("current permission review"),
-            "{error}"
+            message.contains("current permission review"),
+            "{message}"
         );
         assert!(fusion.requests.lock().unwrap().is_empty());
     }

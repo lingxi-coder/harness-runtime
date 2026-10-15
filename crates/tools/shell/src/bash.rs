@@ -2517,11 +2517,14 @@ static INPUT_SCHEMA_NO_BACKGROUND: Lazy<Utf16JsonProjection> = Lazy::new(|| {
 
 static SIDE_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     let mut schema = INPUT_SCHEMA_NO_BACKGROUND.clone();
+    let mut timeout = schema
+        .subprojection("/properties/timeout")
+        .expect("generated Bash schema has timeout");
+    timeout
+        .set_field("maximum", Utf16JsonProjection::plain(json!(120_000)))
+        .expect("generated Bash timeout is an object");
     schema
-        .replace_pointer_projection(
-            "/properties/timeout/maximum",
-            Utf16JsonProjection::plain(json!(120_000)),
-        )
+        .replace_pointer_projection("/properties/timeout", timeout)
         .expect("generated Bash timeout schema is writable");
     schema
 });
@@ -4219,7 +4222,10 @@ mod tests {
             )
             .await
             .expect_err("background denied");
-        assert!(error.to_string().contains("unavailable in Side Chat"));
+        assert!(error
+            .model_facing_message()
+            .string_at("")
+            .is_some_and(|message| message.contains("unavailable in Side Chat")));
     }
 
     /// `ephemeral_id` must never repeat within a process. It used to be

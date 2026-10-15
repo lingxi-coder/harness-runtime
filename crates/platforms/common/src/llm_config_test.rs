@@ -1397,7 +1397,8 @@ async fn vertex_claude_prepare_e2e_bearer_header() {
     apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
     let client = ModelRuntime::from_config(cfg).expect("client must build");
-    let req = llm_runtime::LlmRequest::new("claude-sonnet-4@20250514");
+    let mut req = llm_runtime::LlmRequest::new("claude-sonnet-4@20250514");
+    req.input.max_tokens = Some(4096);
     let prepared = client.prepare(&req).await.expect("prepare must succeed");
 
     // URL: non-streaming must use :rawPredict.
