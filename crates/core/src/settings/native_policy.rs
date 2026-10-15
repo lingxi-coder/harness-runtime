@@ -4090,7 +4090,7 @@ mod tests {
             platform: NativePolicyPlatform::Linux,
             plist_candidates: vec![plist(
                 r#"{"model":"plist-model"}"#,
-                "/Library/Preferences/com.lingxi.code.plist",
+                "/Library/Preferences/com.example.code.plist",
                 false,
             )],
             managed_file_documents: vec![managed_file(
@@ -4124,7 +4124,7 @@ mod tests {
             platform: NativePolicyPlatform::Linux,
             plist_candidates: vec![plist(
                 r#"{"model":"user-model","policyHelpers":[]}"#,
-                "/Users/test/Library/Preferences/com.lingxi.code.plist",
+                "/Users/test/Library/Preferences/com.example.code.plist",
                 true,
             )],
             ..NativePolicyInputs::default()

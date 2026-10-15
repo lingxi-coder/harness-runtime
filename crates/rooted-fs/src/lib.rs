@@ -4533,7 +4533,7 @@ mod tests {
         use std::ffi::OsStr;
         let root = tempfile::tempdir().unwrap();
         let parent = std::os::fd::OwnedFd::from(std::fs::File::open(root.path()).unwrap());
-        let relative = Path::new("session.jsonl.lingxi-message-identities");
+        let relative = Path::new("session.jsonl.message-identities");
 
         std::fs::write(root.path().join(".t1"), b"first").unwrap();
         imp::publish_after_absence_check(

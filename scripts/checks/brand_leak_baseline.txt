@@ -1041,8 +1041,6 @@ G1	crates/test-harness/tests/parity_help_render.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/test-harness/tests/parity_tui_listings.rs	\.claude(?![A-Za-z0-9_.\-])
 
 # 2.1.295 test-only product text and branded path fixtures; preserve their exact inputs.
-G1	crates/command-api/tests/batch_2_e2e.rs	LingXi
-G1	crates/command-api/tests/dispatch_e2e.rs	LingXi
 G1	crates/core/src/settings/raw_layer_stack.rs	\.lingxi
 G3	crates/core/src/settings/raw_layer_stack.rs	.lingxi
 G1	crates/orchestrator/tests/effort_cold_resume_295_test.rs	LINGXI
@@ -1067,3 +1065,31 @@ G1	crates/runtime/tests/fixtures/native_commands_295/sessions/unicode-skill-name
 G1	crates/runtime/tests/fixtures/native_commands_295/sessions/unicode-skill-name.jsonl	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/runtime/tests/fixtures/native_commands_295/sessions/unknown-slash-command.jsonl	CLAUDE\.md
 G1	crates/runtime/tests/fixtures/native_commands_295/sessions/unknown-slash-command.jsonl	\.claude(?![A-Za-z0-9_.\-])
+
+# These 2.1.295 user-facing strings are present in the pinned Native source:
+# native-nl-source/src_187673145.js (SHA-256 6fbf3e921382e88e71bd834f2034ee24a15cada553c00e95181e44fa033d22aa).
+G1	crates/core/src/settings/native_extra_known_marketplaces.rs	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/core/src/settings/native_policy_parser.rs	Claude Code
+G1	crates/core/src/settings/native_policy_static_defaults.rs	Claude Code
+
+# Mobile durable notice uses Native's exact whe() system-reminder from the
+# pinned 2.1.295 src_194447854.js (SHA-256 ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120).
+G1	crates/runtime/src/mobile/turn_durability.rs	Claude Code
+
+# This is the product's real max-output override, read by context_window.rs;
+# the provider-default test skips environment-sensitive assertions when set.
+G1	crates/llm-runtime/src/provider_settings.rs	LINGXI
+
+# Identical retained source-checkpoint copies contain the active product
+# LINGXI_DISABLE_LINGXI_MDS environment contract from conversation/reminders.rs.
+G1	acceptance/tool-search-pfr-gce-gate-r32-20261014/post-reminders.rs	LINGXI
+G1	acceptance/tool-search-pfr-gce-gate-r32-20261014/pre-reminders.rs	LINGXI
+
+# Frozen Headless comparison capture; docs/parity/headless-delivery-status.md
+# explicitly accepts this remaining brand-text difference and records its scope.
+G1	scripts/tests/headless-fixtures/native-harness-resume-matrix-2026-10-08.json	LingXi
+
+# Test isolation reads the same actual Native token-reminder variables as the
+# production resolver; keep the exceptions scoped to this test-only helper.
+G2	crates/orchestrator/src/request_context_staging_test.rs	CLAUDE_CODE_TOTAL_TOKENS_REMINDER
+G2	crates/orchestrator/src/request_context_staging_test.rs	CLAUDE_CODE_TOTAL_TOKENS_REMINDER_AFTER_USER_TURN

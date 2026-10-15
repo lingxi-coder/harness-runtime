@@ -853,13 +853,12 @@ mod tests {
     // run has no fixture environment and immediately returns.
     #[test]
     fn cross_process_worker() {
-        let Some(root) = std::env::var_os("LINGXI_FUSION_CAS_TEST_ROOT") else {
+        let Some(root) = std::env::var_os("FUSION_CAS_TEST_ROOT") else {
             return;
         };
         let ctx = context(std::path::Path::new(&root));
         let command: FusionAdminCommandDto =
-            serde_json::from_str(&std::env::var("LINGXI_FUSION_CAS_TEST_COMMAND").unwrap())
-                .unwrap();
+            serde_json::from_str(&std::env::var("FUSION_CAS_TEST_COMMAND").unwrap()).unwrap();
         match apply_command(&ctx, &command) {
             Ok(()) => println!("FUSION_CAS_RESULT=accepted"),
             Err(error) => {
@@ -899,9 +898,9 @@ mod tests {
                         "fusion_admin::tests::cross_process_worker",
                         "--nocapture",
                     ])
-                    .env("LINGXI_FUSION_CAS_TEST_ROOT", root.path())
+                    .env("FUSION_CAS_TEST_ROOT", root.path())
                     .env(
-                        "LINGXI_FUSION_CAS_TEST_COMMAND",
+                        "FUSION_CAS_TEST_COMMAND",
                         serde_json::to_string(&command).unwrap(),
                     )
                     .stdout(std::process::Stdio::piped())
