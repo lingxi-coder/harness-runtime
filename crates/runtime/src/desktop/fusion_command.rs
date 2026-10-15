@@ -730,10 +730,7 @@ mod tests {
             } else {
                 "Analyze this\nexactly"
             };
-            assert_eq!(
-                fusion_visible_args(&pinned).string_at("").as_deref(),
-                Some(expected)
-            );
+            assert_eq!(fusion_visible_args(&pinned).string_at(""), Some(expected));
         }
         let unrelated = Utf16JsonProjection::from("explain --strategy-revision abc123");
         assert_eq!(

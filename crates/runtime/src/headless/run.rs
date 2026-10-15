@@ -443,15 +443,17 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
             return finish_print_branch(runtime, argv.max_budget_usd, sink, code).await;
         }
     }
-    // Slash branch — bypasses the API entirely.
+    // Local slash commands finish here; unknown or malformed slash input falls
+    // back to a model turn through the same execution owner. Keep its large
+    // child future on the heap to limit poll-time stack growth.
     if prompt.starts_with('/') {
-        let code = run_slash_command_with_budget(
+        let code = Box::pin(run_slash_command_with_budget(
             &prompt_source,
             runtime,
             argv.max_budget_usd,
             argv.no_stream,
             sink,
-        )
+        ))
         .await;
         return finish_print_branch(runtime, argv.max_budget_usd, sink, code).await;
     }
@@ -2053,10 +2055,10 @@ async fn run_slash_command_with_budget(
         columns: 80,
     };
     let cancellation = runtime.turn_cancel();
-    match command_api::with_mod_command_context(
+    match Box::pin(command_api::with_mod_command_context(
         context,
         runtime.dispatcher.dispatch(input.clone(), cancellation),
-    )
+    ))
     .await
     {
         SlashDispatchResult::Failed { diagnostic } => {
@@ -2083,9 +2085,12 @@ async fn run_slash_command_with_budget(
             // await that one task to a terminal status before returning.
             match local_fusion_task_id_to_await(input, display_text) {
                 Some(task_id) => {
-                    let outcome =
-                        await_local_fusion_result(task_id, runtime.task_registry.as_ref(), sink)
-                            .await;
+                    let outcome = Box::pin(await_local_fusion_result(
+                        task_id,
+                        runtime.task_registry.as_ref(),
+                        sink,
+                    ))
+                    .await;
                     fusion_result_exit_code(outcome.as_ref())
                 }
                 None => fusion_spawn_failure_exit_code(input, display_text),
@@ -2099,15 +2104,15 @@ async fn run_slash_command_with_budget(
             sink.turn_start().await;
             let cancel = runtime.turn_cancel();
             let turn_result = if no_stream {
-                orchestrator::native_user_message_source::with_sdk_source(
+                Box::pin(orchestrator::native_user_message_source::with_sdk_source(
                     orchestrator::mod_prompt_origin::with_origin(
                         serde_json::json!({"kind":"sdk"}),
                         runtime.orchestrator.run_turn_with_cancel(prompt, cancel),
                     ),
-                )
+                ))
                 .await
             } else {
-                orchestrator::native_user_message_source::with_sdk_source(
+                Box::pin(orchestrator::native_user_message_source::with_sdk_source(
                     orchestrator::mod_prompt_origin::with_origin(
                         serde_json::json!({"kind":"sdk"}),
                         runtime
@@ -2118,7 +2123,7 @@ async fn run_slash_command_with_budget(
                                 cancel,
                             ),
                     ),
-                )
+                ))
                 .await
             };
             stop_background_agents_at_budget(
@@ -2152,22 +2157,22 @@ async fn run_slash_command_with_budget(
             let cancel = runtime.turn_cancel();
             let inputs = orchestrator::skill_prompt_inputs(command, body, hook_messages);
             let turn_result = if no_stream {
-                orchestrator::native_user_message_source::with_sdk_source(
+                Box::pin(orchestrator::native_user_message_source::with_sdk_source(
                     orchestrator::mod_prompt_origin::with_origin(
                         serde_json::json!({"kind":"sdk"}),
                         runtime
                             .orchestrator
                             .run_queued_prompt_batch_batched(inputs, cancel),
                     ),
-                )
+                ))
                 .await
             } else {
-                orchestrator::native_user_message_source::with_sdk_source(
+                Box::pin(orchestrator::native_user_message_source::with_sdk_source(
                     orchestrator::mod_prompt_origin::with_origin(
                         serde_json::json!({"kind":"sdk"}),
                         runtime.orchestrator.run_queued_prompt_batch(inputs, cancel),
                     ),
-                )
+                ))
                 .await
             };
             stop_background_agents_at_budget(
@@ -2196,7 +2201,7 @@ async fn run_slash_command_with_budget(
             let catalog = runtime.headless_command_catalog().await;
             let reminder = command_api::render_unknown_command_reminder(&name, &catalog);
             let attachment = unknown_command_fallback_attachment(&name, &catalog, reminder.clone());
-            run_fallback_prompt_turn(
+            Box::pin(run_fallback_prompt_turn(
                 runtime,
                 input.clone(),
                 vec![reminder],
@@ -2204,11 +2209,11 @@ async fn run_slash_command_with_budget(
                 max_budget_usd,
                 no_stream,
                 sink,
-            )
+            ))
             .await
         }
         SlashDispatchResult::ParseFailure { input } => {
-            run_fallback_prompt_turn(
+            Box::pin(run_fallback_prompt_turn(
                 runtime,
                 input,
                 Vec::new(),
@@ -2216,7 +2221,7 @@ async fn run_slash_command_with_budget(
                 max_budget_usd,
                 no_stream,
                 sink,
-            )
+            ))
             .await
         }
         SlashDispatchResult::NotASlashCommand => {
@@ -2272,7 +2277,7 @@ async fn run_fallback_prompt_turn(
     sink.turn_start().await;
     let cancel = runtime.turn_cancel();
     let result = if no_stream {
-        orchestrator::native_user_message_source::with_sdk_source(
+        Box::pin(orchestrator::native_user_message_source::with_sdk_source(
             orchestrator::mod_prompt_origin::with_origin(
                 json!({"kind":"sdk"}),
                 runtime.orchestrator.run_turn_with_request_context(
@@ -2282,10 +2287,10 @@ async fn run_fallback_prompt_turn(
                     cancel,
                 ),
             ),
-        )
+        ))
         .await
     } else {
-        orchestrator::native_user_message_source::with_sdk_source(
+        Box::pin(orchestrator::native_user_message_source::with_sdk_source(
             orchestrator::mod_prompt_origin::with_origin(
                 json!({"kind":"sdk"}),
                 runtime
@@ -2297,7 +2302,7 @@ async fn run_fallback_prompt_turn(
                         cancel,
                     ),
             ),
-        )
+        ))
         .await
     };
     stop_background_agents_at_budget(

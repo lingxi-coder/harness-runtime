@@ -1423,13 +1423,14 @@ fn desktop_fusion_executor(
     pricing: Arc<cost::PricingCatalog>,
     implement_host: Option<Arc<dyn lingxi_core::host::FusionImplementHost>>,
 ) -> Arc<dyn lingxi_core::host::FusionExecutor> {
-    // Boot-time validation: surface the FIRST invalid `fusion.*` value
-    // through a log line, but always build the live orchestrator below —
-    // its `config_source` (and `DesktopFusionExecutor::preflight_error`)
-    // re-validate on every subsequent call, so a still-broken file keeps
-    // failing with an up-to-date message while a fixed-then-saved one
-    // recovers without a restart (finding [14]).
-    if let Err(error) = desktop_fusion_runtime_config(cfg) {
+    // Boot-time validation: surface malformed Fusion layers and a configured
+    // default strategy's merged runtime through a log line. A missing default
+    // is normal before the user selects a strategy; selection-specific
+    // validation belongs to capture_strategy and must not make a fresh,
+    // unconfigured CLI emit a startup warning. Always build the live
+    // orchestrator below — its config source and preflight revalidate on each
+    // call, so invalid settings still fail and recover after a saved fix.
+    if let Err(error) = desktop_fusion_boot_validation(cfg) {
         tracing::warn!(
             error = %error,
             "fusion.* settings failed boot-time validation; \
@@ -1450,6 +1451,39 @@ fn desktop_fusion_executor(
         inner: Arc::new(inner),
         cfg: cfg.clone(),
     })
+}
+
+fn desktop_fusion_boot_validation(
+    cfg: &DesktopConfig,
+) -> Result<(), lingxi_core::host::FusionError> {
+    let layers = desktop_fusion_layers(cfg)?;
+    desktop_fusion_boot_validation_for_layers(&layers)
+}
+
+fn desktop_fusion_boot_validation_for_layers(
+    layers: &[lingxi_core::host::fusion_strategy::FusionSettingsLayer],
+) -> Result<(), lingxi_core::host::FusionError> {
+    use lingxi_core::host::fusion_strategy::{
+        default_fusion_strategy, fusion_global_settings, resolve_fusion_strategy,
+    };
+    use lingxi_core::host::FusionError;
+
+    // Validate every admitted registry and the effective global settings even
+    // when no strategy has been selected. This keeps malformed layers visible
+    // without treating the absent default as a bad configuration.
+    fusion_global_settings(layers)
+        .map_err(|error| FusionError::InvalidConfiguration(error.to_string()))?;
+    let Some(default_strategy) = default_fusion_strategy(layers)
+        .map_err(|error| FusionError::InvalidConfiguration(error.to_string()))?
+    else {
+        return Ok(());
+    };
+
+    // Validate the same selected strategy Fusion will use, including merged
+    // runtime-only constraints, but only when a default actually exists.
+    let selection = resolve_fusion_strategy(layers, Some(&default_strategy))
+        .map_err(|error| FusionError::InvalidConfiguration(error.to_string()))?;
+    fusion::FusionRuntimeConfig::from_settings(&selection.config).map(|_| ())
 }
 
 #[cfg(test)]
@@ -6351,6 +6385,8 @@ pub use credentials::LlmStack;
 pub use credentials::SharedCredentialStack;
 use fusion_services::desktop_fusion_attempts;
 use fusion_services::desktop_fusion_catalog_row;
+use fusion_services::desktop_fusion_layers;
+#[cfg(test)]
 use fusion_services::desktop_fusion_runtime_config;
 use fusion_services::filter_fusion_catalog;
 pub use fusion_services::fusion_credential_restart_required_message;

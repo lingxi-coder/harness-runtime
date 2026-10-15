@@ -1,5 +1,60 @@
 use super::*;
 
+fn fusion_layer(
+    registry: serde_json::Value,
+) -> lingxi_core::host::fusion_strategy::FusionSettingsLayer {
+    let settings: lingxi_core::settings::SettingsJson =
+        serde_json::from_value(serde_json::json!({"fusion": registry}))
+            .expect("Fusion settings layer parses");
+    lingxi_core::host::fusion_strategy::FusionSettingsLayer::new(
+        lingxi_core::settings::tracer::Source::User,
+        &settings,
+    )
+    .expect("the settings layer contains Fusion settings")
+}
+
+#[test]
+fn boot_validation_accepts_unconfigured_fusion_but_still_checks_bad_layers_and_defaults() {
+    assert!(desktop_fusion_boot_validation_for_layers(&[]).is_ok());
+
+    let configured_without_default = fusion_layer(serde_json::json!({
+        "enabled": false,
+        "strategies": [{"id": "review", "name": "Review", "config": {}}]
+    }));
+    assert!(desktop_fusion_boot_validation_for_layers(&[configured_without_default]).is_ok());
+
+    let malformed_global = fusion_layer(serde_json::json!({"legacySingleConfig": true}));
+    assert!(desktop_fusion_boot_validation_for_layers(&[malformed_global]).is_err());
+
+    let malformed_unselected_strategy = fusion_layer(serde_json::json!({
+        "strategies": [{
+            "id": "unselected",
+            "name": "Unselected",
+            "config": {"preset": "unknown"}
+        }]
+    }));
+    assert!(
+        desktop_fusion_boot_validation_for_layers(&[malformed_unselected_strategy]).is_err(),
+        "boot validation must inspect malformed registered strategies even without a default"
+    );
+
+    let invalid_default = fusion_layer(serde_json::json!({
+        "defaultStrategyId": "review",
+        "strategies": [{
+            "id": "review",
+            "name": "Review",
+            "config": {"totalTimeoutMs": 500000}
+        }]
+    }));
+    assert!(desktop_fusion_boot_validation_for_layers(&[invalid_default]).is_err());
+
+    let valid_default = fusion_layer(serde_json::json!({
+        "defaultStrategyId": "review",
+        "strategies": [{"id": "review", "name": "Review", "config": {}}]
+    }));
+    assert!(desktop_fusion_boot_validation_for_layers(&[valid_default]).is_ok());
+}
+
 /// Config preflight never reaches a provider, but every executor now
 /// carries an attempt registrar, so build a real one over an unreachable
 /// service rather than reintroducing an unregistered executor shape.

@@ -102,7 +102,10 @@ pub async fn prepare(
     let source_path =
         session::jsonl::resolve_session_path_across_worktrees(&config.lingxi_home, &cwd, source_id)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                session::jsonl::loader::LoaderError::SessionNotFound { .. } => missing(),
+                other => other.to_string(),
+            })?;
     // Do not create a live-session directory for a nonexistent resume target.
     if !tokio::fs::try_exists(&source_path)
         .await
@@ -116,7 +119,10 @@ pub async fn prepare(
     let source_path =
         session::jsonl::resolve_session_path_across_worktrees(&config.lingxi_home, &cwd, source_id)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                session::jsonl::loader::LoaderError::SessionNotFound { .. } => missing(),
+                other => other.to_string(),
+            })?;
     let content: Arc<str> = tokio::fs::read_to_string(&source_path)
         .await
         .map_err(|error| error.to_string())?
@@ -521,7 +527,10 @@ mod tests {
         .await
         .err()
         .unwrap();
-        assert!(!error.is_empty());
+        assert_eq!(
+            error,
+            format!("No conversation found with session ID: {id}")
+        );
         assert!(!config.lingxi_home.exists());
         assert!(config.session_id_override.is_none());
     }
