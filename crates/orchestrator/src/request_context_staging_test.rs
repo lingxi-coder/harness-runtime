@@ -8,7 +8,7 @@ use crate::test_support::{
 };
 use async_trait::async_trait;
 use lingxi_core::host::instructions::InstructionRendering;
-use lingxi_core::host::FileSystem;
+use lingxi_core::host::{FileSystem, PermissionGate};
 use memory::lingxi_md::LingxiMdTier;
 use platform_posix::fs::PosixFileSystem;
 use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
@@ -41,6 +41,22 @@ fn orchestrator_with_api(
     filesystem: Arc<dyn FileSystem>,
     api: Arc<MockApiClient>,
 ) -> ConversationOrchestrator {
+    orchestrator_with_api_and_tools(
+        cwd,
+        transcript,
+        filesystem,
+        api,
+        Arc::new(ToolRegistry::new()),
+    )
+}
+
+fn orchestrator_with_api_and_tools(
+    cwd: &Path,
+    transcript: &Path,
+    filesystem: Arc<dyn FileSystem>,
+    api: Arc<MockApiClient>,
+    tools: Arc<ToolRegistry>,
+) -> ConversationOrchestrator {
     let memory = StaticMemoryProvider::with_files(vec![MemoryFile {
         source_content: None,
         parent: None,
@@ -58,7 +74,7 @@ fn orchestrator_with_api(
             ..Default::default()
         },
         api,
-        Arc::new(ToolRegistry::new()),
+        tools,
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
@@ -69,6 +85,55 @@ fn orchestrator_with_api(
         transcript.to_owned(),
         filesystem,
     )))
+}
+
+fn native_policy_orchestrator(
+    cwd: &Path,
+    transcript: &Path,
+    filesystem: Arc<dyn FileSystem>,
+) -> (
+    ConversationOrchestrator,
+    Arc<permission::PolicyPermissionGate>,
+) {
+    let permission_gate = Arc::new(permission::PolicyPermissionGate::new(
+        Arc::new(
+            permission::PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                Vec::new(),
+            )
+            .with_bypass_available(true),
+        ),
+        Arc::new(NoOpPermissionGate),
+    ));
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(SkillListingGateTool { name: "Bash" }));
+    tools.register_builtin(Arc::new(SkillListingGateTool { name: "Edit" }));
+    let mut orchestrator = orchestrator_with_api_and_tools(
+        cwd,
+        transcript,
+        filesystem,
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(tools),
+    );
+    orchestrator.perms = permission_gate.clone();
+    orchestrator.native_policy_host_facts_provider =
+        Some(Arc::new(|| crate::conversation::NativePolicyHostFacts {
+            bash_first_assignment: Some(
+                crate::conversation::NativeBashFirstSessionAssignment::Forced,
+            ),
+            ..Default::default()
+        }));
+    (orchestrator, permission_gate)
+}
+
+async fn current_base_ingress_rows(
+    orchestrator: &ConversationOrchestrator,
+) -> Vec<PromptIngressAttachment> {
+    let mut rows = orchestrator.environment_prompt_ingress_attachments().await;
+    if let Some(model) = orchestrator.model_prompt_ingress_attachment().await {
+        rows.push(model);
+    }
+    rows
 }
 
 fn bind_test_durable_transcript_target(
@@ -122,6 +187,18 @@ fn staged_system_attachment(kind: &str, text: &str) -> PromptIngressAttachment {
         message,
         payload,
     }
+}
+
+async fn append_accepted_ingress_fixture(
+    orchestrator: &ConversationOrchestrator,
+    row: &PromptIngressAttachment,
+) {
+    orchestrator
+        .append_accepted_prompt_ingress_reminder(row)
+        .await;
+    orchestrator
+        .persist_staged_prompt_ingress_reminder(row)
+        .await;
 }
 
 fn staged_api_system_tool_change() -> ConversationMessage {
@@ -222,12 +299,14 @@ impl SkillListingProvider for SkillListingFixture {
     }
 }
 
-struct SkillListingGateTool;
+struct SkillListingGateTool {
+    name: &'static str,
+}
 
 #[async_trait]
 impl Tool for SkillListingGateTool {
     fn name(&self) -> &str {
-        "Skill"
+        self.name
     }
 
     fn input_schema(&self) -> &Utf16JsonProjection {
@@ -323,7 +402,7 @@ fn orchestrator_with_skill_listing(
     filesystem: Arc<dyn FileSystem>,
 ) -> ConversationOrchestrator {
     let mut tools = ToolRegistry::new();
-    tools.register_builtin(Arc::new(SkillListingGateTool));
+    tools.register_builtin(Arc::new(SkillListingGateTool { name: "Skill" }));
     ConversationOrchestrator::new(
         crate::OrchestratorConfig {
             context_rendering: InstructionRendering::Announced,
@@ -2670,5 +2749,364 @@ fn owner_scope_commits_accepted_batch_on_early_error_after_nar_assembly() {
             .collect::<Vec<_>>();
         assert!(nar_ids.iter().all(|id| history_ids.contains(id)));
         assert!(history_ids.contains(&upe_ids[0]));
+    });
+}
+
+#[test]
+fn resume_restores_only_the_exact_prompts_accepted_nar_run_without_reappending_it() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("resume-nar.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let (orch, permission_gate) =
+            native_policy_orchestrator(&cwd, &transcript, filesystem.clone());
+        permission_gate
+            .set_permission_mode("bypassPermissions")
+            .await
+            .unwrap();
+        bind_test_durable_transcript_target(
+            &orch,
+            &cwd,
+            &root.path().join("durable-state"),
+            &transcript,
+        );
+
+        let prompt_id = MessageId::new();
+        let prompt = ConversationMessage::user(prompt_id, "/skill".into());
+        let body_id = MessageId::new();
+        let mut body = ConversationMessage::user(body_id, "resume same prompt body".into());
+        if let ConversationMessage::User { turn_companion, .. } = &mut body {
+            *turn_companion = Some(Some(true));
+        }
+        let mut recovered = current_base_ingress_rows(&orch).await;
+        let auto_mode = orch
+            .native_policy_prompt_ingress_attachments(&[])
+            .await
+            .into_iter()
+            .find(|row| row.payload.string_at("/type") == Some("auto_mode"))
+            .expect("the real Native policy producer emits the accepted auto-mode row");
+        orch.session.lock().await.history.push(prompt.clone());
+        orch.persist_message_to_jsonl(&prompt).await;
+        orch.session.lock().await.history.push(body.clone());
+        orch.persist_message_to_jsonl(&body).await;
+        recovered.extend([
+            staged_system_attachment("deferred_tools_delta", "accepted deferred delta"),
+            staged_system_attachment("deferred_tools_record", "accepted name-only state"),
+            auto_mode,
+        ]);
+        for row in &recovered {
+            append_accepted_ingress_fixture(&orch, row).await;
+        }
+        let native_api_system = staged_api_system_tool_change();
+        let native_api_system_id = native_api_system.id();
+        orch.session
+            .lock()
+            .await
+            .history
+            .insert(2, native_api_system);
+        let upe = Utf16JsonProjection::parse(
+            r#"{"type":"hook_additional_context","hookEvent":"UserPromptExpansion","hookName":"fixture","content":["later prompt hook context"]}"#,
+        )
+        .unwrap();
+        orch.append_native_prompt_expansion_history_rows(&[upe])
+            .await;
+        let hook_id = orch.session.lock().await.history.last().unwrap().id();
+        recovered.sort_by_key(|row| native_ingress_source_order(row));
+        let recovered_ids = recovered
+            .iter()
+            .map(|row| row.message.id())
+            .collect::<std::collections::HashSet<_>>();
+
+        REQUEST_CONTEXT
+            .scope(request_prompt_context(prompt_id), async {
+                persist_prompt_ingress_after_user(&orch, prompt_id, PromptIngressKind::LocalSkill)
+                    .await
+                    .unwrap();
+
+                let staged = staged_prompt_ingress_attachments().unwrap();
+                let staged_ids = staged
+                    .iter()
+                    .map(|row| row.message.id())
+                    .collect::<std::collections::HashSet<_>>();
+                assert!(recovered_ids.is_subset(&staged_ids));
+                for accepted in &recovered {
+                    assert_eq!(
+                        staged
+                            .iter()
+                            .filter(|row| row.payload == accepted.payload)
+                            .count(),
+                        1,
+                        "a real producer does not regenerate an already accepted payload with a new UUID"
+                    );
+                }
+                assert!(!staged_ids.contains(&hook_id));
+                assert!(!staged_ids.contains(&body_id));
+                assert!(!staged_ids.contains(&native_api_system_id));
+                assert!(!prompt_ingress_batch_finalized());
+                let append_attempted = REQUEST_CONTEXT
+                    .try_with(|context| {
+                        context
+                            .ingress_batch
+                            .lock()
+                            .unwrap()
+                            .append_attempted_ids
+                            .clone()
+                    })
+                    .unwrap();
+                assert!(recovered_ids.is_subset(&append_attempted));
+
+                let prior = prior_history_for_current_prompt(&orch).await;
+                let prior_ids = prior
+                    .iter()
+                    .map(ConversationMessage::id)
+                    .collect::<std::collections::HashSet<_>>();
+                let auto_mode_id = recovered
+                    .iter()
+                    .find(|row| row.payload.string_at("/type") == Some("auto_mode"))
+                    .unwrap()
+                    .message
+                    .id();
+                assert!(prior_ids.contains(&auto_mode_id));
+                assert!(!prior_ids.contains(&hook_id));
+                assert!(!prior_ids.contains(&native_api_system_id));
+
+                let policy_rows = orch.native_policy_prompt_ingress_attachments(&prior).await;
+                assert!(
+                    !policy_rows
+                        .iter()
+                        .any(|row| row.payload.string_at("/type") == Some("auto_mode")),
+                    "the real auto-mode producer sees the accepted row and suppresses a duplicate"
+                );
+
+                finalize_prompt_ingress_batch_for_test(&orch, false).await;
+                assert!(prompt_ingress_batch_finalized());
+            })
+            .await;
+
+        let rows = JsonlReader::new(transcript, filesystem)
+            .read_all()
+            .await
+            .unwrap();
+        for id in recovered_ids {
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.message_type == "attachment"
+                        && row.uuid == id.as_uuid().to_string())
+                    .count(),
+                1,
+                "recovered accepted UUIDs are not appended twice"
+            );
+        }
+        assert_eq!(
+            rows.iter()
+                .filter(|row| {
+                    row.uuid == hook_id.as_uuid().to_string()
+                        && row
+                            .attachment_projection
+                            .as_ref()
+                            .and_then(|payload| payload.string_at("/type"))
+                            == Some("hook_additional_context")
+                })
+                .count(),
+            1,
+            "the already durable UserPromptExpansion row is not duplicated"
+        );
+    });
+}
+
+#[test]
+fn resume_partial_nar_prefix_keeps_existing_ids_and_runs_missing_producers() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("resume-partial-nar.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let (orch, permission_gate) =
+            native_policy_orchestrator(&cwd, &transcript, filesystem.clone());
+        permission_gate
+            .set_permission_mode("bypassPermissions")
+            .await
+            .unwrap();
+        let prompt_id = MessageId::new();
+        let prompt = ConversationMessage::user(prompt_id, "resume partial prompt".into());
+        orch.session.lock().await.history.push(prompt.clone());
+        orch.persist_message_to_jsonl(&prompt).await;
+        let prefix = current_base_ingress_rows(&orch)
+            .await
+            .into_iter()
+            .next()
+            .expect("the partial-prefix fixture uses a real base producer row");
+        append_accepted_ingress_fixture(&orch, &prefix).await;
+
+        REQUEST_CONTEXT
+            .scope(request_prompt_context(prompt_id), async {
+                persist_prompt_ingress_after_user(&orch, prompt_id, PromptIngressKind::LocalSkill)
+                    .await
+                    .unwrap();
+                assert!(!prompt_ingress_batch_finalized());
+                assert!(prompt_ingress_producer_rows("native_policy").is_none());
+
+                let prior = prior_history_for_current_prompt(&orch).await;
+                let produced =
+                    prompt_ingress_producer_rows_or_else(&orch, "native_policy", || async {
+                        orch.native_policy_prompt_ingress_attachments(&prior).await
+                    })
+                    .await;
+                let missing = produced
+                    .iter()
+                    .find(|row| row.payload.string_at("/type") == Some("auto_mode"))
+                    .expect("the real missing Native policy producer still runs");
+                let missing_id = missing.message.id();
+
+                let staged = staged_prompt_ingress_attachments().unwrap();
+                let staged_ids = staged
+                    .iter()
+                    .map(|row| row.message.id())
+                    .collect::<std::collections::HashSet<_>>();
+                assert!(staged_ids.contains(&prefix.message.id()));
+                assert_eq!(
+                    staged
+                        .iter()
+                        .filter(|row| row.payload == prefix.payload)
+                        .count(),
+                    1,
+                    "the real base producer suppresses the accepted prefix"
+                );
+                assert!(staged_ids.contains(&missing_id));
+                assert!(!prompt_ingress_batch_finalized());
+                let append_attempted = REQUEST_CONTEXT
+                    .try_with(|context| {
+                        context
+                            .ingress_batch
+                            .lock()
+                            .unwrap()
+                            .append_attempted_ids
+                            .clone()
+                    })
+                    .unwrap();
+                assert!(append_attempted.contains(&prefix.message.id()));
+                assert!(!append_attempted.contains(&missing_id));
+            })
+            .await;
+    });
+}
+
+#[test]
+fn a_new_prompt_does_not_adopt_the_previous_prompts_nar_staging() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("new-prompt-nar.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+        let (orch, permission_gate) = native_policy_orchestrator(&cwd, &transcript, filesystem);
+        const FULL_PROMPT_MODEL: &str = "claude-sonnet-4-6";
+        orch.session.lock().await.model = FULL_PROMPT_MODEL.to_owned();
+        orch.tools
+            .set_main_loop_model(Some(FULL_PROMPT_MODEL.to_owned()));
+        assert_eq!(
+            orch.session.lock().await.model,
+            FULL_PROMPT_MODEL,
+            "the test session and the Native main-loop model use the same full-prompt model"
+        );
+        assert_eq!(
+            orch.tools.main_loop_model().as_deref(),
+            Some(FULL_PROMPT_MODEL)
+        );
+        assert!(
+            !tool_api::dh_simple_system_prompt(Some(FULL_PROMPT_MODEL)),
+            "Sonnet 4.6 selects the full system prompt"
+        );
+        permission_gate
+            .set_permission_mode("bypassPermissions")
+            .await
+            .unwrap();
+        assert_eq!(orch.permission_mode().as_deref(), Some("bypassPermissions"));
+
+        let old_prompt_id = MessageId::new();
+        let old_prompt = ConversationMessage::user(old_prompt_id, "previous prompt".into());
+        orch.session.lock().await.history.push(old_prompt.clone());
+        orch.persist_message_to_jsonl(&old_prompt).await;
+        let mut previous_rows = current_base_ingress_rows(&orch).await;
+        let old_auto_mode = orch
+            .native_policy_prompt_ingress_attachments(&[])
+            .await
+            .into_iter()
+            .find(|row| row.payload.string_at("/type") == Some("auto_mode"))
+            .expect("the real Native policy producer emits the previous mode");
+        assert_eq!(
+            old_auto_mode
+                .payload
+                .at_pointer("/steerOnly")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        previous_rows.push(old_auto_mode.clone());
+        for row in &previous_rows {
+            append_accepted_ingress_fixture(&orch, row).await;
+        }
+
+        let new_prompt_id = MessageId::new();
+        let new_prompt = ConversationMessage::user(new_prompt_id, "new prompt".into());
+        orch.session.lock().await.history.push(new_prompt.clone());
+        orch.persist_message_to_jsonl(&new_prompt).await;
+        permission_gate.set_permission_mode("auto").await.unwrap();
+        assert_eq!(
+            orch.permission_mode().as_deref(),
+            Some("auto"),
+            "the real policy gate accepted the bypass-to-auto transition"
+        );
+
+        REQUEST_CONTEXT
+            .scope(request_prompt_context(new_prompt_id), async {
+                persist_prompt_ingress_after_user(
+                    &orch,
+                    new_prompt_id,
+                    PromptIngressKind::LocalSkill,
+                )
+                .await
+                .unwrap();
+                let before_producer = staged_prompt_ingress_attachments().unwrap();
+                assert!(!before_producer
+                    .iter()
+                    .any(|row| row.message.id() == old_auto_mode.message.id()));
+                let prior = prior_history_for_current_prompt(&orch).await;
+                assert!(prior
+                    .iter()
+                    .any(|row| row.id() == old_auto_mode.message.id()));
+
+                let produced =
+                    prompt_ingress_producer_rows_or_else(&orch, "native_policy", || async {
+                        orch.native_policy_prompt_ingress_attachments(&prior).await
+                    })
+                    .await;
+                let new_auto_mode = produced
+                    .iter()
+                    .find(|row| row.payload.string_at("/type") == Some("auto_mode"))
+                    .expect("the changed current permission mode creates a new auto-mode delta");
+                let new_auto_mode_id = new_auto_mode.message.id();
+                assert_ne!(new_auto_mode_id, old_auto_mode.message.id());
+                assert_eq!(
+                    new_auto_mode
+                        .payload
+                        .at_pointer("/steerOnly")
+                        .and_then(|value| value.as_bool()),
+                    Some(false)
+                );
+                let staged_ids = staged_prompt_ingress_attachments()
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.message.id())
+                    .collect::<std::collections::HashSet<_>>();
+                assert!(staged_ids.contains(&new_auto_mode_id));
+                assert!(!staged_ids.contains(&old_auto_mode.message.id()));
+            })
+            .await;
     });
 }

@@ -1661,7 +1661,7 @@ impl AggregateHookResult {
                 if later.decision == Some(HookDecision::Block)
                     || (current_output.block.is_none() && later_output.block.is_some())
                 {
-                    self.hook_source = later.hook_source.clone();
+                    self.hook_source = later.hook_source;
                 }
             } else if phase == ModelSwitchHookPhase::Pre {
                 let current_rank = permission_rank(current_output.permission_decision.as_ref());
@@ -1673,19 +1673,19 @@ impl AggregateHookResult {
                 {
                     self.decision = Some(decision);
                     if later_owns_permission {
-                        self.hook_source = later.hook_source.clone();
+                        self.hook_source = later.hook_source;
                     }
                     later_owns_decision = later_owns_permission;
                 } else if decision_rank(later.decision) > decision_rank(self.decision) {
                     if let Some(decision) = later.decision {
                         self.decision = Some(decision);
-                        self.hook_source = later.hook_source.clone();
+                        self.hook_source = later.hook_source;
                         later_owns_decision = true;
                     }
                 }
             } else if let Some(decision) = later.decision {
                 self.decision = Some(decision);
-                self.hook_source = later.hook_source.clone();
+                self.hook_source = later.hook_source;
                 later_owns_decision = true;
             }
             if phase == ModelSwitchHookPhase::Pre {

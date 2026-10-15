@@ -645,7 +645,7 @@ fn trusted_anthropic_preset_preserves_and_resolves_its_chat_protocol() {
         .clone();
     let source = anthropic.wire_profile.as_ref().expect("source profile");
     let source_protocol_profiles = source.connection.protocol_profiles.clone();
-    let source_default_protocol = source.connection.default_protocol.clone();
+    let source_default_protocol = source.connection.default_protocol;
     assert_eq!(
         source_protocol_profiles
             .get(&WireProtocol::OpenAiChat)

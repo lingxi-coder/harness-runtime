@@ -2175,8 +2175,7 @@ mod tests {
             expanded
                 .suggestion
                 .as_ref()
-                .and_then(|value| value.string_at(""))
-                .as_deref(),
+                .and_then(|value| value.string_at("")),
             Some("Use \"SSash\"")
         );
 
@@ -2186,8 +2185,7 @@ mod tests {
             dotless_i
                 .suggestion
                 .as_ref()
-                .and_then(|value| value.string_at(""))
-                .as_deref(),
+                .and_then(|value| value.string_at("")),
             Some("Use \"ITool\"")
         );
 

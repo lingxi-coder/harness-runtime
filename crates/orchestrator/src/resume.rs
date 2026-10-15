@@ -1378,39 +1378,80 @@ pub(crate) fn model_reminder_attachments_from_messages(
         .collect()
 }
 
-/// Restore the most recently represented MCP status arrays from each raw
-/// deferred-tools attachment in transcript order. Missing optional arrays do
-/// not reset their prior value; explicit empty arrays do.
-pub(crate) fn replay_deferred_mcp_status_from_messages(
-    deferral: &tool_api::DeferralState,
-    messages: &[JsonlMessage],
-) {
-    for message in messages {
-        if message.message_type != "attachment" {
-            continue;
-        }
-        let Some(attachment) = attachment_projection(message) else {
-            continue;
-        };
-        deferral.replay_deferred_mcp_status_attachment(attachment);
-    }
-}
-
 fn restore_deferred_tool_state_from_messages(
     deferral: &tool_api::DeferralState,
     messages: &[JsonlMessage],
 ) {
     deferral.replace_loaded(session::jsonl::discovered_tool_names(messages));
-    for message in messages {
+    let attachments = model_reminder_attachments_from_messages(messages);
+    let ordered_rows = messages.iter().filter_map(|message| {
         if message.message_type != "attachment" {
+            return None;
+        }
+        let uuid = Uuid::parse_str(&message.uuid).ok()?;
+        let message_id = MessageId::from_uuid(uuid);
+        attachments
+            .get(&message_id)
+            .map(|attachment| (message_id, attachment))
+    });
+    replay_deferred_tool_state_in_order(deferral, ordered_rows, &attachments);
+}
+
+/// Restore deferred-tool state for a hot resume from the exact model-visible
+/// history order and the raw sidecars carried by the resume snapshot. The
+/// snapshot's sidecar collection is map-backed, so it cannot establish row
+/// order by itself. `deferred_tools_record` rows are normally persistence-only;
+/// their payload names the delta UUIDs that were announced by name only, which
+/// lets us restore that latch immediately before folding each ordered delta.
+fn restore_deferred_tool_state_from_history(
+    deferral: &tool_api::DeferralState,
+    history: &[ConversationMessage],
+    attachments: &std::collections::HashMap<MessageId, Utf16JsonProjection>,
+) {
+    let ordered_rows = history.iter().filter_map(|message| {
+        attachments
+            .get(&message.id())
+            .map(|payload| (message.id(), payload))
+    });
+    replay_deferred_tool_state_in_order(deferral, ordered_rows, attachments);
+}
+
+fn replay_deferred_tool_state_in_order<'a>(
+    deferral: &tool_api::DeferralState,
+    ordered_rows: impl IntoIterator<Item = (MessageId, &'a Utf16JsonProjection)>,
+    attachments: &std::collections::HashMap<MessageId, Utf16JsonProjection>,
+) {
+    let mut replayed_records = HashSet::new();
+    for (message_id, attachment) in ordered_rows {
+        if attachment.string_at("/type") == Some("deferred_tools_delta") {
+            let delta_uuid = message_id.to_string();
+            // A record's own UUID is distinct from the delta UUIDs listed in
+            // its payload. Its sidecar is not necessarily model-visible, so
+            // find the records that name this delta and replay their set-like
+            // latch before folding the history-ordered delta row. The set
+            // latch is commutative when multiple record sidecars name a row.
+            for (record_id, record) in attachments.iter().filter(|(_, payload)| {
+                payload.string_at("/type") == Some("deferred_tools_record")
+                    && (0..payload
+                        .array_len("/nameOnlyAnnouncements")
+                        .unwrap_or_default())
+                        .any(|index| {
+                            payload.string_at(&format!("/nameOnlyAnnouncements/{index}"))
+                                == Some(delta_uuid.as_str())
+                        })
+            }) {
+                if replayed_records.insert(*record_id) {
+                    deferral.replay_deferred_tool_state_attachment(record, &record_id.to_string());
+                }
+            }
+            deferral.replay_deferred_mcp_status_attachment(attachment);
+        } else if attachment.string_at("/type") == Some("deferred_tools_record")
+            && !replayed_records.insert(message_id)
+        {
             continue;
         }
-        let Some(attachment) = attachment_projection(message) else {
-            continue;
-        };
-        deferral.replay_deferred_tool_state_attachment(attachment, &message.uuid);
+        deferral.replay_deferred_tool_state_attachment(attachment, &message_id.to_string());
     }
-    replay_deferred_mcp_status_from_messages(deferral, messages);
 }
 
 /// Restore only source-backed Native request-history fields. Placement is an
@@ -1531,21 +1572,41 @@ fn prompt_ingress_sent_sets_from_messages(
     std::collections::HashSet<String>,
     std::collections::HashSet<Vec<u16>>,
 ) {
+    prompt_ingress_sent_sets_from_payloads(messages.iter().filter_map(|message| {
+        if message.message_type != "attachment" {
+            return None;
+        }
+        let uuid = Uuid::parse_str(&message.uuid).ok()?;
+        active_ids
+            .contains(&MessageId::from_uuid(uuid))
+            .then(|| attachment_projection(message))
+            .flatten()
+    }))
+}
+
+fn prompt_ingress_sent_sets_from_history(
+    history: &[ConversationMessage],
+    attachments: &std::collections::HashMap<MessageId, Utf16JsonProjection>,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<Vec<u16>>,
+) {
+    prompt_ingress_sent_sets_from_payloads(
+        history
+            .iter()
+            .filter_map(|message| attachments.get(&message.id())),
+    )
+}
+
+fn prompt_ingress_sent_sets_from_payloads<'a>(
+    attachments: impl IntoIterator<Item = &'a Utf16JsonProjection>,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<Vec<u16>>,
+) {
     let mut agents = std::collections::HashSet::new();
     let mut skills = std::collections::HashSet::new();
-    for message in messages {
-        if message.message_type != "attachment" {
-            continue;
-        }
-        let Some(uuid) = Uuid::parse_str(&message.uuid).ok() else {
-            continue;
-        };
-        if !active_ids.contains(&MessageId::from_uuid(uuid)) {
-            continue;
-        }
-        let Some(attachment) = attachment_projection(message) else {
-            continue;
-        };
+    for attachment in attachments {
         match attachment.string_at("/type") {
             Some("agent_listing_delta") => {
                 for (path, remove) in [("/addedTypes", false), ("/removedTypes", true)] {
@@ -1615,6 +1676,20 @@ fn hook_attachment_message_for_api(
                 content.string_at("")?.to_owned(),
                 content.string_units("")?,
             ))
+        }
+        "auto_mode" | "auto_mode_exit" => {
+            // These NAr rows are durable model history as well as inputs to
+            // the next auto-mode producer (`latest_auto_mode`). Restore only
+            // the exact rendered cache; an absent, empty, or unsupported
+            // rendering must not be reconstructed from the raw payload.
+            if message
+                .extra
+                .string_units("/rendered/0/content")
+                .is_none_or(|units| units.is_empty())
+            {
+                return None;
+            }
+            rendered_prompt_ingress_message_for_api(message, message_uuid)
         }
         "environment"
         | "model"
@@ -3158,6 +3233,24 @@ impl ConversationOrchestrator {
         *self.prompt_runtime.sent_skill_names.lock().await = skills;
     }
 
+    /// Rebuild sticky prompt-ingress and deferred-tool state after an in-place
+    /// hot resume. The runtime snapshot preserves raw sidecars, while the
+    /// adopted session history supplies their authoritative ordering and
+    /// active-model-context filter.
+    pub(crate) async fn restore_hot_resume_prompt_state(&self) {
+        let history = self.session.lock().await.model_context_history();
+        let attachments = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let (agents, skills) = prompt_ingress_sent_sets_from_history(&history, &attachments);
+        *self.prompt_runtime.sent_agent_names.lock().await = agents;
+        *self.prompt_runtime.sent_skill_names.lock().await = skills;
+        restore_deferred_tool_state_from_history(self.tools.deferral(), &history, &attachments);
+    }
+
     async fn restore_mod_attachment_provenance_from_messages(&self, messages: &[JsonlMessage]) {
         let history_ids = self
             .session
@@ -3762,6 +3855,112 @@ mod exact_history_string_tests {
     }
 
     #[test]
+    fn auto_mode_and_exit_cold_restore_cached_meta_rows_with_source_identity_and_utf16() {
+        let session_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let active_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+        let exit_id = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
+        let before = row("user", r#"[{"type":"text","text":"before"}]"#);
+        let active = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"auto_mode","steerOnly":false,"rawOnly":"must not be rendered from payload"},"renderedRole":"system","rendered":[{"content":"cached active auto mode \ud800"}]}"#,
+        );
+        let exit = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:01Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"auto_mode_exit","bashFirst":true,"steerOnly":false},"renderedRole":"system","rendered":[{"content":"cached auto mode exit"}]}"#,
+        );
+        let after = row("user", r#"[{"type":"text","text":"after"}]"#);
+        let rows = [before, active, exit, after];
+
+        let state = state_from_messages(session_id, &rows);
+        assert_eq!(state.history.len(), 4);
+        let before_id = Uuid::parse_str(&rows[0].uuid).unwrap();
+        let after_id = Uuid::parse_str(&rows[3].uuid).unwrap();
+        assert_eq!(state.history[0].id().as_uuid(), before_id);
+        assert_eq!(state.history[1].id().as_uuid(), active_id);
+        assert_eq!(state.history[2].id().as_uuid(), exit_id);
+        assert_eq!(state.history[3].id().as_uuid(), after_id);
+
+        let ConversationMessage::User {
+            content: active_content,
+            is_meta: true,
+            ..
+        } = &state.history[1]
+        else {
+            panic!("auto_mode restores as a model-visible meta user row")
+        };
+        let ContentBlock::TextJsUtf16 {
+            utf16_code_units: active_units,
+            ..
+        } = &active_content[0]
+        else {
+            panic!("auto_mode restores the cached rendered UTF-16 block")
+        };
+        assert_eq!(
+            active_units,
+            &"cached active auto mode "
+                .encode_utf16()
+                .chain([0xd800])
+                .collect::<Vec<_>>(),
+            "cold restore preserves the cached lone-surrogate code unit"
+        );
+        assert_eq!(
+            state.history[1].text_content(),
+            "cached active auto mode \u{fffd}"
+        );
+        assert_eq!(state.history[2].text_content(), "cached auto mode exit");
+        assert!(state.history[2].is_meta());
+
+        // The sidecar still carries source state by the same identities used
+        // by the restored history rows; later Native policy production can
+        // distinguish active mode from its explicit exit without parsing text.
+        let sidecars = model_reminder_attachments_from_messages(&rows);
+        assert_eq!(
+            sidecars[&MessageId::from_uuid(active_id)].string_at("/type"),
+            Some("auto_mode")
+        );
+        assert_eq!(
+            sidecars[&MessageId::from_uuid(active_id)].string_at("/rawOnly"),
+            Some("must not be rendered from payload")
+        );
+        assert_eq!(
+            sidecars[&MessageId::from_uuid(exit_id)].string_at("/type"),
+            Some("auto_mode_exit")
+        );
+    }
+
+    #[test]
+    fn auto_mode_cold_restore_does_not_invent_rows_without_nonempty_rendered_cache() {
+        let session_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let missing_id = Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-cccccccccccc").unwrap();
+        let empty_id = Uuid::parse_str("dddddddd-dddd-4ddd-8ddd-dddddddddddd").unwrap();
+        let invalid_role_id = Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeef").unwrap();
+        let missing_cache = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"auto_mode","steerOnly":false}}"#,
+        );
+        let empty_cache = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:01Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"auto_mode_exit","bashFirst":true},"renderedRole":"system","rendered":[{"content":""}]}"#,
+        );
+        let invalid_role = parsed_jsonl_row(
+            r#"{"type":"attachment","uuid":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeef","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:02Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":null,"attachment":{"type":"auto_mode_exit","bashFirst":true},"renderedRole":"assistant","rendered":[{"content":"must not be projected as an assistant row"}]}"#,
+        );
+        let rows = [missing_cache, empty_cache, invalid_role];
+
+        let state = state_from_messages(session_id, &rows);
+        assert!(
+            state.history.is_empty(),
+            "invalid or empty caches create no model context"
+        );
+        let sidecars = model_reminder_attachments_from_messages(&rows);
+        for id in [missing_id, empty_id, invalid_role_id] {
+            assert!(
+                sidecars.contains_key(&MessageId::from_uuid(id)),
+                "raw auto-mode state remains available as a sidecar even when it has no renderable model row"
+            );
+        }
+        assert!(hook_attachment_message_for_api(&rows[0], missing_id).is_none());
+        assert!(hook_attachment_message_for_api(&rows[1], empty_id).is_none());
+        assert!(hook_attachment_message_for_api(&rows[2], invalid_role_id).is_none());
+    }
+
+    #[test]
     fn native_settings_rows_rehydrate_through_cold_fork_and_reset_without_duplicate() {
         run_with_large_stack(|| async {
             use lingxi_core::host::NativeSettingsAgentContext;
@@ -4015,6 +4214,56 @@ mod exact_history_string_tests {
             Some("auth-next")
         );
         assert!(payload.array_len("/failedMcpServers") == Some(0));
+    }
+
+    #[test]
+    fn deferred_name_only_record_cold_replay_uses_message_id_display_and_precedes_delta() {
+        let session_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let delta_id = Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-cccccccccccc").unwrap();
+        let record_id = Uuid::parse_str("dddddddd-dddd-4ddd-8ddd-dddddddddddd").unwrap();
+        let delta_message_id = MessageId::from_uuid(delta_id);
+        let delta = hook_attachment_row(
+            session_id,
+            delta_id,
+            serde_json::json!({
+                "type":"deferred_tools_delta",
+                "addedNames":["DeferredTool"],
+                "addedLines":["DeferredTool"],
+                "removedNames":[],
+                "wireHiddenNames":[],
+                "surfacedNames":["DeferredTool"]
+            }),
+        );
+        // The name-only record is persistence-only and is written after the
+        // visible delta row. Its reference uses the same `msg:<uuid>` carrier
+        // that the producer generated from MessageId::to_string().
+        let record = hook_attachment_row(
+            session_id,
+            record_id,
+            serde_json::json!({
+                "type":"deferred_tools_record",
+                "nameOnlyAnnouncements":[delta_message_id.to_string()]
+            }),
+        );
+        let deferral = tool_api::DeferralState::new(tool_api::ToolSearchMode::Enabled, false);
+        restore_deferred_tool_state_from_messages(&deferral, &[delta, record]);
+
+        let replayed = deferral.compute_deferred_delta_with_native_state(
+            &["DeferredTool".to_string()],
+            tool_api::DeferredMcpServerStatus::default(),
+            tool_api::DeferredToolNativeContext {
+                current_tool_names: vec!["DeferredTool".to_string()],
+                declared_pool_available: true,
+                tool_search_absent: true,
+                ..Default::default()
+            },
+        );
+        assert!(replayed.readded.is_empty(), "the name was never removed");
+        assert_eq!(
+            replayed.added_lines,
+            vec!["DeferredTool".to_string()],
+            "cold replay correlates the future record sidecar to its visible delta before folding state"
+        );
     }
 
     #[test]

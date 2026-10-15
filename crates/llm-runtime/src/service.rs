@@ -3170,7 +3170,7 @@ impl ApiService {
         let mut child = Self::new_with_routing(
             self.client.clone(),
             self.transport.clone(),
-            self.subscriber.clone(),
+            self.subscriber,
             self.ua.clone(),
             self.version.clone(),
             None,

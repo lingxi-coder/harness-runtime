@@ -66,6 +66,7 @@ mod bun_policy_js_semantics_worker;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod model_resolution;
+#[cfg(any(feature = "desktop", feature = "mobile", test))]
 mod native_model_settings;
 
 #[cfg(feature = "collaboration")]

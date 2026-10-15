@@ -125,6 +125,88 @@ fn first_user_utf16_units(message: &ConversationMessage) -> Option<Vec<u16>> {
     }
 }
 
+fn run_prompt_snapshot_test_in_child(test_name: &str, child_env: &str) -> bool {
+    if std::env::var_os(child_env).is_some() {
+        return true;
+    }
+
+    let child = std::process::Command::new(
+        std::env::current_exe().expect("current integration-test binary"),
+    )
+    .args(["--exact", test_name, "--nocapture"])
+    .env(child_env, "1")
+    .output()
+    .expect("re-execute the isolated prompt-snapshot test");
+    assert!(
+        child.status.success(),
+        "isolated test {test_name} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    false
+}
+
+struct PromptSnapshotTestGuard {
+    previous: Option<bool>,
+}
+
+impl PromptSnapshotTestGuard {
+    fn enable() -> Self {
+        let previous = lingxi_core::host::session_flags::system_prompt_snapshot();
+        lingxi_core::host::session_flags::set_system_prompt_snapshot(Some(true));
+        Self { previous }
+    }
+}
+
+impl Drop for PromptSnapshotTestGuard {
+    fn drop(&mut self) {
+        lingxi_core::host::session_flags::set_system_prompt_snapshot(self.previous);
+    }
+}
+
+fn assert_prompt_snapshot_sidecar(
+    rows: &[session::jsonl::JsonlMessage],
+    index: usize,
+    parent_uuid: &str,
+) -> uuid::Uuid {
+    let row = &rows[index];
+    assert_eq!(row.message_type, "attachment");
+    assert_eq!(row.parent_uuid.as_deref(), Some(parent_uuid));
+    let id = uuid::Uuid::parse_str(&row.uuid).expect("snapshot sidecar has a valid UUID");
+    assert!(!id.is_nil(), "snapshot sidecar UUID is non-nil");
+    assert_eq!(
+        rows.iter()
+            .filter(|candidate| candidate.uuid == row.uuid)
+            .count(),
+        1,
+        "snapshot sidecar UUID is unique in durable history"
+    );
+
+    let payload = row
+        .attachment_projection
+        .as_ref()
+        .expect("snapshot payload remains an attachment projection");
+    assert_eq!(payload.string_at("/type"), Some("prompt_snapshot"));
+    let system_prompt_len = payload
+        .array_len("/systemPrompt")
+        .expect("snapshot contains its static system prompt");
+    assert!(system_prompt_len > 0);
+    assert!(
+        (0..system_prompt_len).any(|index| {
+            let pointer = format!("/systemPrompt/{index}");
+            payload
+                .string_at(&pointer)
+                .is_some_and(|text| !text.is_empty())
+        }),
+        "snapshot keeps nonempty prompt payload"
+    );
+    assert!(
+        payload.string_at("/contextRendering").is_some(),
+        "snapshot records the context rendering mode"
+    );
+    id
+}
+
 #[tokio::test]
 async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn() {
     for flags in [[false, true], [true, false], [true, true]] {
@@ -448,6 +530,13 @@ async fn direct_bash_host_call_passes_native_unsandbox_override_to_registered_sh
 
 #[tokio::test]
 async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
+    if !run_prompt_snapshot_test_in_child(
+        "native_skill_batch_persists_body_before_ordered_hook_rows",
+        "LINGXI_QUEUED_PROMPT_SNAPSHOT_NATIVE_SKILL_CHILD",
+    ) {
+        return;
+    }
+    let _snapshot_guard = PromptSnapshotTestGuard::enable();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skill.jsonl");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
@@ -575,6 +664,7 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
             "hook_additional_context",
             "session_context",
             "date",
+            "prompt_snapshot",
         ],
         "durable rows keep NAr, Qe hook-yield, then separately persisted context order"
     );
@@ -584,7 +674,7 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
         .collect::<Vec<_>>();
     assert_eq!(
         attachment_indices,
-        (body + 1..=body + 7).collect::<Vec<_>>(),
+        (body + 1..=body + 8).collect::<Vec<_>>(),
         "the complete attachment batch is contiguous after the command body"
     );
     assert_eq!(
@@ -593,6 +683,10 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
         "session context follows NAr and Qe rows"
     );
     assert_eq!(nar_rows[1].0, body + 7, "date follows session context");
+    let prompt_snapshot_index = *attachment_indices.last().unwrap();
+    assert_eq!(prompt_snapshot_index, nar_rows[1].0 + 1);
+    let prompt_snapshot_uuid =
+        assert_prompt_snapshot_sidecar(&rows, prompt_snapshot_index, &rows[nar_rows[1].0].uuid);
     let context_payload = rows[nar_rows[0].0]
         .attachment_projection
         .as_ref()
@@ -713,6 +807,12 @@ async fn native_skill_batch_persists_body_before_ordered_hook_rows() {
     let requests = api.captured_calls().await;
     assert_eq!(requests.len(), 1);
     let captured_messages = &requests[0].messages;
+    assert!(captured_messages
+        .iter()
+        .all(|message| message.id().as_uuid() != prompt_snapshot_uuid));
+    assert!(!serde_json::to_string(captured_messages)
+        .unwrap()
+        .contains("prompt_snapshot"));
     let request_index_for_uuid = |uuid: &str| {
         captured_messages
             .iter()
@@ -907,6 +1007,13 @@ async fn native_skill_batch_batched_driver_keeps_source_and_companion_rows() {
 
 #[tokio::test]
 async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
+    if !run_prompt_snapshot_test_in_child(
+        "skill_upe_history_precedes_mod_context_in_both_batch_drivers",
+        "LINGXI_QUEUED_PROMPT_SNAPSHOT_UPE_MOD_CHILD",
+    ) {
+        return;
+    }
+    let _snapshot_guard = PromptSnapshotTestGuard::enable();
     for streaming in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("skill-hook-order.jsonl");
@@ -1056,6 +1163,7 @@ async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
                 "hook_additional_context",
                 "session_context",
                 "date",
+                "prompt_snapshot",
             ],
             "durable rows keep NAr, Qe UPE, prompt.submit, then separately persisted context order; streaming={streaming}"
         );
@@ -1066,7 +1174,7 @@ async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
             .collect::<Vec<_>>();
         assert_eq!(
             attachment_indices,
-            (body_index + 1..=body_index + 7).collect::<Vec<_>>(),
+            (body_index + 1..=body_index + 8).collect::<Vec<_>>(),
             "the complete attachment batch is contiguous after the command body; streaming={streaming}"
         );
         assert_eq!(
@@ -1078,6 +1186,17 @@ async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
             nar_rows[1].0,
             body_index + 7,
             "date follows session context; streaming={streaming}"
+        );
+        let prompt_snapshot_index = *attachment_indices.last().unwrap();
+        assert_eq!(
+            prompt_snapshot_index,
+            nar_rows[1].0 + 1,
+            "the prompt snapshot is a post-NAr durable sidecar; streaming={streaming}"
+        );
+        let prompt_snapshot_uuid = assert_prompt_snapshot_sidecar(
+            &records,
+            prompt_snapshot_index,
+            &records[nar_rows[1].0].uuid,
         );
         let context_payload = records[nar_rows[0].0]
             .attachment_projection
@@ -1128,6 +1247,12 @@ async fn skill_upe_history_precedes_mod_context_in_both_batch_drivers() {
         } else {
             api.captured_msgs().await[0].clone()
         };
+        assert!(outgoing
+            .iter()
+            .all(|message| message.id().as_uuid() != prompt_snapshot_uuid));
+        assert!(!serde_json::to_string(&outgoing)
+            .unwrap()
+            .contains("prompt_snapshot"));
         let upe_context = outgoing
             .iter()
             .position(|message| {

@@ -3449,7 +3449,7 @@ mod tests {
                 capture_count: 1,
             },
         };
-        let valid = validate_with_regex(&source, &[valid_row.clone()]);
+        let valid = validate_with_regex(&source, std::slice::from_ref(&valid_row));
         assert_eq!(valid.status, NativeStrictSettingsStatus::Valid);
         assert!(valid.issues.is_empty());
         assert!(valid.unresolved_fields.is_empty());

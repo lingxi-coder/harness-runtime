@@ -2101,10 +2101,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 ToolError::InvalidInput(message) => source_text(&message),
                 other => panic!("a failed review must reject as InvalidInput: {other:?}"),
             };
-            assert!(
-                message.contains("current permission review"),
-                "{message}"
-            );
+            assert!(message.contains("current permission review"), "{message}");
             assert!(inner.requests.lock().unwrap().is_empty());
         }
     }
@@ -2138,12 +2135,11 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
             let message = match error {
                 ToolError::InvalidInput(message) => source_text(&message),
-                other => panic!("a cancelled or expired review must reject as InvalidInput: {other:?}"),
+                other => {
+                    panic!("a cancelled or expired review must reject as InvalidInput: {other:?}")
+                }
             };
-            assert!(
-                message.contains("current permission review"),
-                "{message}"
-            );
+            assert!(message.contains("current permission review"), "{message}");
             assert!(fusion.requests.lock().unwrap().is_empty());
             assert!(tool.fusion_permission_strategies.lock().unwrap().is_empty());
         }
@@ -2175,10 +2171,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             ToolError::InvalidInput(message) => source_text(&message),
             other => panic!("an evicted review must reject as InvalidInput: {other:?}"),
         };
-        assert!(
-            message.contains("current permission review"),
-            "{message}"
-        );
+        assert!(message.contains("current permission review"), "{message}");
         assert!(fusion.requests.lock().unwrap().is_empty());
     }
 

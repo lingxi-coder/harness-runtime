@@ -1641,9 +1641,8 @@ impl ConversationOrchestrator {
             .main_instruction_files()
             .await
             .map_err(|error| Self::source_settings_failure("instruction_context", error))?;
-        Ok(self
-            .build_prompt_context_from_files(memory_files.as_ref().clone())
-            .await?)
+        self.build_prompt_context_from_files(memory_files.as_ref().clone())
+            .await
     }
 
     async fn build_prompt_context_from_files(

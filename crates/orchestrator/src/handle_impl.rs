@@ -476,7 +476,7 @@ impl ConversationOrchestrator {
             let provider = route_context
                 .as_ref()
                 .and_then(|context| context.route.provider)
-                .unwrap_or_else(|| match route.main.provider_id {
+                .unwrap_or(match route.main.provider_id {
                     llm_runtime::ProviderId::AnthropicFirstParty => ModelProviderKind::FirstParty,
                     llm_runtime::ProviderId::BedrockClaude => ModelProviderKind::Bedrock,
                     llm_runtime::ProviderId::VertexClaude => ModelProviderKind::Vertex,
@@ -1488,6 +1488,7 @@ impl ConversationOrchestrator {
         self.tools
             .deferral()
             .replace_loaded(runtime.loaded_tool_names);
+        self.restore_hot_resume_prompt_state().await;
         *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
         // The latch resets with the session, and so does the cascade's
         // tried-models list (see `clear_session`).
@@ -5019,7 +5020,7 @@ mod tests {
         assert_eq!(orch.session.lock().await.model, "claude-known");
         assert_eq!(
             api.probed_sources.lock().unwrap().as_slice(),
-            &[source_units.clone()]
+            std::slice::from_ref(&source_units)
         );
 
         orch.select_model(request)
@@ -5787,6 +5788,57 @@ mod tests {
         let compact_summary = lingxi_core::types::MessageId::new();
         let virtual_user = lingxi_core::types::MessageId::new();
         let skill_message = lingxi_core::types::MessageId::new();
+        let prompt_message = lingxi_core::types::MessageId::new();
+        let skill_listing_message = lingxi_core::types::MessageId::new();
+        let earlier_delta_message = lingxi_core::types::MessageId::new();
+        let later_delta_message = lingxi_core::types::MessageId::new();
+        let name_only_record_message = lingxi_core::types::MessageId::new();
+        let skill_listing = Utf16JsonProjection::parse(
+            r#"{"type":"skill_listing","names":["resume-skill","odd-\ud800"]}"#,
+        )
+        .unwrap();
+        let earlier_delta = Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "type":"deferred_tools_delta",
+            "addedNames":["DeferredTool"],
+            "addedLines":["DeferredTool"],
+            "removedNames":[],
+            "wireHiddenNames":[],
+            "surfacedNames":["DeferredTool"],
+            "pendingMcpServers":["before-resume"]
+        }))
+        .unwrap();
+        let later_delta = Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "type":"deferred_tools_delta",
+            "addedNames":[],
+            "addedLines":[],
+            "removedNames":["DeferredTool"],
+            "wireHiddenNames":[],
+            "pendingMcpServers":["after-resume"]
+        }))
+        .unwrap();
+        let name_only_record = Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "type":"deferred_tools_record",
+            "nameOnlyAnnouncements":[earlier_delta_message.to_string()]
+        }))
+        .unwrap();
+        let resumed_history = vec![
+            lingxi_core::types::ConversationMessage::user(
+                prompt_message,
+                "resume prompt".to_owned(),
+            ),
+            lingxi_core::types::ConversationMessage::user_meta(
+                skill_listing_message,
+                "cached skill listing".to_owned(),
+            ),
+            lingxi_core::types::ConversationMessage::user_meta(
+                earlier_delta_message,
+                "earlier deferred delta".to_owned(),
+            ),
+            lingxi_core::types::ConversationMessage::user_meta(
+                later_delta_message,
+                "later deferred delta".to_owned(),
+            ),
+        ];
         tools.deferral().mark_loaded(["StaleTool"]);
         orch.prompt_runtime
             .sent_skill_names
@@ -5803,7 +5855,7 @@ mod tests {
         lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
             lingxi_core::types::SessionId::new(),
-            Vec::new(),
+            resumed_history,
             None,
             None,
             lingxi_core::host::ResumeRuntimeSnapshot {
@@ -5835,7 +5887,14 @@ mod tests {
                     vec!["body with\n\n---\n\na legal separator".into()],
                 )],
                 cumulative_dropped_tokens: 4_321,
-                model_reminder_attachments: Vec::new(),
+                // Deliberately scrambled: a hot-resume snapshot's map order
+                // must never define sticky producer state or deferred deltas.
+                model_reminder_attachments: vec![
+                    (later_delta_message, later_delta),
+                    (name_only_record_message, name_only_record),
+                    (skill_listing_message, skill_listing),
+                    (earlier_delta_message, earlier_delta),
+                ],
                 compacted: true,
                 turn_counter: 3,
                 turn_id: "turn-after-compact".to_string(),
@@ -5873,7 +5932,43 @@ mod tests {
         drop(tracking);
         assert!(tools.deferral().is_loaded("DeferredTool"));
         assert!(!tools.deferral().is_loaded("StaleTool"));
-        assert!(orch.prompt_runtime.sent_skill_names.lock().await.is_empty());
+        let sent_skills = orch.prompt_runtime.sent_skill_names.lock().await.clone();
+        assert_eq!(
+            sent_skills,
+            std::collections::HashSet::from([
+                "resume-skill".encode_utf16().collect::<Vec<_>>(),
+                "odd-".encode_utf16().chain([0xd800]).collect::<Vec<_>>(),
+            ]),
+            "hot resume restores sticky skill names from active history in UTF-16"
+        );
+        let replayed_delta = tools.deferral().compute_deferred_delta_with_native_state(
+            &["DeferredTool".to_string()],
+            tool_api::DeferredMcpServerStatus::default(),
+            tool_api::DeferredToolNativeContext {
+                current_tool_names: vec!["DeferredTool".to_string()],
+                declared_pool_available: true,
+                tool_search_absent: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(replayed_delta.readded, vec!["DeferredTool".to_string()]);
+        assert_eq!(
+            replayed_delta.added_lines,
+            vec!["DeferredTool".to_string()],
+            "history-order replay restores the earlier name-only record before its delta"
+        );
+        let status_delta = tools.deferral().compute_deferred_delta_with_mcp_status(
+            &["DeferredTool".to_string()],
+            tool_api::DeferredMcpServerStatus {
+                pending: Some(vec!["after-resume".to_string()]),
+                needs_auth: Some(Vec::new()),
+                failed: Some(Vec::new()),
+            },
+        );
+        assert!(
+            status_delta.is_empty(),
+            "hot resume restores the latest MCP arrays by history order without emitting another delta"
+        );
         assert_eq!(
             orch.compaction_runtime
                 .last_response_input_tokens

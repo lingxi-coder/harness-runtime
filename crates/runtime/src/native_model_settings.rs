@@ -4,6 +4,7 @@ use agent::model_resolution::{NativeModelObservation, NativeModelSettingsSnapsho
 use lingxi_core::settings::{tracer::Source, EffectiveSettings};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
+#[cfg(any(feature = "desktop", feature = "mobile"))]
 pub(crate) fn snapshot(effective: Option<&EffectiveSettings>) -> NativeModelSettingsSnapshot {
     let opus = match std::env::var("ANTHROPIC_DEFAULT_OPUS_MODEL") {
         Ok(value) => NativeModelObservation::Observed(Some(value.into())),

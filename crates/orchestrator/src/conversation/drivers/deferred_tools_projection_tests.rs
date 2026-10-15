@@ -232,7 +232,7 @@ fn cold_jsonl_restore_reprojects_the_raw_sidecar_with_the_same_id() {
          \"renderedRole\":\"system\",\"rendered\":[{{\"content\":{raw_rendered}}}]}}"
     ))
     .expect("valid cold attachment row");
-    let cold_state = crate::resume::state_from_messages(session_id, &[row.clone()]);
+    let cold_state = crate::resume::state_from_messages(session_id, std::slice::from_ref(&row));
     let mut request = cold_state.model_context_history();
     let cold_sidecars = crate::resume::model_reminder_attachments_from_messages(&[row]);
     let api = Arc::new(MockApiClient::new(Vec::new()));

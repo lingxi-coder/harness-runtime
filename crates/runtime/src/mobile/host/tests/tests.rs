@@ -6960,10 +6960,24 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
     }
 
     fn assert_transcript_attachments_are_packed_once_before_skill(
+        phase: &str,
         transcript: &str,
         user_rows: &[SourceUserRow],
         command_index: usize,
     ) -> Vec<String> {
+        let request_rows_brief = user_rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                (
+                    index,
+                    row.id.as_uuid().to_string(),
+                    row.is_meta,
+                    row.turn_companion,
+                    row.text_utf16.as_ref().map(Vec::len),
+                )
+            })
+            .collect::<Vec<_>>();
         let mut request_ids = std::collections::HashSet::new();
         for row in user_rows {
             assert!(
@@ -7018,6 +7032,19 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         }
 
         let attachments = transcript_typed_attachment_rows(transcript);
+        let attachment_request_map = attachments
+            .iter()
+            .map(|(uuid, kind, _)| {
+                let request_rows = user_rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, row)| {
+                        (row.id.as_uuid().to_string() == *uuid).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                (kind.as_str(), uuid.as_str(), request_rows)
+            })
+            .collect::<Vec<_>>();
         let empty_session_context =
             Utf16JsonProjection::parse(r#"{"type":"session_context","context":{}}"#)
                 .expect("the known empty durable session-context payload is valid JSON");
@@ -7027,7 +7054,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         for (uuid, kind, payload) in &attachments {
             assert!(
                 attachment_ids.insert(uuid.clone()),
-                "a typed JSONL attachment UUID is unique: {uuid}"
+                "phase={phase}: typed JSONL attachment UUID is unique: {uuid}"
             );
             let matches = user_rows
                 .iter()
@@ -7073,7 +7100,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             assert_eq!(
                 matches.len(),
                 1,
-                "every model-input JSONL attachment reaches the request once: {kind} {uuid}"
+                "phase={phase}: model-input JSONL attachment {kind} {uuid} reaches the request once; request rows (index,id,is_meta,turn_companion,text_utf16_units)={request_rows_brief:?}; JSONL attachment mapping (type,uuid,request_row_indexes)={attachment_request_map:?}"
             );
             let (index, row) = matches[0];
             assert!(
@@ -7113,9 +7140,9 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         assert_eq!(
             native_nar_types,
             [
-                "deferred_tools_delta",
                 "environment",
                 "model",
+                "deferred_tools_delta",
                 "skill_listing",
                 "auto_mode",
             ],
@@ -7153,9 +7180,9 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
 
     fn assert_known_native_skill_attachment_order(types: &[String]) {
         let expected_nar = [
-            "deferred_tools_delta",
             "environment",
             "model",
+            "deferred_tools_delta",
             "skill_listing",
             "auto_mode",
         ];
@@ -7565,10 +7592,10 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             );
 
             let expected_prefix_markers = [
-                "The following deferred tools",
                 "Today's date is ",
                 "# Environment",
                 "You are powered by the model",
+                "The following deferred tools",
                 "The following skills are available for use with the Skill tool:",
             ];
             for (index, marker) in expected_prefix_markers.iter().enumerate() {
@@ -7613,7 +7640,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 1,
                 "the request keeps its model-reminder marker"
             );
-            let date_user_row_index = 1;
+            let date_user_row_index = 0;
             let date_message_index = first_calls[0]
                 .messages
                 .iter()
@@ -7701,6 +7728,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             let transcript = std::fs::read_to_string(transcript_path)
                 .expect("read durable skill transcript rows");
             let warm_attachment_types = assert_transcript_attachments_are_packed_once_before_skill(
+                "warm",
                 &transcript,
                 &first_user_rows,
                 command_row_index,
@@ -7726,8 +7754,8 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 .find(&skill_listing_uuid)
                 .expect("skill listing attachment reached JSONL");
             assert!(
-                command_row < body_row && body_row < upe_row && upe_row < listing_row,
-                "command, body, deferred UPE, and listing retain source order in JSONL"
+                command_row < body_row && body_row < listing_row && listing_row < upe_row,
+                "H durable ingress byte offsets (command/body/listing/UPE) are {command_row}/{body_row}/{listing_row}/{upe_row}; expected command < body < listing < UPE"
             );
             assert!(transcript[body_row..].contains("\"turnCompanion\":true"));
             assert_eq!(
@@ -7977,6 +8005,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             "cold resume preserves the exact Native API command-header projection"
         );
         let _ = assert_transcript_attachments_are_packed_once_before_skill(
+            "cold",
             &resumed_transcript,
             &resumed_user_rows,
             resumed_command_index,

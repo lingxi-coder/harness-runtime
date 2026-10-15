@@ -840,10 +840,10 @@ impl MobileLinuxProcessRunner {
             if expose_truncation {
                 let truncation_sentinel_len = capture_limit / 4 + 1;
                 if stdout_truncated {
-                    stdout.extend(std::iter::repeat('\0').take(truncation_sentinel_len));
+                    stdout.extend(std::iter::repeat_n('\0', truncation_sentinel_len));
                 }
                 if stderr_truncated {
-                    stderr.extend(std::iter::repeat('\0').take(truncation_sentinel_len));
+                    stderr.extend(std::iter::repeat_n('\0', truncation_sentinel_len));
                 }
             }
             Ok::<_, ProcessError>(ProcessOutput {

@@ -1622,7 +1622,7 @@ impl ConversationOrchestrator {
             .transcript
             .jsonl_writer
             .as_ref()
-            .map(|w| w.path().to_path_buf())
+            .map(|w| w.active_path())
             .unwrap_or_else(|| self.computed_transcript_path(&session_id));
         // LingXi keeps `/plan` as session state, while Shift+Tab/control
         // requests mutate the enforcing permission gate. Prefer the explicit

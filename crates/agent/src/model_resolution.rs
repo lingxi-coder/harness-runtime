@@ -170,18 +170,13 @@ pub struct ModelResolutionContext {
 
 /// A settings fact whose source has not been observed is distinct from a
 /// complete source snapshot that contains no value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NativeModelObservation<T> {
     /// The corresponding Native input was not available to this host path.
+    #[default]
     Unobserved,
     /// The input was observed, including an explicit absence when `T` is `Option<_>`.
     Observed(T),
-}
-
-impl<T> Default for NativeModelObservation<T> {
-    fn default() -> Self {
-        Self::Unobserved
-    }
 }
 
 impl<T> NativeModelObservation<T> {

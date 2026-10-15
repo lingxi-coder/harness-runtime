@@ -136,7 +136,7 @@ async fn remove_slot_if_owner(
     task: &BackgroundTaskHandle,
 ) -> Option<StateMachineSlot> {
     let mut slots = slots.write().await;
-    let is_owner = slots.get(agent_id).map_or(false, |slot| {
+    let is_owner = slots.get(agent_id).is_some_and(|slot| {
         slot.task.task_id == task.task_id && slot.task.task_name == task.task_name
     });
     if is_owner {
@@ -601,7 +601,7 @@ impl StateMachinePool {
         let mut cancel_guard = DeallocateCancelGuard::new(
             self.slots.clone(),
             self.runtime.clone(),
-            agent_id.clone(),
+            *agent_id,
             task.clone(),
             event_tx.clone(),
             runner_done.clone(),

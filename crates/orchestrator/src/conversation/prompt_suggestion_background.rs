@@ -193,16 +193,35 @@ impl ConversationOrchestrator {
                     is_compact_summary: false,
                     ..
                 } if content.len() == 1 => content.iter().find_map(|block| match block {
-                    lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.clone()),
+                    lingxi_core::types::ContentBlock::Text { text, .. } => {
+                        Some(Utf16JsonProjection::from(text.clone()))
+                    }
+                    lingxi_core::types::ContentBlock::TextJsUtf16 {
+                        utf16_code_units, ..
+                    } => Utf16JsonProjection::root_string(
+                        String::from_utf16_lossy(utf16_code_units),
+                        utf16_code_units.clone(),
+                    )
+                    .ok(),
                     _ => None,
                 }),
                 _ => None,
             })
-            .unwrap_or_default();
-        let prepared = evaluate(
+            .unwrap_or_else(|| Utf16JsonProjection::from(""));
+        let prepared = javascript::evaluate_projection_result(
             "prepare",
-            json!({"text":text,"previous":previous,"latestAsk":latest_ask,"tools":tools,"minutes":mins}),
-        )?;
+            object_projection(vec![
+                ("text".into(), Utf16JsonProjection::from(text)),
+                (
+                    "previous".into(),
+                    Utf16JsonProjection::from(previous.as_str()),
+                ),
+                ("latestAsk".into(), latest_ask),
+                ("tools".into(), Utf16JsonProjection::from(tools)),
+                ("minutes".into(), projection_from_value(json!(mins))),
+            ]),
+        )
+        .ok()?;
         let no_text_result = if prepared
             .at_pointer("/hasText")
             .and_then(|value| value.as_bool())
@@ -283,15 +302,26 @@ impl ConversationOrchestrator {
                 });
             }
             if let Some(runner) = &self.recap_runner {
-                let base_prompt = prepared.string_at("/prompt").unwrap_or_default();
+                let base_prompt = prepared.string_units("/prompt").unwrap_or_default();
                 for attempt in 0..2 {
-                    let prompt = if attempt == 0 {
-                        base_prompt.to_owned()
-                    } else {
-                        format!(
-                            "{base_prompt}\n\nPrevious response was not valid JSON. Respond with ONLY the JSON object, nothing else."
-                        )
-                    };
+                    let mut prompt_units = base_prompt.clone();
+                    if attempt != 0 {
+                        prompt_units.extend(
+                            "\n\nPrevious response was not valid JSON. Respond with ONLY the JSON object, nothing else."
+                                .encode_utf16(),
+                        );
+                    }
+                    let mut message = ConversationMessage::user(
+                        MessageId::new(),
+                        String::from_utf16_lossy(&prompt_units),
+                    );
+                    if let ConversationMessage::User { content, .. } = &mut message {
+                        content[0] = lingxi_core::types::ContentBlock::TextJsUtf16 {
+                            text: String::from_utf16_lossy(&prompt_units),
+                            utf16_code_units: prompt_units,
+                            citations: None,
+                        };
+                    }
                     let request = sidequery::SideQueryRequest {
                         model_source: self
                             .main_model_source_for_request(&query_model, query_profile.as_deref())
@@ -305,7 +335,7 @@ impl ConversationOrchestrator {
                         task_deliveries: std::collections::HashMap::new(),
                         system_prompt_input: None,
                         enable_prompt_caching: false,
-                        messages: vec![ConversationMessage::user(MessageId::new(), prompt)],
+                        messages: vec![message],
                         tools: Vec::new(),
                         tool_choice: None,
                         output_format: None,

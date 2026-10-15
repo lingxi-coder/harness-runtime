@@ -3,8 +3,43 @@
 mod javascript;
 #[path = "../src/conversation/prompt_suggestion_background_state.rs"]
 mod state;
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage};
 use serde_json::json;
+
+fn classifier_user_prompt_units(request: &sidequery::SideQueryRequest) -> Vec<u16> {
+    assert_eq!(
+        request.messages.len(),
+        1,
+        "the classifier input is one dynamic user message; static instructions are separate system blocks"
+    );
+    let [ConversationMessage::User { content, .. }] = request.messages.as_slice() else {
+        panic!("the classifier's sole request message must be user-authored");
+    };
+
+    content
+        .iter()
+        .flat_map(|block| match block {
+            ContentBlock::Text { text, .. } => text.encode_utf16().collect::<Vec<_>>(),
+            ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } => utf16_code_units.clone(),
+            ContentBlock::ProviderContent { protocol, value }
+                if protocol == "anthropic_messages" && value.string_at("/type") == Some("text") =>
+            {
+                value.string_units("/text").unwrap_or_default()
+            }
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn contains_utf16(haystack: &[u16], needle: &str) -> bool {
+    let needle = needle.encode_utf16().collect::<Vec<_>>();
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window == needle.as_slice())
+}
 
 #[test]
 fn native_background_classifier_and_redactor_execute_in_quickjs() {
@@ -591,12 +626,35 @@ async fn background_pipeline() {
     })
     .await
     .unwrap();
-    // Native suppresses prompt suggestions until the conversation has at
-    // least two assistant turns; this fixture turn advances that gate without
-    // starting a classifier or suggestion query.
+    // Prompt generation waits for two assistant turns, but background
+    // classification runs first and sends this declarative reply to the provider.
     orch.run_turn_streaming("Warm up suggestion history")
         .await
         .unwrap();
+    let classifiers_before_question = client.classifier_count();
+    assert_eq!(
+        classifiers_before_question, 1,
+        "a declarative warm-up reply falls through native preclassification to the provider classifier"
+    );
+    {
+        let classifiers = client.classifiers.lock().unwrap();
+        let warmup_request = &classifiers[0];
+        assert_eq!(warmup_request.query_source.as_str(), "agent_classifier");
+        assert!(
+            contains_utf16(
+                &classifier_user_prompt_units(warmup_request),
+                "Warm up suggestion history"
+            ),
+            "the classifier input must retain this turn's exact user ask"
+        );
+        assert!(
+            contains_utf16(
+                &classifier_user_prompt_units(warmup_request),
+                "The implementation consists of two components."
+            ),
+            "the same classifier input must retain the corresponding assistant reply"
+        );
+    }
     let first_query = client.suggestion_query_count() + 1;
     orch.run_turn_streaming("Prepare alternatives")
         .await
@@ -638,9 +696,10 @@ async fn background_pipeline() {
         1,
         "unfocused bg may show a classifier-backed reply"
     );
-    assert!(
-        client.classifiers.lock().unwrap().is_empty(),
-        "native question preclassification skips provider classifier requests"
+    assert_eq!(
+        client.classifier_count(),
+        classifiers_before_question,
+        "a direct question uses native preclassification without another provider classifier request"
     );
 
     let changed_query = client.suggestion_query_count() + 1;
@@ -723,9 +782,19 @@ async fn background_pipeline() {
         let classifier_target = client.classifier_count() + 1;
         let suggestion_target = client.suggestion_query_count() + 1;
         let output_target = output.row_count() + 1;
-        orch.run_turn_streaming("Compare the implementation components")
-            .await
-            .unwrap();
+        let ask_units = "Compare the implementation components "
+            .encode_utf16()
+            .chain([unit])
+            .collect::<Vec<_>>();
+        orch.run_turn_streaming(
+            Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&ask_units),
+                ask_units.clone(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             client.wait_for_classifier_count(classifier_target),
@@ -776,6 +845,16 @@ async fn background_pipeline() {
                 "UTF-16 need U+{unit:04X} classifier did not start suggestion query; suppression reasons={suppression_reasons:?}; classifier result={classifier_result}; persisted state={disk_state}"
             );
         }
+        {
+            let requests = client.classifiers.lock().unwrap();
+            let request_units = classifier_user_prompt_units(requests.last().unwrap());
+            assert!(
+                request_units
+                    .windows(ask_units.len())
+                    .any(|window| window == ask_units),
+                "the actual classifier request preserves this user ask's lone UTF-16 unit"
+            );
+        }
         client.release.add_permits(1);
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -796,7 +875,22 @@ async fn background_pipeline() {
             "same-epoch classifier context must survive exact disk reload"
         );
     }
-    assert_eq!(client.classifiers.lock().unwrap().len(), 4);
+    let classifier_requests = client.classifiers.lock().unwrap();
+    assert_eq!(
+        classifier_requests.len(),
+        classifiers_before_question + 4,
+        "warm-up plus two model-route and two UTF-16 cases use the provider classifier"
+    );
+    for request in classifier_requests.iter().skip(1) {
+        assert_eq!(request.query_source.as_str(), "agent_classifier");
+        assert!(
+            contains_utf16(
+                &classifier_user_prompt_units(request),
+                "Compare the implementation components"
+            ),
+            "each model-route and UTF-16 case must classify its actual user ask"
+        );
+    }
 }
 
 #[test]

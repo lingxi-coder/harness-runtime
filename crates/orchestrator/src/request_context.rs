@@ -306,6 +306,125 @@ fn sort_prompt_ingress_source_order(rows: &mut [PromptIngressAttachment]) {
     rows.sort_by_key(native_ingress_source_order);
 }
 
+fn is_native_prompt_ingress_payload(payload: &Utf16JsonProjection) -> bool {
+    matches!(
+        payload.string_at("/type"),
+        Some(
+            "queued_command"
+                | "sandbox_instructions"
+                | "attention_budget"
+                | "environment"
+                | "model"
+                | "output_style_instructions"
+                | "language"
+                | "deferred_tools_delta"
+                | "deferred_tools_record"
+                | "agent_listing_delta"
+                | "mcp_instructions_delta"
+                | "mcp_dropped_tools_delta"
+                | "edited_text_file"
+                | "skill_listing"
+                | "proactivity"
+                | "auto_mode"
+                | "auto_mode_exit"
+                | "total_tokens_reminder"
+                | "budget_usd"
+        )
+    )
+}
+
+fn is_native_tool_change_api_system_row(message: &ConversationMessage) -> bool {
+    let ConversationMessage::System {
+        api_system: Some(api_system),
+        ..
+    } = message
+    else {
+        return false;
+    };
+    !api_system.content.is_empty()
+        && api_system.content.iter().all(|block| {
+            let ContentBlock::ProviderContent { protocol, value } = block else {
+                return false;
+            };
+            protocol == "anthropic_messages"
+                && matches!(
+                    value.string_at("/type"),
+                    Some("tool_addition" | "tool_removal")
+                )
+        })
+}
+
+fn is_turn_companion_user(message: &ConversationMessage) -> bool {
+    matches!(
+        message,
+        ConversationMessage::User {
+            turn_companion: Some(Some(true)),
+            ..
+        }
+    )
+}
+
+/// Recover only the contiguous typed NAr rows following the exact current
+/// prompt, its trusted turn-companion body, and Native tool-change API rows.
+/// A partial durable prefix is useful state, but it cannot seal the whole
+/// producer batch: absent rows still need their producer pass.
+async fn current_prompt_ingress_rows_after_user(
+    orchestrator: &ConversationOrchestrator,
+    prompt_id: MessageId,
+) -> (Vec<ConversationMessage>, Vec<PromptIngressAttachment>) {
+    let history = orchestrator.session.lock().await.history.clone();
+    let attachments = orchestrator
+        .transcript
+        .model_reminder_attachments
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(prompt_index) = history.iter().position(|message| message.id() == prompt_id) else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let mut recovered_history = Vec::new();
+    let mut recovered_attachments = Vec::new();
+    for message in &history[prompt_index + 1..] {
+        // Native tool-change API rows are inserted directly after the prompt
+        // before the durable attachment rows. They are not producer history.
+        if is_native_tool_change_api_system_row(message) {
+            continue;
+        }
+        if recovered_attachments.is_empty() && is_turn_companion_user(message) {
+            // Slash-command admission can persist its paired body after the
+            // exact command row and before the first NAr attachment.
+            continue;
+        }
+        let Some(payload) = attachments.get(&message.id()) else {
+            break;
+        };
+        if !is_native_prompt_ingress_payload(payload) {
+            break;
+        }
+        let rendered = rendered_system_message(message).or_else(|| {
+            // Empty deferred rows retain a typed identity in hot history even
+            // though their per-request render is rebuilt from the sidecar.
+            matches!(
+                payload.string_at("/type"),
+                Some("deferred_tools_delta" | "deferred_tools_record")
+            )
+            .then(|| Utf16JsonProjection::array(Vec::new()).ok())
+            .flatten()
+        });
+        let Some(rendered) = rendered else {
+            break;
+        };
+        recovered_history.push(message.clone());
+        recovered_attachments.push(PromptIngressAttachment {
+            message: message.clone(),
+            payload: payload.clone(),
+            rendered,
+        });
+    }
+    (recovered_history, recovered_attachments)
+}
+
 /// Install per-turn ingress state for ordinary turns while preserving an
 /// enclosing request-context scope. The user-row append fills the actual
 /// prompt ID before preparation projects any staged rows.
@@ -637,11 +756,33 @@ pub(crate) async fn persist_prompt_ingress_after_user(
             staged.push(reminder);
         }
 
+        let (_, recovered) = current_prompt_ingress_rows_after_user(orchestrator, prompt_id).await;
+        let recovered_ids = recovered
+            .iter()
+            .map(|row| row.message.id())
+            .collect::<Vec<_>>();
+        for row in recovered {
+            if !staged
+                .iter()
+                .any(|staged_row| staged_row.message.id() == row.message.id())
+            {
+                staged.push(row);
+            }
+        }
+
         let _ = REQUEST_CONTEXT.try_with(|context| {
             *context
                 .staged_ingress_attachments
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(staged);
+        });
+        let _ = REQUEST_CONTEXT.try_with(|context| {
+            context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .append_attempted_ids
+                .extend(recovered_ids);
         });
     }
     Ok(())
@@ -1548,10 +1689,11 @@ pub(crate) async fn wait_for_prompt_ingress_batch_finalized() {
     }
 }
 
-/// Snapshot the conversation strictly before this task-local user's row for
-/// Native NAr producers. If a committed pre-call compact consumed that exact
-/// pending prompt, use the complete compacted history as the prior baseline;
-/// otherwise retain the existing empty fallback for an absent/unscoped prompt.
+/// Snapshot prior context plus the current prompt's already accepted typed NAr
+/// rows for Native producers that compare against the previous announcement.
+/// If a committed pre-call compact consumed that exact pending prompt, use the
+/// complete compacted history as the prior baseline; otherwise retain the
+/// existing empty fallback for an absent/unscoped prompt.
 pub(crate) async fn prior_history_for_current_prompt(
     orchestrator: &ConversationOrchestrator,
 ) -> Vec<ConversationMessage> {
@@ -1566,14 +1708,17 @@ pub(crate) async fn prior_history_for_current_prompt(
     else {
         return Vec::new();
     };
-    let session = orchestrator.session.lock().await;
-    let current_index = session
-        .history
-        .iter()
-        .position(|message| message.id() == prompt_id);
+    let history = orchestrator.session.lock().await.history.clone();
+    let current_index = history.iter().position(|message| message.id() == prompt_id);
     match current_index {
-        Some(index) => session.history[..index].to_vec(),
-        None if pending_ingress_prompt_was_compacted() => session.history.clone(),
+        Some(index) => {
+            let mut prior = history[..index].to_vec();
+            let (accepted_rows, _) =
+                current_prompt_ingress_rows_after_user(orchestrator, prompt_id).await;
+            prior.extend(accepted_rows);
+            prior
+        }
+        None if pending_ingress_prompt_was_compacted() => history,
         None => Vec::new(),
     }
 }
