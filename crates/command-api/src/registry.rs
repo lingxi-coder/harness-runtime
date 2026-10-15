@@ -103,16 +103,13 @@ impl CommandRegistry {
                 Some("help" | "model" | "compact")
             ),
             SlashCommandKind::Markdown { frontmatter, .. }
-            | SlashCommandKind::Bundled { frontmatter, .. } => projection_text(&command.name)
-                .is_some_and(|name| {
-                    side_skill_allowed(
-                        name,
-                        frontmatter.context.as_deref(),
-                        frontmatter.background,
-                        frontmatter.agent.as_deref(),
-                        frontmatter.allowed_tools.as_deref().unwrap_or(&[]),
-                    )
-                }),
+            | SlashCommandKind::Bundled { frontmatter, .. } => side_skill_allowed(
+                &command.name,
+                frontmatter.context.as_deref(),
+                frontmatter.background,
+                frontmatter.agent.as_deref(),
+                frontmatter.allowed_tools.as_deref().unwrap_or(&[]),
+            ),
             SlashCommandKind::Plugin { .. } | SlashCommandKind::Mcp { .. } => false,
         }
     }
@@ -954,13 +951,14 @@ fn projection_text(value: &Utf16JsonProjection) -> Option<&str> {
 /// detached background task.
 #[must_use]
 pub fn side_skill_allowed(
-    name: &str,
+    name: &Utf16JsonProjection,
     context: Option<&str>,
     background: Option<bool>,
     agent: Option<&str>,
     allowed_tools: &[String],
 ) -> bool {
-    name != "loop"
+    name.string_units("")
+        .is_some_and(|units| !units.into_iter().eq("loop".encode_utf16()))
         && !context.is_some_and(|value| value.eq_ignore_ascii_case("fork"))
         && background != Some(true)
         && agent.is_none()
@@ -2492,5 +2490,22 @@ mod tests {
         assert!(palette.contains(&"manual-only".to_string()));
         assert!(!palette.contains(&"internal".to_string()));
         assert!(!palette.contains(&"login".to_string()));
+    }
+    #[test]
+    fn side_chat_palette_keeps_opaque_inline_skill_names() {
+        let mut registry = CommandRegistry::new();
+        registry.set_side_chat(true);
+        let units = vec![b'x' as u16, 0xd800];
+        let mut inline = markdown_cmd("display", vec![]);
+        inline.name = projection_from_units(units.clone());
+        registry.register_command(inline);
+        registry.register_command(markdown_cmd("loop", vec![]));
+        let commands = registry.palette_commands();
+        assert!(commands
+            .iter()
+            .any(|command| command.name.string_units("") == Some(units.clone())));
+        assert!(!commands
+            .iter()
+            .any(|command| command.name.string_at("") == Some("loop")));
     }
 }

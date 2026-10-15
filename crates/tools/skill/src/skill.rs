@@ -1417,9 +1417,11 @@ present this turn, the skill is loaded — follow it directly rather than callin
                 &desc.allowed_tools,
             )
         {
-            return Err(ToolError::InvalidInput(format!(
-                "Skill {command_name} is unavailable in Side Chat"
-            )));
+            return Err(ToolError::InvalidInput(join_source_parts(&[
+                "Skill ".into(),
+                command_name.clone(),
+                " is unavailable in Side Chat".into(),
+            ])));
         }
 
         // Locked rejection: disable-model-invocation (TS `:412-416`).
