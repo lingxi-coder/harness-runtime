@@ -2187,6 +2187,38 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         );
     }
 
+    #[tokio::test]
+    async fn side_binary_response_stays_in_ram_and_does_not_enter_shared_cache() {
+        let _cache_guard = crate::testsupport::web_globals_lock().await;
+        let _env = SKIP_ENV_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut ctx, http, _) = make_web_ctx_with_workspace(tmp.path().to_path_buf());
+        ctx.side_chat = true;
+        let output_dir = ctx.tool_results_dir();
+        http.enqueue(preflight_allow());
+        http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/pdf".into())],
+            body: "%PDF side data".into(),
+            body_bytes: Vec::new(),
+        }));
+        let tool = WebFetchTool::new(ctx);
+        let result = tool
+            .call(
+                json!({"url":"https://side-ram-binary.example/file.pdf"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.data["result"]
+            .as_str()
+            .unwrap()
+            .contains("also saved to"));
+        assert!(!output_dir.exists());
+        assert!(crate::cache::cache_get("https://side-ram-binary.example/file.pdf").is_none());
+    }
+
     // PARITY (#94): a binary content-type persists the body to a temp file and
     // appends the `[Binary content (...) also saved to <path>]` footer. (No
     // side_query → raw body + footer.)

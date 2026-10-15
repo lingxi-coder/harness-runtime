@@ -296,6 +296,8 @@ impl ShellPermissionGate for DenyShellPermissionGate {
 /// runtime. Dispatching only takes a read lock.
 pub struct RegistrySlashDispatcher {
     registry: Arc<RwLock<CommandRegistry>>,
+    /// Foreground owner supplied by a Side Chat session, when applicable.
+    expansion_owner: Option<String>,
     mod_command_interceptor: Option<Arc<dyn ModCommandRunInterceptor>>,
     /// `UserPromptExpansion` firing deps (#39). `None` keeps the dispatcher a
     /// strict no-op for that event — the default for every existing caller and
@@ -391,6 +393,7 @@ impl RegistrySlashDispatcher {
     pub fn new(registry: Arc<RwLock<CommandRegistry>>) -> Self {
         Self {
             registry,
+            expansion_owner: None,
             mod_command_interceptor: None,
             expansion_hooks: None,
             shell_expansion: None,
@@ -633,6 +636,7 @@ impl RegistrySlashDispatcher {
     pub fn clone_shared(&self) -> Self {
         Self {
             registry: self.registry.clone(),
+            expansion_owner: self.expansion_owner.clone(),
             mod_command_interceptor: self.mod_command_interceptor.clone(),
             // The `UserPromptExpansion` wiring (executor + context provider) is
             // cheap to clone (two `Arc`s) and must travel with the shared
@@ -715,6 +719,19 @@ impl RegistrySlashDispatcher {
 }
 
 impl RegistrySlashDispatcher {
+    /// Dispatch a child-session command with its lifecycle owner and
+    /// cancellation propagated through the existing source-preserving path.
+    pub async fn dispatch_with_cancel(
+        &self,
+        raw: Utf16JsonProjection,
+        owner: String,
+        cancellation: CancellationToken,
+    ) -> SlashDispatchResult {
+        let mut dispatcher = self.clone_shared();
+        dispatcher.expansion_owner = Some(owner);
+        dispatcher.dispatch(raw, cancellation).await
+    }
+
     /// Execute an already-admitted slash command without firing Mod middleware.
     /// A `command.run` core callback uses this to prevent recursive dispatch.
     pub async fn dispatch_without_mod_hooks(
@@ -751,6 +768,19 @@ impl RegistrySlashDispatcher {
                 name: unknown_name,
             };
         };
+
+        // Side Chat admission runs before usage, hooks, prompt builders, or
+        // handlers so rejected work cannot trigger an expansion side effect.
+        if !reg.execution_allowed(&command) {
+            return SlashDispatchResult::Unknown {
+                name: parsed.name.clone(),
+                display: source_concat([
+                    PromptPart::Text("/"),
+                    PromptPart::Source(&parsed.name),
+                    PromptPart::Text(" is unavailable in Side Chat"),
+                ]),
+            };
+        }
 
         // Native `Pp` filters disabled command factories before dispatch.
         // Check the resolved canonical command so its aliases obey the same
@@ -850,7 +880,12 @@ impl RegistrySlashDispatcher {
                             Some(provider) => {
                                 let allowed_tools =
                                     frontmatter.allowed_tools.clone().unwrap_or_default();
-                                let shell_ctx = provider.build(&allowed_tools, frontmatter.shell);
+                                let shell_ctx = provider.build_for_call(
+                                    &allowed_tools,
+                                    frontmatter.shell,
+                                    self.expansion_owner.clone(),
+                                    Some(cancellation.clone()),
+                                );
                                 match execute_shell_commands_in_prompt(
                                     &content,
                                     &shell_ctx,
@@ -1057,9 +1092,13 @@ impl RegistrySlashDispatcher {
             // denies any embedded command, but a body with no `!`cmd`` patterns is
             // returned unchanged regardless, so unwired / MCP behavior is preserved.
             let shell_ctx = match self.shell_expansion.as_ref() {
-                Some(provider) if !matches!(command.source, CommandSource::Mcp) => {
-                    provider.build(&allowed_tools, fm_shell)
-                }
+                Some(provider) if !matches!(command.source, CommandSource::Mcp) => provider
+                    .build_for_call(
+                        &allowed_tools,
+                        fm_shell,
+                        self.expansion_owner.clone(),
+                        Some(cancellation.clone()),
+                    ),
                 _ => ShellExpansionCtx {
                     runner: Arc::new(UnavailableShellRunner),
                     permission_gate: Arc::new(DenyShellPermissionGate),
@@ -1209,7 +1248,9 @@ impl RegistrySlashDispatcher {
         let result = if let Some(content) = outside_worktree_body {
             CommandResult::InjectMessage { content }
         } else {
-            handler.handle(&parsed).await
+            handler
+                .handle_with_cancel(&parsed, cancellation.clone())
+                .await
         };
 
         match result {
@@ -1236,7 +1277,12 @@ impl RegistrySlashDispatcher {
                         .iter()
                         .map(|s| (*s).to_string())
                         .collect();
-                    let shell_ctx = provider.build(&allowed, None);
+                    let shell_ctx = provider.build_for_call(
+                        &allowed,
+                        None,
+                        self.expansion_owner.clone(),
+                        Some(cancellation.clone()),
+                    );
                     match execute_shell_commands_in_prompt(
                         &content,
                         &shell_ctx,
@@ -1270,7 +1316,12 @@ impl RegistrySlashDispatcher {
                                 .iter()
                                 .map(|s| (*s).to_string())
                                 .collect();
-                            let shell_ctx = provider.build(&allowed, None);
+                            let shell_ctx = provider.build_for_call(
+                                &allowed,
+                                None,
+                                self.expansion_owner.clone(),
+                                Some(cancellation.clone()),
+                            );
                             match execute_shell_commands_in_prompt(
                                 &content,
                                 &shell_ctx,
@@ -1346,6 +1397,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                 let registry = self.registry.read().await;
                 resolve_command_invocation(&registry, parsed).and_then(|(command, parsed)| {
                     (crate::registry::native_factory_enabled(&command)
+                        && registry.execution_allowed(&command)
                         && registry.mod_owner_of(&command.name).is_none())
                     .then_some((command.name.clone(), parsed.raw_args))
                 })

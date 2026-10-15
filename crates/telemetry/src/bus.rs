@@ -42,6 +42,15 @@ impl AnalyticsBus {
         }
     }
 
+    /// Construct an instance that drops every event before OTEL mirroring,
+    /// sink delivery or buffering. Other buses retain their own telemetry state.
+    #[must_use]
+    pub fn disabled() -> Self {
+        let bus = Self::new();
+        bus.killswitch.activate();
+        bus
+    }
+
     /// Synchronous log. If no sink is attached, the event is buffered (oldest
     /// evicted at capacity). When the killswitch is active the event is
     /// silently dropped.
@@ -166,6 +175,32 @@ mod tests {
         ] {
             std::env::remove_var(v);
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_bus_drops_before_buffer_and_sink_without_disabling_main() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        clear();
+        let side = AnalyticsBus::disabled();
+        let main = AnalyticsBus::new();
+        assert!(side.killswitch().is_active());
+        assert!(!main.killswitch().is_active());
+
+        side.log_event("side_private_event", LogEventMetadata::default())
+            .await;
+        assert!(side.pending.lock().await.is_empty());
+        let side_sink = Arc::new(InMemorySink::new());
+        side.attach_sink(side_sink.clone()).await;
+        side.log_event("side_private_event", LogEventMetadata::default())
+            .await;
+        assert!(side_sink.events().await.is_empty());
+        assert!(side.pending.lock().await.is_empty());
+
+        let main_sink = Arc::new(InMemorySink::new());
+        main.attach_sink(main_sink.clone()).await;
+        main.log_event("main_event", LogEventMetadata::default())
+            .await;
+        assert_eq!(main_sink.events().await.len(), 1);
     }
 
     /// With telemetry enabled (clean env) events reach the sink; once the

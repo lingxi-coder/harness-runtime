@@ -1330,7 +1330,11 @@ present this turn, the skill is loaded — follow it directly rather than callin
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
-        let bus = self.ctx.bus.clone();
+        let bus = if self.ctx.side_chat {
+            Arc::new(telemetry::AnalyticsBus::disabled())
+        } else {
+            self.ctx.bus.clone()
+        };
 
         // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing
         // (see `agent_processes::mark_stop_pending`).
@@ -1404,6 +1408,20 @@ present this turn, the skill is loaded — follow it directly rather than callin
             }
         };
 
+        if self.ctx.side_chat
+            && !command_api::registry::side_skill_allowed(
+                &command_name,
+                desc.context.as_deref(),
+                desc.background,
+                desc.agent.as_deref(),
+                &desc.allowed_tools,
+            )
+        {
+            return Err(ToolError::InvalidInput(format!(
+                "Skill {command_name} is unavailable in Side Chat"
+            )));
+        }
+
         // Locked rejection: disable-model-invocation (TS `:412-416`).
         if desc.disable_model_invocation {
             emit_failed(
@@ -1435,7 +1453,9 @@ present this turn, the skill is loaded — follow it directly rather than callin
             ])));
         }
 
-        self.loader.skill_invoked(&desc.name, &command_name).await;
+        if !self.ctx.side_chat {
+            self.loader.skill_invoked(&desc.name, &command_name).await;
+        }
 
         // SKILLEXEC.5: fire the registered `SKILL_INVOKED` event on the success
         // path — after validateInput passes (descriptor loaded, prompt-type, not
@@ -1593,7 +1613,15 @@ present this turn, the skill is loaded — follow it directly rather than callin
             // claude-code building a fresh `toolPermissionContext` before
             // `executeShellCommandsInPrompt`. The `shell` selector drives both the
             // gate's tool-name choice and the runner's routing.
-            let shell_ctx = self.prompt_shell.build(&desc.allowed_tools, desc.shell);
+            let shell_ctx = self.prompt_shell.build_for_call(
+                &desc.allowed_tools,
+                desc.shell,
+                ctx.agent_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .or_else(|| self.ctx.session_id.map(|id| id.to_string())),
+                ctx.cancel.clone(),
+            );
             let slash_command_name = join_source_parts(&["/".into(), command_name.clone()]);
             match command_api::execute_shell_commands_in_prompt(
                 &expanded_prompt,

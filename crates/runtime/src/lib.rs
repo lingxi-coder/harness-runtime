@@ -95,3 +95,7 @@ pub mod json_schema_validator;
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
+
+/// Host-owned, RAM-only independent side conversations.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod side_chat;

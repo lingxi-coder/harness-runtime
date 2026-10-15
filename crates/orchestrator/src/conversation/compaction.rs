@@ -3510,7 +3510,7 @@ impl ConversationOrchestrator {
         .await;
     }
 
-    pub(crate) async fn maybe_compact_before_call(&self) {
+    pub(crate) async fn maybe_compact_before_call(&self, side_cancel: Option<&CancellationToken>) {
         let Some(compactor) = self.compaction_runtime.compaction.clone() else {
             // No compactor wired — strict no-op (history untouched).
             return;
@@ -3671,7 +3671,9 @@ impl ConversationOrchestrator {
         let compact_for_core = compactor.clone();
         let phase_output = self.output.clone();
         let last_assistant_at_for_core = last_assistant_at;
+        let side_token = side_cancel.filter(|_| self.side_chat).cloned();
         let core: SessionCompactCore = std::sync::Arc::new(move |source_messages, instructions| {
+            let cancel = side_token.clone();
             let tracking = tracking_for_core.clone();
             let compactor = compact_for_core.clone();
             let phase_output = phase_output.clone();
@@ -3680,16 +3682,23 @@ impl ConversationOrchestrator {
                 phase_output.emit_compaction_phase("summarizing").await;
                 let api_started = std::time::Instant::now();
                 let mut tracking = tracking.lock().await;
-                let result = compactor
-                    .process_iteration_tracked_with_instructions_and_timing(
-                        source_messages.clone(),
-                        0,
-                        &mut tracking,
-                        instructions.as_ref(),
-                        last_assistant_at,
-                        std::time::SystemTime::now(),
-                    )
-                    .await
+                let request = compactor.process_iteration_tracked_with_instructions_and_timing(
+                    source_messages.clone(),
+                    0,
+                    &mut tracking,
+                    instructions.as_ref(),
+                    last_assistant_at,
+                    std::time::SystemTime::now(),
+                );
+                let result = if let Some(cancel) = cancel {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return Err(hooks::mods::ModError::Native("compaction cancelled".into())),
+                        result = request => result,
+                    }
+                } else {
+                    request.await
+                }
                     .map_err(|error| hooks::mods::ModError::Native(error.to_string()))?;
                 Ok(SessionCompactCoreOutput::new(
                     result,
@@ -3706,6 +3715,12 @@ impl ConversationOrchestrator {
                 core,
             )
             .await;
+        if side_cancel.is_some_and(|cancel| self.side_chat && cancel.is_cancelled()) {
+            self.output
+                .emit_compaction_finished(Some("Compaction canceled."))
+                .await;
+            return;
+        }
         let tracking_after_core = tracking_state.lock().await.clone();
         let turns_since = i64::from(tracking_after_core.turn_counter);
         *self.compaction_runtime.compaction_tracking.lock().await = tracking_after_core;

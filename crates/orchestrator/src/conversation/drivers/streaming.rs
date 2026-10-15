@@ -30,6 +30,46 @@ use crate::turn_loop::{
 };
 use hooks::attachment::HookPublicationGuard;
 
+// Cancel request opening without dropping foreground tool execution. An empty
+// stream takes the normal executor cancellation and drain path.
+async fn open_side_stream<F>(
+    orch: &ConversationOrchestrator,
+    cancel: &Option<CancellationToken>,
+    request: F,
+) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>
+where
+    F: std::future::Future<
+        Output = Result<
+            futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
+            LlmError,
+        >,
+    >,
+{
+    if orch.side_chat {
+        if let Some(cancel) = cancel {
+            return tokio::select! {
+                biased;
+                () = cancel.cancelled() => Ok(futures::stream::empty().boxed()),
+                result = request => result,
+            };
+        }
+    }
+    request.await
+}
+
+async fn side_model_request<F: std::future::Future>(
+    orch: &ConversationOrchestrator,
+    cancel: &Option<CancellationToken>,
+    request: F,
+) -> Option<F::Output> {
+    if orch.side_chat {
+        if let Some(cancel) = cancel {
+            return tokio::select! { biased; () = cancel.cancelled() => None, result = request => Some(result) };
+        }
+    }
+    Some(request.await)
+}
+
 fn observe_main_dispatch(
     observer: Option<llm_runtime::RequestDispatchObserver>,
     output: &Arc<dyn lingxi_core::host::OutputStream>,
@@ -197,6 +237,7 @@ enum StreamErrorFallback<'a> {
         cost_receipt: Option<cost::CostResponseReceipt>,
     },
     Declined(MessageId),
+    Cancelled,
 }
 
 type ModStepFrame = (
@@ -1230,8 +1271,12 @@ impl StreamingTurnDriver<'_> {
                     &snapshot,
                     &guarded_async_hook_reminders,
                 );
-            retry_scope
-                .run(
+            let request_dispatch_observer =
+                observe_main_dispatch(orch.turn_request_dispatch_observer(), &orch.output);
+            open_side_stream(
+                orch,
+                user_cancel,
+                retry_scope.run(
                     orch.model_runtime.prompt_cache_capture.scope(
                         orch.streaming_api.stream_with_effort_override(
                             &model,
@@ -1245,10 +1290,7 @@ impl StreamingTurnDriver<'_> {
                             crate::config::sanitize_query_source(&orch.config.query_source),
                             skip_global_cache_for_system_prompt,
                             request_dispatch_admission,
-                            observe_main_dispatch(
-                                orch.turn_request_dispatch_observer(),
-                                &orch.output,
-                            ),
+                            request_dispatch_observer,
                             native_anthropic_request_context.clone(),
                             typed_attachment_ids,
                             task_deliveries,
@@ -1256,14 +1298,15 @@ impl StreamingTurnDriver<'_> {
                                 .await,
                         ),
                     ),
+                ),
+            )
+            .await
+            .map(|stream| {
+                output_accounting_impl::account_stream(
+                    stream,
+                    first_output_observation.take().flatten(),
                 )
-                .await
-                .map(|stream| {
-                    output_accounting_impl::account_stream(
-                        stream,
-                        first_output_observation.take().flatten(),
-                    )
-                })
+            })
         };
         orch.record_native_afk_beta_rejection_if_any();
         orch.persist_thinking_signature_strip_latch().await;
@@ -1442,6 +1485,7 @@ impl StreamingTurnDriver<'_> {
                     &context_announcements,
                     cost_scope.as_ref(),
                     native_anthropic_request_context.clone(),
+                    user_cancel.as_ref(),
                 )
                 .await;
                 orch.record_native_afk_beta_rejection_if_any();
@@ -1533,6 +1577,11 @@ impl StreamingTurnDriver<'_> {
                             });
                         }
                         OpenedModelStream::Recovered(pumped_from_recovery)
+                    }
+                    PtlCallOutcome::Cancelled => {
+                        let cost = orch.snapshot_cost_real().await;
+                        orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                        return Ok(OpenStreamingOutcome::Complete(assistant_id));
                     }
                     PtlCallOutcome::PromptTooLong => {
                         // Reactive recovery exhausted — end with the reactive
@@ -1761,8 +1810,10 @@ impl StreamingTurnDriver<'_> {
             profile: non_stream_profile.clone(),
         });
         let request_history = non_stream_snapshot.clone();
-        let mut resp = retry_scope
-            .run(
+        let resp = side_model_request(
+            orch,
+            user_cancel,
+            retry_scope.run(
                 orch.model_runtime
                     .prompt_cache_capture
                     .scope(
@@ -1809,9 +1860,13 @@ impl StreamingTurnDriver<'_> {
                                 request
                             })),
                     ),
-            )
-            .await
-            .map_err(OrchestratorError::ApiCall)?;
+            ),
+        )
+        .await;
+        let Some(resp_result) = resp else {
+            return Ok(StreamErrorFallback::Cancelled);
+        };
+        let mut resp = resp_result.map_err(OrchestratorError::ApiCall)?;
 
         if let Some(observation) = &mut output_observation {
             observation.observe(&resp.usage);
@@ -2368,8 +2423,14 @@ impl StreamingTurnDriver<'_> {
                                 orch.typed_attachment_ids_for_snapshot(&re_snapshot);
                             let task_deliveries =
                                 orch.task_deliveries_for_snapshot(&re_snapshot).await;
-                            let retry_stream = retry_scope
-                                .run(
+                            let request_dispatch_observer = observe_main_dispatch(
+                                orch.turn_request_dispatch_observer(),
+                                &orch.output,
+                            );
+                            let retry_stream = open_side_stream(
+                                orch,
+                                user_cancel,
+                                retry_scope.run(
                                     orch.model_runtime.prompt_cache_capture.scope(
                                         orch.streaming_api.stream_with_effort_override(
                                             &re_model,
@@ -2388,10 +2449,7 @@ impl StreamingTurnDriver<'_> {
                                             ),
                                             skip_global_cache_for_system_prompt,
                                             request_dispatch_admission,
-                                            observe_main_dispatch(
-                                                orch.turn_request_dispatch_observer(),
-                                                &orch.output,
-                                            ),
+                                            request_dispatch_observer,
                                             native_anthropic_request_context.clone(),
                                             typed_attachment_ids,
                                             task_deliveries,
@@ -2402,8 +2460,9 @@ impl StreamingTurnDriver<'_> {
                                             .await,
                                         ),
                                     ),
-                                )
-                                .await;
+                                ),
+                            )
+                            .await;
                             orch.persist_thinking_signature_strip_latch().await;
                             if retry_stream.is_err() {
                                 if let Some(reason) = retry_scope.take_model_fallback_request() {
@@ -2743,6 +2802,12 @@ impl StreamingTurnDriver<'_> {
                             }
                             StreamErrorFallback::Declined(message_id) => {
                                 return Ok(PumpStreamingOutcome::Complete(message_id));
+                            }
+                            StreamErrorFallback::Cancelled => {
+                                orch.settle_stream_error_attempt(&mut exec, &mut f.partial, &mut settlement, assistant_id, INTERRUPT_MESSAGE).await;
+                                let cost = orch.snapshot_cost_real().await;
+                                orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                                return Ok(PumpStreamingOutcome::Complete(assistant_id));
                             }
                         }
                     }

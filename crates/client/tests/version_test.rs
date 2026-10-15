@@ -32,7 +32,8 @@ fn version_is_semver() {
     }
 }
 
-/// Major 25 moves ClientEvent::Error.message to the source-preserving string carrier.
+/// Major 25 moves ClientEvent::Error.message to the source-preserving string
+/// carrier. Side Chat additions append after the frozen ordinal prefix.
 ///
 /// This test is the deliberate second lock on the version: the structural guard
 /// only asks that SOME bump happened, so without this a later edit could ride

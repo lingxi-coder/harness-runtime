@@ -137,7 +137,11 @@ impl Tool for ShellMobileTool {
     }
 
     fn input_schema(&self) -> &Utf16JsonProjection {
-        &INPUT_SCHEMA
+        if self.ctx.side_chat {
+            &SIDE_INPUT_SCHEMA
+        } else {
+            &INPUT_SCHEMA
+        }
     }
 
     fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
@@ -372,6 +376,14 @@ impl Tool for ShellMobileTool {
         ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        if self.ctx.side_chat
+            && ctx
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            return Err(ToolError::Aborted);
+        }
         // 1. Extract + validate the command.
         // The command is kept as UTF-16 source through validation and reaches
         // the process boundary only when converted to the host OS string.
@@ -382,14 +394,33 @@ impl Tool for ShellMobileTool {
         if command.is_empty() {
             return Err(ToolError::InvalidInput("command must not be empty".into()));
         }
-        let timeout_ms = input.at_pointer("/timeout").and_then(|value| {
-            let number = value.as_number()?;
-            (number.is_finite()
-                && number >= 0.0
-                && number.fract() == 0.0
-                && number < (u64::MAX as f64))
-                .then_some(number as u64)
-        });
+        if self.ctx.side_chat
+            && input
+                .at_pointer("/run_in_background")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+        {
+            return Err(ToolError::InvalidInput(
+                "Background shell execution is unavailable in Side Chat".into(),
+            ));
+        }
+        let timeout_ms = input
+            .at_pointer("/timeout")
+            .and_then(|value| {
+                let number = value.as_number()?;
+                (number.is_finite()
+                    && number >= 0.0
+                    && number.fract() == 0.0
+                    && number < (u64::MAX as f64))
+                    .then_some(number as u64)
+            })
+            .map(|timeout| {
+                if self.ctx.side_chat {
+                    timeout.min(120_000)
+                } else {
+                    timeout
+                }
+            });
         if let Some(t) = timeout_ms {
             if t > SHELL_MAX_TIMEOUT_MS {
                 return Err(ToolError::InvalidInput(
@@ -465,10 +496,22 @@ impl Tool for ShellMobileTool {
         // Give this command a unique child owner under its agent. The runner
         // can then reap exactly this process on turn cancellation while
         // agent-level cleanup can still match the stable prefix.
-        let agent_owner = ctx
+        let owner = ctx
             .agent_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "main".to_string());
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| self.ctx.session_id.map(|id| id.to_string()));
+        if self.ctx.side_chat && owner.is_none() {
+            return Err(ToolError::InvalidInput(
+                "Side Chat shell owner is absent".into(),
+            ));
+        }
+        let agent_owner = match (self.ctx.side_chat, owner) {
+            (true, Some(owner)) => format!("side:{owner}"),
+            (false, Some(owner)) => owner,
+            (false, None) => "main".to_string(),
+            (true, None) => unreachable!("Side Chat owner was checked above"),
+        };
         let process_owner = format!(
             "{agent_owner}/mobile-shell-{}",
             NEXT_SHELL_PROCESS_OWNER.fetch_add(1, Ordering::Relaxed)
@@ -504,7 +547,16 @@ impl Tool for ShellMobileTool {
                     biased;
                     () = cancel.cancelled() => {
                         self.ctx.process.kill_owner_processes(&process_owner).await;
-                        let _ = run.await;
+                        if let Err(error) = run.await {
+                            if self.ctx.side_chat {
+                                self.ctx.note_side_chat_cleanup_failure(&error.to_string());
+                                if error.to_string().contains(
+                                    lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+                                ) {
+                                    return Err(map_process_err(&error, effective_timeout));
+                                }
+                            }
+                        }
                         return Err(ToolError::Aborted);
                     }
                     result = &mut run => result,
@@ -513,7 +565,12 @@ impl Tool for ShellMobileTool {
         } else {
             run.await
         }
-        .map_err(|e| map_process_err(&e, effective_timeout))?;
+        .map_err(|e| {
+            if self.ctx.side_chat {
+                self.ctx.note_side_chat_cleanup_failure(&e.to_string());
+            }
+            map_process_err(&e, effective_timeout)
+        })?;
         let out = match foreground.outcome {
             lingxi_core::host::ForegroundOutcome::Completed(output) => output,
             lingxi_core::host::ForegroundOutcome::MovedToBackground(_) => {
@@ -771,6 +828,85 @@ mod tests {
 
     fn source_input(value: &Value) -> Utf16JsonProjection {
         Utf16JsonProjection::from_serde_value(value).expect("test fixture is valid JSON")
+    }
+
+    #[tokio::test]
+    async fn side_cancel_kills_owner_and_waits_for_reap() {
+        struct KillRunner {
+            started: tokio::sync::Notify,
+            killed: tokio::sync::Notify,
+            reaped: std::sync::atomic::AtomicBool,
+        }
+        #[async_trait]
+        impl ProcessRunner for KillRunner {
+            async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                assert_eq!(command.inner().timeout, Some(Duration::from_secs(120)));
+                assert!(command.process_owner().is_some());
+                self.started.notify_one();
+                self.killed.notified().await;
+                self.reaped.store(true, Ordering::SeqCst);
+                Err(ProcessError::Timeout)
+            }
+            async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+                assert!(!owner.is_empty());
+                self.killed.notify_one();
+                vec![1]
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                panic!("side spawned background")
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let runner = Arc::new(KillRunner {
+            started: tokio::sync::Notify::new(),
+            killed: tokio::sync::Notify::new(),
+            reaped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (mut context, _, _) = enabled_ctx(ok_output(""));
+        context.side_chat = true;
+        context.session_id = Some(lingxi_core::types::SessionId::new());
+        context.process = runner.clone();
+        let tool = ShellMobileTool::new(context);
+        let mut call_context = fresh_ctx();
+        call_context.cancel = Some(Default::default());
+        let cancel = call_context.cancel.clone().unwrap();
+        let call = tokio::spawn(async move {
+            tool.call(
+                source_input(&json!({"command":"echo hi", "timeout":900_000})),
+                call_context,
+                fresh_tx(),
+            )
+            .await
+        });
+        runner.started.notified().await;
+        cancel.cancel();
+        assert!(matches!(call.await.unwrap(), Err(ToolError::Aborted)));
+        assert!(runner.reaped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn side_background_is_rejected_before_process_or_sandbox() {
+        let (mut ctx, sandbox, calls) = enabled_ctx(ok_output(""));
+        ctx.side_chat = true;
+        let tool = ShellMobileTool::new(ctx);
+        assert!(tool
+            .call(
+                source_input(&json!({"command":"echo hi", "run_in_background":true})),
+                fresh_ctx(),
+                fresh_tx()
+            )
+            .await
+            .is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(*sandbox.last_network.lock().unwrap(), None);
     }
 
     #[test]
@@ -1139,3 +1275,14 @@ mod tests {
         );
     }
 }
+
+static SIDE_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    let mut schema = INPUT_SCHEMA.clone();
+    schema
+        .replace_pointer_projection(
+            "/properties/timeout/maximum",
+            Utf16JsonProjection::plain(json!(120_000)),
+        )
+        .expect("generated mobile shell timeout schema is writable");
+    schema
+});

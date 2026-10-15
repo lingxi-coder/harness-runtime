@@ -41,6 +41,7 @@ mod configuration;
 mod linux_runtime;
 mod provider_services;
 mod restoration;
+mod side_chat;
 
 pub use assembly::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
@@ -259,6 +260,8 @@ use crate::mobile::{
 /// runtime); F3-05 adds the async `submit` that drives the orchestrator and
 /// resolves the permission gate.
 pub struct MobileRuntime {
+    /// Ready services used to create RAM-only lightweight conversations.
+    pub side_chat_factory: Arc<dyn crate::side_chat::SideChatFactory>,
     /// Product region captured with the running model client.
     pub provider_region: llm_runtime::Region,
     /// Shared settings baseline used by both the Mod reader and the public
@@ -1067,6 +1070,8 @@ pub enum MobileEngineError {
 /// commands and drives the turn on the owned runtime.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileEngineHandle {
+    /// This Host generation owns all side state; no durable store is involved.
+    side_chats: Arc<crate::side_chat::SideChatManager>,
     session_cron: Option<Arc<cron::CronScheduler>>,
     scheduled_reload: std::sync::atomic::AtomicBool,
     settings: Option<::configuration_admin::settings_bridge::SettingsContext>,
@@ -1263,7 +1268,11 @@ impl Drop for MobileEngineHandle {
             .clone();
         let lsp_registry = self.inner.lsp_registry.clone();
         let session_cron = self.session_cron.clone();
+        let side_chats = self.side_chats.clone();
         mobile_automation_runtime().spawn(async move {
+            if let Err(error) = side_chats.shutdown().await {
+                tracing::warn!(%error, "mobile side chat teardown did not finish");
+            }
             if let Some(audio_service) = audio_service {
                 let mut audio_owners = vec![AudioOwner::Session {
                     session_id: current_session_id,
@@ -1353,7 +1362,7 @@ mod session_identity_import_tests {
         let directory = tempfile::tempdir().unwrap();
         let transcript_path = directory.path().join("session.jsonl");
         let filesystem: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
-            platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
+            platform_posix_minimal::fs::PosixFileSystem::new(directory.path().to_path_buf()),
         );
         let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
         let anchor = concat!(
@@ -1388,7 +1397,7 @@ mod session_identity_import_tests {
         let directory = tempfile::tempdir().unwrap();
         let transcript_path = directory.path().join("session.jsonl");
         let filesystem: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
-            platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
+            platform_posix_minimal::fs::PosixFileSystem::new(directory.path().to_path_buf()),
         );
         let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
         let native = concat!(
@@ -1412,7 +1421,7 @@ mod session_identity_import_tests {
         let directory = tempfile::tempdir().unwrap();
         let transcript_path = directory.path().join("session.jsonl");
         let filesystem: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
-            platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
+            platform_posix_minimal::fs::PosixFileSystem::new(directory.path().to_path_buf()),
         );
         let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
         let empty = session_identity_snapshot_for_path(&writer, &transcript_path)

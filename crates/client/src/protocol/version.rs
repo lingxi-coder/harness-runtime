@@ -163,5 +163,6 @@
 /// native clients must regenerate their version-locked bindings.
 /// Version 25 carries source-preserving UTF-16 strings in ClientEvent::Error and
 /// the SetModel/NewSession model-selection fields. JSON remains string-shaped,
-/// while the generated native layouts change.
+/// while the generated native layouts change. Side Chat variants append after
+/// the protocol-25 frozen prefixes and preserve all existing native ordinals.
 pub const CLIENT_PROTOCOL_VERSION: &str = "25.0.0";

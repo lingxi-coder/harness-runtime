@@ -4,7 +4,7 @@
 //! or reordering a variant can change the mobile ABI even when JSON tags remain
 //! stable. The arrays below are an explicit re-cut of the complete command and
 //! event order in the current protocol macro invocations, reviewed against
-//! `CLIENT_PROTOCOL_VERSION = 25.0.0` and `snapshots/blessed_major.txt = 24`.
+//! `CLIENT_PROTOCOL_VERSION = 25.0.0` and `snapshots/blessed_major.txt = 25`.
 //! They are not generated from a snapshot update. A later append remains
 //! compatible with this frozen prefix; any ordinal change requires a deliberate
 //! major-version re-cut.
@@ -333,6 +333,29 @@ fn client_event_keeps_every_25_0_0_variant_at_its_ordinal() {
         &actual,
         CLIENT_EVENT_ORDINALS_AT_25_0_0,
     );
+}
+
+#[test]
+fn side_chat_variants_are_appended_after_the_protocol_25_prefix() {
+    let commands = variants_in_declaration_order(COMMANDS_SRC, "ClientCommand");
+    let events = variants_in_declaration_order(EVENTS_SRC, "ClientEvent");
+    assert!(commands.ends_with(&[
+        "SideChatCreate".into(),
+        "SideChatList".into(),
+        "SideChatGet".into(),
+        "SideChatEnd".into(),
+        "SideChatSubmit".into(),
+    ]));
+    assert!(events.ends_with(&[
+        "SideChatCreated".into(),
+        "SideChatList".into(),
+        "SideChatSnapshot".into(),
+        "SideChatEvent".into(),
+        "SideChatPermission".into(),
+        "SideChatSubmitted".into(),
+        "SideChatEnded".into(),
+        "SideChatError".into(),
+    ]));
 }
 
 /// Cross-check the AST parser against an independent scan of the original

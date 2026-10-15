@@ -692,6 +692,27 @@ impl ConversationOrchestrator {
         let profile_for_route = if clear_user_selection { None } else { profile };
         let (target_model, target_profile) =
             normalize_session_model_ref(&model_for_route, profile_for_route, &listings);
+        if self.side_chat {
+            let requested =
+                lingxi_core::host::qualified_model_ref(&target_model, target_profile.as_deref());
+            let current = {
+                let session = self.session.lock().await;
+                lingxi_core::host::qualified_model_ref(
+                    &session.model,
+                    session.model_profile.as_deref(),
+                )
+            };
+            if requested != current
+                && !self
+                    .side_chat_model_refs
+                    .as_ref()
+                    .is_some_and(|models| models.contains(&requested))
+            {
+                return Err(HandleError::ActionFailed(
+                    "model is not ready in this side chat".into(),
+                ));
+            }
+        }
         let user_selection = matches!(source, "command" | "picker" | "sdk");
         if user_selection && !clear_user_selection && model_binding.is_none() {
             return Err(HandleError::ActionFailed(
@@ -3369,8 +3390,23 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn list_available_models(&self) -> Vec<String> {
         let available = self.api.available_models();
         let listings = self.api.list_model_listings();
-        let mut visible = Vec::with_capacity(available.len());
-        for reference in available {
+        let candidates = if self.side_chat {
+            self.side_chat_model_refs
+                .clone()
+                .unwrap_or_else(|| vec![self.config.model.clone()])
+        } else {
+            available
+        };
+        let mut visible = Vec::with_capacity(candidates.len());
+        for reference in candidates {
+            if self.side_chat
+                && self
+                    .side_chat_model_refs
+                    .as_ref()
+                    .is_some_and(|models| !models.contains(&reference))
+            {
+                continue;
+            }
             let (model, profile) = lingxi_core::host::parse_model_ref(&reference, &listings);
             match self
                 .model_catalog_route_allows(&model, profile.as_deref())
@@ -3393,6 +3429,19 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let listings = self.api.list_model_listings();
         let mut visible = Vec::with_capacity(listings.len());
         for listing in listings {
+            if self.side_chat
+                && !self.side_chat_model_refs.as_ref().is_some_and(|models| {
+                    models.contains(&lingxi_core::host::qualified_model_ref(
+                        &listing.display_model,
+                        Some(&listing.provider_id),
+                    )) || models.contains(&lingxi_core::host::qualified_model_ref(
+                        &listing.request_model,
+                        Some(&listing.provider_id),
+                    ))
+                })
+            {
+                continue;
+            }
             match self
                 .model_catalog_route_allows(&listing.request_model, Some(&listing.provider_id))
                 .await

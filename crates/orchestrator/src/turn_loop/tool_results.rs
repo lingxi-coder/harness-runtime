@@ -181,6 +181,13 @@ pub(super) async fn apply_tool_result_persistence_with_process_output(
     output_file: Option<&lingxi_core::host::process::ProcessOutputFile>,
 ) -> PersistenceOutcome {
     use crate::tool_result_persistence as trp;
+    if orch.side_chat {
+        return PersistenceOutcome {
+            utf16_code_units: None,
+            content,
+            replaced: false,
+        };
+    }
 
     if let Some(output_file) = output_file {
         // Keep the normal blank/media guards authoritative. In particular, a
@@ -270,6 +277,9 @@ pub(super) async fn persist_keep_recent_clears(
 ) -> std::collections::HashMap<ToolUseId, String> {
     use crate::tool_result_persistence as trp;
 
+    if orch.side_chat {
+        return std::collections::HashMap::new();
+    }
     let mut out = std::collections::HashMap::new();
     let Some(home) = orch.config_home.as_ref() else {
         return out;

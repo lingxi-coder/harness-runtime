@@ -760,7 +760,7 @@ impl WebFetchTool {
     /// was adding one field, not re-plumbing. Until then every persisted binary
     /// was written inside the user's repository.
     fn persist_binary(&self, content_type: &str, body: &[u8]) -> (Option<String>, Option<usize>) {
-        if !is_binary_content_type(content_type) {
+        if self.ctx.side_chat || !is_binary_content_type(content_type) {
             return (None, None);
         }
         let unix_ms = std::time::SystemTime::now()
@@ -1195,7 +1195,10 @@ Usage notes:\n\
         // upgrade — mirrors `utils.ts:392-404`, which short-circuits on a hit
         // ahead of the upgrade block at `utils.ts:406-416`. Repeat fetches of
         // the same URL return instantly without a second network round-trip.
-        if let Some(hit) = crate::cache::cache_get(&parsed_input.url) {
+        if let Some(hit) = (!self.ctx.side_chat)
+            .then(|| crate::cache::cache_get(&parsed_input.url))
+            .flatten()
+        {
             // PARITY (#88): the cached `content` is the FULL body (claude-code
             // caches `content:p` un-sliced; the 100k cap only fires inside the
             // apply step). The LingXi-internal `truncated` flag is derived from
@@ -1607,18 +1610,20 @@ Usage notes:\n\
                 // the body exceeds the apply-step cap.
                 let truncated = body_exceeds_markdown_cap(&content);
 
-                crate::cache::cache_set(
-                    parsed_input.url.clone(),
-                    crate::cache::CachedFetch {
-                        content: content.clone(),
-                        status,
-                        content_type: content_type.clone(),
-                        bytes: body_bytes,
-                        persisted_path: persisted_path.clone(),
-                        persisted_size,
-                        fetched_at_ms,
-                    },
-                );
+                if !self.ctx.side_chat {
+                    crate::cache::cache_set(
+                        parsed_input.url.clone(),
+                        crate::cache::CachedFetch {
+                            content: content.clone(),
+                            status,
+                            content_type: content_type.clone(),
+                            bytes: body_bytes,
+                            persisted_path: persisted_path.clone(),
+                            persisted_size,
+                            fetched_at_ms,
+                        },
+                    );
+                }
                 self.emit_completed(
                     &invocation_id,
                     status,

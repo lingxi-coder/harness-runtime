@@ -8,6 +8,9 @@
 //!
 //! See spec §24 (Sandbox) and D17 (Runtime boundary).
 
+/// Marks a foreground cleanup failure that must retain its Side Chat owner.
+pub const SIDE_CHAT_CLEANUP_FAILURE: &str = "Side Chat foreground cleanup failed:";
+
 use crate::host::sandbox::SandboxedCommand;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

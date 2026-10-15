@@ -779,15 +779,17 @@ impl ConversationOrchestrator {
         // support — never on a present `ToolSearch` tool or deferred candidates —
         // so side queries assembled with an empty toolset take the same
         // normalization branch as the main loop.
-        lingxi_core::host::session_flags::set_tool_search_enabled(
-            self.tools.deferral().mode().is_enabled()
-                && tool_search_supported_for_request(
-                    self.api.as_ref(),
-                    &model,
-                    model_profile.as_deref(),
-                    model_source.as_ref(),
-                ),
-        );
+        if !self.side_chat {
+            lingxi_core::host::session_flags::set_tool_search_enabled(
+                self.tools.deferral().mode().is_enabled()
+                    && tool_search_supported_for_request(
+                        self.api.as_ref(),
+                        &model,
+                        model_profile.as_deref(),
+                        model_source.as_ref(),
+                    ),
+            );
+        }
         let mut complete_wire = wire.clone();
         // Tool Search (2.1.216): omit undiscovered deferred definitions and
         // stamp discovered definitions with `defer_loading: true`. The shared

@@ -2016,6 +2016,21 @@ impl PermissionPolicy {
         })
     }
 
+    /// Copy acknowledged permissions into an independent conversation policy.
+    /// Rules and host restrictions are preserved; denial counters start fresh.
+    #[must_use]
+    pub fn fork_independent(&self, mode: PermissionMode) -> Self {
+        let mut policy = self.clone_with_live_state(
+            self.allow_rules.clone(),
+            self.deny_rules.clone(),
+            self.ask_rules.clone(),
+            self.additional_working_dirs.clone(),
+        );
+        policy.mode = mode;
+        policy.denial_tracking = Mutex::new(DenialTrackingState::default());
+        policy
+    }
+
     /// Clone this policy, replacing only the live-mutable rule/working-dir
     /// state a host `updatedPermissions` payload can change mid-session.
     ///

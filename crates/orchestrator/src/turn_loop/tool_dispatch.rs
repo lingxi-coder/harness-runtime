@@ -3788,7 +3788,13 @@ pub(crate) async fn streaming_tool_context_base(
         assistant_message_id: None,
         assistant_message: None,
         same_turn_tool_uses: Vec::new(),
-        agent_id: None,
+        agent_id: if orch.side_chat {
+            Some(lingxi_core::types::AgentId::from_uuid(
+                orch.session.lock().await.session_id.as_uuid(),
+            ))
+        } else {
+            None
+        },
         agent_spawn_provenance: Default::default(),
         native_query_depth: None,
         nested_memory_triggers: orch.prompt_runtime.nested_memory_triggers.clone(),
@@ -6417,21 +6423,23 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // record (every tool). The path argument is the `getPath` twin: the
         // edit tools' `file_path` / NotebookEdit's `notebook_path` from the
         // input the decision was made on. Byte-noop when OTEL is off.
-        telemetry::otel::record_tool_permission_decision(
-            name,
-            tool_use_id.as_str(),
-            effective_input
-                .string_at("/file_path")
-                .or_else(|| effective_input.string_at("/notebook_path")),
-            if matches!(decision, PermissionDecision::Allow) {
-                "accept"
-            } else {
-                "reject"
-            },
-            decision_otel_source,
-            tool_handle.is_mcp(),
-            Some(&effective_input),
-        );
+        if !orch.side_chat {
+            telemetry::otel::record_tool_permission_decision(
+                name,
+                tool_use_id.as_str(),
+                effective_input
+                    .string_at("/file_path")
+                    .or_else(|| effective_input.string_at("/notebook_path")),
+                if matches!(decision, PermissionDecision::Allow) {
+                    "accept"
+                } else {
+                    "reject"
+                },
+                decision_otel_source,
+                tool_handle.is_mcp(),
+                Some(&effective_input),
+            );
+        }
         match decision {
             PermissionDecision::Allow => {}
             PermissionDecision::Deny { reason } => {

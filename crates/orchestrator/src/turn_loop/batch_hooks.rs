@@ -475,6 +475,19 @@ async fn apply_resolved_model_context(
     if target_model == current && target_profile == current_profile {
         return Ok(());
     }
+    if orch.side_chat {
+        let target =
+            lingxi_core::host::qualified_model_ref(&target_model, target_profile.as_deref());
+        if !orch
+            .side_chat_model_refs
+            .as_ref()
+            .is_some_and(|models| models.contains(&target))
+        {
+            return Err(model_context_error(
+                "model is not ready in this side chat".into(),
+            ));
+        }
+    }
     let source_binding = orch.active_model_source_binding().await;
     {
         let mut session = orch.session.lock().await;

@@ -818,6 +818,41 @@ define_client_event! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    // Lightweight child-conversation lifecycle events, appended to preserve
+    // every protocol-25 UniFFI event ordinal.
+    SideChatCreated {
+        request_id: String,
+        side_id: String,
+    },
+    SideChatList {
+        side_ids: Vec<String>,
+    },
+    SideChatSnapshot {
+        side_id: String,
+        events_json: Vec<String>,
+    },
+    SideChatEvent {
+        side_id: String,
+        event_json: String,
+    },
+    SideChatPermission {
+        side_id: String,
+        request: crate::protocol::permission::PermissionRequest,
+    },
+    SideChatSubmitted {
+        side_id: String,
+        request_id: String,
+    },
+    SideChatEnded {
+        side_id: String,
+    },
+    SideChatError {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        side_id: Option<String>,
+        message: String,
+    },
 }
 
 impl From<ClientEventWire> for ClientEvent {
@@ -832,6 +867,48 @@ impl From<ClientEventWire> for ClientEvent {
                 operation_id,
                 selection_json,
                 error,
+            },
+            ClientEventWire::SideChatCreated {
+                request_id,
+                side_id,
+            } => Self::SideChatCreated {
+                request_id,
+                side_id,
+            },
+            ClientEventWire::SideChatList { side_ids } => Self::SideChatList { side_ids },
+            ClientEventWire::SideChatSnapshot {
+                side_id,
+                events_json,
+            } => Self::SideChatSnapshot {
+                side_id,
+                events_json,
+            },
+            ClientEventWire::SideChatEvent {
+                side_id,
+                event_json,
+            } => Self::SideChatEvent {
+                side_id,
+                event_json,
+            },
+            ClientEventWire::SideChatPermission { side_id, request } => {
+                Self::SideChatPermission { side_id, request }
+            }
+            ClientEventWire::SideChatSubmitted {
+                side_id,
+                request_id,
+            } => Self::SideChatSubmitted {
+                side_id,
+                request_id,
+            },
+            ClientEventWire::SideChatEnded { side_id } => Self::SideChatEnded { side_id },
+            ClientEventWire::SideChatError {
+                request_id,
+                side_id,
+                message,
+            } => Self::SideChatError {
+                request_id,
+                side_id,
+                message,
             },
             ClientEventWire::CoordinatorStatus {
                 active_workers,

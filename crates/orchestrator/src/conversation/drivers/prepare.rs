@@ -289,7 +289,7 @@ impl ConversationOrchestrator {
         let instruction_reason = self.frozen_instruction_refresh_reason();
 
         self.seed_compact_cache_safe_params(system).await?;
-        self.maybe_compact_before_call().await;
+        self.maybe_compact_before_call(user_cancel).await;
         // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
         // before the outgoing snapshot is cloned from history.
         let _ = self.drain_peer_inbox(false).await;

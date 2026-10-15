@@ -8154,6 +8154,50 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn side_fork_preserves_explicit_native_endpoint_admission() {
+        use lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata;
+
+        for selected in [false, true] {
+            let mut parent = make_adapter_for_protocol(
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://api.anthropic.com",
+            )
+            .with_anthropic_client_metadata(
+                AnthropicClientMetadata::claude_code_2_1_293("darwin", "arm64"),
+            );
+            if selected {
+                parent = parent.with_native_anthropic_endpoint("https://api.anthropic.com");
+            }
+            let child = parent.fork_independent();
+            let mut request = LlmRequest::new("model").with_user_text("hello");
+            request.input.max_tokens = Some(4096);
+            let mut prepared = child.client.prepare(&request).await.unwrap();
+            assert_eq!(
+                child.native_anthropic_endpoint_selected(&prepared),
+                selected
+            );
+            child.apply_user_agent(&mut prepared);
+            assert_eq!(
+                prepared
+                    .provider_request
+                    .headers
+                    .contains_key("x-stainless-package-version"),
+                selected,
+            );
+            assert_eq!(
+                prepared
+                    .wire_draft
+                    .as_ref()
+                    .unwrap()
+                    .request()
+                    .http1_header_layout,
+                selected.then_some(lingxi_llm_client::Http1HeaderLayout::NativeFetch),
+            );
+        }
+    }
+
     #[test]
     fn explicit_api_identity_metadata_does_not_read_process_metadata() {
         let extra = serde_json::json!({"scope":"embedding","device_id":"stale"})

@@ -20,6 +20,7 @@ pub struct CommandRegistry {
     aliases: HashMap<Vec<u16>, Vec<u16>>,
     builtin_handlers: HashMap<Vec<u16>, Arc<dyn BuiltinCommandHandler>>,
     plugin_commands: HashMap<PluginId, Vec<Vec<u16>>>,
+    side_chat: bool,
     session_skill_allowlist: Option<Vec<String>>,
     /// Exact plugin display-name units -> (owner id, storage identity, native provider).
     plugin_describe_providers: HashMap<Vec<u16>, (PluginId, String, Utf16JsonProjection)>,
@@ -65,6 +66,7 @@ impl CommandRegistry {
             aliases: HashMap::new(),
             builtin_handlers: HashMap::new(),
             plugin_commands: HashMap::new(),
+            side_chat: false,
             session_skill_allowlist: None,
             plugin_describe_providers: HashMap::new(),
             managed_mcp_servers: HashSet::new(),
@@ -77,6 +79,42 @@ impl CommandRegistry {
     /// This does not affect interactive palette behavior or command ordering.
     pub fn set_native_headless_context(&mut self, context: NativeHeadlessCatalogContext) {
         self.native_headless_context = Some(context);
+    }
+
+    /// Restrict this registry instance to lightweight side conversations.
+    pub fn set_side_chat(&mut self, enabled: bool) {
+        self.side_chat = enabled;
+    }
+
+    /// Check Side Chat admission before handlers, hooks, or prompt expansion.
+    #[must_use]
+    pub fn execution_allowed(&self, command: &SlashCommand) -> bool {
+        if !self.side_chat {
+            return true;
+        }
+        if self.mod_owner_of(&command.name).is_some()
+            || matches!(command.source, CommandSource::Plugin | CommandSource::Mcp)
+        {
+            return false;
+        }
+        match &command.kind {
+            SlashCommandKind::Builtin { .. } => matches!(
+                projection_text(&command.name),
+                Some("help" | "model" | "compact")
+            ),
+            SlashCommandKind::Markdown { frontmatter, .. }
+            | SlashCommandKind::Bundled { frontmatter, .. } => projection_text(&command.name)
+                .is_some_and(|name| {
+                    side_skill_allowed(
+                        name,
+                        frontmatter.context.as_deref(),
+                        frontmatter.background,
+                        frontmatter.agent.as_deref(),
+                        frontmatter.allowed_tools.as_deref().unwrap_or(&[]),
+                    )
+                }),
+            SlashCommandKind::Plugin { .. } | SlashCommandKind::Mcp { .. } => false,
+        }
     }
 
     /// Set a source-bound Native visibility bit on a registered built-in.
@@ -642,6 +680,7 @@ impl CommandRegistry {
             .filter(|c| native_factory_enabled(c))
             .filter(|c| self.native_headless_factory_available(c))
             .filter(|c| !c.disable_model_invocation)
+            .filter(|c| self.execution_allowed(c))
             .filter(|c| self.session_skill_allowed(c))
             .collect()
     }
@@ -656,6 +695,9 @@ impl CommandRegistry {
     /// suffixes for ordinary skills. MCP prompts require their exact name.
     #[must_use]
     pub fn session_skill_allowed(&self, command: &SlashCommand) -> bool {
+        if !self.execution_allowed(command) {
+            return false;
+        }
         let Some(names) = self.session_skill_allowlist.as_ref() else {
             return true;
         };
@@ -695,6 +737,7 @@ impl CommandRegistry {
             .values()
             .filter(|command| native_factory_enabled(command))
             .filter(|command| command.user_invocable != Some(false))
+            .filter(|command| self.execution_allowed(command))
             .map(|command| {
                 let mut command = command.clone();
                 command.aliases = self.aliases_for(&command.name);
@@ -905,6 +948,28 @@ fn projection_text(value: &Utf16JsonProjection) -> Option<&str> {
         .copied()
         .eq(text.encode_utf16())
         .then_some(text)
+}
+
+/// Side Chat omits skills that can fork work, dispatch more agents, or run a
+/// detached background task.
+#[must_use]
+pub fn side_skill_allowed(
+    name: &str,
+    context: Option<&str>,
+    background: Option<bool>,
+    agent: Option<&str>,
+    allowed_tools: &[String],
+) -> bool {
+    name != "loop"
+        && !context.is_some_and(|value| value.eq_ignore_ascii_case("fork"))
+        && background != Some(true)
+        && agent.is_none()
+        && !allowed_tools.iter().any(|tool| {
+            matches!(
+                tool.split(['(', ':']).next().unwrap_or(tool).trim(),
+                "Agent" | "Task" | "TeamCreate" | "TeamDelete"
+            )
+        })
 }
 
 fn string_projection(value: &str) -> Utf16JsonProjection {

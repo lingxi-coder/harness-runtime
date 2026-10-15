@@ -74,6 +74,8 @@ mod mcp_transport;
 mod mobile_lsp;
 
 #[cfg(feature = "mobile")]
+pub use crate::side_chat::SideChatInfoDto;
+#[cfg(feature = "mobile")]
 pub use client::protocol::listings::{
     ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
     ModelPricingTierDto, SessionModeDto,
@@ -465,6 +467,12 @@ pub fn mobile_command_registry(
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtin_support::UnimplementedCommandHandler::new(
+            "side",
+            "Open a lightweight side chat",
+        ),
+    ));
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());

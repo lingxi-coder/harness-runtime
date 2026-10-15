@@ -1763,6 +1763,11 @@ impl ConversationOrchestrator {
         prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         message_id: MessageId,
     ) -> bool {
+        // A side chat is an isolated child context. It does not publish
+        // session hooks, telemetry, or derived host facilities.
+        if self.side_chat {
+            return false;
+        }
         let prompt_display = prompt.string_at("").unwrap_or_default();
         // The JSONL append immediately before this seam minted the stable
         // per-turn prompt id. Emit once for all batched/streaming/cancelable

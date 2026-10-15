@@ -274,7 +274,25 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::SkillAdmin", "skill_admin");
     put("ClientCommand::SkillAdmin.command", "SkillAdminCommandDto");
     put("ClientCommand::FusionAdmin", "fusion_admin");
-    put("ClientCommand::FusionAdmin.command", "FusionAdminCommandDto");
+    put(
+        "ClientCommand::FusionAdmin.command",
+        "FusionAdminCommandDto",
+    );
+    put("ClientCommand::SideChatCreate", "side_chat_create");
+    put("ClientCommand::SideChatCreate.request_id", "String");
+    put(
+        "ClientCommand::SideChatCreate.initial_input",
+        "Option<ClientTextDto>",
+    );
+    put("ClientCommand::SideChatList", "side_chat_list");
+    put("ClientCommand::SideChatGet", "side_chat_get");
+    put("ClientCommand::SideChatGet.side_id", "String");
+    put("ClientCommand::SideChatEnd", "side_chat_end");
+    put("ClientCommand::SideChatEnd.side_id", "String");
+    put("ClientCommand::SideChatSubmit", "side_chat_submit");
+    put("ClientCommand::SideChatSubmit.side_id", "String");
+    put("ClientCommand::SideChatSubmit.request_id", "String");
+    put("ClientCommand::SideChatSubmit.command_json", "String");
     put("FusionAdminCommandDto.action", "String");
     put("FusionAdminCommandDto.operation_id", "Option<u64>");
     put("FusionAdminCommandDto.target", "Option<String>");
@@ -284,10 +302,45 @@ fn current_contract_index() -> ContractIndex {
     put("ConfigurationDomainDto::Fusion", "fusion");
     put("ClientEvent::FusionCatalog", "fusion_catalog");
     put("ClientEvent::FusionCatalog.catalog_json", "String");
-    put("ClientEvent::FusionStrategyResolved", "fusion_strategy_resolved");
+    put(
+        "ClientEvent::FusionStrategyResolved",
+        "fusion_strategy_resolved",
+    );
     put("ClientEvent::FusionStrategyResolved.operation_id", "u64");
-    put("ClientEvent::FusionStrategyResolved.selection_json", "Option<String>");
-    put("ClientEvent::FusionStrategyResolved.error", "Option<String>");
+    put(
+        "ClientEvent::FusionStrategyResolved.selection_json",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::FusionStrategyResolved.error",
+        "Option<String>",
+    );
+    put("ClientEvent::SideChatCreated", "side_chat_created");
+    put("ClientEvent::SideChatCreated.request_id", "String");
+    put("ClientEvent::SideChatCreated.side_id", "String");
+    put("ClientEvent::SideChatList", "side_chat_list");
+    put("ClientEvent::SideChatList.side_ids", "Vec<String>");
+    put("ClientEvent::SideChatSnapshot", "side_chat_snapshot");
+    put("ClientEvent::SideChatSnapshot.side_id", "String");
+    put("ClientEvent::SideChatSnapshot.events_json", "Vec<String>");
+    put("ClientEvent::SideChatEvent", "side_chat_event");
+    put("ClientEvent::SideChatEvent.side_id", "String");
+    put("ClientEvent::SideChatEvent.event_json", "String");
+    put("ClientEvent::SideChatPermission", "side_chat_permission");
+    put("ClientEvent::SideChatPermission.side_id", "String");
+    put(
+        "ClientEvent::SideChatPermission.request",
+        "PermissionRequest",
+    );
+    put("ClientEvent::SideChatSubmitted", "side_chat_submitted");
+    put("ClientEvent::SideChatSubmitted.side_id", "String");
+    put("ClientEvent::SideChatSubmitted.request_id", "String");
+    put("ClientEvent::SideChatEnded", "side_chat_ended");
+    put("ClientEvent::SideChatEnded.side_id", "String");
+    put("ClientEvent::SideChatError", "side_chat_error");
+    put("ClientEvent::SideChatError.request_id", "Option<String>");
+    put("ClientEvent::SideChatError.side_id", "Option<String>");
+    put("ClientEvent::SideChatError.message", "String");
 
     // ── ClientEvent (events.rs) ───────────────────────────────────────────
     put("ClientEvent::Error", "error");

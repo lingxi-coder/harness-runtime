@@ -1588,6 +1588,9 @@ pub use native_policy_attachments::{
 };
 
 pub struct ConversationOrchestrator {
+    /// Lightweight child state never publishes process-wide session flags.
+    pub(crate) side_chat: bool,
+    pub(crate) side_chat_model_refs: Option<Vec<String>>,
     pub(crate) config: OrchestratorConfig,
     pub(crate) native_sandbox_host_facts_provider:
         Option<Arc<dyn Fn() -> NativeSandboxHostFacts + Send + Sync>>,
@@ -2061,3 +2064,7 @@ impl StreamingApiClient for NoStreamingApiClient {
         })
     }
 }
+
+#[path = "conversation/side_chat.rs"]
+mod side_chat_impl;
+pub use side_chat_impl::SideChatParentSnapshot;

@@ -884,12 +884,50 @@ define_client_command! {
     FusionAdmin {
         command: FusionAdminCommandDto,
     },
+    // Lightweight child-conversation lifecycle. Keep additions at the enum tail
+    // so protocol-25 UniFFI ordinals remain stable.
+    SideChatCreate {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial_input: Option<ClientTextDto>,
+    },
+    SideChatList {},
+    SideChatGet {
+        side_id: String,
+    },
+    SideChatEnd {
+        side_id: String,
+    },
+    SideChatSubmit {
+        side_id: String,
+        request_id: String,
+        command_json: String,
+    },
 }
 
 impl From<ClientCommandWire> for ClientCommand {
     fn from(value: ClientCommandWire) -> Self {
         match value {
             ClientCommandWire::FusionAdmin { command } => Self::FusionAdmin { command },
+            ClientCommandWire::SideChatCreate {
+                request_id,
+                initial_input,
+            } => Self::SideChatCreate {
+                request_id,
+                initial_input,
+            },
+            ClientCommandWire::SideChatList {} => Self::SideChatList {},
+            ClientCommandWire::SideChatGet { side_id } => Self::SideChatGet { side_id },
+            ClientCommandWire::SideChatEnd { side_id } => Self::SideChatEnd { side_id },
+            ClientCommandWire::SideChatSubmit {
+                side_id,
+                request_id,
+                command_json,
+            } => Self::SideChatSubmit {
+                side_id,
+                request_id,
+                command_json,
+            },
             ClientCommandWire::StartRealtimeAudio { request_json } => {
                 Self::StartRealtimeAudio { request_json }
             }

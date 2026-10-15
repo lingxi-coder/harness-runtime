@@ -2515,6 +2515,17 @@ static INPUT_SCHEMA_NO_BACKGROUND: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     schema
 });
 
+static SIDE_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    let mut schema = INPUT_SCHEMA_NO_BACKGROUND.clone();
+    schema
+        .replace_pointer_projection(
+            "/properties/timeout/maximum",
+            Utf16JsonProjection::plain(json!(120_000)),
+        )
+        .expect("generated Bash timeout schema is writable");
+    schema
+});
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -2531,7 +2542,9 @@ impl Tool for BashTool {
     /// same switch — so a session that flips the env var sees a consistent
     /// prompt + schema pair.
     fn input_schema(&self) -> &Utf16JsonProjection {
-        if crate::prompt::background_tasks_disabled() {
+        if self.ctx.side_chat {
+            &SIDE_INPUT_SCHEMA
+        } else if crate::prompt::background_tasks_disabled() {
             &INPUT_SCHEMA_NO_BACKGROUND
         } else {
             &INPUT_SCHEMA
@@ -2634,7 +2647,15 @@ impl Tool for BashTool {
     /// threshold in claude-code — and `M0u`'s `AKr` ceiling would have clamped
     /// it to 50 000 even if it did.
     fn persistence_threshold(&self) -> Option<usize> {
-        Some(MAX_TOOL_OUTPUT_LENGTH)
+        Some(if self.ctx.side_chat {
+            usize::MAX
+        } else {
+            MAX_TOOL_OUTPUT_LENGTH
+        })
+    }
+
+    fn persistence_threshold_ceiling(&self) -> Option<usize> {
+        self.ctx.side_chat.then_some(usize::MAX)
     }
 
     fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool {
@@ -2844,6 +2865,9 @@ impl Tool for BashTool {
         &self,
         opts: &PromptOptions,
     ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        if self.ctx.side_chat {
+            return "Execute a shell command in the foreground. The default and maximum timeout are 120000 ms. Background execution and promotion are unavailable. Cancellation and timeout stop the command and wait for its process tree to be reaped. Prefer absolute paths; working-directory changes affect only this Side Chat.".into();
+        }
         // BASH.6/BASH.7 — 1:1 with claude-code
         // `getSimplePrompt(model) = Dh(model) ? qUp(/*CONCISE*/) : TXa(/*VERBOSE*/)`.
         // The `Dh(model)` "simple system prompt" gate (binary @~195159752)
@@ -2899,7 +2923,11 @@ impl Tool for BashTool {
         // with background tasks disabled the block's own remedy
         // (`run_in_background: true`) does not exist, so the oracle stops
         // blocking rather than dead-ending the model.
-        if sleep_block_enabled() && !crate::prompt::background_tasks_disabled() && !run_bg {
+        if sleep_block_enabled()
+            && !self.ctx.side_chat
+            && !crate::prompt::background_tasks_disabled()
+            && !run_bg
+        {
             if let Some(pattern) = detect_blocked_sleep_pattern(cmd) {
                 return Err(ValidationError(format!(
                     "Blocked: {pattern}. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block."
@@ -2949,10 +2977,11 @@ impl Tool for BashTool {
         //
         // Every failure answers `None` and the command proceeds: a diff is a
         // convenience, and a shell command must never fail because git did.
-        let edit_diff_eligible = !input
-            .at_pointer("/run_in_background")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
+        let edit_diff_eligible = !self.ctx.side_chat
+            && !input
+                .at_pointer("/run_in_background")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
             && !self.is_read_only(&input)
             && !crate::bash_edit_diff::is_branch_moving_git(&cmd_str);
         let edit_diff_before = match (self.ctx.bash_edit_diff.as_ref(), ctx.cwd.as_ref()) {
@@ -2986,7 +3015,26 @@ impl Tool for BashTool {
         // claude-code `BashTool.tsx` sends the timeout as `timeout` (ms). Resolve
         // it with the faithful `VF` (numeric-string coercion) + `H5a` (use iff a
         // finite number > 0, else default), then clamp the execution budget.
-        let timeout_ms = resolve_timeout_ms(&input);
+        if self.ctx.side_chat
+            && input
+                .at_pointer("/run_in_background")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+        {
+            return Err(ToolError::InvalidInput(
+                "Background shell execution is unavailable in Side Chat".into(),
+            ));
+        }
+        if self.ctx.side_chat && ctx.agent_id.is_none() && self.ctx.session_id.is_none() {
+            return Err(ToolError::InvalidInput(
+                "Side Chat shell owner is absent".into(),
+            ));
+        }
+        let timeout_ms = if self.ctx.side_chat {
+            input_timeout_ms(&input).unwrap_or(120_000).min(120_000)
+        } else {
+            resolve_timeout_ms(&input)
+        };
         // claude-code gates the explicit-background branch on the same
         // background-tasks-disabled flag that removes the parameter from the
         // schema (`if (Oe === !0 && !It)`), so a call that carries the
@@ -2995,13 +3043,15 @@ impl Tool for BashTool {
             .at_pointer("/run_in_background")
             .and_then(|value| value.as_bool())
             .unwrap_or(false)
+            && !self.ctx.side_chat
             && !crate::prompt::background_tasks_disabled();
         // Whether exceeding the timeout may move this command to the background
         // rather than kill it (claude-code `dn = !Dl() && $es(command)`). A
         // command whose first statement starts with `sleep` is excluded: the
         // point of a sleep is to finish, so backgrounding it just hides it.
-        let can_auto_background =
-            !crate::prompt::background_tasks_disabled() && !first_statement_is_sleep(&cmd_str);
+        let can_auto_background = !self.ctx.side_chat
+            && !crate::prompt::background_tasks_disabled()
+            && !first_statement_is_sleep(&cmd_str);
         // BASH.5: optional `dangerouslyDisableSandbox` override.
         let dangerously_disable_sandbox = input
             .at_pointer("/dangerouslyDisableSandbox")
@@ -3261,7 +3311,13 @@ impl Tool for BashTool {
             // behaviour, retained for hosts that have no task registry.
             let bound = self.allocate_task_identity().await;
             let sandboxed = self.bind_identity(sandboxed, bound.as_ref(), None);
-            let sandboxed = sandboxed.with_process_owner(ctx.agent_id.map(|id| id.to_string()));
+            let sandboxed =
+                sandboxed.with_process_owner(ctx.agent_id.map(|id| id.to_string()).or_else(|| {
+                    self.ctx
+                        .side_chat
+                        .then(|| self.ctx.session_id.map(|id| id.to_string()))
+                        .flatten()
+                }));
             return match self.ctx.process.spawn_background(&sandboxed).await {
                 Ok(handle) => {
                     // Only claim the registry identity if the runner actually
@@ -3377,7 +3433,24 @@ impl Tool for BashTool {
             .with_background_timeout(
                 resolve_background_timeout_ms(&input, false).map(Duration::from_millis),
             )
-            .with_process_owner(ctx.agent_id.map(|id| id.to_string()));
+            .with_process_owner(
+                ctx.agent_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .or_else(|| {
+                        self.ctx
+                            .side_chat
+                            .then(|| self.ctx.session_id.map(|id| id.to_string()))
+                            .flatten()
+                    })
+                    .map(|owner| {
+                        if self.ctx.side_chat {
+                            format!("side:{owner}")
+                        } else {
+                            owner
+                        }
+                    }),
+            );
         // A foreground command can still be moved to the background when it
         // exceeds its timeout (claude-code 2.1.210 `timedOutAfterMs`), and the
         // id it is then given must be a registry id for the same reason the
@@ -3385,7 +3458,11 @@ impl Tool for BashTool {
         // does the same, minting one identity per shell command in `vV`
         // regardless of whether it is ever backgrounded — and settle it as
         // completed when the command actually finishes in the foreground.
-        let fg_bound = self.allocate_task_identity().await;
+        let fg_bound = if self.ctx.side_chat {
+            None
+        } else {
+            self.allocate_task_identity().await
+        };
         // The other end of claude-code `I_t`'s `t.background(e)`. Ctrl+B,
         // background-all and the SDK `background_tasks` request all reach a
         // still-running foreground shell through this, and the runner treats it
@@ -3424,20 +3501,42 @@ impl Tool for BashTool {
         // background (returning `MovedToBackground`) rather than killing it; the
         // default trait impl still maps a normal finish to `Completed` and a
         // timeout to `Err(Timeout)`, preserving the interrupted-result fallback.
-        let run_fut = self
-            .ctx
-            .process
-            .run_foreground_with_output_limit(&sandboxed, Some(bash_max_output_length()));
+        let run_fut = self.ctx.process.run_foreground_with_output_limit(
+            &sandboxed,
+            if self.ctx.side_chat {
+                None
+            } else {
+                Some(bash_max_output_length())
+            },
+        );
         tokio::pin!(run_fut);
         let run_result = match &cancel {
             Some(token) => {
                 tokio::select! {
                     biased;
                     () = token.cancelled() => {
+                        if self.ctx.side_chat {
+                            if let Some(owner) = ctx.agent_id.as_ref().map(ToString::to_string).or_else(|| self.ctx.session_id.map(|id| id.to_string())) {
+                                loop {
+                                    self.ctx.process.kill_owner_processes(&format!("side:{owner}")).await;
+                                    tokio::select! {
+                                        result = &mut run_fut => {
+                                            if let Err(error) = result {
+                                                if self.ctx.note_side_chat_cleanup_failure(&error.to_string()) { return Err(ToolError::Internal(error.to_string())); }
+                                            }
+                                            break;
+                                        }
+                                        () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                                    }
+                                }
+                            }
+                            self.ctx.sandbox_runner.cleanup_after_command().await;
+                            return Err(ToolError::Aborted);
+                        }
                         // `turnAbortBackgrounds: !Dl()` applies even before the
                         // 2 s UI row is armed. Keep polling the same runner so
                         // detachment does not drop (and kill) its OS child.
-                        if !crate::prompt::background_tasks_disabled() {
+                        if !self.ctx.side_chat && !crate::prompt::background_tasks_disabled() {
                             if let Some(notify) = &on_demand {
                                 let _ = background_reason.compare_exchange(0, lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
                                 notify.notify_one();
@@ -3450,6 +3549,9 @@ impl Tool for BashTool {
             }
             None => run_fut.await,
         };
+        if let Err(error) = &run_result {
+            self.ctx.note_side_chat_cleanup_failure(&error.to_string());
+        }
         // The wrapped command has finished: tear down any per-command sandbox
         // state (e.g. bwrap mount points). No-op for the default
         // `LegacyWrapRunner`; only the live runner has anything to clean up.
@@ -4082,6 +4184,41 @@ mod tests {
 
     fn use_ctx() -> ToolUseContext {
         tool_api::test_support::fresh_ctx()
+    }
+
+    #[tokio::test]
+    async fn side_shell_rejects_background_and_keeps_main_schema() {
+        let main = BashTool::new(shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        let mut context = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        context.side_chat = true;
+        let side = BashTool::new(context);
+        assert!(side.input_schema()["properties"]
+            .get("run_in_background")
+            .is_none());
+        assert_eq!(
+            side.input_schema()["properties"]["timeout"]["maximum"],
+            120_000
+        );
+        assert_ne!(main.persistence_threshold(), side.persistence_threshold());
+        let error = side
+            .call(
+                json!({"command":"echo hi", "run_in_background":true}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("background denied");
+        assert!(error.to_string().contains("unavailable in Side Chat"));
     }
 
     /// `ephemeral_id` must never repeat within a process. It used to be

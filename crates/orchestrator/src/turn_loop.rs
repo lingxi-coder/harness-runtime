@@ -90,11 +90,6 @@ pub(crate) use error_reporting::surface_prompt_too_long;
 pub(crate) use error_reporting::surface_rapid_refill_thrashing;
 pub(crate) use error_reporting::surface_terminal_api_error;
 pub(crate) use error_reporting::terminal_api_error_text;
-#[cfg(test)]
-use error_reporting::GoalClearBucket;
-pub(crate) use error_reporting::GoalClearReason;
-#[cfg(test)]
-use error_reporting::GOAL_CLEAR_CONDITION_WIDTH;
 use response::handle_malformed_tool_use;
 use response::handle_max_output_tokens;
 use response::handle_thinking_only;
@@ -784,6 +779,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         &context_announcements,
                         cost_scope.as_ref(),
                         native_anthropic_request_context.clone(),
+                        None,
                     ),
                 )
                 .await
@@ -798,6 +794,17 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                 response,
                 request_history,
             } => (response, request_history),
+            PtlCallOutcome::Cancelled => {
+                return Ok((
+                    TurnStepOutcome::Ended {
+                        final_message_id: MessageId::new(),
+                        stop_reason: "aborted_streaming".into(),
+                        allow_budget_continuation: false,
+                        tool_requested_end: false,
+                    },
+                    0,
+                ));
+            }
             PtlCallOutcome::PromptTooLong => {
                 let assistant_id = surface_prompt_too_long(orch).await;
                 // SLASH-04: `w4v` maps `prompt_too_long` to `context_limit`.

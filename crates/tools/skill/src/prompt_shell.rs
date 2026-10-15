@@ -67,6 +67,10 @@ use tool_api::builtin_context::BuiltinToolContext;
 /// the BASH.4 persistent-cwd `pwd -P` readback is omitted (one-shot expansion
 /// keeps no shell-cwd state).
 pub struct PromptShellRunner {
+    side_chat: bool,
+    cleanup_failed: Option<Arc<std::sync::atomic::AtomicBool>>,
+    owner: Option<String>,
+    cancel: Option<lingxi_core::host::CancellationToken>,
     process: Arc<dyn lingxi_core::host::process::ProcessRunner>,
     sandbox: Arc<dyn lingxi_core::host::sandbox::Sandbox>,
     workspace: std::path::PathBuf,
@@ -266,8 +270,12 @@ async fn run_prompt_shell_process(
     process: Arc<dyn lingxi_core::host::process::ProcessRunner>,
     command: lingxi_core::host::sandbox::SandboxedCommand,
     cancellation: lingxi_core::host::CancellationToken,
+    owner_prefix: Option<&str>,
 ) -> Result<lingxi_core::host::process::ForegroundRunResult, mobile_linux_api::ProcessError> {
-    let owner = format!("prompt-shell-{}", tool_api::util::ids::ulid_or_uuid());
+    let child_owner = format!("prompt-shell-{}", tool_api::util::ids::ulid_or_uuid());
+    let owner = owner_prefix.map_or(child_owner.clone(), |prefix| {
+        format!("{prefix}/{child_owner}")
+    });
     let command = command
         .with_process_owner(Some(owner.clone()))
         .with_auto_background_on_timeout(false);
@@ -296,6 +304,27 @@ impl ShellRunner for PromptShellRunner {
         _shell: Option<FrontmatterShell>,
         cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<ShellOut, ShellRunError> {
+        if self.side_chat
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            return Err(ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
+                interrupted: true,
+                generic_message: None,
+            });
+        }
+        if self.side_chat && self.owner.is_none() {
+            return Err(ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
+                interrupted: false,
+                generic_message: Some("Side Chat shell owner is absent".into()),
+            });
+        }
         use lingxi_core::host::sandbox::ProcessCommand;
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
@@ -330,7 +359,7 @@ impl ShellRunner for PromptShellRunner {
         }
 
         let shell_path = self.shell_path.as_str();
-        let snapshot = if self.mobile_shell {
+        let snapshot = if self.mobile_shell || self.side_chat {
             None
         } else {
             self.snapshot
@@ -420,7 +449,7 @@ impl ShellRunner for PromptShellRunner {
             },
             cwd: Some(self.workspace.clone()),
             env: HashMap::new(),
-            timeout: None,
+            timeout: self.side_chat.then(|| std::time::Duration::from_secs(120)),
             stdin: None,
         };
         let sandboxed = if self.force_platform_sandbox {
@@ -452,11 +481,32 @@ impl ShellRunner for PromptShellRunner {
                 generic_message: None,
             });
         }
-        let run_result =
-            run_prompt_shell_process(self.process.clone(), sandboxed, cancellation.clone()).await;
+        let owner_prefix = if self.side_chat {
+            self.owner.as_deref()
+        } else {
+            None
+        };
+        let run_result = run_prompt_shell_process(
+            self.process.clone(),
+            sandboxed,
+            cancellation.clone(),
+            owner_prefix,
+        )
+        .await;
         // The wrapped command has finished and been joined: tear down any
         // per-command sandbox state. No-op for the default `LegacyWrapRunner`.
         self.sandbox_runner.cleanup_after_command().await;
+        if let Err(error) = &run_result {
+            if self.side_chat
+                && error
+                    .to_string()
+                    .contains(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE)
+            {
+                if let Some(flag) = &self.cleanup_failed {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
         match run_result {
             Ok(result) => match result.outcome {
                 lingxi_core::host::process::ForegroundOutcome::Completed(out)
@@ -489,12 +539,19 @@ impl ShellRunner for PromptShellRunner {
             },
             // A process error produced by the owner kill is still the
             // interruption path; unrelated spawn/I/O failures remain generic.
-            Err(_) if cancellation.is_cancelled() => Err(ShellRunError {
-                stdout: String::new(),
-                stderr: String::new(),
-                interrupted: true,
-                generic_message: None,
-            }),
+            Err(error)
+                if cancellation.is_cancelled()
+                    && !error
+                        .to_string()
+                        .contains(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE) =>
+            {
+                Err(ShellRunError {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    interrupted: true,
+                    generic_message: None,
+                })
+            }
             // Spawn / I/O failure -> the TS `errorMessage(e)` generic path
             // (`[Error]\n{message}`).
             Err(e) => Err(ShellRunError {
@@ -1651,7 +1708,22 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
     fn build(
         &self,
         allowed_tools: &[String],
+        shell: Option<FrontmatterShell>,
+    ) -> ShellExpansionCtx {
+        self.build_for_call(
+            allowed_tools,
+            shell,
+            self.ctx.session_id.map(|id| id.to_string()),
+            None,
+        )
+    }
+
+    fn build_for_call(
+        &self,
+        allowed_tools: &[String],
         _shell: Option<FrontmatterShell>,
+        owner: Option<String>,
+        cancel: Option<lingxi_core::host::CancellationToken>,
     ) -> ShellExpansionCtx {
         // NOTE: the `_shell` build-time hint is redundant with the per-command
         // `shell` that `execute_shell_commands_in_prompt` threads into both
@@ -1661,6 +1733,14 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
         let mobile_shell = self.ctx.mobile_shell();
         let shell_enabled = mobile_shell.is_some_and(|carrier| carrier.enabled);
         let runner = Arc::new(PromptShellRunner {
+            side_chat: self.ctx.side_chat,
+            cleanup_failed: self.ctx.side_chat_cleanup_failed.clone(),
+            owner: if self.ctx.side_chat {
+                owner.map(|owner| format!("side:{owner}"))
+            } else {
+                owner
+            },
+            cancel,
             process: self.ctx.process.clone(),
             sandbox: self.ctx.sandbox.clone(),
             workspace: self.ctx.cwd(),

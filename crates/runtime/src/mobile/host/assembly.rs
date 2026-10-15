@@ -1791,6 +1791,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     local_agent_status_sink.bind(task_registry.clone());
     let tool_ctx = BuiltinToolContext {
         host_git_root_cache: cfg.host_git_root_cache.clone(),
+        side_chat: false,
+        side_chat_cleanup_failed: None,
         // No session: this context never persists tool output.
         session_id: None,
         // FILE.B / P1-06: file tools share the ONE per-session read-state map
@@ -2035,6 +2037,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // bodies identically to desktop. Mobile reports `sandbox_available:false`, so
     // `should_use_sandbox` short-circuits to `NoSandbox` and the expansion runs
     // via the plain `ProcessRunner` — consistent with mobile's own Bash tool.
+    let side_chat_context = tool_ctx.clone();
     let shell_expansion_provider = tool_skill::build_prompt_shell_provider(&tool_ctx);
     let ask_resolver = ask_user_question_tx.map(|tx| {
         let timeout = tool_ui::ask_user_question::AskUserQuestionTimeout::parse_or_default(
@@ -2861,7 +2864,13 @@ pub(super) async fn build_mobile_inner_with_ask(
         })
         .await;
 
+    let side_chat_factory = Arc::new(super::side_chat::MobileSideChatFactory {
+        api: api_service,
+        context: side_chat_context,
+        commands: shared_command_registry.clone(),
+    });
     Ok(MobileRuntime {
+        side_chat_factory,
         provider_region,
         settings_active: mod_settings_active,
         settings_managed: mod_settings_managed,
@@ -3663,7 +3672,15 @@ pub fn build_mobile_engine_inner(
         managed: inner.settings_managed.clone(),
         managed_diagnostics: None,
     });
+    let side_chats = runtime.block_on(async {
+        crate::side_chat::SideChatManager::new(
+            inner.orchestrator.clone(),
+            inner.side_chat_factory.clone(),
+            connection_sink.clone(),
+        )
+    });
     let handle = Arc::new(MobileEngineHandle {
+        side_chats,
         session_cron,
         scheduled_reload: std::sync::atomic::AtomicBool::new(false),
         settings,

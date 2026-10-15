@@ -120,8 +120,8 @@ pub use conversation::{
 };
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
-    OrchestratorApiClient, OrchestratorApiRequest, SessionMemoryHandle, StreamingApiClient,
-    TurnExecutionMetrics, TurnOutcome,
+    OrchestratorApiClient, OrchestratorApiRequest, SessionMemoryHandle, SideChatParentSnapshot,
+    StreamingApiClient, TurnExecutionMetrics, TurnOutcome,
 };
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;

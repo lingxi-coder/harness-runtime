@@ -178,6 +178,17 @@ pub trait ShellExpansionProvider: Send + Sync {
     /// frontmatter-selected shell (`None` → bash; builtins always pass `None`).
     fn build(&self, allowed_tools: &[String], shell: Option<FrontmatterShell>)
         -> ShellExpansionCtx;
+
+    /// Bind foreground expansion to this call's cancellation and process owner.
+    fn build_for_call(
+        &self,
+        allowed_tools: &[String],
+        shell: Option<FrontmatterShell>,
+        _owner: Option<String>,
+        _cancel: Option<lingxi_core::host::CancellationToken>,
+    ) -> ShellExpansionCtx {
+        self.build(allowed_tools, shell)
+    }
 }
 
 /// A single extracted shell command: its full matched span (for replacement)

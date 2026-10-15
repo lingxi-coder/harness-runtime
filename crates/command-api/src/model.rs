@@ -710,6 +710,14 @@ pub enum NativePromptPreparation {
 pub trait BuiltinCommandHandler: Send + Sync {
     /// Execute the command with parsed arguments and return a result.
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult;
+    /// Execute with a caller-owned foreground cancellation token.
+    async fn handle_with_cancel(
+        &self,
+        args: &ParsedSlashCommand,
+        _cancel: lingxi_core::host::CancellationToken,
+    ) -> CommandResult {
+        self.handle(args).await
+    }
     /// Canonical command name (without the leading `/`).
     fn name(&self) -> &str;
     /// Short user-facing description.

@@ -4369,6 +4369,8 @@ pub async fn build_with_credential_stack(
     let desktop_audio = cfg.audio.clone();
     let tool_ctx = BuiltinToolContext {
         host_git_root_cache: cfg.host_git_root_cache.clone(),
+        side_chat: false,
+        side_chat_cleanup_failed: None,
         // The live session, so tools that persist oversized output can write to
         // claude-code's session-scoped `<projects>/<session-id>/tool-results/`
         // instead of dropping artifacts inside the user's repository. Same
@@ -4548,6 +4550,7 @@ pub async fn build_with_credential_stack(
             ),
         )),
     };
+    let side_chat_tool_context = tool_ctx.clone();
     // (worktree-tmux-launch plan, Task 3) `-w`/`--worktree [name]` boot
     // launch: create + enter a git worktree BEFORE anything downstream reads
     // `tool_ctx.session_cwd`/`tool_ctx.worktree_session` (the orchestrator's
@@ -7091,7 +7094,7 @@ pub async fn build_with_credential_stack(
         task_registry: task_registry.clone(),
         command_registry: shared_command_registry.clone(),
         subagent_spawner: lifecycle_subagent_spawner,
-        fusion_api_service: api_service,
+        fusion_api_service: api_service.clone(),
         fusion_implement_host,
         cost_tracker,
         session_state_manager,
@@ -7113,7 +7116,23 @@ pub async fn build_with_credential_stack(
         None
     };
 
+    shared_command_registry
+        .write()
+        .await
+        .register_builtin_handler(Arc::new(
+            command_api::builtin_support::UnimplementedCommandHandler::new(
+                "side",
+                "Open an independent side chat",
+            ),
+        ));
+    let side_chat_factory = Arc::new(super::side_chat::DesktopSideChatFactory {
+        api: api_service,
+        context: side_chat_tool_context,
+        commands: shared_command_registry.clone(),
+        availability: provider_availability.clone(),
+    });
     Ok(DesktopRuntime {
+        side_chat_factory,
         deferred_startup: tokio::sync::Mutex::new(deferred_startup),
         mcp_startup,
         fork_writer: cfg.session_persistence.then_some(main_agent_setting_writer),

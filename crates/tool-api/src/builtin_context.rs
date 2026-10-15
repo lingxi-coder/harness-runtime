@@ -79,6 +79,10 @@ pub struct BashEditDiffSetup {
 /// Cloning is cheap — every field is `Arc` or a small owned vec.
 #[derive(Clone)]
 pub struct BuiltinToolContext {
+    /// RAM-only side conversation: foreground execution and inline skills only.
+    pub side_chat: bool,
+    /// Latched when foreground work could not be reaped; keeps the side Closing.
+    pub side_chat_cleanup_failed: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Sandboxed FS access (M1).
     pub fs: Arc<dyn FileSystem>,
     /// Telemetry bus (M3-06).
@@ -380,6 +384,18 @@ pub struct BuiltinToolContext {
 }
 
 impl BuiltinToolContext {
+    /// Record an explicit runner cleanup error, excluding ordinary command failures.
+    pub fn note_side_chat_cleanup_failure(&self, error: &str) -> bool {
+        let failed =
+            self.side_chat && error.contains(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE);
+        if failed {
+            if let Some(flag) = &self.side_chat_cleanup_failed {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        failed
+    }
+
     /// Directory for persisted oversized tool output.
     ///
     /// claude-code's `xke()` — `vas.join(qzg(), "tool-results")` where
@@ -806,6 +822,22 @@ mod tests {
     use lingxi_core::host::permission_gate::PermissionDecision;
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
+
+    #[test]
+    fn side_cleanup_flag_ignores_command_errors_and_latches_reap_failure() {
+        let mut ctx =
+            ctx_for_file_tools(make_dummy_fs(), Arc::new(AnalyticsBus::new()), Vec::new());
+        let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ctx.side_chat_cleanup_failed = Some(failed.clone());
+        assert!(!ctx
+            .note_side_chat_cleanup_failure(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE));
+        ctx.side_chat = true;
+        assert!(!ctx.note_side_chat_cleanup_failure("Shell command timed out"));
+        assert!(!failed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(ctx
+            .note_side_chat_cleanup_failure(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE));
+        assert!(failed.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     struct LiveReadDenyGate;
 

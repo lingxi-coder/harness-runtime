@@ -827,6 +827,8 @@ pub fn ctx_for_file_tools(
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
     super::BuiltinToolContext {
+        side_chat: false,
+        side_chat_cleanup_failed: None,
         host_git_root_cache: Arc::new(crate::HostGitRootCache::new()),
         // No session: this context never persists tool output.
         session_id: None,
@@ -905,6 +907,8 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
     use telemetry::AnalyticsBus;
 
     super::BuiltinToolContext {
+        side_chat: false,
+        side_chat_cleanup_failed: None,
         host_git_root_cache: Arc::new(crate::HostGitRootCache::new()),
         // No session: this context never persists tool output.
         session_id: None,
@@ -984,6 +988,8 @@ pub fn shell_test_ctx_in(
     let ctx = shell_test_ctx(out);
     let trusted = ctx.trusted_dirs();
     super::BuiltinToolContext {
+        side_chat: false,
+        side_chat_cleanup_failed: None,
         // No session: this context never persists tool output.
         session_id: None,
         session_cwd: crate::session_cwd::SessionCwd::new(workspace, trusted),
