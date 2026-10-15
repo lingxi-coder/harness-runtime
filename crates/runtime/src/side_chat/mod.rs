@@ -37,6 +37,40 @@ pub struct SideChatInfoDto {
     pub status: String,
 }
 
+fn lower_model_source(
+    source: Option<&Utf16JsonProjection>,
+) -> Result<Option<ClientTextDto>, &'static str> {
+    source.map(ClientTextDto::from_projection).transpose()
+}
+
+fn split_model_selection_source(
+    source: Utf16JsonProjection,
+    listings: &[lingxi_core::host::ModelListing],
+) -> (
+    Utf16JsonProjection,
+    Option<lingxi_core::host::ModelRouteAnchor>,
+) {
+    let Some(units) = source.string_units("") else {
+        return (source, None);
+    };
+    let Ok(text) = String::from_utf16(&units) else {
+        return (source, None);
+    };
+    let trimmed = lingxi_core::host::effort::trim_js_whitespace(&text);
+    let (model, profile) = lingxi_core::host::parse_model_ref(&trimmed, listings);
+    let route_hint = profile.map(|profile| lingxi_core::host::ModelRouteAnchor {
+        model: model.clone(),
+        profile: Some(profile),
+    });
+    if route_hint.is_some() {
+        (source, route_hint)
+    } else if model != trimmed {
+        (Utf16JsonProjection::from(model), route_hint)
+    } else {
+        (source, route_hint)
+    }
+}
+
 /// The only composition seam: build a new engine from ready host inputs.
 #[async_trait]
 pub trait SideChatFactory: Send + Sync {
@@ -1179,6 +1213,16 @@ async fn dispatch(
             request_id,
             answers,
         } => {
+            let answers = answers
+                .pairs
+                .into_iter()
+                .map(|pair| {
+                    (
+                        pair.question.into_projection(),
+                        pair.answer.into_projection(),
+                    )
+                })
+                .collect();
             if side
                 .session
                 .question_broker
@@ -1202,38 +1246,52 @@ async fn dispatch(
             Ok(())
         }
         ClientCommand::SetModel { model } => {
-            let model = String::from_utf16(&model.code_units)
-                .map_err(|_| "model selection contains invalid UTF-16".to_string())?;
-            let (profile, bare) = model
-                .split_once('/')
-                .map_or((None, model.as_str()), |(p, m)| (Some(p), m));
-            orch.switch_model(bare, profile)
-                .await
-                .map_err(|e| e.to_string())?;
-            let snapshot = orch.side_chat_parent_snapshot().await;
+            let model_selection = model.into_projection();
+            let listings = orch.list_model_listings().await;
+            let (source, route_hint) = split_model_selection_source(model_selection, &listings);
+            orch.select_model(lingxi_core::host::ModelSelectionRequest::Select {
+                source,
+                route_hint,
+                origin: lingxi_core::host::ModelSelectionOrigin::Sdk,
+                validation: lingxi_core::host::ModelValidationMode::GzrAbortAfterFiveSeconds,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            let snapshot = orch.get_status_snapshot().await;
             let model = lingxi_core::host::qualified_model_ref(
-                &snapshot.config.model,
+                &snapshot.model,
                 snapshot.model_profile.as_deref(),
             );
-            side.replay.emit(ClientEvent::ModelChanged { model }).await;
+            side.replay
+                .emit(ClientEvent::ModelChanged {
+                    model,
+                    model_source: lower_model_source(snapshot.model_source.as_ref())
+                        .map_err(str::to_owned)?,
+                })
+                .await;
             if let Some(controls) = orch.conversation_controls().await {
                 side.replay
                     .emit(ClientEvent::ConversationControlsChanged {
-                        controls: client::adapter::controls::lower_conversation_controls(controls),
+                        controls: client::adapter::controls::lower_conversation_controls(
+                            controls,
+                            orch.native_proactivity_snapshot(),
+                        ),
                     })
                     .await;
             }
             Ok(())
         }
         ClientCommand::ListModels => {
-            let snapshot = orch.side_chat_parent_snapshot().await;
+            let snapshot = orch.get_status_snapshot().await;
             side.replay
                 .emit(ClientEvent::ModelList {
                     models: orch.list_available_models().await,
                     current: lingxi_core::host::qualified_model_ref(
-                        &snapshot.config.model,
+                        &snapshot.model,
                         snapshot.model_profile.as_deref(),
                     ),
+                    current_model_source: lower_model_source(snapshot.model_source.as_ref())
+                        .map_err(str::to_owned)?,
                     details: orch
                         .list_model_listings()
                         .await
@@ -1248,7 +1306,10 @@ async fn dispatch(
             if let Some(controls) = orch.conversation_controls().await {
                 side.replay
                     .emit(ClientEvent::ConversationControlsChanged {
-                        controls: client::adapter::controls::lower_conversation_controls(controls),
+                        controls: client::adapter::controls::lower_conversation_controls(
+                            controls,
+                            orch.native_proactivity_snapshot(),
+                        ),
                     })
                     .await;
             }
@@ -1259,14 +1320,16 @@ async fn dispatch(
                 .iter()
                 .any(|kind| matches!(kind, client::protocol::commands::ListingKindDto::Models))
             {
-                let snapshot = orch.side_chat_parent_snapshot().await;
+                let snapshot = orch.get_status_snapshot().await;
                 side.replay
                     .emit(ClientEvent::ModelList {
                         models: orch.list_available_models().await,
                         current: lingxi_core::host::qualified_model_ref(
-                            &snapshot.config.model,
+                            &snapshot.model,
                             snapshot.model_profile.as_deref(),
                         ),
+                        current_model_source: lower_model_source(snapshot.model_source.as_ref())
+                            .map_err(str::to_owned)?,
                         details: orch
                             .list_model_listings()
                             .await
@@ -1325,7 +1388,10 @@ async fn dispatch(
             if let Some(controls) = orch.conversation_controls().await {
                 side.replay
                     .emit(ClientEvent::ConversationControlsChanged {
-                        controls: client::adapter::controls::lower_conversation_controls(controls),
+                        controls: client::adapter::controls::lower_conversation_controls(
+                            controls,
+                            orch.native_proactivity_snapshot(),
+                        ),
                     })
                     .await;
             }
@@ -1491,7 +1557,7 @@ mod tests {
             _: Option<&str>,
             _: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
             _: Vec<lingxi_core::types::ConversationMessage>,
-            _: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+            _: Vec<llm_runtime::ToolDeclaration>,
             _: &str,
             _: bool,
             _: Option<llm_runtime::RequestDispatchAdmission>,
