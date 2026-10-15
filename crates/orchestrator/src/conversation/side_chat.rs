@@ -65,20 +65,26 @@ fn legal_prefix(history: &[ConversationMessage]) -> Vec<ConversationMessage> {
 fn prompt_snapshot_system_source_text(
     snapshot: &lingxi_core::host::PromptSnapshot,
 ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let boundary = lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY
+        .encode_utf16()
+        .collect::<Vec<_>>();
     let mut units = Vec::new();
+    let mut joined = false;
     for (index, display) in snapshot.system_prompt.iter().enumerate() {
-        if index > 0 {
-            units.extend("\n\n".encode_utf16());
-        }
-        if let Some(source_units) = snapshot
+        let section = snapshot
             .system_prompt_utf16
             .get(index)
             .and_then(Option::as_ref)
-        {
-            units.extend_from_slice(source_units);
-        } else {
-            units.extend(display.encode_utf16());
+            .cloned()
+            .unwrap_or_else(|| display.encode_utf16().collect());
+        if section == boundary {
+            continue;
         }
+        if joined {
+            units.extend("\n\n".encode_utf16());
+        }
+        units.extend(section);
+        joined = true;
     }
     lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
         String::from_utf16_lossy(&units),
@@ -385,9 +391,10 @@ mod tests {
             Some(lingxi_core::host::PromptSnapshot {
                 system_prompt: vec![
                     "first static section".into(),
+                    lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY.into(),
                     String::from_utf16_lossy(&exact_units),
                 ],
-                system_prompt_utf16: vec![None, Some(exact_units.clone())],
+                system_prompt_utf16: vec![None, None, Some(exact_units.clone())],
                 ..Default::default()
             });
 
