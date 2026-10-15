@@ -16,8 +16,22 @@ NETWORK_EXCEPTIONS = {
     "crates/bridge/src/mcp_endpoint.rs",  # MCP server.
     "crates/platforms/common/src/mcp_ws.rs",  # MCP client.
 }
-# This module serializes normalized host events for the CLI, not provider input.
-STREAM_EXCEPTIONS = {"crates/orchestrator/src/sse/event_router.rs"}
+# These modules consume/serialize host-owned event shapes, not provider input.
+# Keep this list limited to the stream-parsing rule; other boundary rules still
+# apply to both files.
+STREAM_EXCEPTIONS = {
+    "crates/orchestrator/src/sse/event_router.rs",
+    "crates/llm-runtime/src/history.rs",  # Host HistoryEvent JSON DTO deserializer.
+}
+# Rust external test modules do not have an in-file `#[cfg(test)]`. Skip only
+# this exact source when its crate root explicitly declares it under cfg(test).
+TEST_MODULE_ROOTS = {
+    "crates/audio-runtime/src/tests.rs": "crates/audio-runtime/src/lib.rs",
+}
+TEST_MODULE_DECLARATION = re.compile(
+    r"(?m)^[ \t]*#\[cfg\([ \t]*test[ \t]*\)\][ \t]*\r?\n"
+    r"[ \t]*mod[ \t]+tests[ \t]*;[ \t]*$"
+)
 FIXTURES = {"crates/llm-runtime/src/test_support.rs", "crates/tool-api/src/test_support.rs", "crates/llm-runtime/src/codec_fixtures.rs", "crates/llm-runtime/src/codec_tests/gemini_files_fixture.rs"}
 
 def item_end(source, start):
@@ -123,6 +137,29 @@ def findings(source):
     text = production(source)
     return [(text.count('\n', 0, match.start()) + 1, reason) for reason, rule in RULES.items() for match in rule.finditer(text)]
 
+def is_declared_test_module(relative, root=ROOT, module_source=None):
+    crate_root = TEST_MODULE_ROOTS.get(relative)
+    if crate_root is None:
+        return False
+    if module_source is None:
+        try:
+            module_source = (root / crate_root).read_text()
+        except OSError:
+            return False
+    return TEST_MODULE_DECLARATION.search(module_source) is not None
+
+def path_findings(relative, source):
+    result = []
+    if relative.startswith("crates/llm-runtime/src/"):
+        result.extend(runtime_findings(source))
+    for line, reason in findings(source):
+        if relative in STREAM_EXCEPTIONS and reason == 'provider stream parsing belongs in llm-client':
+            continue
+        if relative in NETWORK_EXCEPTIONS and reason.startswith('WebSocket implementation'):
+            continue
+        result.append((line, reason))
+    return result
+
 def main():
     if "--selftest" in sys.argv:
         assert findings('fn run() { let url = format!("{base}/v1/messages"); }')
@@ -137,6 +174,25 @@ def main():
         assert findings('pub struct LlmResponse {}')
         assert not findings('pub use lingxi_llm_client::WireCodec;')
         assert findings('match event { \"content_block_delta\" => {} }')
+        stream_reason = 'provider stream parsing belongs in llm-client'
+        host_history_dto = 'fn deserialize_history_event() { match kind { "content_block_delta" => {}, _ => {} } }'
+        # This exact host DTO may deserialize the same discriminator, while a
+        # production provider parser using it must continue to fail the rule.
+        assert stream_reason not in {reason for _, reason in path_findings(
+            "crates/llm-runtime/src/history.rs", host_history_dto
+        )}
+        assert stream_reason in {reason for _, reason in path_findings(
+            "crates/llm-runtime/src/provider_stream_decoder.rs", host_history_dto
+        )}
+        history_source = (ROOT / "crates/llm-runtime/src/history.rs").read_text()
+        assert stream_reason in {reason for _, reason in findings(history_source)}
+        assert stream_reason not in {reason for _, reason in path_findings(
+            "crates/llm-runtime/src/history.rs", history_source
+        )}
+        # The path exception applies only to the stream rule.
+        assert any(reason == "model endpoint belongs in llm-client" for _, reason in path_findings(
+            "crates/llm-runtime/src/history.rs", 'fn bad() { let endpoint = "/v1/messages"; }'
+        ))
         assert findings('fn connect(){ tokio_tungstenite::connect_async(url); }')
         assert findings('fn run(){ let url="https://provider.test/v1/messages"; }')
         assert not findings('#[cfg(test)] mod tests { fn mock() { let url="/v1/messages"; } }')
@@ -154,6 +210,14 @@ def main():
         assert not runtime_findings('pub struct ExecutionUsage { report: sdk::UsageReport }')
         assert not runtime_findings('pub use sdk::protocol::Usage;')
         assert findings('fn parse() { headers.get("x-claudeai-window-limit"); }')
+        test_module = "crates/audio-runtime/src/tests.rs"
+        explicit_test_declaration = "#[cfg(test)]\nmod tests;\n"
+        assert is_declared_test_module(test_module, module_source=explicit_test_declaration)
+        assert not is_declared_test_module(test_module, module_source="mod tests;\n")
+        assert not is_declared_test_module(
+            "crates/example/src/tests.rs", module_source=explicit_test_declaration
+        )
+        assert is_declared_test_module(test_module)
         print('llm-boundary selftest: OK')
         return 0
     errors = []
@@ -171,12 +235,10 @@ def main():
         relative = path.relative_to(ROOT).as_posix()
         if relative in FIXTURES or '/tests/' in relative or path.stem.endswith(('_test', '_tests')):
             continue
+        if is_declared_test_module(relative):
+            continue
         source = path.read_text()
-        if relative.startswith("crates/llm-runtime/src/"):
-            errors.extend(f'{relative}:{line}: {reason}' for line, reason in runtime_findings(source))
-        errors.extend(f'{relative}:{line}: {reason}' for line, reason in findings(source)
-                      if not (relative in STREAM_EXCEPTIONS and reason == 'provider stream parsing belongs in llm-client')
-                      and not (relative in NETWORK_EXCEPTIONS and reason.startswith('WebSocket implementation')))
+        errors.extend(f'{relative}:{line}: {reason}' for line, reason in path_findings(relative, source))
     if errors:
         print('\n'.join(errors), file=sys.stderr)
         return 1

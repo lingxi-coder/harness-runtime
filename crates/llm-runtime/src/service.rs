@@ -513,28 +513,6 @@ fn native_anthropic_unix_socket_enabled() -> bool {
     std::env::var_os("ANTHROPIC_UNIX_SOCKET").is_some_and(|value| !value.is_empty())
 }
 
-fn configured_base_matches_messages_request(configured_base_url: &str, request_url: &str) -> bool {
-    let (Ok(base), Ok(request)) = (
-        url::Url::parse(configured_base_url),
-        url::Url::parse(request_url),
-    ) else {
-        return false;
-    };
-    if base.query().is_some()
-        || base.fragment().is_some()
-        || request.scheme() != base.scheme()
-        || request.host_str() != base.host_str()
-        || request.port_or_known_default() != base.port_or_known_default()
-        || request.username() != base.username()
-        || request.password() != base.password()
-    {
-        return false;
-    }
-    let base_path = base.path().trim_end_matches('/');
-    let expected_path = format!("{base_path}/v1/messages");
-    request.path() == expected_path
-}
-
 fn custom_system_prompt(
     text: Option<&str>,
 ) -> Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput> {
@@ -4404,7 +4382,7 @@ impl ApiService {
             .as_deref()
             .unwrap_or(NATIVE_ANTHROPIC_FIRST_PARTY_BASE_URL);
         profile.base_url.trim_end_matches('/') == configured_base_url.trim_end_matches('/')
-            && configured_base_matches_messages_request(
+            && lingxi_llm_client::providers::anthropic::request_policy::messages_request_matches_base_url(
                 configured_base_url,
                 &prepared.provider_request.url,
             )
