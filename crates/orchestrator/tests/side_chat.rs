@@ -11,6 +11,7 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig, StreamingApiCli
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::json;
@@ -27,10 +28,19 @@ impl Tool for PermissionInputFixture {
     fn name(&self) -> &str {
         "Bash"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_schema(&json!({"type": "object"}))
+            });
         &SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -38,22 +48,22 @@ impl Tool for PermissionInputFixture {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -65,23 +75,25 @@ impl Tool for PermissionInputFixture {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "Bash".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+        "".into()
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            mcp_meta_projection: None,
-            model_content_projection: None,
-            data_projection: None,
-            data: json!({"ok": true}),
+            data: Utf16JsonProjection::from_serde_value(&json!({"ok": true}))
+                .expect("generated fixture"),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
@@ -100,7 +112,7 @@ impl StreamingApiClient for PendingStream {
         _: Option<&str>,
         _: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _: Vec<ConversationMessage>,
-        _: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        _: Vec<llm_runtime::ToolDeclaration>,
         _: &str,
         _: bool,
         _: Option<llm_runtime::RequestDispatchAdmission>,
@@ -141,7 +153,15 @@ async fn fixed_legal_busy_context_ready_models_and_global_flags() {
     assert!(lingxi_core::host::session_flags::tool_search_enabled());
     assert!(parent.switch_model("keyless-current", None).await.is_ok());
     assert!(parent
-        .switch_model_with_source("unconnected-model", Some("other-profile"), "command")
+        .select_model(lingxi_core::host::ModelSelectionRequest::Select {
+            source: "unconnected-model".into(),
+            route_hint: Some(lingxi_core::host::ModelRouteAnchor {
+                model: "unconnected-model".into(),
+                profile: Some("other-profile".into()),
+            }),
+            origin: lingxi_core::host::ModelSelectionOrigin::Command,
+            validation: lingxi_core::host::ModelValidationMode::ServerProbeDisabled,
+        })
         .await
         .is_err());
     assert_eq!(
@@ -187,7 +207,7 @@ fn side_payloads_do_not_enter_enabled_otel_or_tracing_exports() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "payload_export_child", "--nocapture"])
         .env("SIDE_CHAT_EXPORT_CHILD", "1")
-        .env("LINGXI_ENABLE_TELEMETRY", "1")
+        .env(telemetry::otel::config::ENV_ENABLE_TELEMETRY, "1")
         .env("OTEL_LOGS_EXPORTER", "console")
         .env("OTEL_METRICS_EXPORTER", "none")
         .env("OTEL_TRACES_EXPORTER", "none")
@@ -251,8 +271,7 @@ async fn payload_export_child() {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: lingxi_core::types::ToolUseId::new().to_string(),
                 name: "Bash".into(),
-                input: json!({"command":if side {"SIDE_TOOL_PRIVATE_MARKER"} else {"MAIN_TOOL_EXPORT_MARKER"}}),
-                input_projection: None,
+                input: lingxi_llm_client::protocol::JsonPayload::from_generated_value(&json!({"command":if side {"SIDE_TOOL_PRIVATE_MARKER"} else {"MAIN_TOOL_EXPORT_MARKER"}})).expect("generated fixture"),
             }],
             Some("tool_use"),
         );

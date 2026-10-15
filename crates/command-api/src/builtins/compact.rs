@@ -216,7 +216,7 @@ mod tests {
         cancel.cancel();
         let result = handler.handle_with_cancel(&args(), cancel).await;
         assert!(
-            matches!(result, CommandResult::Done { display: Some(display) } if display == "Compaction canceled.")
+            matches!(result, CommandResult::Done { display: Some(display) } if display.string_at("") == Some("Compaction canceled."))
         );
         assert!(mock.last_compact_instructions().is_none());
     }

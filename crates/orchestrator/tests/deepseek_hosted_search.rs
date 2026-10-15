@@ -148,5 +148,6 @@ async fn deepseek_prose_without_native_results_is_an_error() {
         .expect("prose-only response must fail");
     assert!(error
         .message
-        .contains("no structured web_search_tool_result"));
+        .string_at("")
+        .is_some_and(|message| message.contains("no structured web_search_tool_result")));
 }

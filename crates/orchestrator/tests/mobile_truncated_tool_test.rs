@@ -258,7 +258,10 @@ fn budget_retry_reuses_original_request_and_never_appends_partial_json() {
             let cwd = tempfile::tempdir().unwrap();
             let mut usage = llm_runtime::ExecutionUsage::from_counts(
                 lingxi_llm_client::protocol::Usage { input_tokens: 1000, output_tokens: 65536, ..Default::default() });
-            usage.provider_metadata = serde_json::json!({"llm_client":{"output_budget":{"can_repeat_original":true,"source":"provider_default","provider_default":65536}}});
+            usage.provider_metadata = lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                &serde_json::json!({"llm_client":{"output_budget":{"can_repeat_original":true,"source":"provider_default","provider_default":65536}}}),
+            )
+            .expect("generated provider metadata is valid JSON");
             let first = vec![message_start("failed", "deepseek-flash"),
                 content_block_start_tool_use(0, ToolUseId::from("partial"), "Write"),
                 input_json_delta(0, "{\"content\":\"partial private source"), content_block_stop(0),

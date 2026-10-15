@@ -451,11 +451,11 @@ async fn background_pipeline() {
                 assert!(request.system_prompt.is_none());
                 assert_eq!(
                     request.max_tokens,
-                    if request.model.contains("haiku") {
+                    Some(if request.model.contains("haiku") {
                         1024
                     } else {
                         3072
-                    }
+                    })
                 );
                 self.classifiers.lock().unwrap().push(request);
                 self.classifier_entered.notify_waiters();
@@ -827,7 +827,7 @@ fn native_background_input_preserves_tool_tie_order_whole_history_and_text_windo
     assert_eq!(
         prepared.string_at("/prompt"),
         Some(
-        "Current state: working (for 2m)\nTool calls so far: Zulu×2, Alpha, Agent\nUser's most recent ask: \"Keep ordering\"\n\nAssistant message tail (last 21 chars):\nLatest one\nLatest two"
+            "Current state: working (for 2m)\nTool calls so far: Zulu×2, Alpha, Agent\nUser's most recent ask: \"Keep ordering\"\n\nAssistant message tail (last 21 chars):\nLatest one\nLatest two"
         )
     );
     assert_eq!(

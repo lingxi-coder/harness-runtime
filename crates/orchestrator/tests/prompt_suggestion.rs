@@ -204,7 +204,10 @@ async fn post_turn_suggestion_is_nonblocking_uses_parent_prefix_and_never_change
         assert_eq!(req.effort, cached.effort);
         assert_eq!(
             req.max_tokens,
-            llm_runtime::model::context_window::default_output_tokens_for_model(&req.model) as u32
+            Some(
+                llm_runtime::model::context_window::default_output_tokens_for_model(&req.model)
+                    as u32,
+            )
         );
         let serialized = serde_json::to_value(req.messages.last().unwrap()).unwrap();
         assert_eq!(

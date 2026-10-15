@@ -230,20 +230,21 @@ mod tests {
     async fn local_app_skill_follows_the_local_app_tool_in_both_modes() {
         let mut registry = CommandRegistry::new();
         register_mobile_device_skills(&mut registry, &tool_names(&["Read"]));
-        assert!(registry.resolve("local-app").is_none());
+        assert!(registry.resolve(&"local-app".into()).is_none());
         register_mobile_device_skills(&mut registry, &tool_names(&["LocalApp", "Shell"]));
         let registry = Arc::new(RwLock::new(registry));
         for mode in [SessionMode::Chat, SessionMode::Code] {
             let loader = MobileDiskSkillLoader::for_mode(registry.clone(), mode);
-            assert_eq!(loader.list_names().await, ["local-app"]);
-            let descriptor = loader.load("local-app").await.unwrap().unwrap();
+            assert_eq!(loader.list_names().await, ["local-app".into()]);
+            let descriptor = loader.load(&"local-app".into()).await.unwrap().unwrap();
             assert!(descriptor.allowed_tools.is_empty());
             assert!(descriptor.shell.is_none() && descriptor.context.is_none());
             assert!(descriptor
                 .dynamic_body
                 .unwrap()
-                .build("")
-                .contains("with the `Shell` tool"));
+                .build(&"".into())
+                .string_at("")
+                .is_some_and(|text| text.contains("with the `Shell` tool")));
         }
     }
 

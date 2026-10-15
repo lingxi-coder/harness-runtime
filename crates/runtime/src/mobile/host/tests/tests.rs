@@ -529,7 +529,6 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
                 }],
                 stop_reason: None,
                 resumable: None,
-                per_turn_effort: None,
             }
         }))
         .unwrap()
@@ -5377,6 +5376,8 @@ impl orchestrator::StreamingApiClient for PendingPromptStreamClient {
                 model: model.to_owned(),
                 profile: profile.map(str::to_owned),
                 effort_override: None,
+                output_budget: None,
+                native_anthropic_request_context: None,
                 system: system.cloned(),
                 messages,
                 tools,
