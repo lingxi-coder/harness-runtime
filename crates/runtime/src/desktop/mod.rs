@@ -2580,18 +2580,11 @@ impl DesktopRuntime {
         )
     }
     /// Current local Agent statistics, sampled when a result is published.
-    /// Hosts without the Agent tool omit the field instead of inventing zeros.
+    /// Tool selection does not disable the session's statistics owner: Native
+    /// reports its empty snapshot even with an explicitly empty tool catalog.
     pub async fn agent_session_statistics(
         &self,
     ) -> Option<lingxi_core::host::agent_statistics::AgentSessionStatisticsSnapshot> {
-        if !self
-            .orchestrator
-            .tool_names()
-            .iter()
-            .any(|name| name == "Agent")
-        {
-            return None;
-        }
         let session_id = self.orchestrator.current_session_id().await;
         Some(
             self.task_registry

@@ -75,7 +75,7 @@ fn model_supports_1m(model: &str) -> bool {
     canonical.contains("claude-sonnet-4")
         || matches!(
             canonical.as_str(),
-            "claude-sonnet-5"
+            "claude-sonnet-5" | "claude-sonnet-5-5"
                 | "claude-opus-4-6"
                 | "claude-opus-4-7"
                 | "claude-opus-4-8"
@@ -99,7 +99,7 @@ pub fn model_native_1m(model: &str) -> bool {
     let canonical = canonical_name(model);
     matches!(
         canonical.as_str(),
-        "claude-sonnet-5"
+        "claude-sonnet-5" | "claude-sonnet-5-5"
             | "claude-opus-4-7"
             | "claude-opus-4-8"
             | "claude-opus-5"
@@ -151,6 +151,10 @@ fn canonical_name(model: &str) -> String {
     // claude-sonnet-5; binary canonicalization checks `sonnet-5` first —
     // note "claude-sonnet-4-5" does NOT contain "sonnet-5", see tests).
     if name.contains("claude-sonnet-5") {
+        // 2.1.293 native result.modelUsage preserves this more specific model.
+        if name.contains("claude-sonnet-5-5") {
+            return "claude-sonnet-5-5".to_string();
+        }
         return "claude-sonnet-5".to_string();
     }
     if name.contains("claude-sonnet-4-6") {
@@ -277,7 +281,7 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
     // models retain their existing defaults and upper limits.
     let (default_tokens, upper_limit) = if matches!(
         m.as_str(),
-        "claude-opus-5" | "claude-sonnet-5" | "claude-fable-5-1" | "claude-mythos-5-1"
+        "claude-opus-5" | "claude-sonnet-5" | "claude-sonnet-5-5" | "claude-fable-5-1" | "claude-mythos-5-1"
     ) {
         (128_000, 128_000)
     } else if m.contains("opus-4-8") || m.contains("opus-4-7") || m.contains("opus-4-6") {
@@ -378,6 +382,12 @@ pub fn max_thinking_tokens_for_model(model: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_293_sonnet_5_5_retains_identity_and_limits() {
+        assert_eq!(canonical_name("claude-sonnet-5-5"), "claude-sonnet-5-5");
+        assert_eq!(model_max_output_tokens("claude-sonnet-5-5"), (128_000, 128_000));
+    }
 
     #[test]
     fn default_window_for_unknown_and_known_models() {

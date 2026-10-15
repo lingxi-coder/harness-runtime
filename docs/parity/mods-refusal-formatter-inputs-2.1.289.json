@@ -1,0 +1,661 @@
+{
+  "oracle": "Claude Code 2.1.289 refusal formatter input resolver",
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "execution_scope": "Exact Native model capability, eYe/KI, $o, b1r, provider, QA/Nre, and policy decision helpers executed against explicit controlled host/policy/catalog snapshots. No Native CLI, account, provider, network, or real user configuration was read.",
+  "source_windows": [
+    {
+      "label": "hand-maintained baked model catalog",
+      "start": 180307020,
+      "end_exclusive": 180324545,
+      "sha256": "f87f1b4aef70a13ec78e3a9b6f38bd1db7c67ef7ed2b3ec5c21e037816771b1b"
+    },
+    {
+      "label": "baked catalog index and La reader",
+      "start": 180324545,
+      "end_exclusive": 180327360,
+      "sha256": "707aaf22673b7246b659e5ea25c5db0b71fde648acd54b2bc15643f8060a1661"
+    },
+    {
+      "label": "provider-aware alias lookup from baked catalog aliases",
+      "start": 180328974,
+      "end_exclusive": 180329131,
+      "sha256": "776928835e74d1e4a4324635b00e6f0d32cbd50f41b2899fcf41c887c58df8df"
+    },
+    {
+      "label": "environment, served-catalog, and baked refusal capability resolution",
+      "start": 180328062,
+      "end_exclusive": 180328974,
+      "sha256": "cb84a7ad675edaecf2f5c1684286f555249ed11b7ca7bd74668395b9e2581485"
+    },
+    {
+      "label": "baked provider-id table used to classify catalog model IDs",
+      "start": 180329330,
+      "end_exclusive": 180331654,
+      "sha256": "5d518394ad391b3bc22554b00b0ba835b27eaa08c633908544373045ca8e6871"
+    },
+    {
+      "label": "baked Opus alias priority order and first-party provider reverse map",
+      "start": 180331314,
+      "end_exclusive": 180331491,
+      "sha256": "4c9b7308beb97fc8c6dda17d1fb518e2d86bfe4ebd1e50d8e1f710f7e420cbf3"
+    },
+    {
+      "label": "provider identity test used by model display labels",
+      "start": 180331491,
+      "end_exclusive": 180331654,
+      "sha256": "00ef3ff704985dcc6c51e349e4816c58a5856c805025488f32824a703d5cf7c1"
+    },
+    {
+      "label": "baked family lookup and Opus-family predicate",
+      "start": 182027136,
+      "end_exclusive": 182027879,
+      "sha256": "0e184cf52740e4cff3dcc90479f661047aa0f64ceb6deed5544f3d378d07832b"
+    },
+    {
+      "label": "model identity suffix normalizer used by formatter helpers",
+      "start": 179588498,
+      "end_exclusive": 179588545,
+      "sha256": "f399497412cd2286f289bd067290ff9bc545a77af6047731ff4d274dcfd22ed8"
+    },
+    {
+      "label": "catalog-family model identity entry point Nm",
+      "start": 182054282,
+      "end_exclusive": 182054328,
+      "sha256": "f421b492d2dade2ec068dcf8c296e8c601f1a7df21758edf959b6a223ec3dfdf"
+    },
+    {
+      "label": "label resolver normalization of both 1m and 2m suffixes",
+      "start": 179588611,
+      "end_exclusive": 179588662,
+      "sha256": "a4d795f092297c1da48837e8342f8a6b308a4fc1b4cd8b34f2ed7bbcdd775ac3"
+    },
+    {
+      "label": "model capability suffix normalizer",
+      "start": 180328928,
+      "end_exclusive": 180328974,
+      "sha256": "1563e658e7174696e2678e2a84eddcda19fd9f1b77893f2f3b531696fa5e9c3a"
+    },
+    {
+      "label": "served catalog and dynamic capability lookup resolver",
+      "start": 182002562,
+      "end_exclusive": 182004282,
+      "sha256": "c0a61a2eb09088f76735aa2626b6b33ad1731d07c29f54b70efef9df1d4f6709"
+    },
+    {
+      "label": "model layer wires capability lookup to catalog runtime metadata",
+      "start": 182057652,
+      "end_exclusive": 182057675,
+      "sha256": "0ab34e96b4a03e16f58a1b2b1bf9f61fd1a234b02c37b86c2efedc9dc9ec47cd"
+    },
+    {
+      "label": "served catalog lookup by exact model ID",
+      "start": 181997296,
+      "end_exclusive": 181997362,
+      "sha256": "84211b45330ee7d1b950e16339652757c7f1808603b77ff46888292d7d792f95"
+    },
+    {
+      "label": "exact refusal candidate resolver eYe/KI and family-default fallback",
+      "start": 186201217,
+      "end_exclusive": 186202286,
+      "sha256": "78852a33137cb7cb45ce56b35a1f084d8d6fcf604832c41688add53209ec3dc9"
+    },
+    {
+      "label": "Fable and Mythos model predicates plus mitigation capability",
+      "start": 183122844,
+      "end_exclusive": 183123162,
+      "sha256": "317839d1dcc2693503ce58ce4f4d69f2d731f84463fbd8ec290caaa65b063aca"
+    },
+    {
+      "label": "GrowthBook refusal model roster and EAP suffix checks",
+      "start": 183197213,
+      "end_exclusive": 183197621,
+      "sha256": "5387a5907945c768a3217a0aa84205f20dd0bba7dcb85da56b48b0b31fe9e2f9"
+    },
+    {
+      "label": "explicit configured default Fable model comparison",
+      "start": 182031092,
+      "end_exclusive": 182031181,
+      "sha256": "ec753829a5e805deab8d94010c0ea4cf7dab9272414179484c4d11ece96b6ddc"
+    },
+    {
+      "label": "eg model exception predicate",
+      "start": 186198584,
+      "end_exclusive": 186198608,
+      "sha256": "0946254fd1d19b756f9e1edeb4506c4eb6657d95838f5fc90978886f8aa21762"
+    },
+    {
+      "label": "Fable and Opus help-link selector",
+      "start": 186204278,
+      "end_exclusive": 186204775,
+      "sha256": "cc581a5b365323ffb9430ee8803d18d4d162a26aebb8fe2f0181fd8c2cacc6af"
+    },
+    {
+      "label": "family copy table, La(Nm(model)), and explicit Opus 5.5 exception",
+      "start": 186206171,
+      "end_exclusive": 186207723,
+      "sha256": "b29ec1877e6d928aecd32e2c93f06f75f880b1135aff954fb29249a4c66a069d"
+    },
+    {
+      "label": "Dw Fable suppression and b1r help URL decision",
+      "start": 186204443,
+      "end_exclusive": 186204656,
+      "sha256": "b3295f6a33160c3dacc471298a90c5758e4369a75925a101c5eb1ad5ea155e17"
+    },
+    {
+      "label": "Fable help alias set and catalog matcher",
+      "start": 186193447,
+      "end_exclusive": 186193506,
+      "sha256": "dde7eae9e9618f82480a586f5c4c6800c5286de21e5186ecab8abe065086073a"
+    },
+    {
+      "label": "Fable model prefix test",
+      "start": 183123030,
+      "end_exclusive": 183123083,
+      "sha256": "f622a8db0ae4acef0a12a8a476624524447dc82dc24adbb3eb4f0c4f0dce4fd5"
+    },
+    {
+      "label": "Fable model help family matcher",
+      "start": 182029462,
+      "end_exclusive": 182029513,
+      "sha256": "db2f41b3aa8fb2c265b6a468128e874250e668681bc64ab81291050e35dbc1b9"
+    },
+    {
+      "label": "one-meg context suffix stripping for help-link selection",
+      "start": 182061267,
+      "end_exclusive": 182061314,
+      "sha256": "1d5c5e72e07948c66b0b99c9fbf309f0565af2c66749065b5bc71e865167c4b6"
+    },
+    {
+      "label": "baked display name fallback and 1M suffix label",
+      "start": 182056382,
+      "end_exclusive": 182056576,
+      "sha256": "66cd7a1adca7c1b524b3c86cd2fe07281d3656d2dd9a0b9b067f3409c95e8b6f"
+    },
+    {
+      "label": "model picker display-label override",
+      "start": 182056819,
+      "end_exclusive": 182056941,
+      "sha256": "76e55885f00958248863e9b010f1e3181a1fce5aa72464a9e8affc82430f6fda"
+    },
+    {
+      "label": "full model display label resolver $o",
+      "start": 182057675,
+      "end_exclusive": 182058133,
+      "sha256": "e183021156d7a04d442e223123365ae9b57f9d47ff478d6e5e68b3b78acd2b2f"
+    },
+    {
+      "label": "provider kind precedence and cyber-copy allowlist",
+      "start": 180332633,
+      "end_exclusive": 180333499,
+      "sha256": "6b09cc3f86c4cfd10bca85995b4c7c2343880839ba2dbd816349f6bf0c7a91cb"
+    },
+    {
+      "label": "gateway credential and host-policy identity sources",
+      "start": 179315397,
+      "end_exclusive": 179316014,
+      "sha256": "859fe50c1a561601f6db2fd6e37e7fdd5487dd838faad1f3bf2db8e5ad0b13f1"
+    },
+    {
+      "label": "Opus 5 candidate remote remap gate",
+      "start": 182008503,
+      "end_exclusive": 182008589,
+      "sha256": "4b09e86dffe740d869dfbc29dcf77c7d7286ea570f9518ae3eff551e4addfa02"
+    },
+    {
+      "label": "Opus alias default selector and E9r configured candidate",
+      "start": 182032490,
+      "end_exclusive": 182032782,
+      "sha256": "b1bd523f292e0ad8a3d92170954ac0fd7fa16788da3ff6075971914aa3113aa8"
+    },
+    {
+      "label": "configured Opus alias baseline and ordered alias source",
+      "start": 182032468,
+      "end_exclusive": 182032490,
+      "sha256": "b04e4ef429619034f59c921d40da4569b31d10a2df8195ae1685fc96a8ce4a75"
+    },
+    {
+      "label": "Opus 5 canonical model comparison used by candidate backport",
+      "start": 182031336,
+      "end_exclusive": 182031387,
+      "sha256": "d4cbcc51d4039dce639765c36acb4a24cdf5ef63dd1e139cfcce93dc93aef730"
+    },
+    {
+      "label": "provider-key names used to resolve model aliases",
+      "start": 182034000,
+      "end_exclusive": 182034263,
+      "sha256": "359486f29ff0c387ac8f6a30fe2915bfbffca047f78b71f9ab7b3309ec8dc6a4"
+    },
+    {
+      "label": "provider-specific alias model selection",
+      "start": 182034263,
+      "end_exclusive": 182034394,
+      "sha256": "1e9bcdfa9872ada581014f0273d74c2ff83bf1b34f77760970b947e8d784728d"
+    },
+    {
+      "label": "provider-resolved default-model accessor",
+      "start": 181703824,
+      "end_exclusive": 181703968,
+      "sha256": "c1c9fee1af345f853053ce4c2a5fb4fa340ce398fde1cb0fb89c3f3730001b01"
+    },
+    {
+      "label": "current model availability fallback chain accessor",
+      "start": 179303440,
+      "end_exclusive": 179303509,
+      "sha256": "be7703ef2998eaa2dd520590be3a3c4b5c803d0a871af0d6f37837e6e2b26321"
+    },
+    {
+      "label": "lA model spelling canonicalizer",
+      "start": 181702158,
+      "end_exclusive": 181702182,
+      "sha256": "6de1c795288a69a41d3687906d55ec6eabd18bf6ad34eedd0a5177a15ff2ded3"
+    },
+    {
+      "label": "interactive mode reads host launchOptions",
+      "start": 179307203,
+      "end_exclusive": 179307263,
+      "sha256": "c5962d665b6699f61261e7a0bccf7d54659c6deee200a6725eeb6402707056f1"
+    },
+    {
+      "label": "QA feedback command, disable flags, and allow_product_feedback check",
+      "start": 186171443,
+      "end_exclusive": 186171956,
+      "sha256": "5f5a000f728ef8cea9c617397a1334ea1729022b0e90aaf5d21bfbb91974f872"
+    },
+    {
+      "label": "allow_product_feedback native policy metadata and policy key sets",
+      "start": 183104513,
+      "end_exclusive": 183110955,
+      "sha256": "d63179cd87ac8debe86eb11f1d2072dc577a4ce2723db985c628a596eb91132c"
+    },
+    {
+      "label": "Native effective permission and policy-denial reason helpers",
+      "start": 183109600,
+      "end_exclusive": 183114613,
+      "sha256": "c56fedb4ac86ae2e1ac159a456be6156dcd571f09814ac9aede87761e9b34947"
+    },
+    {
+      "label": "main query resolves current model ge before server-fallback formatting",
+      "start": 195432246,
+      "end_exclusive": 195433666,
+      "sha256": "0da0ff364f7d22f5c952892626f075324d11b3cfe087aa81b83aee1434744d58"
+    },
+    {
+      "label": "query-local model override precedence",
+      "start": 195413357,
+      "end_exclusive": 195413473,
+      "sha256": "ca70f36e5a01726ba4d9c57d9145847e0eac6d8366228f1ef786e8bcb7fd4b97"
+    },
+    {
+      "label": "permission-mode model clamp Jf",
+      "start": 182036250,
+      "end_exclusive": 182037196,
+      "sha256": "c625974b3e65d261ee632ef1ea3439170bd64d7deb6828a1849e6678a0224bc9"
+    }
+  ],
+  "observations": {
+    "formatter_input_model": "At the actual server-fallback refusal callsite $dt receives ge. The query reducer computes ge as Jf({ permissionMode, mainLoopModel: br(), exceeds200kTokens }); br selects refusalOverride ?? fableConsentOverride ?? liveSwitchOverride ?? chainModel ?? primaryModel. ge may change after a model-switch transition. The actual callsite, override precedence, and plan clamp are separately pinned.",
+    "refusal_eligibility": "eYe(model) is KI(model) !== undefined. KI gates on environment capability rules, baked/dynamic catalog capability, Fable/EAP/default-Fable exceptions, a GrowthBook model roster for Mythos IDs, provider-kind routing, and an Opus-family-valid current fallback candidate. It does not consult organization availableModels membership.",
+    "capability_order": "fy uses an explicit CLAUDE_CODE_MODEL_CAPABILITIES match first (including false); a served runtime capability true second; then the hand-maintained baked Hsr catalog. The served callback returns only true or undefined and cannot veto a baked true; refusal_fallback is absent from the feature-gated S map, so its dynamic true is not blocked by that map.",
+    "dynamic_vs_baked": "La reads only Hsr, a hand-maintained baked catalog, for family/display_name/capabilities. The separate WQe path reads active or deactivated served-catalog rows and can provide dynamic custom-model names/runtime capabilities. Dynamic display labels are consulted only when nP(modelId) does not identify a baked provider ID; clean canonical built-in IDs use the baked label fallback.",
+    "model_label": "$o resolves the model picker label first, then the eligible dynamic catalog/custom model paths, then cE through baked La.display_name (and optional 1M context label), then a sanitized model spelling or unknown model. The full dynamic label cache and host modelKnowledge state remain live inputs.",
+    "family_copy": "Lw uses La(Nm(model))?.family and the baked $I family table. In this build first-time wording supports Sonnet/cyber and the explicit claude-opus-5-5 model exception; Dw suppresses it for Fable identity/aliases/configured default.",
+    "provider_copy": "He chooses gateway first from three host credential-slot facts, then the provider environment flags in Bedrock, Foundry, Anthropic AWS, Anthropic Google Cloud, Mantle, Vertex order, else firstParty. ad permits only firstParty, Anthropic AWS, Anthropic Google Cloud, or gateway.",
+    "feedback_gate": "QA is Nre()==null. Nre first applies raw truthiness disable flags for DISABLE_FEEDBACK_COMMAND / DISABLE_BUG_COMMAND and the nonessential-traffic mode, then checks dp(allow_product_feedback, /feedback, is). dp is a projection of the Native effective policy decision sn: allow gives null, deny/missing policy produces a non-null reason. The built-in key is server-populated, denied under hipaa/zdr, and deny-on-cache-miss.",
+    "missing_runtime_inputs": "The probe uses explicit settings-policy state, custom/served catalog records, model picker absence, current provider credentials, GrowthBook roster, model-switch state, and candidate model config. It does not reconstruct the Native account/model-catalog fetch, modelKnowledge resolver, the current account policy service, or dynamic model picker caches."
+  },
+  "current_query_model": {
+    "override_precedence": "claude-opus-5"
+  },
+  "model_capability_cases": [
+    {
+      "name": "baked Sonnet 5 has no refusal_fallback capability",
+      "model": "claude-sonnet-5",
+      "capability": "refusal_fallback",
+      "result": null
+    },
+    {
+      "name": "baked Sonnet 5.5 has refusal_fallback capability",
+      "model": "claude-sonnet-5-5",
+      "capability": "refusal_fallback",
+      "result": true
+    },
+    {
+      "name": "1m selector normalizes before baked capability lookup",
+      "model": "claude-sonnet-5-5[1m]",
+      "capability": "refusal_fallback",
+      "result": true
+    },
+    {
+      "name": "exact environment grant can add a capability absent from baked catalog",
+      "model": "claude-sonnet-5",
+      "capability": "refusal_fallback",
+      "result": true
+    },
+    {
+      "name": "explicit environment deny overrides baked capability",
+      "model": "claude-sonnet-5-5",
+      "capability": "refusal_fallback",
+      "result": false
+    },
+    {
+      "name": "later matching environment segment wins",
+      "model": "claude-sonnet-5",
+      "capability": "refusal_fallback",
+      "result": true
+    },
+    {
+      "name": "prefix wildcard applies to canonical model ID",
+      "model": "claude-sonnet-5-5",
+      "capability": "refusal_fallback",
+      "result": true
+    },
+    {
+      "name": "capability token matching is case-sensitive",
+      "model": "claude-sonnet-5",
+      "capability": "refusal_fallback",
+      "result": null
+    },
+    {
+      "name": "served runtime metadata can enable an absent baked capability",
+      "model": "claude-sonnet-5",
+      "capability": "refusal_fallback",
+      "result": true
+    },
+    {
+      "name": "environment deny has precedence over served capability true",
+      "model": "claude-sonnet-5",
+      "capability": "refusal_fallback",
+      "result": false
+    },
+    {
+      "name": "served lookup absence falls through to baked capability",
+      "model": "claude-sonnet-5-5",
+      "capability": "refusal_fallback",
+      "result": true
+    }
+  ],
+  "refusal_eligibility_cases": [
+    {
+      "name": "baked eligible Sonnet 5.5 resolves the configured Opus candidate",
+      "model": "claude-sonnet-5-5",
+      "eligible": true,
+      "candidate": "claude-opus-5",
+      "dw_fable_suppression": false,
+      "provider": "firstParty"
+    },
+    {
+      "name": "explicit capability deny prevents baked eligibility",
+      "model": "claude-sonnet-5-5",
+      "eligible": false,
+      "candidate": null,
+      "dw_fable_suppression": false,
+      "provider": "firstParty"
+    },
+    {
+      "name": "unflagged Sonnet 5 is not made eligible by a model catalog membership",
+      "model": "claude-sonnet-5",
+      "eligible": false,
+      "candidate": null,
+      "dw_fable_suppression": false,
+      "provider": "firstParty"
+    },
+    {
+      "name": "Fable capability qualifies while Dw suppresses first-time copy",
+      "model": "claude-fable-5-1",
+      "eligible": true,
+      "candidate": "claude-opus-5",
+      "dw_fable_suppression": true,
+      "provider": "firstParty"
+    },
+    {
+      "name": "EAP suffix is an independent model eligibility exception",
+      "model": "claude-sonnet-5-eap",
+      "eligible": true,
+      "candidate": "claude-opus-5",
+      "dw_fable_suppression": false,
+      "provider": "firstParty"
+    },
+    {
+      "name": "GrowthBook model roster is required before Mythos policy exception",
+      "model": "claude-mythos-5",
+      "eligible": false,
+      "candidate": null,
+      "dw_fable_suppression": false,
+      "provider": "firstParty"
+    },
+    {
+      "name": "rostered Mythos 5 can use the explicit mitigation exception",
+      "model": "claude-mythos-5",
+      "eligible": true,
+      "candidate": "claude-opus-5",
+      "dw_fable_suppression": false,
+      "provider": "firstParty"
+    },
+    {
+      "name": "configured default Fable identity is an eligibility condition",
+      "model": "claude-sonnet-5",
+      "eligible": true,
+      "candidate": "claude-opus-5",
+      "dw_fable_suppression": true,
+      "provider": "firstParty"
+    },
+    {
+      "name": "candidate must resolve to Opus family",
+      "model": "claude-sonnet-5-5",
+      "eligible": false,
+      "candidate": null,
+      "dw_fable_suppression": false,
+      "provider": "firstParty"
+    },
+    {
+      "name": "non-first-party providers use the same-family configured default",
+      "model": "claude-sonnet-5-5",
+      "eligible": true,
+      "candidate": "claude-opus-5",
+      "dw_fable_suppression": false,
+      "provider": "bedrock"
+    },
+    {
+      "name": "first-party Opus 5 candidate is remapped when exact remote gate is true",
+      "model": "claude-opus-5",
+      "eligible": true,
+      "candidate": "claude-opus-4-8",
+      "dw_fable_suppression": false,
+      "provider": "firstParty",
+      "fallback_chain": []
+    },
+    {
+      "name": "a fallback chain containing Opus 5 suppresses the remap",
+      "model": "claude-opus-5",
+      "eligible": true,
+      "candidate": "claude-opus-5",
+      "dw_fable_suppression": false,
+      "provider": "firstParty",
+      "fallback_chain": [
+        "claude-opus-5"
+      ]
+    }
+  ],
+  "model_labels": [
+    {
+      "model": "claude-sonnet-5-5",
+      "display_label": "Sonnet 5.5",
+      "baked_family": "sonnet",
+      "baked_capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "mid_conv_system",
+        "mid_conv_tool_change",
+        "context_management",
+        "rejects_disabled_thinking",
+        "per_turn_effort",
+        "per_turn_timing",
+        "lean_prompt",
+        "refusal_fallback",
+        "silent_turn_reminder",
+        "org_locked_thinking"
+      ]
+    },
+    {
+      "model": "claude-opus-5-5",
+      "display_label": "Opus 5.5",
+      "baked_family": "opus",
+      "baked_capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "rejects_disabled_thinking",
+        "mid_conv_system",
+        "mid_conv_tool_change",
+        "per_turn_effort",
+        "per_turn_timing",
+        "context_management",
+        "fast_mode",
+        "lean_prompt",
+        "refusal_fallback",
+        "opus_5_5_prompt_bundle"
+      ]
+    },
+    {
+      "model": "vendor.custom-sonnet",
+      "display_label": "Served Custom Label",
+      "baked_family": null,
+      "source": "served custom model record"
+    }
+  ],
+  "family_lookup": [
+    {
+      "model": "claude-sonnet-5-5",
+      "is_first_time_model": true,
+      "baked_family": "sonnet"
+    },
+    {
+      "model": "claude-opus-5-5",
+      "is_first_time_model": true,
+      "baked_family": "opus"
+    },
+    {
+      "model": "claude-opus-5",
+      "is_first_time_model": false,
+      "baked_family": "opus"
+    }
+  ],
+  "fable_and_help_links": [
+    {
+      "model": "claude-fable-5-1",
+      "fable_suppressed": true,
+      "help_url": "https://support.claude.com/en/articles/15363606"
+    },
+    {
+      "model": "fable",
+      "fable_suppressed": true,
+      "help_url": "https://support.claude.com/en/articles/15363606"
+    },
+    {
+      "model": "claude-opus-5[1m]",
+      "fable_suppressed": false,
+      "help_url": "https://support.claude.com/en/articles/16049681"
+    },
+    {
+      "model": "claude-opus-5-5",
+      "fable_suppressed": false,
+      "help_url": "https://support.claude.com/en/articles/8106465"
+    },
+    {
+      "model": null,
+      "fable_suppressed": false,
+      "help_url": "https://support.claude.com/en/articles/8106465"
+    }
+  ],
+  "provider_cases": [
+    {
+      "name": "first party default",
+      "provider": "firstParty",
+      "special_cyber_copy": true,
+      "opus_default_alias_key": "opus5"
+    },
+    {
+      "name": "Bedrock environment flag",
+      "provider": "bedrock",
+      "special_cyber_copy": false,
+      "opus_default_alias_key": null
+    },
+    {
+      "name": "Foundry environment flag",
+      "provider": "foundry",
+      "special_cyber_copy": false,
+      "opus_default_alias_key": null
+    },
+    {
+      "name": "Anthropic AWS environment flag",
+      "provider": "anthropicAws",
+      "special_cyber_copy": true,
+      "opus_default_alias_key": "opus5"
+    },
+    {
+      "name": "Anthropic Google Cloud environment flag",
+      "provider": "anthropicGoogleCloud",
+      "special_cyber_copy": true,
+      "opus_default_alias_key": "opus5"
+    },
+    {
+      "name": "Mantle environment flag",
+      "provider": "mantle",
+      "special_cyber_copy": false,
+      "opus_default_alias_key": null
+    },
+    {
+      "name": "Vertex environment flag",
+      "provider": "vertex",
+      "special_cyber_copy": false,
+      "opus_default_alias_key": null
+    },
+    {
+      "name": "gateway credential wins over Bedrock flag",
+      "provider": "gateway",
+      "special_cyber_copy": true,
+      "opus_default_alias_key": "opus47"
+    }
+  ],
+  "feedback_policy_cases": [
+    {
+      "name": "loaded policy explicitly allows feedback",
+      "qa": true,
+      "nre_is_null": true,
+      "nre_non_null_reason": false
+    },
+    {
+      "name": "loaded policy explicitly denies feedback",
+      "qa": false,
+      "nre_is_null": false,
+      "nre_non_null_reason": true
+    },
+    {
+      "name": "Native onCacheMiss deny blocks an enabled service without a loaded policy snapshot",
+      "qa": false,
+      "nre_is_null": false,
+      "nre_non_null_reason": true
+    },
+    {
+      "name": "disabled service does not infer a deny when no policy hints are present",
+      "qa": true,
+      "nre_is_null": true,
+      "nre_non_null_reason": false
+    }
+  ],
+  "feedback_disable_cases": [
+    {
+      "key": "DISABLE_FEEDBACK_COMMAND",
+      "value": "false",
+      "nre": "/feedback has been disabled via the DISABLE_FEEDBACK_COMMAND environment variable"
+    },
+    {
+      "key": "DISABLE_FEEDBACK_COMMAND",
+      "value": "0",
+      "nre": "/feedback has been disabled via the DISABLE_FEEDBACK_COMMAND environment variable"
+    }
+  ]
+}

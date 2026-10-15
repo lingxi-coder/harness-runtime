@@ -1,0 +1,170 @@
+{
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "extracted_source_sha256": {
+    "src_187181803.js": "47b62b9ac561f0cc5cd75ab6e7b9e14c1b027cccebfb900b56f07685c69fa825",
+    "src_182637043.js": "b8b83549f7b4273ed3f6b4669d666e535f9abfd831ea3952e9387ac73500e85c"
+  },
+  "source_ranges": [
+    {
+      "label": "primary extracted source chunk (trailing NUL excluded)",
+      "binary_start": 187181803,
+      "binary_end_exclusive": 191691520,
+      "extracted_js_start": 0,
+      "extracted_js_end_exclusive": 4509717,
+      "sha256": "47b62b9ac561f0cc5cd75ab6e7b9e14c1b027cccebfb900b56f07685c69fa825"
+    },
+    {
+      "label": "helpers extracted source chunk (trailing NUL excluded)",
+      "binary_start": 182637043,
+      "binary_end_exclusive": 182864929,
+      "extracted_js_start": 0,
+      "extracted_js_end_exclusive": 227886,
+      "sha256": "b8b83549f7b4273ed3f6b4669d666e535f9abfd831ea3952e9387ac73500e85c"
+    },
+    {
+      "label": "native FAt error-result helper",
+      "binary_start": 188508310,
+      "binary_end_exclusive": 188508356,
+      "extracted_js_start": 1326507,
+      "extracted_js_end_exclusive": 1326553,
+      "sha256": "045f105e8a6e8de36b56189cfb4a4a40534f75ce98a68423376f9fd1777cf51f"
+    },
+    {
+      "label": "native hfo synthetic tool_use builder",
+      "binary_start": 188508394,
+      "binary_end_exclusive": 188508499,
+      "extracted_js_start": 1326591,
+      "extracted_js_end_exclusive": 1326696,
+      "sha256": "4e933392955334171fd9efc7dd0a1ab917ecebf507c0037e30e6c010318ee6f7"
+    },
+    {
+      "label": "native bfo user-result frame extractor",
+      "binary_start": 188508846,
+      "binary_end_exclusive": 188508932,
+      "extracted_js_start": 1327043,
+      "extracted_js_end_exclusive": 1327129,
+      "sha256": "fe7a3d4a251aa07165ee0a7aa300e4ec6aea2efd2d05349a8a24044c217b4858"
+    },
+    {
+      "label": "native Aq result clone/parser",
+      "binary_start": 187732214,
+      "binary_end_exclusive": 187732252,
+      "extracted_js_start": 550411,
+      "extracted_js_end_exclusive": 550449,
+      "sha256": "825dbf7480279df62d806647d028466d4c531bb1f139dae21a93b68f78057aff"
+    },
+    {
+      "label": "native eU $.tool.call Promise wrapper",
+      "binary_start": 188853212,
+      "binary_end_exclusive": 188855653,
+      "extracted_js_start": 1671409,
+      "extracted_js_end_exclusive": 1673850,
+      "sha256": "a8488d8e2775de457b6ff288249a54f1367ef3116b6f9b64b78863bedf22dd66"
+    },
+    {
+      "label": "native W1 tool execution generator (source-only)",
+      "binary_start": 188814536,
+      "binary_end_exclusive": 188819240,
+      "extracted_js_start": 1632733,
+      "extracted_js_end_exclusive": 1637437,
+      "sha256": "2dac343f7459b2386e673fc7726ae690d0b2bb0304ae2e8727fda593fcbaa3d4"
+    },
+    {
+      "label": "native DVt tool.call event outcome (source-only)",
+      "binary_start": 189564393,
+      "binary_end_exclusive": 189566538,
+      "extracted_js_start": 2382590,
+      "extracted_js_end_exclusive": 2384735,
+      "sha256": "2d239227114d8a8a6f9c14bce7f44192a2758fd8c3e8ef4226498d90f9eaf52a"
+    },
+    {
+      "label": "native _se reserved-input/shadow merge helper",
+      "binary_start": 182734762,
+      "binary_end_exclusive": 182734864,
+      "extracted_js_start": 97719,
+      "extracted_js_end_exclusive": 97821,
+      "sha256": "5bd63444d844fa9131e1eaf820ddf5d57212fcf472794ec2f1a245b89adf8702"
+    },
+    {
+      "label": "native r5r tool-result text extractor",
+      "binary_start": 182734921,
+      "binary_end_exclusive": 182734977,
+      "extracted_js_start": 97878,
+      "extracted_js_end_exclusive": 97934,
+      "sha256": "3c1cf0c0fced0ed217d10afd8a44a8d74874a7c95176225e695cb6569ccd2894"
+    },
+    {
+      "label": "native Uoe Projects consent predicate",
+      "binary_start": 183805687,
+      "binary_end_exclusive": 183805858,
+      "sha256": "7507090d046e83385390644695e89b695b66ec7b919048cc1dda2e69e98fa3cb"
+    },
+    {
+      "label": "native WebFetch alias used by Uoe",
+      "binary_start": 183190392,
+      "binary_end_exclusive": 183190431,
+      "sha256": "a54a825ea4a9f70c0e0a26180866f0076cc8d8b3dcb14f4cf1e22eaf7ae9fcde"
+    },
+    {
+      "label": "native WebSearch alias used by Uoe",
+      "binary_start": 183304712,
+      "binary_end_exclusive": 183304751,
+      "sha256": "dd6beace88fabb5ea7984a88a74082229eeaf84b73195d7e7be1de6802f400f9"
+    }
+  ],
+  "executed_native_wrapper": {
+    "function": "eU",
+    "cases": {
+      "success": {
+        "result": {
+          "result": {
+            "structured": "raw-result"
+          },
+          "text": "model-facing text"
+        },
+        "assertions": [
+          "raw structured result",
+          "model text",
+          "fresh toolu_plugin id",
+          "reserved field stripping",
+          "shadow merge",
+          "human-origin consent",
+          "composed-signal cleanup"
+        ]
+      },
+      "ordinary_tool_error": {
+        "result": {
+          "error": "tool failed"
+        },
+        "text": "tool failed",
+        "isError": true
+      },
+      "permission_denial": {
+        "deny": "permission denied"
+      },
+      "missing_result": "rejects with no-result error",
+      "cancellation": "composed caller signal aborts wrapper; no result rejects with (aborted)",
+      "projects_consent": "source Uoe branch rejects before W1"
+    },
+    "fake_host_boundary": "W1 was replaced by an async generator yielding synthetic Native-shaped user/result frames. This executes eU and extracted _se/r5r/bfo/Aq/FAt/hfo/Uoe helpers, not native W1 permission/tool hooks or an installed Mod runtime."
+  },
+  "projects_predicate": {
+    "source_expression": "function Uoe(e){if(e!==_r&&e!==Pm||!(Is(el).value||a.CLAUDE_CODE_PROJECTS_SESSION||Sbt(SS())))return!1;let n=io(Tf,!1);return!(n.value===!0&&n.source===\"payload\"&&!Use())}",
+    "native_tool_names": [
+      "WebFetch",
+      "WebSearch"
+    ],
+    "project_inputs_used_by_native": [
+      "Is(el).value",
+      "CLAUDE_CODE_PROJECTS_SESSION",
+      "Sbt(SS())"
+    ],
+    "additional_payload_condition": "io(Tf, false) returning {value:true, source:\"payload\"} with !Use() makes Uoe return false.",
+    "actual_projects_state_is_stubbed_in_eU_test": true
+  },
+  "source_only": {
+    "W1": "Pinned exactly by the recorded range/hash but not executed; it depends on the native tool catalog, permission, hooks, process and session subsystems.",
+    "DVt": "Pinned exactly by the recorded range/hash but not executed; outcome-to-message projection is not needed to test eU wrapper frame extraction.",
+    "native_llm_usage": "No usage field is read or returned by eU; tool-created model usage remains outside this Promise wrapper."
+  }
+}

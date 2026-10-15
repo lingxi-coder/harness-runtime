@@ -3293,7 +3293,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper"
 version = "1.9.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=468c05a6145545db707df950da828dd2b8bffd01#468c05a6145545db707df950da828dd2b8bffd01"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=450d52b12b6d88a377ab3332c3b8a6a1820e2b7c#450d52b12b6d88a377ab3332c3b8a6a1820e2b7c"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3312,7 +3312,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-rustls"
 version = "0.27.5"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=468c05a6145545db707df950da828dd2b8bffd01#468c05a6145545db707df950da828dd2b8bffd01"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=450d52b12b6d88a377ab3332c3b8a6a1820e2b7c#450d52b12b6d88a377ab3332c3b8a6a1820e2b7c"
 dependencies = [
  "futures-util",
  "http",
@@ -3329,7 +3329,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-util"
 version = "0.1.20"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=468c05a6145545db707df950da828dd2b8bffd01#468c05a6145545db707df950da828dd2b8bffd01"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=450d52b12b6d88a377ab3332c3b8a6a1820e2b7c#450d52b12b6d88a377ab3332c3b8a6a1820e2b7c"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3351,7 +3351,7 @@ dependencies = [
 [[package]]
 name = "lingxi-llm-client"
 version = "0.3.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=468c05a6145545db707df950da828dd2b8bffd01#468c05a6145545db707df950da828dd2b8bffd01"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=450d52b12b6d88a377ab3332c3b8a6a1820e2b7c#450d52b12b6d88a377ab3332c3b8a6a1820e2b7c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3379,7 +3379,7 @@ dependencies = [
 [[package]]
 name = "lingxi-reqwest"
 version = "0.12.28"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=468c05a6145545db707df950da828dd2b8bffd01#468c05a6145545db707df950da828dd2b8bffd01"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=450d52b12b6d88a377ab3332c3b8a6a1820e2b7c#450d52b12b6d88a377ab3332c3b8a6a1820e2b7c"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3932,7 +3932,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

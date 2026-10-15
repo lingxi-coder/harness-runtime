@@ -2833,10 +2833,9 @@ mod tests {
 
     #[test]
     fn prompt_cache_ttl_settings_use_current_enum_values_and_scalar_override() {
-        let parsed: SettingsJson = serde_json::from_str(
-            r#"{"promptCacheTtl":"1h","subagentPromptCacheTtl":"5m"}"#,
-        )
-        .unwrap();
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"promptCacheTtl":"1h","subagentPromptCacheTtl":"5m"}"#)
+                .unwrap();
         assert_eq!(parsed.prompt_cache_ttl, Some(PromptCacheTtl::OneHour));
         assert_eq!(
             parsed.subagent_prompt_cache_ttl,

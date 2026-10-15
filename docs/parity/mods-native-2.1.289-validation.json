@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "captured_at_utc": "2026-10-04T04:47:11Z",
+  "scope": "Isolated native 2.1.289 validation of the existing 2.1.288 Mods API fixture; this captures static validation and available test-command behavior only.",
+  "native_reference": {
+    "version_output": "2.1.289 (Claude Code)",
+    "binary_path": "/tmp/harness-claude-code-2.1.289-darwin-arm64",
+    "binary_format": "Mach-O 64-bit executable arm64",
+    "binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+    "pin_record": "docs/parity/claude-mods-integration-validation-2026-10-03.json",
+    "pin_record_sha256": "0745759d99c5e3c5fdbb63ec83f0b9f7a9e74c8402aa81021c8f741d3072e24b",
+    "official_release_asset_sha256_in_pin_record": "20acfc89a32ed7260b63fd2f3fd71a33de7b2d74b82c724d25941ad73d2e0e96"
+  },
+  "handoff": {
+    "path": "docs/parity/claude-mods-handoff-2026-10-03.md",
+    "sha256": "74dd4b690eb17c5b065c8547ff683028b7536df1671fc41f69a68ce097e27586"
+  },
+  "fixture": {
+    "path": "docs/parity/fixtures/claude-mods-2.1.288-api",
+    "files": [
+      {
+        "path": ".claude-plugin/plugin.json",
+        "sha256": "082e612122d5ed2bf48168490cd801067d8b31ad99fc1bced168f53dde460bd8"
+      },
+      {
+        "path": "hooks/hooks.json",
+        "sha256": "448e29b17c4ce3ee767d3caf0ff9e35b5501b1cfb3b59952e7b7625744bbf070"
+      },
+      {
+        "path": "hooks/register.js",
+        "sha256": "7a6cff39f8bd4a53e60bd4d28f66d95ac0fd60fe38f8a79f64b58b10d5122602"
+      },
+      {
+        "path": "types/index.d.ts",
+        "sha256": "8ebf263814d7a3f35852c4a5cc0f37794bafca9b9e25e33d58c27b41f76aff6b"
+      }
+    ],
+    "test_files_found": 0,
+    "runtime_side_effects_in_registration_source": [
+      "model.complete/classify/fork calls",
+      "process.run",
+      "filesystem writes",
+      "environment writes",
+      "tool and command registration"
+    ],
+    "registration_source_loaded": false
+  },
+  "isolation": {
+    "environment_mode": "env -i; only PATH, HOME, TMPDIR, LANG and CLAUDE_CONFIG_DIR were set; no provider/API credential variables were inherited or supplied.",
+    "bare_validation": {
+      "used": true,
+      "claude_config_dir": "/private/tmp/claude-mods-native-289.4vTTGc/claude-config-bare",
+      "home": "/private/tmp/claude-mods-native-289.4vTTGc/home-bare",
+      "tmpdir": "/private/tmp/claude-mods-native-289.4vTTGc/tmp-bare",
+      "native_help_states_bare_skips_keychain_reads": true
+    },
+    "non_bare_plugin_test_attempt": {
+      "claude_config_dir": "/private/tmp/claude-mods-native-289.4vTTGc/claude-config",
+      "home": "/private/tmp/claude-mods-native-289.4vTTGc/home",
+      "tmpdir": "/private/tmp/claude-mods-native-289.4vTTGc/tmp",
+      "result": "The command found no test files and did not load the registration source.",
+      "provider_or_api_credentials_captured_or_displayed": false,
+      "keychain_read_status": "not instrumented and not excluded; the isolated HOME and CLAUDE_CONFIG_DIR do not establish macOS Keychain isolation"
+    },
+    "native_cli_created_files_only_under_isolated_config_dirs": [
+      ".claude.json",
+      "backups/.claude.json.backup.*",
+      "telemetry/1p_failed_events.*.json"
+    ],
+    "isolated_config_file_hashes": "/private/tmp/claude-mods-native-289.4vTTGc/isolated-config.sha256"
+  },
+  "runs": [
+    {
+      "name": "plugin-validate-json-bare",
+      "command": "env -i PATH=/usr/bin:/bin HOME=/private/tmp/claude-mods-native-289.4vTTGc/home-bare TMPDIR=/private/tmp/claude-mods-native-289.4vTTGc/tmp-bare LANG=C.UTF-8 CLAUDE_CONFIG_DIR=/private/tmp/claude-mods-native-289.4vTTGc/claude-config-bare /tmp/harness-claude-code-2.1.289-darwin-arm64 --bare plugin validate --json /Users/luolingfeng/lingxi/harness-runtime/docs/parity/fixtures/claude-mods-2.1.288-api",
+      "exit_code": 0,
+      "result": {
+        "success": true,
+        "strict": false,
+        "errors": 0,
+        "warnings": 0,
+        "scope": "Static source/manifest validation; this does not run the Mod runtime."
+      },
+      "stdout": {
+        "path": "/private/tmp/claude-mods-native-289.4vTTGc/validate-bare.stdout",
+        "sha256": "980c51b4e4f0dedee73563817277edfadc194caf1086ed5263dec70b37fe73ad"
+      },
+      "stderr": {
+        "path": "/private/tmp/claude-mods-native-289.4vTTGc/validate-bare.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "plugin-test-non-bare",
+      "command": "env -i PATH=/usr/bin:/bin HOME=/private/tmp/claude-mods-native-289.4vTTGc/home TMPDIR=/private/tmp/claude-mods-native-289.4vTTGc/tmp LANG=C.UTF-8 CLAUDE_CONFIG_DIR=/private/tmp/claude-mods-native-289.4vTTGc/claude-config /tmp/harness-claude-code-2.1.289-darwin-arm64 plugin test /Users/luolingfeng/lingxi/harness-runtime/docs/parity/fixtures/claude-mods-2.1.288-api",
+      "exit_code": 1,
+      "result": "No *.test.ts or *.test.tsx under the fixture; no tests executed. This does not establish whether startup read the macOS Keychain.",
+      "stdout": {
+        "path": "/private/tmp/claude-mods-native-289.4vTTGc/plugin-test.stdout",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "path": "/private/tmp/claude-mods-native-289.4vTTGc/plugin-test.stderr",
+        "sha256": "0820d2abb005dc2598d72c1679b405876c0fbb0bba244a656fe3a1ebefea1156"
+      }
+    },
+    {
+      "name": "plugin-test-bare",
+      "command": "env -i PATH=/usr/bin:/bin HOME=/private/tmp/claude-mods-native-289.4vTTGc/home-bare TMPDIR=/private/tmp/claude-mods-native-289.4vTTGc/tmp-bare LANG=C.UTF-8 CLAUDE_CONFIG_DIR=/private/tmp/claude-mods-native-289.4vTTGc/claude-config-bare /tmp/harness-claude-code-2.1.289-darwin-arm64 --bare plugin test /Users/luolingfeng/lingxi/harness-runtime/docs/parity/fixtures/claude-mods-2.1.288-api",
+      "exit_code": 1,
+      "result": "Unknown command 'test' in bare mode; no test executed.",
+      "stdout": {
+        "path": "/private/tmp/claude-mods-native-289.4vTTGc/plugin-test-bare.stdout",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "path": "/private/tmp/claude-mods-native-289.4vTTGc/plugin-test-bare.stderr",
+        "sha256": "1f76d73167a64a72a1b3afcc17b472f971d1bf0cf21303599e8d2de99dce67d6"
+      }
+    }
+  ],
+  "test_runner_source_audit": {
+    "reference_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+    "capture_manifest": "/private/tmp/claude-code-oracle-2.1.289/relevant-src/capture.json",
+    "plugin_test_source": {
+      "path": "/private/tmp/claude-code-oracle-2.1.289/relevant-src/src_197843226.js",
+      "sha256": "d0da516c1fa6ac395acd7210b50f182a7d4cf3dbb3deb44815726750432389c1",
+      "binary_range": "197843226..197890604"
+    },
+    "root_commander_source": {
+      "path": "/private/tmp/claude-code-oracle-2.1.289/relevant-src/src_196786288.js",
+      "sha256": "2e61ffe78bf6a0303f974364ef3e75426bc285a4074e693b43d14696f536434b",
+      "binary_range": "196786288..196922063"
+    },
+    "confirmed_test_entry": {
+      "command": "claude plugin test <plugin-root>",
+      "discovery": "Recursively scans for *.test.ts and *.test.tsx, excluding dot-directories and node_modules; caps discovery at 1000 files.",
+      "test_module": "claude-code/testing",
+      "runtime_exports": ["describe", "expect", "mock", "test", "tier"],
+      "inline_plugin_shape": "The harness runtime validates plugin entries with name, tier, and source; tier is prepend, user, append, or builtin. Inline register source accepts register(...), a function, or an arrow-function form and is wrapped as an exported register(on) module.",
+      "plugin_root_requirement": "The root is validated as a plugin directory and must resolve a hooks module through hooks/hooks.json.",
+      "type_declaration_limit": "The existing fixture types/index.d.ts only augments module claude-code; no claude-code/testing declaration was present in the pinned source capture or fixture. The complete test callback type signature is therefore not claimed."
+    },
+    "keychain_boundary": {
+      "normal_cli_pre_action": "The captured root Commander preAction begins with unconditionally awaiting Det() and V3t() under the pre_action_mdm_keychain_ms timing label.",
+      "bare_help": "The --bare help text says bare mode skips keychain reads.",
+      "bare_test_attempt": "The observed --bare plugin test command returned Unknown command 'test' in bare mode.",
+      "safe_native_execution_proven": false,
+      "reason": "The supported plugin-test route is non-bare and its common preAction keychain behavior was not instrumented or excluded. No new test was launched."
+    }
+  },
+  "runtime_evidence": {
+    "mods_rollout_status": "unknown; no rollout conclusion is drawn from static validation or the no-test-file run",
+    "native_event_result_error_bytes_captured": false,
+    "status": "unsupported under the currently proven keychain-safety boundary",
+    "reason": "The fixture contains no plugin test files. plugin validate only scans manifests and source; plugin test found no tests. The registration source was deliberately not loaded because it contains provider/model operations and filesystem/process/environment effects. A separate pinned-source review found that normal CLI preAction invokes Det() and V3t() at the keychain timing point, while the plugin-test command is unavailable in --bare mode. The prior env -i run did not capture or display credentials, but did not establish that macOS Keychain was not read.",
+    "static_validator_success_is_enabled_mods_evidence": false
+  },
+  "raw_evidence_directory": "/private/tmp/claude-mods-native-289.4vTTGc",
+  "raw_evidence_manifests": {
+    "commands": {
+      "path": "/private/tmp/claude-mods-native-289.4vTTGc/commands.txt",
+      "sha256": "a2037a3d92ba4dc46b7c43ba0a6de4d03c2cf5027404883944ae18739149ef5e"
+    },
+    "run_status": {
+      "path": "/private/tmp/claude-mods-native-289.4vTTGc/run-status.txt",
+      "sha256": "866fb9b09f5859f064616077b0e489ae0c3607de605fe3e0641640723ba5d495"
+    },
+    "environment_non_bare": {
+      "path": "/private/tmp/claude-mods-native-289.4vTTGc/env-manifest.json",
+      "sha256": "6c6b8cc5775290e18ebe4a69734efde9005401dbfad07f1326025a12cf1a1ca4"
+    },
+    "environment_bare": {
+      "path": "/private/tmp/claude-mods-native-289.4vTTGc/env-manifest-bare.json",
+      "sha256": "b6175d009f86cdc48d4002e3da2ae586555a955db1168295fd08e19aefdc65fd"
+    },
+    "fixture_hashes": {
+      "path": "/private/tmp/claude-mods-native-289.4vTTGc/fixture.sha256",
+      "sha256": "b378bb17501b110b4703df579a89ed894856d43bcf7571069db44b20465efaea"
+    },
+    "source_record_hashes": {
+      "path": "/private/tmp/claude-mods-native-289.4vTTGc/source-records.sha256",
+      "sha256": "b45890beff3061d44432f86332a08781932ab337f9fd05429f8e54043588e4e5"
+    },
+    "all_evidence_checksums": {
+      "path": "/private/tmp/claude-mods-native-289.4vTTGc/evidence.sha256",
+      "sha256": "7998cb42ed6805554d2de5f21bf9604a0dcb2c8c179a03d08b43657c2984952f"
+    }
+  }
+}

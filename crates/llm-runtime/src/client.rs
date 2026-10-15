@@ -179,15 +179,18 @@ impl ModelRuntime {
         })
     }
 
-    /// Whether the resolved route uses the native first-party provider, wire
-    /// and endpoint. Profile names and model-family guesses are not authority.
+    /// Provider identity for protocol metadata. A configured API base does not
+    /// change Native's provider label; fast admission separately validates the
+    /// endpoint and credentials through `fast_account_identity`.
     pub fn is_first_party_route(
         &self,
         model: &str,
         profile: Option<&str>,
     ) -> Result<bool, LlmError> {
-        self.fast_account_identity(model, profile)
-            .map(|account| account.first_party)
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self.routes.get(&route.profile_name).ok_or(LlmError::ModelUnavailable)?;
+        Ok(route.provider_id == ProviderId::AnthropicFirstParty
+            && entry.protocol == ProtocolFamily::AnthropicMessages)
     }
 
     pub(crate) async fn load_fast_account(
@@ -325,17 +328,53 @@ impl ModelRuntime {
         ))
     }
 
+    /// Resolve an auxiliary hosted-search route without changing conversation routing.
+    pub(crate) fn hosted_search_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::ResolvedRoute, LlmError> {
+        let route = self.registry.resolve_in(model, profile)?;
+        let source = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        if lingxi_llm_client::hosted_search::supports(&source.profile) {
+            return Ok(route);
+        }
+        // The caller chooses a format supporting native search from the SDK's
+        // declared alternatives. SDK resolution validates provider/account identity.
+        let catalog = lingxi_llm_client::client::RoutingCatalog::new(
+            self.routes.values().map(|entry| entry.profile.clone()).collect(),
+            lingxi_llm_client::protocol::Region::International,
+        );
+        for format in source.profile.connection.protocol_profiles.keys() {
+            if let Ok(selected) = catalog.resolve_in_with_protocol(
+                &route.request_model, Some(&route.profile_name), Some(*format),
+            ) {
+                if let Some(target) = self.routes.get(&selected.profile_name) {
+                    if target.credential == source.credential
+                        && lingxi_llm_client::hosted_search::supports(&target.profile) {
+                        return self.registry.resolve_in(
+                            &selected.request_model, Some(&selected.profile_name),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(route)
+    }
+
     pub(crate) fn search_profile(
         &self,
         model: &str,
         profile: Option<&str>,
     ) -> Option<&lingxi_llm_client::protocol::ProviderProfile> {
-        let route = self.registry.resolve_in(model, profile).ok()?;
+        let route = self.hosted_search_route(model, profile).ok()?;
         self.routes
             .get(&route.profile_name)
             .map(|entry| &entry.profile)
     }
-
     pub(crate) fn attempt_price_bounds(
         &self,
         route: &crate::ResolvedRoute,

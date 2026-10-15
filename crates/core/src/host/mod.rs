@@ -148,8 +148,8 @@ pub use mcp_wire::transport as mcp;
 pub mod mobile_runtime_environment;
 pub mod mod_agent_list;
 pub mod model_attempt;
-pub mod model_safety;
 pub mod model_capabilities;
+pub mod model_safety;
 pub mod observer_pairing;
 pub mod orchestrator;
 pub mod panel_pool;
@@ -166,6 +166,7 @@ pub mod repo_root_reload;
 // The rooted filesystem primitives live in the `rooted-fs` crate; re-exporting
 // the crate keeps `host::rooted_fs::…` resolving for every caller.
 pub use ::rooted_fs;
+pub mod agent_statistics;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
@@ -175,7 +176,6 @@ pub mod session_retention;
 pub mod skill_loader;
 pub mod subagent_output;
 pub mod subagent_output_guard;
-pub mod agent_statistics;
 pub mod subagent_spawn;
 pub mod subscription;
 pub mod swarm;
@@ -301,7 +301,6 @@ pub use model_attempt::{
 };
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
-    ToolResultProjection,
     curated_model_listings, curated_model_names, curated_model_refs, is_curated_model,
     parse_model_ref, provider_default_model, provider_fallback_order, provider_has_curated_list,
     provider_model_catalog, provider_model_catalog_listings, qualified_model_ref,
@@ -320,7 +319,7 @@ pub use orchestrator::{
     ReasoningControlSpec, ReasoningSelection, RecapOutcome, RefusalContinuationJoin,
     RefusalContinuationPhase, RegisterRepoRootOutcome, RegisterRepoRootRequest,
     ResumeRuntimeSnapshot, RewindRowData, ServerFallbackTombstoneMessage, SkillInfo,
-    StatusSnapshot, SummarizeDirection, TurnOutcome,
+    StatusSnapshot, SummarizeDirection, ToolResultProjection, TurnOutcome,
 };
 pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{

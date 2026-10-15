@@ -1,0 +1,211 @@
+{
+  "schemaVersion": 1,
+  "baseline": {
+    "version": "2.1.293",
+    "sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e"
+  },
+  "harnessBinary": {
+    "path": "/Users/luolingfeng/lingxi/.omx/context/headless-implementation-20261007T235741Z/validation/run-002/target/debug/lingxi-cli",
+    "sha256": "cd6ae1558ba8073c87ac467ba3c0e2f78f6fe3f5d14a0007de64d643004226ec",
+    "bytes": 305658816
+  },
+  "sourceMode": "explicit local path overlays; delivered product source plus working runtime and SDK source",
+  "rawCaptureRoot": "/tmp/headless-resume-293-focused-05",
+  "rawReportSha256": "963978335bb124d4149dc7b1ad99a61dcc1d7782f1aeee18f556b281e7d43794",
+  "normalizationRulesChanged": false,
+  "fullByteParity": false,
+  "cases": [
+    {
+      "id": "print-json",
+      "nativeStable": false,
+      "protocolComplete": true,
+      "channels": [
+        {
+          "artifact": "processes/0/exit.json",
+          "equal": true,
+          "rawEqual": true,
+          "normalizedEqual": true,
+          "difference": null,
+          "left": {
+            "bytes": 25,
+            "sha256": "bcebd13d238a77ac126cc4e2019b18ca63df4a97ac56ee163379a4c768d3acd3"
+          },
+          "right": {
+            "bytes": 25,
+            "sha256": "bcebd13d238a77ac126cc4e2019b18ca63df4a97ac56ee163379a4c768d3acd3"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "equal": true,
+          "rawEqual": true,
+          "normalizedEqual": true,
+          "difference": null,
+          "left": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "right": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "equal": true,
+          "rawEqual": false,
+          "normalizedEqual": true,
+          "difference": null,
+          "left": {
+            "bytes": 1588,
+            "sha256": "9d2428e17cc5f00da41be6a6451bd7512f764c6c2f037439246aa083db8361d0"
+          },
+          "right": {
+            "bytes": 1587,
+            "sha256": "0085334151fa1dc23c4bd10696f0cfba98616efc31b8af9751629a67cf795962"
+          }
+        }
+      ]
+    },
+    {
+      "id": "schema-success",
+      "nativeStable": false,
+      "protocolComplete": true,
+      "channels": [
+        {
+          "artifact": "processes/0/exit.json",
+          "equal": true,
+          "rawEqual": true,
+          "normalizedEqual": true,
+          "difference": null,
+          "left": {
+            "bytes": 25,
+            "sha256": "bcebd13d238a77ac126cc4e2019b18ca63df4a97ac56ee163379a4c768d3acd3"
+          },
+          "right": {
+            "bytes": 25,
+            "sha256": "bcebd13d238a77ac126cc4e2019b18ca63df4a97ac56ee163379a4c768d3acd3"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "equal": false,
+          "rawEqual": false,
+          "normalizedEqual": false,
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 215,
+              "byte": 91,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "5b7475726e2d646961676e6f737469635d20746f6f6c206361",
+              "text": "[turn-diagnostic] tool ca"
+            }
+          },
+          "left": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "right": {
+            "bytes": 215,
+            "sha256": "75dcb98a810d27ddd8a3bbb8517e06d521c2f22a38da86747e308d276ac03c36"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "equal": true,
+          "rawEqual": false,
+          "normalizedEqual": true,
+          "difference": null,
+          "left": {
+            "bytes": 1664,
+            "sha256": "63ce7c5d5b9b6d369e182180e2d4af3ca6dac2c548c6f07e0418e8a52a59b0d3"
+          },
+          "right": {
+            "bytes": 1664,
+            "sha256": "648614750f828843d3841b78ab24ea8984d9cd72c5a7ddf76a6c989896a5d0c9"
+          }
+        }
+      ]
+    },
+    {
+      "id": "budget-limit",
+      "nativeStable": false,
+      "protocolComplete": true,
+      "channels": [
+        {
+          "artifact": "processes/0/exit.json",
+          "equal": true,
+          "rawEqual": true,
+          "normalizedEqual": true,
+          "difference": null,
+          "left": {
+            "bytes": 25,
+            "sha256": "0cf195d64edfa93e108082da543b5fe976bc4709e8021c314b822c486255c3d7"
+          },
+          "right": {
+            "bytes": 25,
+            "sha256": "0cf195d64edfa93e108082da543b5fe976bc4709e8021c314b822c486255c3d7"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "equal": true,
+          "rawEqual": true,
+          "normalizedEqual": true,
+          "difference": null,
+          "left": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "right": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "equal": false,
+          "rawEqual": false,
+          "normalizedEqual": false,
+          "difference": {
+            "offset": 131,
+            "left": {
+              "length": 1496,
+              "byte": 111,
+              "contextStart": 107,
+              "contextEnd": 156,
+              "hex": "73745f757364223a302e3031322c227573616765223a7b226f75747075745f746f6b656e735f64657461696c73223a7b22",
+              "text": "st_usd\":0.012,\"usage\":{\"output_tokens_details\":{\""
+            },
+            "right": {
+              "length": 1502,
+              "byte": 105,
+              "contextStart": 107,
+              "contextEnd": 156,
+              "hex": "73745f757364223a302e3031322c227573616765223a7b22696e7075745f746f6b656e73223a313030302c226361636865",
+              "text": "st_usd\":0.012,\"usage\":{\"input_tokens\":1000,\"cache"
+            }
+          },
+          "left": {
+            "bytes": 1510,
+            "sha256": "65cdf4e674a4271906ab7807499626686dc55f5f15181caea81f2f40062136d5"
+          },
+          "right": {
+            "bytes": 1516,
+            "sha256": "98ab7b66d37d4c76bb13a0e0082bc4b8ef5ee4f727de2459ae27c6dcd60850c0"
+          }
+        }
+      ]
+    }
+  ]
+}

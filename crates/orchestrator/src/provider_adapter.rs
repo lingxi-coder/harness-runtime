@@ -3421,11 +3421,15 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         use futures::StreamExt;
         use llm_runtime::services::sdk;
         use llm_runtime::HistoryEvent;
-        let mut request = llm_runtime::LlmRequest::new(input.model).with_user_text(format!(
+        let route = self.service.hosted_search_route(&input.model, input.profile.as_deref())
+            .map_err(hosted_search_error)?;
+        let require_native_results = matches!(&route.provider_id,
+            llm_runtime::ProviderId::OpenAICompatible { name } | llm_runtime::ProviderId::Custom { name } if name == "deepseek");
+        let mut request = llm_runtime::LlmRequest::new(route.request_model).with_user_text(format!(
             "Perform a web search for the query: {}",
             input.query
         ));
-        request.profile = input.profile;
+        request.profile = Some(route.profile_name);
         request.input.max_tokens = Some(4096);
         request.execution.query_source = Some("web_search_tool".into());
         request.input.system = vec![sdk::protocol::SystemBlock {
@@ -3532,6 +3536,12 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             .map(|block| serde_json::to_value(block).unwrap_or_default())
             .collect::<Vec<_>>();
         let mut results = sdk::hosted_search::parse_response_content(&native);
+        if require_native_results && !results.iter().any(|entry| matches!(entry, sdk::hosted_search::SearchResultEntry::Hit(_))) {
+            return Err(tool_api::HostedSearchError {
+                message: "DeepSeek returned no structured web_search_tool_result; native search did not complete".into(),
+                http_status: None, timeout: false,
+            });
+        }
         let mut observations = metadata
             .get("llm_client")
             .and_then(|v| v.get("web_search"))

@@ -379,10 +379,15 @@ mod tests {
             0,
             "budget rejection must not consume a lifetime spawn slot"
         );
-        let statistics = lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(registry.as_ref(), statistics_session).unwrap().snapshot();
+        let statistics =
+            lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(
+                registry.as_ref(),
+                statistics_session,
+            )
+            .unwrap()
+            .snapshot();
         assert_eq!(statistics.refused.budget, 1);
         assert_eq!(statistics.spawned, 0);
-
     }
 
     // =====================================================================
@@ -619,10 +624,15 @@ mod tests {
         }
         assert!(spawner.invocations().is_empty());
         assert_eq!(registry.get_total_agent_spawns(), 0);
-        let statistics = lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(registry.as_ref(), statistics_session).unwrap().snapshot();
+        let statistics =
+            lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(
+                registry.as_ref(),
+                statistics_session,
+            )
+            .unwrap()
+            .snapshot();
         assert_eq!(statistics.refused.depth_limit, 1);
         assert_eq!(statistics.spawned, 0);
-
     }
 
     #[tokio::test]
@@ -663,10 +673,15 @@ mod tests {
         }
         assert!(spawner.invocations().is_empty());
         assert_eq!(registry.get_total_agent_spawns(), 0);
-        let statistics = lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(registry.as_ref(), statistics_session).unwrap().snapshot();
+        let statistics =
+            lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(
+                registry.as_ref(),
+                statistics_session,
+            )
+            .unwrap()
+            .snapshot();
         assert_eq!(statistics.refused.concurrency_limit, 1);
         assert_eq!(statistics.spawned, 0);
-
     }
 
     #[tokio::test]
@@ -5110,7 +5125,10 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 _: ToolUseContext,
                 _: ToolProgressSender,
             ) -> Result<ToolCallResult, ToolError> {
-                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+                Ok(ToolCallResult {
+                    mcp_meta_projection: None,
+                    model_content_projection: None,
+                    data_projection: None,
                     data: json!({}),
                     model_content: None,
                     new_messages: vec![],
@@ -6043,14 +6061,16 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
     }
 
     fn parent_assistant_with_tool_use() -> lingxi_core::types::ConversationMessage {
-        lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+        lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Text {
                     text: "I'll run a command".into(),
                     citations: None,
                 },
-                lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
+                lingxi_core::types::ContentBlock::ToolUse {
+                    input_projection: None,
                     id: lingxi_core::types::ToolUseId::new(),
                     name: "Bash".into(),
                     input: serde_json::json!({"command": "ls"}),
@@ -6289,7 +6309,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_budget(u64::MAX),
         );
         let tool = AgentTool::new(bctx);
-        let boilerplate = lingxi_core::types::ConversationMessage::User { api_message_override: None,
+        let boilerplate = lingxi_core::types::ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: lingxi_core::host::fork_subagent::build_child_message("prior directive"),

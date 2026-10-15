@@ -3765,6 +3765,17 @@ impl StreamingTurnDriver<'_> {
             }
         }
 
+        // The final response can cross the session budget without requiring
+        // another loop iteration. Check after owned tools, accounting and
+        // persistence have settled, so an end_turn cannot bypass the limit.
+        if !token_aborted(&user_cancel) && orch.over_budget().await {
+            let cost = orch.snapshot_cost_real().await;
+            orch.emit_turn_terminal("budget_exhausted", &cost).await;
+            return Err(OrchestratorError::MaxBudgetReached {
+                budget_nano_usd: orch.config.max_budget_nano_usd.unwrap_or(0),
+            });
+        }
+
         Ok(ConversationOutcome::EndTurn {
             turn_count: loop_state.turn_count,
             final_message_id,

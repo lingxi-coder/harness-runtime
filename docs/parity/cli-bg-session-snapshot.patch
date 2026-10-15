@@ -1,0 +1,60 @@
+diff --git a/apps/cli/host/src/bg_session_forker.rs b/apps/cli/host/src/bg_session_forker.rs
+index 668883fd3..fc3943320 100644
+--- a/apps/cli/host/src/bg_session_forker.rs
++++ b/apps/cli/host/src/bg_session_forker.rs
+@@ -20,7 +20,7 @@
+ //! depends on `apps/cli`.
+ 
+ use async_trait::async_trait;
+-use lingxi_core::host::bg_session_forker::{BgForkError, BgSessionForker};
++use lingxi_core::host::bg_session_forker::{BgForkError, BgSessionForker, BgSessionSnapshot};
+ use lingxi_core::host::FileSystem;
+ #[cfg(unix)]
+ use platform_posix::PosixFileSystem as HostFileSystem;
+@@ -127,7 +127,7 @@ impl CliBgSessionForker {
+ 
+     async fn fork_with_handoff(
+         &self,
+-        history: &[lingxi_core::types::ConversationMessage],
++        conversation: &BgSessionSnapshot,
+         system_prompt: Option<Arc<str>>,
+         prompt: &str,
+         model: &str,
+@@ -145,7 +145,7 @@ impl CliBgSessionForker {
+         let session_path =
+             session::jsonl::path::session_path(&self.config_home, &cwd, &new_session_id);
+         let lines = orchestrator::bg_snapshot::history_to_jsonl_lines(
+-            history,
++            conversation,
+             &new_session_id,
+             &cwd,
+             &self.version,
+@@ -242,24 +242,24 @@ impl BgSessionForker for CliBgSessionForker {
+ 
+     async fn fork_to_background(
+         &self,
+-        history: &[lingxi_core::types::ConversationMessage],
++        conversation: &BgSessionSnapshot,
+         system_prompt: Option<Arc<str>>,
+         prompt: &str,
+         model: &str,
+     ) -> Result<String, BgForkError> {
+-        self.fork_with_handoff(history, system_prompt, prompt, model, None)
++        self.fork_with_handoff(conversation, system_prompt, prompt, model, None)
+             .await
+     }
+ 
+     async fn background_conversation(
+         &self,
+-        history: &[lingxi_core::types::ConversationMessage],
++        conversation: &BgSessionSnapshot,
+         system_prompt: Option<Arc<str>>,
+         prompt: &str,
+         model: &str,
+         snapshot: &lingxi_core::host::BackgroundingSnapshot,
+     ) -> Result<String, BgForkError> {
+-        self.fork_with_handoff(history, system_prompt, prompt, model, Some(snapshot))
++        self.fork_with_handoff(conversation, system_prompt, prompt, model, Some(snapshot))
+             .await
+     }
+ 

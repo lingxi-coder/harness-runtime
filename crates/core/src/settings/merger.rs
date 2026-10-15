@@ -586,9 +586,7 @@ mod tests {
         let merged = merge(
             SettingsJson {
                 prompt_cache_ttl: Some(crate::settings::schema::PromptCacheTtl::FiveMinutes),
-                subagent_prompt_cache_ttl: Some(
-                    crate::settings::schema::PromptCacheTtl::OneHour,
-                ),
+                subagent_prompt_cache_ttl: Some(crate::settings::schema::PromptCacheTtl::OneHour),
                 ..Default::default()
             },
             SettingsJson {

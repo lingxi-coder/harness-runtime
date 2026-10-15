@@ -1,0 +1,399 @@
+{
+  "oracle": "Claude Code 2.1.289 refusal cold-state/default audit",
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "execution_scope": "Exact pinned Native default/source functions with controlled host, credential, policy-cache, and GrowthBook cache seams. No CLI, user settings, account, network, or provider request was used. Stubs are listed per case and do not stand in for live Native fetches.",
+  "source_windows": [
+    {
+      "label": "baked hand-maintained catalog Hsr",
+      "start": 180307020,
+      "end_exclusive": 180324545,
+      "sha256": "f87f1b4aef70a13ec78e3a9b6f38bd1db7c67ef7ed2b3ec5c21e037816771b1b"
+    },
+    {
+      "label": "baked catalog index, La, and cold capability resolver state",
+      "start": 180324545,
+      "end_exclusive": 180327360,
+      "sha256": "707aaf22673b7246b659e5ea25c5db0b71fde648acd54b2bc15643f8060a1661"
+    },
+    {
+      "label": "initial IL resolver slots",
+      "start": 180324545,
+      "end_exclusive": 180324763,
+      "sha256": "4109ccec64d48bef1a02be7cf78b2311bf0eae008f1436561a0a1bafee81806d"
+    },
+    {
+      "label": "baked provider IDs, provider model rows, and fallback table",
+      "start": 180329330,
+      "end_exclusive": 180331654,
+      "sha256": "5d518394ad391b3bc22554b00b0ba835b27eaa08c633908544373045ca8e6871"
+    },
+    {
+      "label": "capability precedence and optional served resolver",
+      "start": 180328062,
+      "end_exclusive": 180328974,
+      "sha256": "cb84a7ad675edaecf2f5c1684286f555249ed11b7ca7bd74668395b9e2581485"
+    },
+    {
+      "label": "model module installs the served capability resolver",
+      "start": 182057652,
+      "end_exclusive": 182057675,
+      "sha256": "0ab34e96b4a03e16f58a1b2b1bf9f61fd1a234b02c37b86c2efedc9dc9ec47cd"
+    },
+    {
+      "label": "per-host served catalog cold state initializer",
+      "start": 181696189,
+      "end_exclusive": 181697613,
+      "sha256": "cf260d4711c9341dcc7ff6a48521bb21445ef4cccad93b64dee0e7028088bece"
+    },
+    {
+      "label": "served-catalog miss behavior",
+      "start": 182002562,
+      "end_exclusive": 182004282,
+      "sha256": "c0a61a2eb09088f76735aa2626b6b33ad1731d07c29f54b70efef9df1d4f6709"
+    },
+    {
+      "label": "Native provider kind and approved refusal-copy providers",
+      "start": 180332633,
+      "end_exclusive": 180333499,
+      "sha256": "6b09cc3f86c4cfd10bca85995b4c7c2343880839ba2dbd816349f6bf0c7a91cb"
+    },
+    {
+      "label": "provider classifier gateway host credential slots",
+      "start": 179315397,
+      "end_exclusive": 179316014,
+      "sha256": "859fe50c1a561601f6db2fd6e37e7fdd5487dd838faad1f3bf2db8e5ad0b13f1"
+    },
+    {
+      "label": "provider alias order and cold Opus candidate selector",
+      "start": 180331314,
+      "end_exclusive": 180331491,
+      "sha256": "4c9b7308beb97fc8c6dda17d1fb518e2d86bfe4ebd1e50d8e1f710f7e420cbf3"
+    },
+    {
+      "label": "provider model alias lookup from the baked catalog",
+      "start": 180328974,
+      "end_exclusive": 180329131,
+      "sha256": "776928835e74d1e4a4324635b00e6f0d32cbd50f41b2899fcf41c887c58df8df"
+    },
+    {
+      "label": "provider names used by baked alias selection",
+      "start": 182034000,
+      "end_exclusive": 182034263,
+      "sha256": "359486f29ff0c387ac8f6a30fe2915bfbffca047f78b71f9ab7b3309ec8dc6a4"
+    },
+    {
+      "label": "provider-specific alias selector Yb",
+      "start": 182034263,
+      "end_exclusive": 182034394,
+      "sha256": "1e9bcdfa9872ada581014f0273d74c2ff83bf1b34f77760970b947e8d784728d"
+    },
+    {
+      "label": "cold Opus alias baseline",
+      "start": 182032468,
+      "end_exclusive": 182032490,
+      "sha256": "b04e4ef429619034f59c921d40da4569b31d10a2df8195ae1685fc96a8ce4a75"
+    },
+    {
+      "label": "Gd/E9r Native candidate resolver",
+      "start": 182032490,
+      "end_exclusive": 182032782,
+      "sha256": "b1bd523f292e0ad8a3d92170954ac0fd7fa16788da3ff6075971914aa3113aa8"
+    },
+    {
+      "label": "Opus candidate remote remap gate",
+      "start": 182008503,
+      "end_exclusive": 182008589,
+      "sha256": "4b09e86dffe740d869dfbc29dcf77c7d7286ea570f9518ae3eff551e4addfa02"
+    },
+    {
+      "label": "canonical Opus identity check",
+      "start": 182031336,
+      "end_exclusive": 182031387,
+      "sha256": "d4cbcc51d4039dce639765c36acb4a24cdf5ef63dd1e139cfcce93dc93aef730"
+    },
+    {
+      "label": "availability fallback chain host getter",
+      "start": 179303440,
+      "end_exclusive": 179303509,
+      "sha256": "be7703ef2998eaa2dd520590be3a3c4b5c803d0a871af0d6f37837e6e2b26321"
+    },
+    {
+      "label": "cold provider fallback table from baked model rows",
+      "start": 181702158,
+      "end_exclusive": 181702394,
+      "sha256": "2dbb0e644a48967586ddf86686241181cf03de9726435a61510f688434784db8"
+    },
+    {
+      "label": "user modelOverrides applied over provider defaults",
+      "start": 181703344,
+      "end_exclusive": 181703625,
+      "sha256": "3a1f140ff85330424aa1655ba832fc9eed80666ff22c2fcb8dfdbfc83ca6c9cd"
+    },
+    {
+      "label": "cold modelStringsCache initialization path",
+      "start": 181703740,
+      "end_exclusive": 181703968,
+      "sha256": "1fc3be9719feebfdb38ed64f5b79babe39adbafc2584722704641fa9d2054596"
+    },
+    {
+      "label": "modelStringsCache host getter",
+      "start": 179305694,
+      "end_exclusive": 179305758,
+      "sha256": "8c3c14691033638eb8122eed8ec4afc04eac631ff0fbe673f440507d0804e83d"
+    },
+    {
+      "label": "modelStringsCache host writer",
+      "start": 179305758,
+      "end_exclusive": 179305824,
+      "sha256": "685493f52e4d04aa1769d8fb06c31a3208d20f61b7e70d42160668c7c26abffb"
+    },
+    {
+      "label": "exact KI/eYe and candidate selection",
+      "start": 186201217,
+      "end_exclusive": 186202286,
+      "sha256": "78852a33137cb7cb45ce56b35a1f084d8d6fcf604832c41688add53209ec3dc9"
+    },
+    {
+      "label": "Fable/Mythos refusal predicates",
+      "start": 183122844,
+      "end_exclusive": 183123162,
+      "sha256": "317839d1dcc2693503ce58ce4f4d69f2d731f84463fbd8ec290caaa65b063aca"
+    },
+    {
+      "label": "static family predicate and first-time Opus exception",
+      "start": 182027136,
+      "end_exclusive": 182027879,
+      "sha256": "0e184cf52740e4cff3dcc90479f661047aa0f64ceb6deed5544f3d378d07832b"
+    },
+    {
+      "label": "GrowthBook refusal roster default and membership",
+      "start": 183197213,
+      "end_exclusive": 183197621,
+      "sha256": "5387a5907945c768a3217a0aa84205f20dd0bba7dcb85da56b48b0b31fe9e2f9"
+    },
+    {
+      "label": "configured Fable model is an environment-only equality condition",
+      "start": 182031092,
+      "end_exclusive": 182031181,
+      "sha256": "ec753829a5e805deab8d94010c0ea4cf7dab9272414179484c4d11ece96b6ddc"
+    },
+    {
+      "label": "Native eg exception predicate",
+      "start": 186198584,
+      "end_exclusive": 186198608,
+      "sha256": "0946254fd1d19b756f9e1edeb4506c4eb6657d95838f5fc90978886f8aa21762"
+    },
+    {
+      "label": "candidate suffix removal",
+      "start": 182061267,
+      "end_exclusive": 182061314,
+      "sha256": "1d5c5e72e07948c66b0b99c9fbf309f0565af2c66749065b5bc71e865167c4b6"
+    },
+    {
+      "label": "feature lookup cold, disabled, disk, and fallback sources",
+      "start": 181846341,
+      "end_exclusive": 181847084,
+      "sha256": "106782695c7016daf255548f5737e6472e2bb5bb1b860e58d9eae8b253220113"
+    },
+    {
+      "label": "GrowthBook null-to-default value conversion",
+      "start": 181851707,
+      "end_exclusive": 181851744,
+      "sha256": "4ef000b7340a6cab5590571f5e21f7e35d53cda372f9e54110b403c19ada178e"
+    },
+    {
+      "label": "GrowthBook lookup lazily creates its client resolver",
+      "start": 182188260,
+      "end_exclusive": 182188813,
+      "sha256": "1aae4728aa575c9f6400393b8f393b0ce37fde222381e02a761e755ee77f7bd9"
+    },
+    {
+      "label": "GrowthBook service enabled and disk-readable gates",
+      "start": 182189752,
+      "end_exclusive": 182189903,
+      "sha256": "648fdcadd3707a05a510ddc4d3b1598055012efcfb6ad6c37c28645060174329"
+    },
+    {
+      "label": "feature lookup wrapper k/io",
+      "start": 182191232,
+      "end_exclusive": 182191465,
+      "sha256": "61732312a4b5da02bdac6db71125555355bb0752eb11f299d632fef3ba5712a7"
+    },
+    {
+      "label": "policy service eligibility: first-party route and accepted credential conditions",
+      "start": 183094674,
+      "end_exclusive": 183095246,
+      "sha256": "a8d1c9b012dfa732e5ddb810cd6839e26b54f5184089a0953c25950f5927ae56"
+    },
+    {
+      "label": "policy cold session state constructor",
+      "start": 183088968,
+      "end_exclusive": 183092134,
+      "sha256": "8e48921f6ac419646f6c20e9baad6a5c7fa4b5c08e493df4266447e8b0d2e590"
+    },
+    {
+      "label": "policy snapshot lookup with cache-miss result",
+      "start": 183115886,
+      "end_exclusive": 183116056,
+      "sha256": "c95de8b8d86e7b3e67af30e461be4938b2cc8b9ed26216f45d5e2407ae7d90c4"
+    },
+    {
+      "label": "allow_product_feedback server-populated deny-on-cache-miss metadata",
+      "start": 183104513,
+      "end_exclusive": 183110955,
+      "sha256": "d63179cd87ac8debe86eb11f1d2072dc577a4ce2723db985c628a596eb91132c"
+    },
+    {
+      "label": "effective Native policy decision sn",
+      "start": 183109600,
+      "end_exclusive": 183114613,
+      "sha256": "c56fedb4ac86ae2e1ac159a456be6156dcd571f09814ac9aede87761e9b34947"
+    },
+    {
+      "label": "feedback command environment gates before policy evaluation",
+      "start": 186171443,
+      "end_exclusive": 186171956,
+      "sha256": "5f5a000f728ef8cea9c617397a1334ea1729022b0e90aaf5d21bfbb91974f872"
+    }
+  ],
+  "observations": {
+    "capability_resolver": "IL starts with servedCapabilityLookup undefined; the model module source then registers its callback. With no active/deactivated served catalog the attached callback returns undefined, so fy falls through to baked Hsr capability. A matching explicit CLAUDE_CODE_MODEL_CAPABILITIES=false is checked first and remains a veto.",
+    "growthbook_roster": "Gr asks k(\"tengu_loggia_roster\", []). With the Native feature lookup source, disabled/no-readable-disk returns that fallback with source=disabled; enabled but no remote/disk value returns it with source=fallback. An explicitly readable cached value still wins with source=disk. An empty cold roster is not proof that no later refresh can load it.",
+    "policy_service": "C_ is a Native policy-service eligibility gate, not a cache-presence test. In the controlled helper execution, API-key auth and enterprise/team OAuth with the required scope enable it on the first-party route; missing auth, missing inference scope, prosumer OAuth, non-first-party provider and custom endpoint disable it.",
+    "policy_cache": "Native p4o begins with sessionCache=null, failOpenVerdict=false, and empty hintedDeniedKeys/hintedTaints. dS returns null when the service is disabled; when enabled and disk/session cache is absent it also returns null. sn denies allow_product_feedback for the enabled-service cache miss (metadata onCacheMiss=deny), but with the service unavailable and no local hints it returns allow. That is Native behavior, not a Host resolver-absence rule.",
+    "feedback_env": "Nre checks DISABLE_FEEDBACK_COMMAND, DISABLE_BUG_COMMAND and nonessential-traffic mode before dp(allow_product_feedback). The disable fields use JavaScript truthiness; strings \"false\" and \"0\" are truthy.",
+    "model_route": "When Native modelStringsCache is null, jS initializes its provider table from the baked provider-ID rows through ro(He()), then applies user modelOverrides. With the controlled empty-overrides first-party case, Gd chooses the baked opus5 alias and E9r resolves the candidate from that table; this is not a universal setting when Native model strings or user overrides are populated.",
+    "host_boundary": "Native Hsr/La still supplies static labels, family and capabilities in the absence of served catalog rows. The Rust ProviderApiAdapter snapshot resolver is optional and returns None if no embedding-host source is attached; that Host composition state is not equivalent to Native C_=false or Native missing policy cache."
+  },
+  "cold_model_facts": {
+    "model_strings_cache_initially_null": true,
+    "native_model_strings_cache_after_resolution": {
+      "haiku35": "claude-3-5-haiku-20241022",
+      "haiku45": "claude-haiku-4-5-20251001",
+      "sonnet35": "claude-3-5-sonnet-20241022",
+      "sonnet37": "claude-3-7-sonnet-20250219",
+      "sonnet40": "claude-sonnet-4-20250514",
+      "sonnet45": "claude-sonnet-4-5-20250929",
+      "sonnet46": "claude-sonnet-4-6",
+      "sonnet5": "claude-sonnet-5",
+      "sonnet55": "claude-sonnet-5-5",
+      "opus40": "claude-opus-4-20250514",
+      "opus41": "claude-opus-4-1-20250805",
+      "opus45": "claude-opus-4-5-20251101",
+      "opus46": "claude-opus-4-6",
+      "opus47": "claude-opus-4-7",
+      "opus48": "claude-opus-4-8",
+      "opus5": "claude-opus-5",
+      "opus55": "claude-opus-5-5",
+      "fable5": "claude-fable-5",
+      "fable51": "claude-fable-5-1"
+    },
+    "provider_kind": "firstParty",
+    "opus_alias": "opus5",
+    "opus_candidate": "claude-opus-5",
+    "sonnet_5_5_baked_family": "sonnet",
+    "sonnet_5_5_baked_display_name": "Sonnet 5.5",
+    "sonnet_5_5_eligible_without_served_catalog_or_env": true,
+    "mythos_eligible_with_empty_roster": false,
+    "eligible_after_explicit_env_deny": false
+  },
+  "growthbook_cold_cases": [
+    {
+      "name": "DISABLE_GROWTHBOOK with no readable disk cache",
+      "value": [],
+      "source": "disabled",
+      "resolver_was_absent_before_lookup": true,
+      "resolver_attached_on_lookup": true
+    },
+    {
+      "name": "enabled GrowthBook with no remote or disk value",
+      "value": [],
+      "source": "fallback"
+    },
+    {
+      "name": "disabled service with explicitly readable cached feature",
+      "value": [
+        "claude-mythos-5"
+      ],
+      "source": "disk"
+    }
+  ],
+  "policy_service_cases": [
+    {
+      "name": "first-party API key",
+      "policy_service_enabled": true
+    },
+    {
+      "name": "first-party enterprise/team OAuth with required inference scope",
+      "policy_service_enabled": true
+    },
+    {
+      "name": "first-party API route with no usable auth",
+      "policy_service_enabled": false
+    },
+    {
+      "name": "OAuth missing the required inference scope",
+      "policy_service_enabled": false
+    },
+    {
+      "name": "prosumer OAuth without enterprise/team policy service eligibility",
+      "policy_service_enabled": false
+    },
+    {
+      "name": "non-first-party provider",
+      "policy_service_enabled": false
+    },
+    {
+      "name": "custom endpoint route",
+      "policy_service_enabled": false
+    }
+  ],
+  "policy_cold_cases": [
+    {
+      "name": "service eligible but server-policy cache is absent",
+      "policy_service_enabled": true,
+      "snapshot": null,
+      "session_cache": null,
+      "last_fetch_outcome": null,
+      "fail_open_verdict": false,
+      "initial_hinted_denies": [],
+      "initial_hinted_taints": [],
+      "policy_allowed": false,
+      "qa": false
+    },
+    {
+      "name": "service unavailable and cold state has no policy hints/cache",
+      "policy_service_enabled": false,
+      "snapshot": null,
+      "session_cache": null,
+      "last_fetch_outcome": null,
+      "fail_open_verdict": false,
+      "initial_hinted_denies": [],
+      "initial_hinted_taints": [],
+      "policy_allowed": true,
+      "qa": true
+    },
+    {
+      "name": "DISABLE_FEEDBACK_COMMAND string false is truthy and disables QA",
+      "policy_service_enabled": true,
+      "qa": false
+    },
+    {
+      "name": "DISABLE_BUG_COMMAND string false is truthy and disables QA",
+      "policy_service_enabled": true,
+      "qa": false
+    },
+    {
+      "name": "nonessential traffic mode disables QA before policy",
+      "qa": false
+    }
+  ],
+  "native_initial_policy_state": {
+    "session_cache": null,
+    "last_fetch_outcome": null,
+    "fail_open_verdict": false,
+    "hinted_denied_keys": [],
+    "hinted_taints": [],
+    "principal_rung": "none"
+  }
+}

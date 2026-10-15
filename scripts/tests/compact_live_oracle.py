@@ -15,6 +15,7 @@ The reported token usage and costs are synthetic and incur no model charges.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -57,12 +58,21 @@ def isolated_env(root: Path, base_url: str) -> dict[str, str]:
 
 
 def is_summary(body: dict) -> bool:
-    return any(
-        block.get("text", "").startswith(SUMMARY_PREFIX)
-        for message in body.get("messages", [])
-        for block in message.get("content", [])
-        if isinstance(block, dict)
-    )
+    for message in body.get("messages", []):
+        content = message.get("content", [])
+        # The latest summarize-all fallback uses the API's string shorthand;
+        # the preserved-tail path sends text blocks. Both are real requests.
+        if isinstance(content, str):
+            if content.startswith(SUMMARY_PREFIX):
+                return True
+        elif isinstance(content, list) and any(
+            isinstance(block, dict)
+            and isinstance(block.get("text"), str)
+            and block["text"].startswith(SUMMARY_PREFIX)
+            for block in content
+        ):
+            return True
+    return False
 
 
 def make_handler(root: Path, scenario: str, requests: list[dict]):
@@ -140,12 +150,13 @@ def make_handler(root: Path, scenario: str, requests: list[dict]):
     return MockAPI
 
 
-def check_capture(scenario: str, events: list[dict], requests: list[dict]) -> dict:
+def check_capture(scenario: str, events: list[dict], requests: list[dict], expected_version: str) -> dict:
     summaries = [request["body"] for request in requests if is_summary(request["body"])]
     statuses = [event for event in events if event.get("subtype") == "status"]
     boundaries = [event for event in events if event.get("subtype") == "compact_boundary"]
     errors = [event["compact_error"] for event in statuses if "compact_error" in event]
-    if scenario in ("success", "prompt-too-long"):
+    short_history_compacts = scenario == "too-few" and expected_version == "2.1.286"
+    if scenario in ("success", "prompt-too-long") or short_history_compacts:
         assert len(boundaries) == 1, "Expected one successful compact boundary"
         assert any(event.get("compact_result") == "success" for event in statuses)
         summary_index = next(i for i, request in enumerate(requests) if is_summary(request["body"]))
@@ -153,6 +164,8 @@ def check_capture(scenario: str, events: list[dict], requests: list[dict]) -> di
         for key in ("tools", "thinking", "max_tokens", "context_management", "output_config"):
             assert summaries[0].get(key) == parent.get(key), f"Parent {key} changed during compact"
         assert "PRIORITY_MARKER_42" in json.dumps(requests[-1]["body"]["messages"])
+        if short_history_compacts:
+            assert len(summaries) == 1 and not errors
         if scenario == "prompt-too-long":
             assert len(summaries) == 2, "Expected one prompt-too-long retry"
             assert summaries[1]["messages"][0] == summaries[0]["messages"][0]
@@ -179,7 +192,7 @@ def check_capture(scenario: str, events: list[dict], requests: list[dict]) -> di
     }
 
 
-def run_scenario(binary: Path, root: Path, scenario: str, timeout: float) -> dict:
+def run_scenario(binary: Path, root: Path, scenario: str, timeout: float, expected_version: str) -> dict:
     root.mkdir(parents=True, exist_ok=False)
     for name in ("config", "work", "tmp"):
         (root / name).mkdir()
@@ -268,7 +281,7 @@ def run_scenario(binary: Path, root: Path, scenario: str, timeout: float) -> dic
         server_thread.join(timeout=2)
     # Read again after EOF so the final completed lifecycle event is included.
     events = [json.loads(line) for line in (root / "stdout.jsonl").read_text().splitlines()]
-    report = check_capture(scenario, events, requests)
+    report = check_capture(scenario, events, requests, expected_version)
     dump(root / "report.json", report)
     return report
 
@@ -277,7 +290,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("binary", type=Path)
     parser.add_argument("--output", required=True, type=Path, help="New output directory (usually under /tmp)")
-    parser.add_argument("--expected-version", default="2.1.261")
+    parser.add_argument("--expected-version", choices=("2.1.261", "2.1.286"), default="2.1.261")
     parser.add_argument("--scenario", choices=("all",) + SCENARIOS, default="all")
     parser.add_argument("--timeout", type=float, default=45, help="Seconds per scenario")
     args = parser.parse_args()
@@ -294,13 +307,15 @@ def main() -> None:
     ).stdout.strip()
     if not re.match(rf"^{re.escape(args.expected_version)}(?:\s|$)", version):
         raise RuntimeError(f"Expected Claude Code {args.expected_version}; got {version!r}")
-    scenarios = SCENARIOS[:4] if args.scenario == "all" else (args.scenario,)
+    scenarios = SCENARIOS if args.scenario == "all" else (args.scenario,)
+    with binary.open("rb") as source:
+        binary_sha256 = hashlib.file_digest(source, "sha256").hexdigest()
     reports = []
     for scenario in scenarios:
-        report = run_scenario(binary, root / scenario, scenario, args.timeout)
+        report = run_scenario(binary, root / scenario, scenario, args.timeout, args.expected_version)
         reports.append(report)
         print(f"PASS {scenario}: {report['requests']} loopback requests", flush=True)
-    dump(root / "report.json", {"version": version, "scenarios": reports})
+    dump(root / "report.json", {"version": version, "binary_sha256": binary_sha256, "scenarios": reports})
     print(root / "report.json")
 
 

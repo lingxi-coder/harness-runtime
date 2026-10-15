@@ -54,11 +54,14 @@ if (!options.existing) {
   native = {command: nativeBinary, flags: ['--bare']};
 }
 let harness;
+let harnessBinary;
 if (options.harnessConfig) {
   harness = JSON.parse(await readFile(path.resolve(options.harnessConfig)));
   if (!harness.command || !path.isAbsolute(harness.command)) throw new Error('Harness command must be an absolute executable path');
   if (![harness.args ?? [], harness.flags ?? []].every(value => Array.isArray(value) && value.every(item => typeof item === 'string'))) throw new Error('Harness args/flags must be string arrays');
   if (harness.env && (typeof harness.env !== 'object' || Array.isArray(harness.env))) throw new Error('Harness env must be an object');
+  const executable = await readFile(harness.command);
+  harnessBinary = {path: harness.command, sha256: sha256(executable), bytes: executable.length};
   harness.flags = ['--bare', ...harness.flags ?? []].filter((flag, index, values) => flag !== '--bare' || values.indexOf(flag) === index);
 }
 const rules = options.rules ? JSON.parse(await readFile(path.resolve(options.rules))) : {version: 1};
@@ -68,8 +71,12 @@ const root = options.existing ? path.resolve(options.existing) : options.output 
 if (options.output) await mkdir(root); // Never overwrite an existing evidence directory.
 const provider = options.existing ? undefined : await startProvider();
 const report = {schemaVersion: 1, baseline, root, comparisonOnly: Boolean(options.existing), protocolContext: existingReport?.protocolContext ?? {schemaResearch: Boolean(options.schemaProbes), lifecycleResearch: Boolean(options.lifecycleProbes), nativeRepetitions: options.nativeOnce ? 1 : 2, startupSettleMs: options.startupSettleMs, textStdin: Boolean(options.textStdin), providerDelayMs: options.providerDelayMs}, provider: provider?.baseUrl ?? existingReport?.provider, inheritedEnvironment: false, credentialMode: 'fixed dummy only', nativeNativeCompletedBeforeHarness: false, fixtureIds: selected.map(f => f.id), captures: existingReport?.captures ?? {}, nativeNative: [], nativeHarness: [], scope: 'Raw stdin/stdout/stderr/exit, exact local HTTP request/response wire, and this fixture session JSONL. Native result is observed before EOF/drain. No raw data is canonicalized or discarded.'};
+report.harnessBinary = harnessBinary ?? existingReport?.harnessBinary;
 
 async function run(fixture, engine, label) {
+  if (label === 'harness' && sha256(await readFile(engine.command)) !== harnessBinary.sha256) {
+    throw new Error('Harness executable changed during the differential run');
+  }
   const fixtureRoot = path.join(root, fixture.id);
   const locations = {workspace: path.join(fixtureRoot, 'workspace'), state: path.join(fixtureRoot, 'state'), tmp: path.join(fixtureRoot, 'tmp')};
   // All these paths were allocated beneath this run's fresh evidence root.
@@ -122,8 +129,14 @@ async function compare(fixture, leftLabel, rightLabel, phase) {
   let filenameIdentity;
   if (fixtureRules['@session-files']) {
     if (!fixture.resumeFork) throw new Error('Fork filename rules require an explicit fork fixture');
-    const mapped = mapForkSessionFiles(left, right, {context, declaration: fixtureRules['@session-files'], leftId: report.captures[`${fixture.id}/${leftLabel}`].observations[1]?.primarySessionId, rightId: report.captures[`${fixture.id}/${rightLabel}`].observations[1]?.primarySessionId});
-    left = mapped.left.files; right = mapped.right.files; filenameIdentity = mapped.mapping;
+    try {
+      const mapped = mapForkSessionFiles(left, right, {context, declaration: fixtureRules['@session-files'], leftId: report.captures[`${fixture.id}/${leftLabel}`].observations[1]?.primarySessionId, rightId: report.captures[`${fixture.id}/${rightLabel}`].observations[1]?.primarySessionId});
+      left = mapped.left.files; right = mapped.right.files; filenameIdentity = mapped.mapping;
+    } catch (error) {
+      // A rejected identity is a failed comparison, not permission to skip
+      // later cases or lose the report and captures already collected.
+      entries.push({artifact: '@session-files', equal: false, kind: 'comparison-rejected', error: String(error), details: error.details});
+    }
   }
   for (const artifact of new Set([...left.keys(), ...right.keys()])) {
     if (!left.has(artifact) || !right.has(artifact)) { entries.push({artifact, equal: false, kind: 'missing-artifact', leftPresent: left.has(artifact), rightPresent: right.has(artifact)}); continue; }

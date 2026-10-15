@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use branding::{
     MAX_CONCURRENT_SUBAGENTS_ENV, MAX_SUBAGENTS_PER_SESSION_ENV, MAX_SUBAGENT_SPAWN_DEPTH_ENV,
 };
-use lingxi_core::host::budget::BudgetError;
 use lingxi_core::host::agent_statistics::{AgentSpawnRefusal, AgentSpawnToken};
+use lingxi_core::host::budget::BudgetError;
 use lingxi_core::host::fusion::{
     FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
     FusionOrigin, FusionPanelMode, FusionPreparedSummary, FusionPreset, FusionProgress,
@@ -963,7 +963,10 @@ fn async_launch_result(
     if let Some(task_id) = task_id {
         data["task_id"] = json!(task_id);
     }
-    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+    ToolCallResult {
+        mcp_meta_projection: None,
+        model_content_projection: None,
+        data_projection: None,
         data,
         model_content: None,
         new_messages: vec![],
@@ -1318,7 +1321,10 @@ fn fusion_tool_result(result: lingxi_core::host::FusionResult) -> ToolCallResult
             })
         })
         .collect();
-    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+    ToolCallResult {
+        mcp_meta_projection: None,
+        model_content_projection: None,
+        data_projection: None,
         data: json!({
             "runId": result.run_id,
             "mode": result.mode,
@@ -3775,7 +3781,9 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 ))
             }
             Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
-                if let Some(token) = &agent_spawn_token { token.refused(AgentSpawnRefusal::ConcurrencyLimit); }
+                if let Some(token) = &agent_spawn_token {
+                    token.refused(AgentSpawnRefusal::ConcurrencyLimit);
+                }
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     bus,
@@ -4072,17 +4080,25 @@ impl Tool for AgentTool {
         };
 
         let inherited_statistics = match (self.ctx.task_registry.as_ref(), ctx.agent_id) {
-            (Some(registry), Some(agent_id)) => registry.agent_statistics_for_parent(agent_id).await,
+            (Some(registry), Some(agent_id)) => {
+                registry.agent_statistics_for_parent(agent_id).await
+            }
             _ => None,
         };
         let statistics = match inherited_statistics {
             Some(statistics) => Some(statistics),
-            None => match (self.ctx.task_registry.as_ref(), Self::origin_session_id(&ctx).await) {
+            None => match (
+                self.ctx.task_registry.as_ref(),
+                Self::origin_session_id(&ctx).await,
+            ) {
                 (Some(registry), Some(session_id)) => registry.agent_session_statistics(session_id),
                 _ => None,
             },
         };
-        let requested_background = self.advertise_run_in_background.then_some(parsed.run_in_background).flatten();
+        let requested_background = self
+            .advertise_run_in_background
+            .then_some(parsed.run_in_background)
+            .flatten();
 
         // Model and profile are one selection: forced inheritance clears both.
         // Keep this policy for Mod rewrites as well as the original call.
@@ -4125,7 +4141,9 @@ impl Tool for AgentTool {
         // unless LINGXI_MAX_SUBAGENT_SPAWN_DEPTH raises the limit.
         let depth_limit = lingxi_core::host::subagent_spawn::max_subagent_spawn_depth();
         if ctx.depth >= depth_limit {
-            if let Some(statistics) = &statistics { statistics.record_refused(AgentSpawnRefusal::DepthLimit); }
+            if let Some(statistics) = &statistics {
+                statistics.record_refused(AgentSpawnRefusal::DepthLimit);
+            }
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -4860,7 +4878,9 @@ impl Tool for AgentTool {
         // does not consume one of the 200 lifetime slots.
         let concurrent_cap = lingxi_core::host::subagent_spawn::max_concurrent_subagents();
         if spawner.concurrent_subagent_count().await >= concurrent_cap {
-            if let Some(statistics) = &statistics { statistics.record_refused(AgentSpawnRefusal::ConcurrencyLimit); }
+            if let Some(statistics) = &statistics {
+                statistics.record_refused(AgentSpawnRefusal::ConcurrencyLimit);
+            }
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -4884,7 +4904,9 @@ impl Tool for AgentTool {
         let origin_session_id = Self::origin_session_id(&ctx).await;
         let budget = Self::budget_for_origin(budget, origin_session_id);
         if let Err(BudgetError::Exceeded { current_nano_usd }) = budget.check_and_charge(0).await {
-            if let Some(statistics) = &statistics { statistics.record_refused(AgentSpawnRefusal::Budget); }
+            if let Some(statistics) = &statistics {
+                statistics.record_refused(AgentSpawnRefusal::Budget);
+            }
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -5330,9 +5352,14 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 )));
             }
         }
-        let agent_spawn_token = statistics.as_ref().map(|statistics| statistics.prepare_spawn(
-            selected.agent_type.clone(), requested_background, run_in_background, ctx.depth + 1,
-        ));
+        let agent_spawn_token = statistics.as_ref().map(|statistics| {
+            statistics.prepare_spawn(
+                selected.agent_type.clone(),
+                requested_background,
+                run_in_background,
+                ctx.depth + 1,
+            )
+        });
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -5989,7 +6016,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
                         obj.insert("worktreeBranch".into(), json!(branch));
                     }
                 }
-                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+                Ok(ToolCallResult {
+                    mcp_meta_projection: None,
+                    model_content_projection: None,
+                    data_projection: None,
                     data,
                     model_content: None,
                     new_messages: vec![],
@@ -6027,7 +6057,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 Err(ToolError::Internal("Agent: subagent was killed".into()))
             }
             Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
-                if let Some(token) = &agent_spawn_token { token.refused(AgentSpawnRefusal::ConcurrencyLimit); }
+                if let Some(token) = &agent_spawn_token {
+                    token.refused(AgentSpawnRefusal::ConcurrencyLimit);
+                }
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     &bus,

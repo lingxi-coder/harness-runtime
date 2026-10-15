@@ -1,0 +1,659 @@
+{
+  "reference_version": "2.1.287",
+  "release_url": "https://github.com/anthropics/claude-code/releases/tag/v2.1.287",
+  "published_at": "2026-10-01T18:00:22Z",
+  "release_body_sha256": "54729a449b821d8d4d58b1eaeae082e6427cc6a3a72871260c2fa366bd0fc8a5",
+  "item_count": 106,
+  "status": "Current native audits and production ports in progress; scoped previous regression passes do not establish overall equality",
+  "items": [
+    {
+      "ordinal": 1,
+      "source_line": 3,
+      "source_text_sha256": "f7e1bb4d4eb5d5057ed90c1b05f0c938866a37ab790db2c5700e210bbb4d2696",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 2,
+      "source_line": 4,
+      "source_text_sha256": "6bcbfe61563d767dab288294676270620b8cf66cd2ed1c9d221bec277cff1835",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 3,
+      "source_line": 5,
+      "source_text_sha256": "f1cecc943e6862333695e5750185b57271790ef2e6fd62266dba76b3ac56e907",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 4,
+      "source_line": 6,
+      "source_text_sha256": "5d9116175ee30ad0cc2dd2b2b7bd34e916eaa1cb1636d11b991ad2cf4ea33f3e",
+      "status": "copy_field_regression_passed",
+      "audit_note": "Telemetry154; both fields share existing processed value; native helper8 ad hoc copy cases, no complete exporter parity claim"
+    },
+    {
+      "ordinal": 5,
+      "source_line": 7,
+      "source_text_sha256": "5af8ff6eeef81ab61583bd57b4231ca89fe0b636e64c3fe8bd5ad138e3b35a1a",
+      "status": "scoped_capability_wire_regressions_passed",
+      "audit_note": "MCP668/POSIX163/mock26/actualHTTP4; native558/Rust540 cases; typed Java rescue and Runtime interactive completion remain open"
+    },
+    {
+      "ordinal": 6,
+      "source_line": 8,
+      "source_text_sha256": "7722291c1f1c2f2c090cd2fd1b10de6ae1dc175de8690498eb9cc61b95286a7e",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 7,
+      "source_line": 9,
+      "source_text_sha256": "db2f8dc32366e845dacfcde14292b60f29f3176fa0f3873635c285e379e9acaf",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 8,
+      "source_line": 10,
+      "source_text_sha256": "7d26b73aded1297c4da96724ed3b702abc15c213e2dc6b509af197ff9611a7d3",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 9,
+      "source_line": 11,
+      "source_text_sha256": "89cf824e6002c57d5e57e9843f8d8c20dad6171482ff6fe3610cbfe7b9e71618",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 10,
+      "source_line": 12,
+      "source_text_sha256": "9ec2a94ca7f29f5a3a18ecd56ac9adb65eb4ee8713690993ab64861027680a51",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 11,
+      "source_line": 13,
+      "source_text_sha256": "a84ec9503952091f9bc015eab4e378d638894cc25a0e91d7392a8674d98d5959",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 12,
+      "source_line": 14,
+      "source_text_sha256": "1cf1b9777bfcbc95610c48d54340739d358fe581c91be0e2da8e01991c177ebe",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 13,
+      "source_line": 15,
+      "source_text_sha256": "207e61541dfc3825ae971cfe6be4c0287bd1807cd7d45d8ff6088321dd213165",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 14,
+      "source_line": 16,
+      "source_text_sha256": "e419f82e63902084f8a72e9fa8959119448d0f9f02cff7e531726ce844b435a6",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 15,
+      "source_line": 17,
+      "source_text_sha256": "c0f58542488c577988db07f5d3e6577bb07f1de690cb1be8e2408a0c7c039cec",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 16,
+      "source_line": 18,
+      "source_text_sha256": "897871f497d30e46212b29ee700240650baf81f8c4090989269d937a85aa670e",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 17,
+      "source_line": 19,
+      "source_text_sha256": "bbd5f1fda29489cd261481d232a51a8c0536b8616aa798ae6f53845ffb84f793",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 18,
+      "source_line": 20,
+      "source_text_sha256": "fa23fd5ca7ccb3d6206302922344da8ad18567c51f7d983700d1451d6d45ec6d",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 19,
+      "source_line": 21,
+      "source_text_sha256": "80a7df758bbb48a9214d9e5f495fe7718e7fa2dba70bc17b52b66915aacb0ca6",
+      "status": "scoped_history_restore_regressions_passed",
+      "audit_note": "Orchestrator1308/Memory197/Compaction276/Session322/integrations80; native eager23/nested9/restore8/file6/typed-boundary6. Trigger queue, complete marked/walker and native resume initializer remain open."
+    },
+    {
+      "ordinal": 20,
+      "source_line": 22,
+      "source_text_sha256": "ba71c22c3a39fa423300d61e839a53b6fd42dcb19dad4b3ca62f5c0b3a42335a",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 21,
+      "source_line": 23,
+      "source_text_sha256": "4bcd42f79e6f9e270a873760a8380c1fc3f8933f4964078ee5c0e7519f1536ad",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 22,
+      "source_line": 24,
+      "source_text_sha256": "96c56ba85cc305869618f93169ebbbff62eb6e313d2439304e5ba2713ef67f6e",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 23,
+      "source_line": 25,
+      "source_text_sha256": "609b3387255967c77a55b2493383fc0af1c2e7ca47ecd7299c68394d8362abf4",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 24,
+      "source_line": 26,
+      "source_text_sha256": "c6a2cbb8cf02e7b7d0b0ca3ae64036c62fb09c2744f928c07838bce0c83bf894",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 25,
+      "source_line": 27,
+      "source_text_sha256": "cf4da8e7ca4c86e5d1774ce9cd5a8939f5e61e0c6e8c9355656062f0f4ef6e6c",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 26,
+      "source_line": 28,
+      "source_text_sha256": "989f13edd7c9383e97d156132808c8fd99b9d3d7d67e13f3f3a3a961af2108d1",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 27,
+      "source_line": 29,
+      "source_text_sha256": "604fc4ecbc8766080c54d1c8917a237fe3707f7516e172f470c888801b6c08fd",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 28,
+      "source_line": 30,
+      "source_text_sha256": "b5a6d101a33a1da5e2ca1439f83ba77ef7625785db0dd06099806b4744a39394",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 29,
+      "source_line": 31,
+      "source_text_sha256": "4a627b845f35608bda98fe80ecdcdc74e85c8281fb2a917fc07e1c3900ce6e0a",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 30,
+      "source_line": 32,
+      "source_text_sha256": "d378d16445b7e7ab5adcbb29e9eef0304f3133b68c89599acc2eca86933b76e4",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 31,
+      "source_line": 33,
+      "source_text_sha256": "c1cf54a36f9f0fdc04260774a8c73534ec41990068de60e0c691432ecce9233d",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 32,
+      "source_line": 34,
+      "source_text_sha256": "d48c7c9b108fe6d2aa2a458c5f77eec485ade3001a943932c1e446c022b37298",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 33,
+      "source_line": 35,
+      "source_text_sha256": "14eb16b85fe30e26408ba7f54ab1493040de42704e94a399588936fc5d6828ea",
+      "status": "reviewed_scoped",
+      "implementation": "crates/llm-runtime/src/structured_output.rs",
+      "native_oracle": "scripts/tests/structured_output_287_oracle.mjs",
+      "regressions": [
+        "crates/llm-runtime/tests/structured_output_287_test.rs",
+        "crates/orchestrator/tests/hook_dispatch_category_287_test.rs"
+      ],
+      "scope": "Actual Le/D.bool/ZZe environment getter, GF/zF/own route/model gates, automatic structured beta, distinct SDK main/side merging, exact UTF-16 sidecars, captured Hook and real cross-provider fallback. Dynamic denial/HIPAA/full API client remain open.",
+      "sdk_implementation": "deps/llm-client/src/providers/anthropic/request_policy.rs",
+      "wire_oracle": "scripts/tests/output_config_wire_287_oracle.mjs"
+    },
+    {
+      "ordinal": 34,
+      "source_line": 36,
+      "source_text_sha256": "e86dd7f4789f156f4ba786b43eac8a291994ea909b48ce16682fae3c20f3c917",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 35,
+      "source_line": 37,
+      "source_text_sha256": "432a020cb7eb716ee0a3fbd0adf77243617bcdedc24732b42c586274386335e9",
+      "status": "scoped_partial_stream_closure_regressions_passed",
+      "audit_note": "Native14close/24completion/16error-eligibility with Rust replay and actual caller regressions. Preserve native empty-text nudge and interactive/headless recovery. Full abort/retraction/outer policy/native CLI remain open."
+    },
+    {
+      "ordinal": 36,
+      "source_line": 38,
+      "source_text_sha256": "2e46bb7fd0cfe59918d3801317299df68d6ecd4b729fe00ce5b2b9a457306066",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 37,
+      "source_line": 39,
+      "source_text_sha256": "c3efcbd6cee1726b6005a1295a835dd317785bf21b854b6720c27de18ea1e411",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 38,
+      "source_line": 40,
+      "source_text_sha256": "103e6f495651c459778ed6a7f9c3e32449e1a91ee216ec2255c370e2df99787d",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 39,
+      "source_line": 41,
+      "source_text_sha256": "2411f0279309a876d92b0f647e4f94857ad35b5415888be436d0f024ce54c226",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 40,
+      "source_line": 42,
+      "source_text_sha256": "c19d74c4e8f14e6acec188534a30bc81dd8398936f6593dc787cfb9b45f256df",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 41,
+      "source_line": 43,
+      "source_text_sha256": "3f4e45db928ab6d18100bce9dcfd14108fdd63bcbd766bf357bd9a26aaa16792",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 42,
+      "source_line": 44,
+      "source_text_sha256": "578cb6fdffee45b107b4488737d6bf2d1365b58c46b8e34dd12f3cfed185a413",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 43,
+      "source_line": 45,
+      "source_text_sha256": "f0bf010eac1963c0ee1bc73d96da2d7f307b05d7ec316312acc80814d1c01dae",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 44,
+      "source_line": 46,
+      "source_text_sha256": "819b34c6cc5810c3b5f734a680a098d82ce1042ca849bcd509b2293f0c55f88b",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 45,
+      "source_line": 47,
+      "source_text_sha256": "fa6005a8a595b32c98c068f9c3620213c3cafe66248487723b64354dfcad9fe5",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 46,
+      "source_line": 48,
+      "source_text_sha256": "adfaa4488f5698496f625800872a9ffe3463cab463476e286632ea06030f39a5",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 47,
+      "source_line": 49,
+      "source_text_sha256": "b163e7feb82596ab0235676a3f5bad8d793418a8ec1ea14442b2cdb8b8db595c",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 48,
+      "source_line": 50,
+      "source_text_sha256": "72b5296b784fc45a71cfe6f3d17ae42ee16fa98b0eabc0dd4509fc7efea7483c",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 49,
+      "source_line": 51,
+      "source_text_sha256": "96850e4181ab55e64abcbafa23ba17ae6885b25268841010c70cfc851897f466",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 50,
+      "source_line": 52,
+      "source_text_sha256": "170001b9aeaf1362118f6c4ea7ca019d72426b01acf44e51b9d6e7c7af577844",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 51,
+      "source_line": 53,
+      "source_text_sha256": "45193463405b4ee2ecf6784917d1c6a2ca61980aec1cbd5ca1d217c2a6c3e3a2",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 52,
+      "source_line": 54,
+      "source_text_sha256": "94b5bcded42936468a8d25c2fd9807aed208fed2892c5149d445b24a76bc958d",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 53,
+      "source_line": 55,
+      "source_text_sha256": "04632543efd30ea45e6c9d546bb4a27d43f3229339d923bb84ee41d00df79a67",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 54,
+      "source_line": 56,
+      "source_text_sha256": "5aa021e6b211d25e005c5aa4af13083914ecf802e2936835c6d005350bb8c4cc",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 55,
+      "source_line": 57,
+      "source_text_sha256": "e2d80749462d42ea419a50dda6d9df3876614de96bcc52f068e489aa6f2fc19f",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 56,
+      "source_line": 58,
+      "source_text_sha256": "72f89cda951d94f1764724b1323f4211a8d0318d38022841916e4161b9786d4d",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 57,
+      "source_line": 59,
+      "source_text_sha256": "0c21d88c9de28ca0356b7c1620369b9a786e3cff17093f49850ee54bb41d474d",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 58,
+      "source_line": 60,
+      "source_text_sha256": "0bc2ff6f1b34cfaaa6ba1c369689f126f2c1b33fc486357787020a06d7b9ff2c",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 59,
+      "source_line": 61,
+      "source_text_sha256": "0e099002a1cdf6c6b87401ee5d87652d38b58e5c82ccf90257315383f78d9dcd",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 60,
+      "source_line": 62,
+      "source_text_sha256": "9b7bcd89087a87221e2e06c025181ccb3f50976457920e45e8bd6626e188c6f8",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 61,
+      "source_line": 63,
+      "source_text_sha256": "aa61be5cedd1ccf8229c118a446e4e6c1bf2224365cd40a6117eaebe9c71a7be",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 62,
+      "source_line": 64,
+      "source_text_sha256": "d9a7390ccf6fd350782a6ea2e3faa20e4009f1bc8818466f131bb698fbcdc2c7",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 63,
+      "source_line": 65,
+      "source_text_sha256": "40cc1c584b8825b665279d676a812e49e22be5d0d8f24f083a68cefa4301da4a",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 64,
+      "source_line": 66,
+      "source_text_sha256": "84b9a621268a9cb65badea9ed01e5bbfcfa3c657a3005ea945ab0fac7b038619",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 65,
+      "source_line": 67,
+      "source_text_sha256": "b9b86b44e32e5fae86202c0cd4ee067fbc3312075e5f67e0c45a2135d1a70a56",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 66,
+      "source_line": 68,
+      "source_text_sha256": "59329d9ed14fca40b1e4c7d21df3316131d57372f55a5f55fd50b1373a9850c9",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 67,
+      "source_line": 69,
+      "source_text_sha256": "e2a1be59522a84e1d9c8e303a86d623cce3b7870dbb94209c31427993e664aed",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 68,
+      "source_line": 70,
+      "source_text_sha256": "06abf7c94c59db0e7ab9b876542ba53626767872d0a7bf03a0a74c6f83ac95c2",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 69,
+      "source_line": 71,
+      "source_text_sha256": "a618c0d9471fd18b4f383fdb68d069d854cea876c7200c2b6b4e629efb8efd96",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 70,
+      "source_line": 72,
+      "source_text_sha256": "de39642a5993b8534ce7d2b6c7e5ea883c0ab9d5e44db57f5a83d3db3a89e8bb",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 71,
+      "source_line": 73,
+      "source_text_sha256": "4696a3a760f9333640c91e11e03ffa28d13b86a865a0c90c5e059ca80a1d3850",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 72,
+      "source_line": 74,
+      "source_text_sha256": "5c8267581cca9096a7ee581bbdb9a7b986c5529cafdc045401e2de4de68d55e8",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 73,
+      "source_line": 75,
+      "source_text_sha256": "ee89aca5c74ba454d4f4785d7f56e4cfa6b7980ded0a64119ee3cfa2373183f2",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 74,
+      "source_line": 76,
+      "source_text_sha256": "ea0418b8ffeb8b72509a124bf41eed68aefb446c8adf0e892cd3f5b5d3f3e627",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 75,
+      "source_line": 77,
+      "source_text_sha256": "8ea93ef75bba5150232ceabd21690aaf766ede2162680810979c2e8cabe8cb38",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 76,
+      "source_line": 78,
+      "source_text_sha256": "b59ae3966bb94700ff9537ede68e3081b17ddb4a4a4bb1e2d338307f81aa5bd7",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 77,
+      "source_line": 79,
+      "source_text_sha256": "a4dac863a7cdabef83f5e77322621dadcfb796542c4905043fd832fb321306d1",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 78,
+      "source_line": 80,
+      "source_text_sha256": "715184b2ba178376c2eababecd0b141cb3f2806b7925e3f8c207f33c2d84fd04",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 79,
+      "source_line": 81,
+      "source_text_sha256": "a97446ac30df5a486b9ea47f0747871bbd75e76892f4c923e4071dafc15f238e",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 80,
+      "source_line": 82,
+      "source_text_sha256": "61d6fb6c8e8a4bc07c87ceceb642a42cc8006c60131b7d4ee85ced7ebebbec0f",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 81,
+      "source_line": 83,
+      "source_text_sha256": "d9a1f8e0be2b82b3529ac91e268e5ad631745ec38e4de0176b8e62f20632f974",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 82,
+      "source_line": 84,
+      "source_text_sha256": "b1d9db118470eb3a6957076074b30268b6684c3f46c18ba1ccf659014f4f797e",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 83,
+      "source_line": 85,
+      "source_text_sha256": "3842cc50e10fe72e1470fbb010e72596f8ca1cf02ade9eee182ee84fefd01705",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 84,
+      "source_line": 86,
+      "source_text_sha256": "a112ba143b0cc34da2991340b9fcc7fcd635257bf9b4f65bce8b0fa789ee8708",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 85,
+      "source_line": 87,
+      "source_text_sha256": "300bb74871b8ff3a13dc5cf0b1ce8a79f3ccc5e7ecffba91a19d706997c1a69f",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 86,
+      "source_line": 88,
+      "source_text_sha256": "1fdccb5d9af474a27038abc8ce3725d16572d235ba5fdca7148ba058d75371f3",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 87,
+      "source_line": 89,
+      "source_text_sha256": "b8a397019ab9dabcc12a5863a87a388ce4dea70343f8160ceca954b831f88be0",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 88,
+      "source_line": 90,
+      "source_text_sha256": "9182c5a6560455617591977b2e9cf6feef86b302d73b5b142b1d2db2583091ed",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 89,
+      "source_line": 91,
+      "source_text_sha256": "239215293b0be9ea4b3dc911d46d298063ced8eb6602ad1ace7739a0b6f1fcb4",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 90,
+      "source_line": 92,
+      "source_text_sha256": "62fe5afbe2657e338e21a06c28b66c40ae5364c088d11fdc16f38f5ee6244914",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 91,
+      "source_line": 93,
+      "source_text_sha256": "562c5ffe7c9dc1d3729cd77c3a9c4122791fe6a7ee781905f186c6b86f641511",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 92,
+      "source_line": 94,
+      "source_text_sha256": "19ac63be388162cad6f9ff3a56aa37fa18e1472925b0852bdb4e8c134704e76e",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 93,
+      "source_line": 95,
+      "source_text_sha256": "1634cbbb454fd5a29defc5b791399ca7eeef66b84d27dfa6466da81b8c66dd68",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 94,
+      "source_line": 96,
+      "source_text_sha256": "7545a4ba068b2301799087172e55403e3c2cb08e4eb735e271f81605b04e4451",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 95,
+      "source_line": 97,
+      "source_text_sha256": "64920cabae71fd55be0304ce15d7f24f7f978d85b62060425f68b8849a7237d7",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 96,
+      "source_line": 98,
+      "source_text_sha256": "bb96578b8fd5fcaf015bc866eb4310b84a8b24c285ec1f8069dc1f4b5e0fc4ca",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 97,
+      "source_line": 99,
+      "source_text_sha256": "628a8ceaf31c70eb4d11fb3600d702749644e1c796588d0c1c60d8114a1dc247",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 98,
+      "source_line": 100,
+      "source_text_sha256": "9bf5f4175ccdf2cb69ace229993339411aebed5337555f982244aab8ff3a4050",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 99,
+      "source_line": 101,
+      "source_text_sha256": "4caa2f8da0f04a39090f845a38bf0d843398227bf7e4cd66b2798c312ae70820",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 100,
+      "source_line": 102,
+      "source_text_sha256": "a579ea41c52db905b6cd7efcb714973d4340dbd7b2d00d2948c4c872b7f2fd0a",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 101,
+      "source_line": 103,
+      "source_text_sha256": "2b202d8414f174ac011529f983cfd1d4fff18ab93f07fe95ca3e16dc9c2b7263",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 102,
+      "source_line": 104,
+      "source_text_sha256": "6211f2af7f1c7e8bddb788fd159fcbb2e20cb0c1b178d27593710839b4316fbd",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 103,
+      "source_line": 105,
+      "source_text_sha256": "52e8c7aad69d2627141276b4e64354c7c9a1fc41b4e14385c1c33ffffe8fc07d",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 104,
+      "source_line": 106,
+      "source_text_sha256": "802912195666eebb71bdd4e60b9448736132cef5e79cdad404c4466f243416c5",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 105,
+      "source_line": 107,
+      "source_text_sha256": "346eaca8759bc562739fce1262b398ca843cd8d0ab067518d063be2c8d51a07d",
+      "status": "unreviewed"
+    },
+    {
+      "ordinal": 106,
+      "source_line": 108,
+      "source_text_sha256": "8e20f5509b0cd4797750a8e47d6bb4d049f6a8330c33ee9ddad16d2e10bb955f",
+      "status": "unreviewed"
+    }
+  ]
+}
