@@ -1683,7 +1683,7 @@ mod tests {
             .with_roots(permission::filesystem::FsRoots {
                 cwd: home.path().to_path_buf(),
                 home: Some(home.path().to_path_buf()),
-                lingxi_home: home.path().join(lingxi_core::branding::DOT_DIR),
+                lingxi_home: home.path().join("test-config-home"),
             }),
         );
         let tool = tool_with_permission_policy(home.path(), Arc::clone(&policy));

@@ -256,10 +256,10 @@ async fn administration_and_execution_share_admitted_layers_and_cli_revision() {
     cfg.managed_policy_snapshot_cache
         .replace(settings_watch::read_managed_settings_snapshot(&managed_dir).await);
     std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
-    std::fs::create_dir_all(cfg.cwd.join(lingxi_core::branding::DOT_DIR)).unwrap();
+    std::fs::create_dir_all(cfg.cwd.join(branding::DOT_DIR)).unwrap();
     std::fs::write(cfg.lingxi_home.join("settings.json"),
         r#"{"fusion":{"defaultStrategyId":"review","strategies":[{"id":"review","name":"User review","config":{"preset":"quality"}}]}}"#).unwrap();
-    std::fs::write(cfg.cwd.join(lingxi_core::branding::DOT_DIR).join("settings.json"),
+    std::fs::write(cfg.cwd.join(branding::DOT_DIR).join("settings.json"),
         r#"{"fusion":{"defaultStrategyId":"excluded","strategies":[{"id":"excluded","name":"Excluded project","config":{}}]}}"#).unwrap();
     let layers = fusion_settings_layers_for_config(&cfg).unwrap();
     let admin_selection = lingxi_core::host::resolve_fusion_strategy(&layers, None).unwrap();
