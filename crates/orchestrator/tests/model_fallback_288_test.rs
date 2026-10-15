@@ -179,9 +179,11 @@ fn variable(name: &str, value: Option<&str>) {
 }
 fn config() -> ClientConfig {
     let model = |id: &str, label: &str| json!({"display_model":label,"request_model":id,"billing_model":id,"capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":true,"structured_output":false}});
+    let mut remote_model = model("remote/model", "Other Model");
+    remote_model["metadata"] = json!({"applicationOutputTokens":4096});
     serde_json::from_value(json!({"providers":[
         {"provider_id":"anthropic_first_party","profile_name":"direct","base_url":"https://api.anthropic.com","protocol":"anthropic_messages","auth":"none","credential":{"type":"none"},"models":[model(PRIMARY,"Opus 4.7"),model(FALLBACK,"Sonnet 4.6"),model(FAST_FALLBACK,"Opus 4.8")]},
-        {"provider_id":{"custom":{"name":"other"}},"profile_name":"other","base_url":"https://second.fixture.invalid","protocol":"anthropic_messages","auth":"none","credential":{"type":"none"},"models":[model("remote/model","Other Model")]}
+        {"provider_id":{"custom":{"name":"other"}},"profile_name":"other","base_url":"https://second.fixture.invalid","protocol":"anthropic_messages","auth":"none","credential":{"type":"none"},"models":[remote_model]}
     ]})).unwrap()
 }
 fn make(

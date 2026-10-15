@@ -3551,10 +3551,23 @@ impl ConversationOrchestrator {
         // Snapshot history + estimate tokens WITHOUT holding the lock across
         // the (possibly networked) compaction call. The session's CURRENT model
         // rides along for the threshold resolution below.
-        let (snapshot, last_assistant_at, model) = {
+        let pending_ingress_prompt_id = crate::request_context::pending_ingress_prompt_id();
+        let (snapshot, compaction_source, current_prompt_tail, last_assistant_at, model) = {
             let s = self.session.lock().await;
+            let snapshot = s.model_context_history();
+            let current_prompt_index = pending_ingress_prompt_id.and_then(|prompt_id| {
+                snapshot
+                    .iter()
+                    .position(|message| message.id() == prompt_id)
+            });
+            let compaction_source = current_prompt_index
+                .map_or_else(|| snapshot.clone(), |index| snapshot[..index].to_vec());
+            let current_prompt_tail =
+                current_prompt_index.map_or_else(Vec::new, |index| snapshot[index..].to_vec());
             (
-                s.model_context_history(),
+                snapshot,
+                compaction_source,
+                current_prompt_tail,
                 s.message_timing.last_assistant_at,
                 s.model.clone(),
             )
@@ -3711,7 +3724,7 @@ impl ConversationOrchestrator {
         let compacted = self
             .dispatch_session_compact_mods(
                 "auto",
-                snapshot,
+                compaction_source,
                 pre_compact.additional_instructions.as_ref(),
                 core,
             )
@@ -3725,7 +3738,7 @@ impl ConversationOrchestrator {
         let tracking_after_core = tracking_state.lock().await.clone();
         let turns_since = i64::from(tracking_after_core.turn_counter);
         *self.compaction_runtime.compaction_tracking.lock().await = tracking_after_core;
-        let (result, snapshot, compact_duration, core_ran) = match compacted {
+        let (mut result, snapshot, compact_duration, core_ran) = match compacted {
             Ok(SessionCompactDecision::Continue {
                 result,
                 source_messages,
@@ -3805,6 +3818,25 @@ impl ConversationOrchestrator {
             // boundary marker.
             self.output.emit_compaction_skipped().await;
             return;
+        }
+
+        // Native compacts the prior model history before assembling the live
+        // prompt's NAr batch. The host has already persisted the active user
+        // row before this pre-call pass, so keep that row and its contiguous
+        // turn-owned suffix outside the summarizer input and splice it onto the
+        // compactor's preserved tail. This keeps the user row available for the
+        // accepted NAr finalizer without summarizing (then duplicating) the
+        // current query in the outgoing request.
+        let mut preserved_ids = result
+            .messages
+            .iter()
+            .chain(&result.messages_to_preserve)
+            .map(lingxi_core::types::ConversationMessage::id)
+            .collect::<HashSet<_>>();
+        for message in current_prompt_tail {
+            if preserved_ids.insert(message.id()) {
+                result.messages_to_preserve.push(message);
+            }
         }
 
         // `cancel: None` — the proactive trigger has no user-cancellable

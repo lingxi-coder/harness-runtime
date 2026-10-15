@@ -1350,6 +1350,38 @@ pub(crate) fn staged_prompt_ingress_attachment(
         .find(|row| row.payload.string_at("/type") == Some(attachment_type))
 }
 
+/// The user row owned by an unfinalized prompt-ingress batch.
+///
+/// Proactive auto compact runs after that row was persisted, but before its
+/// initial NAr batch is finalized. Once finalized, later model steps treat that
+/// user row as ordinary prior history and may compact it normally.
+pub(crate) fn pending_ingress_prompt_id() -> Option<MessageId> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            let batch = context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if batch.finalized
+                || context
+                    .staged_ingress_attachments
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_none()
+            {
+                return None;
+            }
+            Some(
+                *context
+                    .prompt_id
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        })
+        .ok()
+        .flatten()
+}
+
 /// Whether initial ingress producers have already been consumed for this task
 /// scope. This includes a finalized empty batch, so a retry cannot run a
 /// consume-once producer a second time.
