@@ -4202,17 +4202,18 @@ mod tests {
         });
         context.side_chat = true;
         let side = BashTool::new(context);
-        assert!(side.input_schema()["properties"]
-            .get("run_in_background")
+        assert!(side
+            .input_schema()
+            .at_pointer("/properties/run_in_background")
             .is_none());
         assert_eq!(
-            side.input_schema()["properties"]["timeout"]["maximum"],
-            120_000
+            side.input_schema().number_at("/properties/timeout/maximum"),
+            Some(120_000.0)
         );
         assert_ne!(main.persistence_threshold(), side.persistence_threshold());
         let error = side
             .call(
-                json!({"command":"echo hi", "run_in_background":true}),
+                source_json!({"command":"echo hi", "run_in_background":true}),
                 use_ctx(),
                 fresh_tx(),
             )

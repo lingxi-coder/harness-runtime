@@ -94,7 +94,7 @@ mod tests {
         desc.body = "!`must-not-execute`".into();
         let tool = SkillTool::with_loader(context.clone(), Arc::new(FixedLoader(Some(desc))));
         let error = tool
-            .call(json!({"skill":"forker"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill":"forker"}), fresh_ctx(), fresh_tx())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("unavailable in Side Chat"));
@@ -102,7 +102,7 @@ mod tests {
         inline.allowed_tools = vec!["*".into()];
         let tool = SkillTool::with_loader(context, Arc::new(FixedLoader(Some(inline))));
         assert!(tool
-            .call(json!({"skill":"inline"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill":"inline"}), fresh_ctx(), fresh_tx())
             .await
             .is_ok());
     }

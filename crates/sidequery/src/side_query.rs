@@ -378,7 +378,7 @@ mod source_system_prompt_tests {
             tools: Vec::new(),
             tool_choice: None,
             output_format: None,
-            max_tokens: 16,
+            max_tokens: Some(16),
             max_retries: 0,
             temperature: None,
             thinking: None,

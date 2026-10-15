@@ -2205,18 +2205,20 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let result = tool
             .call(
-                json!({"url":"https://side-ram-binary.example/file.pdf"}),
+                crate::source::generated(json!({"url":"https://side-ram-binary.example/file.pdf"})),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert!(!result.data["result"]
-            .as_str()
-            .unwrap()
+        assert!(!result
+            .data
+            .string_at("/result")
+            .expect("result text")
             .contains("also saved to"));
         assert!(!output_dir.exists());
-        assert!(crate::cache::cache_get("https://side-ram-binary.example/file.pdf").is_none());
+        let cache_key: crate::source::Source = "https://side-ram-binary.example/file.pdf".into();
+        assert!(crate::cache::cache_get(&cache_key).is_none());
     }
 
     // PARITY (#94): a binary content-type persists the body to a temp file and

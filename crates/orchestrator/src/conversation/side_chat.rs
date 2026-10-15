@@ -62,6 +62,31 @@ fn legal_prefix(history: &[ConversationMessage]) -> Vec<ConversationMessage> {
     history[..complete].to_vec()
 }
 
+fn prompt_snapshot_system_source_text(
+    snapshot: &lingxi_core::host::PromptSnapshot,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let mut units = Vec::new();
+    for (index, display) in snapshot.system_prompt.iter().enumerate() {
+        if index > 0 {
+            units.extend("\n\n".encode_utf16());
+        }
+        if let Some(source_units) = snapshot
+            .system_prompt_utf16
+            .get(index)
+            .and_then(Option::as_ref)
+        {
+            units.extend_from_slice(source_units);
+        } else {
+            units.extend(display.encode_utf16());
+        }
+    }
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&units),
+        units,
+    )
+    .expect("joined prompt snapshot source is a root string")
+}
+
 impl ConversationOrchestrator {
     /// Restrict child model selection to ready host routes and its current route.
     pub fn with_side_chat_model_refs(mut self, mut models: Vec<String>) -> Self {
@@ -106,7 +131,7 @@ impl ConversationOrchestrator {
         drop(session);
         if let Some(prompt) = self.prompt_runtime.prompt_snapshot.lock().await.as_ref() {
             snapshot.config.system_prompt_override =
-                Some(ConversationOrchestrator::system_prompt_source_text(prompt));
+                Some(prompt_snapshot_system_source_text(prompt));
         }
         snapshot.memory_files = self.memory.load(&snapshot.cwd).await;
         snapshot
@@ -349,5 +374,32 @@ mod tests {
                 Some(changed_parent_user),
             );
         }
+    }
+
+    #[tokio::test]
+    async fn side_chat_snapshot_keeps_exact_prompt_snapshot_source_units() {
+        let parent = new_orchestrator(false);
+        let mut exact_units = "second static section".encode_utf16().collect::<Vec<_>>();
+        exact_units.push(0xD800);
+        *parent.prompt_runtime.prompt_snapshot.lock().await =
+            Some(lingxi_core::host::PromptSnapshot {
+                system_prompt: vec![
+                    "first static section".into(),
+                    String::from_utf16_lossy(&exact_units),
+                ],
+                system_prompt_utf16: vec![None, Some(exact_units.clone())],
+                ..Default::default()
+            });
+
+        let snapshot = parent.side_chat_parent_snapshot().await;
+        let source = snapshot
+            .config
+            .system_prompt_override
+            .expect("prompt snapshot becomes a child system prompt");
+        let expected = "first static section\n\n"
+            .encode_utf16()
+            .chain(exact_units)
+            .collect::<Vec<_>>();
+        assert_eq!(source.string_units(""), Some(expected));
     }
 }

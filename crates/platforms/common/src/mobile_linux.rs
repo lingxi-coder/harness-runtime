@@ -1086,7 +1086,6 @@ mod tests {
         backend: SandboxBackend,
         mode: MobileLinuxRuntimeMode,
         capability: MobileLinuxCapability,
-        last_raw: Mutex<Vec<RawStdioOpenRequest>>,
         raw_closed: std::sync::atomic::AtomicBool,
         last_run: Mutex<Vec<LinuxCommandRequest>>,
         last_background: Mutex<Vec<LinuxCommandRequest>>,
@@ -1117,7 +1116,6 @@ mod tests {
                     bind_mounts: true,
                     rootfs_integrity: false,
                 },
-                last_raw: Mutex::new(Vec::new()),
                 raw_closed: std::sync::atomic::AtomicBool::new(false),
                 last_run: Mutex::new(Vec::new()),
                 last_background: Mutex::new(Vec::new()),
@@ -1160,38 +1158,6 @@ mod tests {
         }
 
         async fn shutdown(&self) -> Result<(), MobileLinuxError> {
-            Ok(())
-        }
-
-        async fn open_raw_stdio(
-            &self,
-            request: RawStdioOpenRequest,
-        ) -> Result<RawStdioSessionHandle, MobileLinuxError> {
-            self.last_raw.lock().unwrap().push(request);
-            Ok(RawStdioSessionHandle {
-                id: "raw-side".into(),
-                enforcement: LinuxEnforcementReceipt {
-                    network_policy_enforced: true,
-                    memory_limit_enforced: true,
-                },
-            })
-        }
-        async fn read_raw_stdio(
-            &self,
-            _: &RawStdioSessionHandle,
-            _: usize,
-        ) -> Result<mobile_linux_api::RawStdioReadResult, MobileLinuxError> {
-            let closed = self.raw_closed.load(std::sync::atomic::Ordering::SeqCst);
-            Ok(mobile_linux_api::RawStdioReadResult {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                closed,
-                exit_code: closed.then_some(-1),
-            })
-        }
-        async fn close_raw_stdio(&self, _: &RawStdioSessionHandle) -> Result<(), MobileLinuxError> {
-            self.raw_closed
-                .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
@@ -1289,6 +1255,7 @@ mod tests {
             &self,
             request: RawStdioOpenRequest,
         ) -> Result<RawStdioSessionHandle, MobileLinuxError> {
+            self.raw_closed.store(false, Ordering::Release);
             self.raw_stdio_requests
                 .lock()
                 .expect("raw stdio request mutex")
@@ -1357,6 +1324,7 @@ mod tests {
             handle: &RawStdioSessionHandle,
         ) -> Result<(), MobileLinuxError> {
             self.raw_stdio_never_close.store(false, Ordering::Release);
+            self.raw_closed.store(true, Ordering::Release);
             self.raw_stdio_closed
                 .lock()
                 .expect("raw stdio closed mutex")
@@ -1829,6 +1797,7 @@ mod tests {
         fs::create_dir_all(temp.path().join("workspace")).unwrap();
         fs::create_dir_all(temp.path().join("readonly")).unwrap();
         let runtime = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        runtime.raw_stdio_never_close.store(true, Ordering::Release);
         let sandbox = MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp)).unwrap();
         let mut request = sample_command(&temp);
         request.stdin = None;
@@ -1840,24 +1809,35 @@ mod tests {
         let runner = Arc::new(MobileLinuxProcessRunner::new(runtime.clone()));
         let run_runner = runner.clone();
         let running = tokio::spawn(async move { run_runner.run(&command).await });
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while !runner
-                .foreground_owners
-                .lock()
-                .unwrap()
-                .get("side:one")
-                .is_some_and(|owner| !owner.sessions.is_empty())
-            {
+        let owned_session_id = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(session_id) = runner
+                    .foreground_owners
+                    .lock()
+                    .unwrap()
+                    .get("side:one")
+                    .and_then(|owner| owner.sessions.keys().next().cloned())
+                {
+                    break session_id;
+                }
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .unwrap();
+        .expect("side owner should expose its registered raw session");
         runner.kill_owner_processes("side:other").await;
         assert!(!runtime.raw_closed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(runtime.raw_stdio_closed.lock().unwrap().is_empty());
         runner.kill_owner_processes("side:one").await;
         running.await.unwrap().unwrap();
         assert!(runtime.raw_closed.load(std::sync::atomic::Ordering::SeqCst));
+        let closed_sessions = runtime.raw_stdio_closed.lock().unwrap();
+        assert_eq!(closed_sessions.len(), 1);
+        assert_eq!(
+            closed_sessions.first().map(String::as_str),
+            Some(owned_session_id.as_str()),
+            "the side owner must close its own raw session"
+        );
         assert!(runtime.last_background.lock().unwrap().is_empty());
         assert!(runtime.last_run.lock().unwrap().is_empty());
     }

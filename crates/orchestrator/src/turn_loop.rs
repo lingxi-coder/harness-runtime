@@ -91,6 +91,8 @@ pub(crate) use error_reporting::surface_rapid_refill_thrashing;
 pub(crate) use error_reporting::surface_terminal_api_error;
 pub(crate) use error_reporting::terminal_api_error_text;
 pub(crate) use error_reporting::GoalClearReason;
+#[cfg(test)]
+pub(crate) use error_reporting::{GoalClearBucket, GOAL_CLEAR_CONDITION_WIDTH};
 use response::handle_malformed_tool_use;
 use response::handle_max_output_tokens;
 use response::handle_thinking_only;
