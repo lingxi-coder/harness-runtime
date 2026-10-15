@@ -3332,7 +3332,7 @@ pub fn build_mobile_engine_inner(
                                 if let Some(command) = scheduled.as_ref() {
                                     message_queue
                                         .remove(
-                                            &[command.uuid.clone()],
+                                            std::slice::from_ref(&command.uuid),
                                             "remove stale durable mobile prompt dispatch",
                                         )
                                         .await;

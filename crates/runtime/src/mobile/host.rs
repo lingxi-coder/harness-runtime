@@ -2494,7 +2494,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                 | Err(DurableTurnStoreError::Terminal { .. }) => {
                     self.queue
                         .consume(
-                            &[first_command.uuid.clone()],
+                            std::slice::from_ref(&first_command.uuid),
                             "remove stale durable mobile prompt dispatch",
                         )
                         .await;
@@ -4177,8 +4177,7 @@ impl MobileEngineHandle {
         }
 
         let finalize_claimed_bash_cancel = if let Some(turn_id) = turn.turn_id {
-            let should_finalize = self
-                .durable_turns
+            self.durable_turns
                 .load(&turn.session_id, turn_id)
                 .ok()
                 .is_some_and(|checkpoint| {
@@ -4189,8 +4188,7 @@ impl MobileEngineHandle {
                         && (checkpoint.queue_delivery == QueueDeliveryState::BashClaimed
                             || (checkpoint.queue_delivery == QueueDeliveryState::Claimed
                                 && checkpoint.bash_result.is_some()))
-                });
-            should_finalize
+                })
         } else {
             false
         };
@@ -5433,8 +5431,8 @@ impl MobileEngineHandle {
                         .claim_pending(&turn.session_id, admitted.turn_id)
                         .map_err(Self::map_durable_turn_error),
                 )
-            } else if let Some(turn_id) = turn_id {
-                Some(
+            } else {
+                turn_id.map(|turn_id| {
                     self.durable_turns
                         .begin_direct_with_skill_prompt(
                             &turn.session_id,
@@ -5445,10 +5443,8 @@ impl MobileEngineHandle {
                             images,
                             skill_prompt.clone(),
                         )
-                        .map_err(Self::map_durable_turn_error),
-                )
-            } else {
-                None
+                        .map_err(Self::map_durable_turn_error)
+                })
             };
             if let Some(checkpoint) = checkpoint_result {
                 match checkpoint {

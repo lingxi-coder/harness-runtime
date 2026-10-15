@@ -5,11 +5,23 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use client::adapter::PermissionRequestSink;
 use command_api::{CommandRegistry, SlashCommandKind};
 use harness_runtime::local_apps::{register_skill, shared_store};
 use harness_runtime::mobile::local_app_host::LocalAppHost;
-use lingxi_core::host::FileSystem;
+use lingxi_core::host::{FileSystem, OrchestratorHandle, Platform};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{ContentBlock, ToolUseId};
+
+const VISUALIZATION_FRAGMENT: &str = "<p>assembled-create-app-marker</p>";
+
+struct NoopPermissionSink;
+
+#[async_trait]
+impl PermissionRequestSink for NoopPermissionSink {
+    async fn emit_request(&self, _request: client::protocol::permission::PermissionRequest) {}
+}
 
 fn names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_string()).collect()
@@ -30,6 +42,91 @@ fn body(registry: &CommandRegistry) -> Option<Utf16JsonProjection> {
         "the skill grants nothing"
     );
     Some(prompt.build(&Utf16JsonProjection::from("")))
+}
+
+async fn assert_assembled_tool_saves_current_visualization(
+    orchestrator: &orchestrator::ConversationOrchestrator,
+    fs: Arc<dyn FileSystem>,
+    config_home: &Path,
+) {
+    let session = orchestrator.current_session_id().await;
+    let visualizations =
+        harness_runtime::inline_visualization::shared_store(fs.clone(), config_home);
+    let reference = visualizations
+        .publish(
+            &visualization::Publisher {
+                root_session: session.as_uuid(),
+                agent_id: None,
+            },
+            None,
+            "Assembled visualization",
+            VISUALIZATION_FRAGMENT,
+            0,
+        )
+        .await
+        .expect("publish visualization into the host's shared store")
+        .reference;
+    let input = Utf16JsonProjection::object(vec![(
+        "visualization_id".to_owned(),
+        Utf16JsonProjection::from(reference.id.as_str()),
+    )])
+    .expect("visualization reference is valid LocalApp input");
+
+    // Exercise the assembled tool through the same dispatcher path as a host
+    // tool request, including the real schema, validation, and permission gates.
+    let result = orchestrator
+        .call_tool_from_host(ToolUseId::new(), "LocalApp".to_owned(), input, None)
+        .await
+        .expect("dispatch LocalApp through the assembled orchestrator")
+        .expect("the local-app tool is registered by this host");
+    match result {
+        ContentBlock::ToolResult {
+            is_error, content, ..
+        } => assert_ne!(
+            is_error,
+            Some(true),
+            "saving the current visualization should succeed; full tool-result content: {}",
+            content
+                .to_json_string()
+                .unwrap_or_else(|error| format!("<projection serialization failed: {error}>"))
+        ),
+        _ => panic!("LocalApp dispatch should return a tool result"),
+    }
+
+    let host_runtime = tokio::runtime::Handle::current();
+    let host_config_home = config_home.to_path_buf();
+    let (apps, served) = tokio::task::spawn_blocking(move || {
+        let host = LocalAppHost::for_config_home(fs, &host_config_home, host_runtime);
+        let apps = host.list();
+        let served = apps
+            .first()
+            .map(|app| host.serve(app.id.clone(), "/".to_owned()));
+        (apps, served)
+    })
+    .await
+    .expect("run synchronous LocalAppHost methods outside the runtime");
+    assert_eq!(apps.len(), 1, "the host should observe the newly saved app");
+    assert_eq!(apps[0].name, "Assembled visualization");
+    let served = served.expect("serve the listed local app");
+    assert_eq!(served.status, 200);
+    assert!(
+        String::from_utf8(served.body)
+            .unwrap()
+            .contains(VISUALIZATION_FRAGMENT),
+        "the published app should contain the source visualization fragment"
+    );
+}
+
+fn configure_local_app_test_permission(config_home: &Path) {
+    // The assembly test is about store wiring, so avoid the Auto-mode safety
+    // classifier (which needs a provider) while retaining the real policy gate
+    // and an explicit rule for this tool.
+    std::fs::create_dir_all(config_home).expect("create isolated host settings directory");
+    std::fs::write(
+        config_home.join("settings.local.json"),
+        r#"{"permissions":{"defaultMode":"default","allow":["LocalApp"]}}"#,
+    )
+    .expect("configure an explicit non-auto LocalApp allow rule");
 }
 
 #[test]
@@ -126,4 +223,65 @@ fn the_mobile_host_lists_serves_and_deletes_the_shared_library() {
     assert!(host.get(id.clone()).is_none());
     assert_eq!(host.serve(id, "/index.html".into()).status, 404);
     assert!(host.list().is_empty());
+}
+
+#[tokio::test]
+async fn desktop_assembly_passes_shared_visualizations_to_local_app() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = home.path().to_path_buf();
+    let config_home = cwd.join(".lingxi");
+    configure_local_app_test_permission(&config_home);
+    let mut cfg = harness_runtime::desktop::DesktopConfig::default();
+    cfg.cwd = cwd.clone();
+    cfg.lingxi_home = config_home.clone();
+    cfg.local_apps = true;
+    cfg.inline_visualization = true;
+    cfg.isolated_credential_storage = true;
+    cfg.session_persistence = false;
+    cfg.use_noop_permission_gate = true;
+
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
+        Arc::new(orchestrator::test_support::MockOutputStream::new());
+    let permission_sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
+    let runtime = Box::pin(harness_runtime::desktop::build(
+        cfg,
+        output,
+        permission_sink,
+    ))
+    .await
+    .expect("desktop runtime should assemble with local apps and visualizations");
+    assert!(runtime
+        .registered_tool_names()
+        .iter()
+        .any(|name| name == "LocalApp"));
+
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd));
+    assert_assembled_tool_saves_current_visualization(&runtime.orchestrator, fs, &config_home)
+        .await;
+}
+
+#[tokio::test]
+async fn mobile_assembly_passes_shared_visualizations_to_local_app() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = home.path().to_path_buf();
+    let config_home = cwd.join(".lingxi");
+    configure_local_app_test_permission(&config_home);
+    let mut cfg = harness_runtime::mobile::test_support::test_config(&cwd);
+    cfg.local_apps = true;
+    cfg.inline_visualization = true;
+    cfg.api_key = "test-key".into();
+    assert_eq!(cfg.lingxi_home, config_home);
+    let platform = Arc::new(harness_runtime::mobile::test_support::HostFakePlatform::new(cwd));
+    let fs = platform.filesystem();
+    let runtime = harness_runtime::mobile::build_mobile(
+        cfg,
+        platform,
+        Arc::new(harness_runtime::mobile::test_support::FakeListener::default()),
+        Arc::new(harness_runtime::mobile::test_support::CollectingPermissionSink::default()),
+    )
+    .await
+    .expect("mobile runtime should assemble with local apps and visualizations");
+
+    assert_assembled_tool_saves_current_visualization(&runtime.orchestrator, fs, &config_home)
+        .await;
 }

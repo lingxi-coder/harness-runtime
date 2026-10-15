@@ -531,7 +531,7 @@ impl MobileEngineHandle {
                             "enableAllProjectMcpServers",
                         ]
                         .iter()
-                        .any(|key| settings.managed.contains_property(*key))
+                        .any(|key| settings.managed.contains_property(key))
                         {
                             return Err("MCP approval is locked by managed policy.".into());
                         }
@@ -586,7 +586,7 @@ impl MobileEngineHandle {
         }
         if ["enabledPlugins", "pluginConfigs", "extraKnownMarketplaces"]
             .iter()
-            .any(|key| settings.managed.contains_property(*key))
+            .any(|key| settings.managed.contains_property(key))
         {
             finish(
                 sink,
