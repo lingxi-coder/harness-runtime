@@ -27,19 +27,10 @@ impl NativeIntegerNumber {
 
 /// Shared session thinking state. Base updates preserve the separately managed
 /// Native nullable max-token overlay.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ThinkingState {
     base: ThinkingConfig,
     max_thinking_tokens_override: Option<NativeIntegerNumber>,
-}
-
-impl Default for ThinkingState {
-    fn default() -> Self {
-        Self {
-            base: ThinkingConfig::default(),
-            max_thinking_tokens_override: None,
-        }
-    }
 }
 
 impl ThinkingState {

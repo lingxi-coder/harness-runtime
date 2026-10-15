@@ -9,13 +9,15 @@ use command_api::{CommandRegistry, SlashCommandKind};
 use harness_runtime::local_apps::{register_skill, shared_store};
 use harness_runtime::mobile::local_app_host::LocalAppHost;
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 fn names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_string()).collect()
 }
 
-fn body(registry: &CommandRegistry) -> Option<String> {
-    let command = registry.resolve(local_app::skill::SKILL_NAME)?;
+fn body(registry: &CommandRegistry) -> Option<Utf16JsonProjection> {
+    let name = Utf16JsonProjection::from(local_app::skill::SKILL_NAME);
+    let command = registry.resolve(&name)?;
     let SlashCommandKind::Bundled {
         prompt_fn: Some(prompt),
         frontmatter,
@@ -27,7 +29,7 @@ fn body(registry: &CommandRegistry) -> Option<String> {
         frontmatter.allowed_tools.is_none(),
         "the skill grants nothing"
     );
-    Some(prompt.build(""))
+    Some(prompt.build(&Utf16JsonProjection::from("")))
 }
 
 #[test]
@@ -37,15 +39,23 @@ fn skill_follows_the_tool_and_names_the_host_shell() {
     assert!(body(&registry).is_none(), "no tool, no skill");
 
     register_skill(&mut registry, &names(&["LocalApp", "Bash"]), "Bash");
-    assert!(body(&registry).unwrap().contains("with the `Bash` tool"));
+    assert!(body(&registry)
+        .unwrap()
+        .string_at("")
+        .unwrap()
+        .contains("with the `Bash` tool"));
 
     register_skill(&mut registry, &names(&["LocalApp"]), "Shell");
-    assert!(!body(&registry).unwrap().contains("file_path"));
+    assert!(!body(&registry)
+        .unwrap()
+        .string_at("")
+        .unwrap()
+        .contains("file_path"));
     assert_eq!(
         registry
             .list_all()
             .iter()
-            .filter(|command| command.name == local_app::skill::SKILL_NAME)
+            .filter(|command| { command.name.string_at("") == Some(local_app::skill::SKILL_NAME) })
             .count(),
         1,
         "re-registration replaces instead of stacking"

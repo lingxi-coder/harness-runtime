@@ -338,6 +338,12 @@ pub(crate) struct RecoveryState {
     /// call via [`crate::OrchestratorApiClient::messages_create`], so
     /// it never leaks past the single escalated retry.
     pub(crate) max_output_tokens_override: Option<u32>,
+    /// A Native resume intent applies to the next request only if the selected
+    /// model/profile still matches the request that produced the partial block.
+    pub(crate) resume_incomplete_thinking_next_request: Option<NativeThinkingResumeIntent>,
+    /// Non-error assistant responses in the current query, including earlier
+    /// tool rounds. Native resumes only when the current response is the sole one.
+    pub(crate) successful_assistant_messages: u32,
     /// Whether the 8k→64k escalation has already fired this recovery episode
     /// (TS gates the single-shot retry on the override being unset; we use a
     /// separate flag because the override is TAKEN per call). Reset alongside
@@ -358,7 +364,34 @@ pub(crate) struct RecoveryState {
     pub(crate) thinking_only_nudged: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeThinkingResumeIntent {
+    pub(crate) model: String,
+    pub(crate) profile: Option<String>,
+}
+
 impl RecoveryState {
+    /// Attach a pending Native resume marker to the next request on the exact
+    /// selected route. Unknown or changed routes consume the intent without
+    /// enabling it.
+    pub(crate) fn apply_native_thinking_resume_intent(
+        &mut self,
+        model: &str,
+        profile: Option<&str>,
+        context: &mut Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+    ) {
+        let Some(intent) = self.resume_incomplete_thinking_next_request.take() else {
+            return;
+        };
+        if intent.model != model || intent.profile.as_deref() != profile {
+            return;
+        }
+        let Some(context) = context.as_mut() else {
+            return;
+        };
+        context.resume_incomplete_thinking = true;
+    }
+
     /// Reset the `max_output_tokens` recovery bookkeeping to begin a fresh
     /// escalation episode: zero the consecutive nudge count, drop any armed
     /// escalation override, and re-arm the 8k→64k single-shot. 1:1 with the TS
@@ -545,7 +578,8 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     // fallback only for a fully synthetic Mod response. Successful physical
     // requests carry their own post-PTL/compact message snapshot below.
     let outgoing_history_rewriter = prepared.outgoing_history_rewriter;
-    let native_anthropic_request_context = prepared.native_anthropic_request_context;
+    let mut native_anthropic_request_context = prepared.native_anthropic_request_context;
+    let thinking_resumption_host_facts = prepared.thinking_resumption_host_facts;
     let mut turn_reminders = prepared.turn_reminders;
     let mut guarded_async_hook_reminders = prepared.guarded_async_hook_reminders;
     let context_announcements = prepared.context_announcements;
@@ -626,6 +660,17 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     } else {
         None
     };
+    if let Some(state) = recovery.as_deref_mut() {
+        if mod_host.is_none() {
+            state.apply_native_thinking_resume_intent(
+                &model,
+                model_profile.as_deref(),
+                &mut native_anthropic_request_context,
+            );
+        } else {
+            state.resume_incomplete_thinking_next_request = None;
+        }
+    }
     crate::prompt::async_hook_response::retain_current_async_hook_reminders(
         &mut history_snapshot,
         &mut turn_reminders,
@@ -640,6 +685,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                 messages: history_snapshot.clone(),
                 tools: tools.clone(),
                 skip_global_cache: skip_global_cache_for_system_prompt,
+                thinking_resumption_host_facts: thinking_resumption_host_facts.clone(),
             })
         } else {
             None

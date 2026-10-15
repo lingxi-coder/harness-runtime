@@ -17,7 +17,6 @@ struct State {
     display_probe: lingxi_llm_client::providers::anthropic::thinking_display::DisplayProbe,
     max_retries: Option<u32>,
     retries: u32,
-    native_main_dispatches: u32,
     native_thinking_type_retry_used: bool,
     overloaded: u32,
     tried_without_streaming: bool,
@@ -71,17 +70,6 @@ pub(crate) fn http_retry_decline_is_terminal(
 }
 
 impl ModelCallRetryScope {
-    fn native_main_retry_limit(shared: &State, configured_max_retries: u32) -> u32 {
-        if shared.native_main_dispatches == 0 {
-            configured_max_retries
-        } else {
-            // The first actual dispatch consumes no retry slot. Every later
-            // Native Main dispatch, regardless of which repair requested it,
-            // consumes one slot from the same finite max-retries allowance.
-            configured_max_retries.saturating_sub(shared.native_main_dispatches.saturating_sub(1))
-        }
-    }
-
     /// Record one matching Native prefix-lock response on this logical call.
     pub(crate) fn record_prefix_lock_error(&self) -> u32 {
         self.0
@@ -208,58 +196,19 @@ impl ModelCallRetryScope {
         state.attempt = 0;
         state.watchdog_capacity_waits = 0;
         let mut control = control.clone();
-        control.max_retries = max
-            .saturating_sub(shared.retries)
-            .min(Self::native_main_retry_limit(&shared, max));
+        control.max_retries = max.saturating_sub(shared.retries);
         control
     }
 
-    /// Record a real Native Main API dispatch. The stream and non-stream
-    /// drivers call this only after their dispatch callback has accepted the
-    /// attempt, so preparation failures and rejected host admissions do not
-    /// consume the API-attempt allowance.
-    pub(crate) fn record_native_main_dispatch(&self) {
-        let mut shared = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        shared.native_main_dispatches = shared.native_main_dispatches.saturating_add(1);
-    }
-
-    /// Whether another Native Main API dispatch can fit under this logical
-    /// call's `max_retries + 1` total-attempt allowance. This count is
-    /// intentionally independent of the ordinary retry index: Native's
-    /// thinking-type repair does not spend an ordinary retry, but its next
-    /// request is still a real API attempt.
-    pub(crate) fn native_main_attempt_available(&self) -> bool {
-        let shared = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        let max_retries = shared
-            .max_retries
-            .unwrap_or_else(super::retry::max_retries_from_env);
-        shared.native_main_dispatches < max_retries.saturating_add(1)
-    }
-
-    /// Claim Native's dedicated thinking-type retry once, if a real API
-    /// attempt remains. A later matching error may still update the service's
-    /// per-model type latch, but it cannot schedule another dedicated retry.
+    /// Claim Native's dedicated thinking-type retry at most once. It is a
+    /// source-specific repair and does not spend the ordinary retry budget.
     pub(crate) fn take_native_thinking_type_retry(&self) -> bool {
         let mut shared = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        let max_retries = shared
-            .max_retries
-            .unwrap_or_else(super::retry::max_retries_from_env);
-        if shared.native_thinking_type_retry_used
-            || shared.native_main_dispatches == 0
-            || shared.native_main_dispatches >= max_retries.saturating_add(1)
-        {
+        if shared.native_thinking_type_retry_used {
             return false;
         }
         shared.native_thinking_type_retry_used = true;
         true
-    }
-
-    #[cfg(test)]
-    fn native_main_dispatch_count(&self) -> u32 {
-        self.0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .native_main_dispatches
     }
 
     pub(crate) fn next_step(
@@ -276,8 +225,7 @@ impl ModelCallRetryScope {
         let ordinary_remaining = state
             .attempt
             .saturating_add(max.saturating_sub(shared.retries));
-        let native_main_remaining = Self::native_main_retry_limit(&shared, max);
-        control.max_retries = ordinary_remaining.min(native_main_remaining);
+        control.max_retries = ordinary_remaining;
         state.consecutive_overloaded = u8::try_from(shared.overloaded).unwrap_or(u8::MAX);
         let before = state.attempt;
         let step = super::retry::next_step_with_backoff(
@@ -331,18 +279,14 @@ impl ModelCallRetryScope {
     ) -> super::stream_recovery::Outcome {
         use super::stream_recovery::{Counts, Policy};
         let mut shared = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let max_retries = shared.max_retries.unwrap_or_else(|| {
+            super::retry::resolve_max_retries(
+                super::retry::retry_watchdog_from_env(),
+                std::env::var("LINGXI_MAX_RETRIES").ok().as_deref(),
+            )
+        });
         let policy = Policy {
-            max_retries: {
-                let max = shared.max_retries.unwrap_or_else(|| {
-                    super::retry::resolve_max_retries(
-                        super::retry::retry_watchdog_from_env(),
-                        std::env::var("LINGXI_MAX_RETRIES").ok().as_deref(),
-                    )
-                });
-                shared
-                    .retries
-                    .saturating_add(Self::native_main_retry_limit(&shared, max))
-            },
+            max_retries,
             max_overloaded: shared
                 .max_overloaded
                 .unwrap_or(u32::from(super::retry::MAX_529_RETRIES)),
@@ -376,10 +320,7 @@ impl ModelCallRetryScope {
         let max = shared
             .max_retries
             .unwrap_or_else(super::retry::max_retries_from_env);
-        if shared.retries >= max
-            || shared.native_main_dispatches > 0
-                && shared.native_main_dispatches >= max.saturating_add(1)
-        {
+        if shared.retries >= max {
             return false;
         }
         shared.retries += 1;
@@ -393,10 +334,7 @@ impl ModelCallRetryScope {
         let max = shared
             .max_retries
             .unwrap_or_else(super::retry::max_retries_from_env);
-        if shared.native_main_dispatches > 0
-            && shared.native_main_dispatches >= max.saturating_add(1)
-            || shared.tried_without_streaming && shared.retries >= max
-        {
+        if shared.tried_without_streaming && shared.retries >= max {
             return false;
         }
         shared.tried_without_streaming = true;
@@ -465,19 +403,29 @@ mod tests {
     }
 
     #[test]
-    fn native_main_thinking_type_retry_uses_actual_dispatch_budget_not_retry_index() {
+    fn native_thinking_type_retry_is_deduplicated_outside_ordinary_budget() {
         let zero_retry_scope = ModelCallRetryScope::default();
         let zero_retry_control = RetryControl {
             max_retries: 0,
             ..RetryControl::default()
         };
         let mut zero_retry_state = RetryState::default();
-        zero_retry_scope.configure(&zero_retry_control, &mut zero_retry_state);
-        assert!(zero_retry_scope.native_main_attempt_available());
-        zero_retry_scope.record_native_main_dispatch();
-        assert_eq!(zero_retry_scope.native_main_dispatch_count(), 1);
-        assert!(!zero_retry_scope.native_main_attempt_available());
+        let zero_retry_control =
+            zero_retry_scope.configure(&zero_retry_control, &mut zero_retry_state);
+        assert!(zero_retry_scope.take_native_thinking_type_retry());
         assert!(!zero_retry_scope.take_native_thinking_type_retry());
+        assert_eq!(zero_retry_scope.retry_count(), 0);
+        assert_eq!(
+            zero_retry_scope.next_step(
+                &mut zero_retry_state,
+                &zero_retry_control,
+                &crate::LlmError::ProviderInternal,
+                0,
+                Some(1),
+            ),
+            DriveStep::Terminal,
+            "the dedicated typed repair does not create an ordinary retry"
+        );
         assert_eq!(zero_retry_scope.retry_count(), 0);
 
         let one_retry_scope = ModelCallRetryScope::default();
@@ -486,20 +434,22 @@ mod tests {
             ..RetryControl::default()
         };
         let mut one_retry_state = RetryState::default();
-        one_retry_scope.configure(&one_retry_control, &mut one_retry_state);
-        one_retry_scope.record_native_main_dispatch();
-        assert!(one_retry_scope.native_main_attempt_available());
+        let one_retry_control = one_retry_scope.configure(&one_retry_control, &mut one_retry_state);
         assert!(one_retry_scope.take_native_thinking_type_retry());
         assert!(!one_retry_scope.take_native_thinking_type_retry());
         assert_eq!(one_retry_scope.retry_count(), 0);
-
-        // Repeated type rejection still gets a second chance to update the
-        // caller-owned model latch, but cannot claim another dedicated retry.
-        one_retry_scope.record_native_main_dispatch();
-        assert_eq!(one_retry_scope.native_main_dispatch_count(), 2);
-        assert!(!one_retry_scope.native_main_attempt_available());
+        assert!(matches!(
+            one_retry_scope.next_step(
+                &mut one_retry_state,
+                &one_retry_control,
+                &crate::LlmError::ProviderInternal,
+                0,
+                Some(1),
+            ),
+            DriveStep::RetryAfter(_)
+        ));
+        assert_eq!(one_retry_scope.retry_count(), 1);
         assert!(!one_retry_scope.take_native_thinking_type_retry());
-        assert_eq!(one_retry_scope.retry_count(), 0);
     }
 
     #[test]

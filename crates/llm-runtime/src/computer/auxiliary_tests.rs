@@ -393,7 +393,6 @@ fn gemini_native_history() -> (Vec<ConversationMessage>, wire::ContinuationRef) 
             },
             history_user(vec![
                 ContentBlock::ToolResult {
-                    content_projection: None,
                     tool_use_id: "synthetic".into(),
                     content: "Observed desktop".into(),
                     is_error: Some(false),

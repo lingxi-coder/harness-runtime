@@ -1924,7 +1924,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                request.body_json.kind_at("/anthropic_beta"),
+                request.body_json.raw_source_at("/anthropic_beta"),
                 None,
                 "CLI header projection does not synthesize a Bedrock body-beta field"
             );

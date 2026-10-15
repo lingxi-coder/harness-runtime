@@ -399,6 +399,24 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.protocol_for_model(model, profile).ok()
     }
 
+    fn native_model_option_capability_for_request(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        capability: &str,
+    ) -> Option<bool> {
+        let mut request = llm_runtime::LlmRequest::new(model);
+        request.profile = profile.map(str::to_owned);
+        self.service
+            .native_model_option_capability_for_request(&request, capability)
+            .ok()
+            .flatten()
+    }
+
+    fn native_thinking_resumption_refused(&self) -> Option<bool> {
+        Some(self.service.native_thinking_resumption_refused())
+    }
+
     fn foundry_tool_search_supported(
         &self,
         model: &str,
@@ -1514,6 +1532,355 @@ mod tests {
         }
     }
     llm_runtime::impl_fixture_transport!(FakeTransport);
+
+    /// No-network wire fixture that drives the production SDK batch and SSE
+    /// decoders through `ApiService` and `ProviderApiAdapter`.
+    struct NativeResumeTransport {
+        response: ProviderResponse,
+        stream_frames: Mutex<Vec<llm_runtime::RawStreamFrame>>,
+        seen: Mutex<Vec<ProviderRequest>>,
+    }
+
+    impl NativeResumeTransport {
+        fn new() -> Arc<Self> {
+            let response = ProviderResponse::json(
+                200,
+                serde_json::json!({
+                    "id": "msg_native_resume_batch",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [{
+                        "type": "thinking",
+                        "thinking": "unfinished reasoning",
+                        "signature": "native-signature"
+                    }],
+                    "stop_reason": "max_tokens",
+                    "resumable": true,
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0
+                    }
+                }),
+            );
+            let stream_frames = [
+                serde_json::json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_native_resume_stream",
+                        "model": "claude-sonnet-4-20250514",
+                        "content": [],
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0
+                        }
+                    }
+                }),
+                serde_json::json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "thinking", "thinking": ""}
+                }),
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "unfinished reasoning"}
+                }),
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "signature_delta", "signature": "native-signature"}
+                }),
+                serde_json::json!({"type": "content_block_stop", "index": 0}),
+                serde_json::json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "max_tokens", "resumable": true},
+                    "usage": {"output_tokens": 0}
+                }),
+                serde_json::json!({"type": "message_stop"}),
+            ]
+            .into_iter()
+            .map(|frame| {
+                llm_runtime::RawStreamFrame::new(
+                    serde_json::to_vec(&frame).expect("stream frame is valid JSON"),
+                )
+            })
+            .collect();
+            Arc::new(Self {
+                response,
+                stream_frames: Mutex::new(stream_frames),
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    struct NativeResumeFrameStream(std::collections::VecDeque<llm_runtime::RawStreamFrame>);
+
+    impl llm_runtime::FrameStream for NativeResumeFrameStream {
+        fn next_frame(
+            &mut self,
+        ) -> BoxFuture<'_, Result<Option<llm_runtime::RawStreamFrame>, LlmError>> {
+            Box::pin(async move { Ok(self.0.pop_front()) })
+        }
+    }
+
+    impl llm_runtime::test_support::FixtureTransport for NativeResumeTransport {
+        fn execute<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            self.seen.lock().unwrap().push(request.clone());
+            let response = self.response.clone();
+            Box::pin(async move { Ok(response) })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            self.seen.lock().unwrap().push(request.clone());
+            let frames =
+                std::collections::VecDeque::from(self.stream_frames.lock().unwrap().clone());
+            Box::pin(async move {
+                Ok(StreamingResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    frames: Box::new(NativeResumeFrameStream(frames)),
+                })
+            })
+        }
+    }
+    llm_runtime::impl_fixture_transport!(NativeResumeTransport);
+
+    fn native_resume_adapter(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
+        make_adapter_with_session_tool_choice_configured(
+            transport,
+            None,
+            "claude-sonnet-4-20250514",
+            |service| service.with_native_anthropic_endpoint("https://api.anthropic.com"),
+        )
+    }
+
+    #[tokio::test]
+    async fn native_resume_sdk_context_fact_reaches_batch_and_stream_consumers() {
+        use crate::conversation::OrchestratorApiRequest;
+        use lingxi_llm_client::NativeAnthropicRequestContext;
+
+        let transport = NativeResumeTransport::new();
+        let adapter = native_resume_adapter(transport.clone());
+        let make_request = || {
+            let mut request = llm_runtime::MessagesCreateRequest::new(
+                "claude-sonnet-4-20250514",
+                Some("anthropic"),
+                None,
+                vec![lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "Continue the incomplete response.".into(),
+                )],
+                vec![],
+            );
+            request.opts.native_anthropic_request_context =
+                Some(NativeAnthropicRequestContext::default());
+            request
+        };
+
+        let batch = adapter
+            .messages_create(OrchestratorApiRequest::Main(make_request()))
+            .await
+            .expect("batch response decodes through ApiService");
+        assert_eq!(batch.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(
+            batch.resumable.as_ref().map(|value| value.as_json_source()),
+            Some("true")
+        );
+        assert!(matches!(
+            batch.content.as_slice(),
+            [llm_runtime::ContentBlock::Reasoning {
+                signature: Some(signature),
+                ..
+            }] if signature == "native-signature"
+        ));
+        assert_eq!(
+            batch.usage.native_resume_context_exhausted,
+            Some(false),
+            "SDK batch context evidence must survive HistoryProjector and response accounting"
+        );
+
+        let stream = StreamingApiClient::stream_with_effort_override(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            Some("anthropic"),
+            None,
+            vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "Continue the incomplete response.".into(),
+            )],
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            "main",
+            false,
+            None,
+            None,
+            Some(NativeAnthropicRequestContext::default()),
+            Default::default(),
+            Default::default(),
+            None,
+        )
+        .await
+        .expect("stream opens through ProviderApiAdapter and ApiService");
+        let streamed = llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream)
+            .await
+            .expect("stream is decoded and accumulated");
+        assert_eq!(streamed.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(
+            streamed
+                .resumable
+                .as_ref()
+                .map(|value| value.as_json_source()),
+            Some("true")
+        );
+        assert!(matches!(
+            streamed.content.as_slice(),
+            [llm_runtime::ContentBlock::Reasoning {
+                signature: Some(signature),
+                ..
+            }] if signature == "native-signature"
+        ));
+        assert_eq!(
+            streamed.usage.native_resume_context_exhausted,
+            Some(false),
+            "SDK streaming getter evidence must survive projector and ResponseAccumulator"
+        );
+        assert_eq!(transport.seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn native_resume_later_usage_unknown_clears_initial_zero_usage_false() {
+        use lingxi_llm_client::NativeAnthropicRequestContext;
+
+        let transport = NativeResumeTransport::new();
+        let raw = |value: serde_json::Value| {
+            llm_runtime::RawStreamFrame::new(
+                serde_json::to_vec(&value).expect("stream frame is valid JSON"),
+            )
+        };
+        *transport.stream_frames.lock().unwrap() = vec![
+            raw(serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_native_resume_transition",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [],
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0
+                    }
+                }
+            })),
+            raw(serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""}
+            })),
+            raw(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "unfinished reasoning"}
+            })),
+            raw(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "native-signature"}
+            })),
+            raw(serde_json::json!({"type": "content_block_stop", "index": 0})),
+            // This stop snapshot sees zero total usage and temporarily yields
+            // Some(false), matching Native's zero-total fast path.
+            raw(serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "max_tokens", "resumable": true}
+            })),
+            // Later provider usage makes the SDK context comparison Unknown
+            // because this request has no Native context-window observation.
+            raw(serde_json::json!({
+                "type": "message_delta",
+                "delta": {},
+                "usage": {"output_tokens": 1}
+            })),
+            raw(serde_json::json!({"type": "message_stop"})),
+        ];
+
+        let adapter = native_resume_adapter(transport);
+        let stream = StreamingApiClient::stream_with_effort_override(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            Some("anthropic"),
+            None,
+            vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "Continue the incomplete response.".into(),
+            )],
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            "main",
+            false,
+            None,
+            None,
+            Some(NativeAnthropicRequestContext::default()),
+            Default::default(),
+            Default::default(),
+            None,
+        )
+        .await
+        .expect("stream opens through ProviderApiAdapter and ApiService");
+        let streamed = llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream)
+            .await
+            .expect("stream is decoded and accumulated");
+
+        assert_eq!(streamed.stop_reason.as_deref(), Some("max_tokens"));
+        assert!(matches!(
+            streamed.content.as_slice(),
+            [llm_runtime::ContentBlock::Reasoning {
+                signature: Some(signature),
+                ..
+            }] if signature == "native-signature"
+        ));
+        assert_eq!(
+            streamed.usage.native_resume_context_exhausted, None,
+            "later positive usage invalidates the earlier zero-usage Some(false)"
+        );
+        let host = crate::conversation::NativeThinkingResumptionHostFacts {
+            feature_gate_enabled: Some(true),
+            request_gate_enabled: Some(true),
+            provider_route_allowed: Some(true),
+            model_capability_allowed: Some(true),
+            disable_experimental_betas: Some(false),
+            hipaa_mode: Some(false),
+            thinking_resumption_refused: Some(false),
+        };
+        assert!(
+            !crate::output_recovery::native_thinking_resumption_eligible(
+                &host,
+                streamed.stop_reason.as_deref(),
+                1,
+                false,
+                streamed.content.len(),
+                crate::output_recovery::history_has_resumable_thinking_block(&streamed.content),
+                streamed
+                    .resumable
+                    .as_ref()
+                    .map(crate::output_recovery::json_payload_is_true),
+                streamed.usage.native_resume_context_exhausted,
+            )
+        );
+    }
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 

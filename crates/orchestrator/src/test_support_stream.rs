@@ -47,6 +47,8 @@ pub struct CapturedStreamCall {
     /// Sanitized Native query source used for provider cache policy.
     pub query_source: String,
     pub skip_global_cache_for_system_prompt: bool,
+    /// Host-only Native request intent observed by the streaming adapter.
+    pub native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
 }
 
 /// Mock streaming client. Yields the next per-turn script of events each
@@ -144,6 +146,7 @@ impl StreamingApiClient for MockStreamingApiClient {
             tools,
             query_source: query_source.to_string(),
             skip_global_cache_for_system_prompt,
+            native_anthropic_request_context: None,
         });
         // One-shot connect-phase error (see `with_open_error`).
         if let Some(e) = self.open_error.lock().await.take() {
@@ -181,7 +184,6 @@ impl StreamingApiClient for MockStreamingApiClient {
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = tool_result_reminder_suffixes;
         let _ = request_dispatch_observer;
-        let _ = native_anthropic_request_context;
         let _ = typed_attachment_ids;
         let _ = task_deliveries;
         let stream = self
@@ -199,6 +201,7 @@ impl StreamingApiClient for MockStreamingApiClient {
         if let Some(last) = self.captured.lock().await.last_mut() {
             last.effort_override = effort.map(str::to_owned);
             last.output_budget = max_tokens;
+            last.native_anthropic_request_context = native_anthropic_request_context;
         }
         Ok(stream)
     }
@@ -377,6 +380,28 @@ pub fn message_delta_stop_with_usage(stop_reason: &str, usage: Usage) -> History
             stop_reason: Some(stop_reason.to_string()),
             stop_details: None,
             resumable: None,
+        },
+        usage: Some(usage),
+    }
+}
+
+/// `message_delta` with exact resumability metadata and final usage.
+#[must_use]
+pub fn message_delta_stop_with_resumable_usage(
+    stop_reason: &str,
+    resumable: bool,
+    usage: Usage,
+) -> HistoryEvent {
+    HistoryEvent::MessageDelta {
+        delta: HistoryMessageDelta {
+            stop_reason: Some(stop_reason.to_string()),
+            stop_details: None,
+            resumable: Some(
+                lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!(
+                    resumable
+                ))
+                .expect("resumable fixture is valid JSON"),
+            ),
         },
         usage: Some(usage),
     }

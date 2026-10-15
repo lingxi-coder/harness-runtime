@@ -2447,7 +2447,6 @@ mod api_error_metrics_tests {
         noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
         StaticMemoryProvider,
     };
-    use lingxi_core::types::ContentBlock;
 
     #[tokio::test]
     async fn final_api_assistant_marker_survives_without_jsonl_and_later_assistant_clears_it() {

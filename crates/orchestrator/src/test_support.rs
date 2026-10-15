@@ -100,6 +100,8 @@ pub struct MockApiClient {
     model_listings: std::sync::Mutex<Vec<lingxi_core::host::ModelListing>>,
     effort_snapshot: std::sync::Mutex<Option<lingxi_core::host::effort::EffortCommandSnapshot>>,
     native_mid_system_supported: std::sync::Mutex<bool>,
+    native_request_protocol: std::sync::Mutex<Option<llm_runtime::ProtocolFamily>>,
+    native_request_first_party: std::sync::Mutex<bool>,
     recovery_budget: Option<u32>,
 }
 
@@ -155,6 +157,8 @@ impl MockApiClient {
             model_listings: std::sync::Mutex::new(Vec::new()),
             effort_snapshot: std::sync::Mutex::new(None),
             native_mid_system_supported: std::sync::Mutex::new(false),
+            native_request_protocol: std::sync::Mutex::new(None),
+            native_request_first_party: std::sync::Mutex::new(false),
             recovery_budget: None,
         }
     }
@@ -162,6 +166,16 @@ impl MockApiClient {
     /// Set the test route's Native mid-conversation system capability.
     pub fn set_native_mid_system_supported(&self, supported: bool) {
         *self.native_mid_system_supported.lock().unwrap() = supported;
+    }
+
+    /// Set exact route facts used by Native-only request-context tests.
+    pub fn set_native_request_route(
+        &self,
+        protocol: Option<llm_runtime::ProtocolFamily>,
+        first_party: bool,
+    ) {
+        *self.native_request_protocol.lock().unwrap() = protocol;
+        *self.native_request_first_party.lock().unwrap() = first_party;
     }
 
     /// Seed the catalog `list_model_listings()` returns, so a test can exercise
@@ -254,6 +268,18 @@ impl MockApiClient {
 
 #[async_trait]
 impl OrchestratorApiClient for MockApiClient {
+    fn is_first_party_route(&self, _model: &str, _profile: Option<&str>) -> bool {
+        *self.native_request_first_party.lock().unwrap()
+    }
+
+    fn protocol_for_model(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Option<llm_runtime::ProtocolFamily> {
+        *self.native_request_protocol.lock().unwrap()
+    }
+
     fn supports_native_mid_conversation_system(
         &self,
         _model: &str,

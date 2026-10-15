@@ -346,6 +346,22 @@ pub(crate) fn strip_partial_request(
         return false;
     }
 
+    // Native fKt uses the thinking ordinal within the source assistant row.
+    // Earlier source rows can be merged into this wire message; OYe leaves
+    // those rows untouched even when the target source ordinal is zero.
+    let preserve_target_prefix = target.source_thinking_index > 0;
+    let prefix_from_other_sources = request
+        .execution
+        .request_content_source_ids
+        .get(target.request_message_index)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .map(|ids| !ids.is_empty() && !ids.contains(&target.source_message_id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     let roles = request
         .input
         .messages
@@ -368,6 +384,11 @@ pub(crate) fn strip_partial_request(
             }
             if message_index == target.request_message_index
                 && block_index < target.request_block_index
+                && (preserve_target_prefix
+                    || prefix_from_other_sources
+                        .get(block_index)
+                        .copied()
+                        .unwrap_or(false))
             {
                 return true;
             }
@@ -440,7 +461,7 @@ fn is_blank_text(block: &WireBlock) -> bool {
     matches!(
         block,
         WireBlock::Text { text, .. } | WireBlock::TextJsUtf16 { text, .. }
-            if text.trim().is_empty()
+            if lingxi_core::host::effort::trim_js_whitespace(text).is_empty()
     )
 }
 

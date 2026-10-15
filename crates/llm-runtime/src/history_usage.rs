@@ -198,6 +198,8 @@ impl<'de> Deserialize<'de> for ExecutionUsage {
             provider_reported_total_tokens: stored.provider_reported_total_tokens,
             provider_metadata: stored.provider_metadata,
             cost_estimate: None,
+            native_resume_context_exhausted: None,
+            native_resume_context_observed: false,
         })
     }
 }
@@ -257,5 +259,19 @@ mod tests {
                 .as_deref(),
             Some(r#""\ud801""#)
         );
+    }
+
+    #[test]
+    fn native_resume_context_fact_is_not_persisted_as_usage_metadata() {
+        let usage = ExecutionUsage {
+            native_resume_context_exhausted: Some(false),
+            native_resume_context_observed: true,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&usage).expect("usage serializes");
+        assert!(encoded.get("native_resume_context_exhausted").is_none());
+        let restored: ExecutionUsage = serde_json::from_value(encoded).expect("usage restores");
+        assert_eq!(restored.native_resume_context_exhausted, None);
+        assert!(!restored.native_resume_context_observed);
     }
 }

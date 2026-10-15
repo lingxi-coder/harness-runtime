@@ -265,8 +265,7 @@ pub(crate) fn normalize_native_hook_settings(
         };
     }
 
-    let result = normalize_event_map_at(&hooks, context, &mut diagnostics, unresolved, semantics);
-    result
+    normalize_event_map_at(&hooks, context, &mut diagnostics, unresolved, semantics)
 }
 
 /// Parse the nested `Due` field built as `QQ() = record(enum(Dp), array(tn()))`.

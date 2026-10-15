@@ -671,6 +671,80 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Default)]
+struct NativeThinkingResumptionRefusalLatch(std::sync::atomic::AtomicBool);
+
+impl NativeThinkingResumptionRefusalLatch {
+    fn observe(&self, error: &LlmError) {
+        if error
+            .native_anthropic_error_facts()
+            .is_some_and(|facts| facts.thinking_resumption_beta_refused)
+        {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn is_refused(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod native_thinking_resumption_refusal_latch_tests {
+    use super::NativeThinkingResumptionRefusalLatch;
+    use crate::LlmError;
+    use lingxi_llm_client::protocol::{
+        NativeAnthropicErrorFacts, ProtocolFamily, ProviderErrorText, ProviderId,
+    };
+
+    fn error(exact_beta_refusal: bool, broad_refusal: bool) -> LlmError {
+        LlmError::ProviderErrorText {
+            source: Box::new(LlmError::InvalidRequest {
+                message: "fixture provider error".into(),
+            }),
+            text: ProviderErrorText::new(
+                "fixture provider error".into(),
+                "fixture provider error".encode_utf16().collect(),
+            )
+            .expect("fixture text is valid UTF-16"),
+            native_anthropic_facts: Some(NativeAnthropicErrorFacts {
+                provider_id: ProviderId::from("anthropic"),
+                protocol: ProtocolFamily::AnthropicMessages,
+                request_authority: Some("api.anthropic.com".into()),
+                thinking_resumption_refused: broad_refusal,
+                thinking_resumption_beta_requested: Some(true),
+                thinking_resumption_beta_refused: exact_beta_refusal,
+                native_thinking_type_rejection: None,
+                native_thinking_binding_controls_beta_requested: None,
+                native_thinking_binding_controls_error_evidence: None,
+                native_hq_model_source: None,
+                native_hq_model_provider_family: None,
+                native_hq_known_error_evidence: None,
+                native_hq_hrn15_evidence: None,
+                response: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn only_exact_beta_refusal_sets_a_sticky_service_latch() {
+        let latch = NativeThinkingResumptionRefusalLatch::default();
+        assert!(!latch.is_refused());
+
+        latch.observe(&error(false, true));
+        assert!(!latch.is_refused(), "the broad refusal fact is not enough");
+
+        latch.observe(&error(true, false));
+        assert!(latch.is_refused());
+
+        latch.observe(&error(false, false));
+        assert!(
+            latch.is_refused(),
+            "the service-lifetime latch never clears"
+        );
+    }
+}
+
 tokio::task_local! {
     static MOD_REQUEST_EFFORT: serde_json::Value;
 }
@@ -940,6 +1014,7 @@ struct StreamState {
     attempt: crate::model_attempt::WireAttempt,
     decoder: crate::history_projection::HistoryProjector,
     frames: lingxi_llm_client::ModelStream,
+    native_thinking_resumption_refused: Arc<NativeThinkingResumptionRefusalLatch>,
     pricing: Option<lingxi_llm_client::FrozenPricing>,
     pricing_model: crate::PricingModelRef,
     server_fallback_lane:
@@ -1347,6 +1422,10 @@ pub struct ApiService {
     /// Harness providers from sharing cached capability state.
     native_model_option_capabilities:
         Mutex<std::collections::HashMap<(NativeThinkingTypeKey, String), Option<bool>>>,
+    /// Native requestLatches.thinkingResumptionRefused. Only the SDK's exact
+    /// beta-specific HTTP 400 fact may set it, and it stays set for this
+    /// ApiService lifetime.
+    native_thinking_resumption_refused: Arc<NativeThinkingResumptionRefusalLatch>,
     /// Identity for the Anthropic `metadata.user_id` field (claude-code
     /// `claude.ts:503-525`). `None` (the default) omits `metadata` entirely.
     /// Set via [`Self::with_request_metadata`]; the composition root supplies
@@ -2731,6 +2810,17 @@ impl ApiService {
         ))
     }
 
+    /// Read Native's sticky requestLatches.thinkingResumptionRefused value.
+    /// The latch starts false and only transitions to true from the SDK's
+    /// exact `thinking_resumption_beta_refused` fact.
+    pub fn native_thinking_resumption_refused(&self) -> bool {
+        self.native_thinking_resumption_refused.is_refused()
+    }
+
+    fn observe_native_thinking_resumption_refusal(&self, error: &LlmError) {
+        self.native_thinking_resumption_refused.observe(error);
+    }
+
     fn native_model_option_capability_for_route(
         &self,
         request: &LlmRequest,
@@ -2779,13 +2869,11 @@ impl ApiService {
         if usage.report.complete().is_none() {
             return Ok(None);
         }
-        let observed_profile = usage
+        let provider_metadata = usage
             .provider_metadata
-            .get("stream")
-            .unwrap_or(&usage.provider_metadata)
-            .get("llm_client")
-            .and_then(|m| m.get("executed_profile"))
-            .and_then(serde_json::Value::as_str);
+            .payload_at("/stream")
+            .unwrap_or_else(|| usage.provider_metadata.clone());
+        let observed_profile = provider_metadata.string_at("/llm_client/executed_profile");
         let route = self.client.resolve_media_route(model, profile)?.main;
         let profiles = self.client.provider_service_profiles();
         let Some(connection) = profiles
@@ -2797,28 +2885,24 @@ impl ApiService {
         if observed_profile.is_some_and(|actual| actual != route.profile_name) {
             return Ok(None);
         }
-        let observation = usage
-            .provider_metadata
-            .get("stream")
-            .unwrap_or(&usage.provider_metadata)
-            .get("llm_client")
-            .and_then(|v| v.get("output_budget"));
+        let observation = provider_metadata.payload_at("/llm_client/output_budget");
         // Explicit task/user limits and an overflow-reduced same-route limit
         // remain hard ceilings. Recovery must not erase their provenance.
         if observation
-            .and_then(|v| v.get("source"))
-            .and_then(serde_json::Value::as_str)
+            .as_ref()
+            .and_then(|value| value.string_at("/source"))
+            .as_deref()
             == Some("explicit")
         {
             return Ok(None);
         }
         let issued = observation
-            .and_then(|v| v.get("value"))
-            .and_then(serde_json::Value::as_u64)
+            .as_ref()
+            .and_then(|value| json_payload_u64_at(value, "/value"))
             .or_else(|| {
                 observation
-                    .and_then(|v| v.get("provider_default"))
-                    .and_then(serde_json::Value::as_u64)
+                    .as_ref()
+                    .and_then(|value| json_payload_u64_at(value, "/provider_default"))
             });
         let effective_context = crate::model::context_window::is_claude_family(model).then(|| {
             crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas)
@@ -3058,6 +3142,7 @@ impl ApiService {
             thinking: RwLock::new(crate::model::thinking_state::ThinkingState::default()),
             native_thinking_type_overrides: Mutex::new(Default::default()),
             native_model_option_capabilities: Mutex::new(Default::default()),
+            native_thinking_resumption_refused: Arc::new(Default::default()),
             request_metadata: None,
             cache_editing_inputs: CacheEditingInputs::default(),
             ua,
@@ -4082,6 +4167,18 @@ impl ApiService {
         )
     }
 
+    /// Bedrock's extra-parameter beta IDs are projected through the SDK request
+    /// policy into `anthropic_beta`, never appended to the HTTP beta header.
+    fn custom_cli_betas_for_header(&self, prepared: &crate::PreparedLlmCall) -> Vec<String> {
+        let mut betas = self.custom_cli_betas(prepared);
+        if prepared.route.protocol == crate::ProtocolFamily::BedrockClaude {
+            betas.retain(|beta| {
+                !crate::model::betas::BEDROCK_EXTRA_PARAMS_HEADERS.contains(&beta.as_str())
+            });
+        }
+        betas
+    }
+
     /// A direct first-party Anthropic API route, resolved after profile/model
     /// selection. Custom Anthropic-wire gateways are deliberately excluded:
     /// they may understand the stable Messages schema, but must not inherit
@@ -4326,27 +4423,6 @@ impl ApiService {
             })
     }
 
-    fn is_native_main_request_route(&self, request: &LlmRequest) -> bool {
-        request_query_source_category(request) == Some(QuerySourceCategory::Main)
-            && request.execution.anthropic_request_kind
-                == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-            && self
-                .client
-                .resolve_media_route(&request.input.model, request.profile.as_deref())
-                .ok()
-                .is_some_and(|route| {
-                    self.client
-                        .protocol_for_model(
-                            &request.input.model,
-                            Some(&route.main.profile_name),
-                        )
-                        .ok()
-                        .is_some_and(|protocol| {
-                            is_native_main_anthropic_route(&route.main.provider_id, protocol)
-                        })
-                })
-    }
-
     /// Port of claude-code's `B0t` (2.1.207): parse `CLAUDE_CODE_EXTRA_BODY` into a
     /// JSON object to be spread into the outgoing Anthropic-family request body.
     ///
@@ -4426,16 +4502,30 @@ impl ApiService {
         )
     }
 
+    /// Native-owned Bedrock body betas before the `CLAUDE_CODE_EXTRA_BODY`
+    /// spread: model policy plus route-filtered CLI additions that Bedrock
+    /// requires in `anthropic_beta`. Arbitrary extra-body values are excluded.
+    fn planned_bedrock_body_betas(&self, prepared: &crate::PreparedLlmCall) -> Vec<String> {
+        if prepared.route.protocol != crate::ProtocolFamily::BedrockClaude {
+            return Vec::new();
+        }
+        let mut betas = bedrock_extra_body_betas(&self.beta_context(prepared));
+        for beta in self.custom_cli_betas(prepared) {
+            if crate::model::betas::BEDROCK_EXTRA_PARAMS_HEADERS.contains(&beta.as_str())
+                && !betas.iter().any(|existing| existing == &beta)
+            {
+                betas.push(beta);
+            }
+        }
+        betas
+    }
+
     /// Native's `DJe`: planned beta membership is recorded from the final
-    /// host/header producer plus the Bedrock subset generated by beta policy,
-    /// before the `CLAUDE_CODE_EXTRA_BODY` spread.  A token that appears only
-    /// in an arbitrary extra-body array is not a planned beta request.
+    /// host/header producer plus the Bedrock body producer set above, before
+    /// the `CLAUDE_CODE_EXTRA_BODY` spread. A token that appears only in an
+    /// arbitrary extra-body array is not a planned beta request.
     fn capture_planned_native_beta_context(&self, prepared: &mut crate::PreparedLlmCall) {
-        let generated_body = if prepared.route.protocol == crate::ProtocolFamily::BedrockClaude {
-            bedrock_extra_body_betas(&self.beta_context(prepared))
-        } else {
-            Vec::new()
-        };
+        let generated_body = self.planned_bedrock_body_betas(prepared);
         let suppressed = prepared.context_1m_beta_suppressed;
         let mut header = prepared
             .computed_beta_headers
@@ -4783,8 +4873,8 @@ impl ApiService {
         Ok(())
     }
 
-    /// Store the exact Native `tae` target before checking the dedicated
-    /// one-shot and total-attempt budget. Repeated matching errors still
+    /// Store the exact Native `tae` target before checking its dedicated
+    /// one-shot repair gate. Repeated matching errors still
     /// update the service-lifetime per-model latch, but only the first one can
     /// claim its dedicated retry.
     fn record_native_thinking_type_rejection(
@@ -4806,11 +4896,21 @@ impl ApiService {
         {
             return false;
         }
-        let Some(target) = error
+        let Some(rejected) = error
             .native_anthropic_error_facts()
             .and_then(|facts| facts.native_thinking_type_rejection)
         else {
             return false;
+        };
+        // Native `tae` retries with the opposite mode from the one the SDK
+        // reports as rejected: adaptive → enabled, enabled → adaptive.
+        let target = match rejected {
+            lingxi_llm_client::protocol::NativeThinkingTypeRejection::Adaptive => {
+                lingxi_llm_client::protocol::NativeThinkingTypeRejection::Enabled
+            }
+            lingxi_llm_client::protocol::NativeThinkingTypeRejection::Enabled => {
+                lingxi_llm_client::protocol::NativeThinkingTypeRejection::Adaptive
+            }
         };
         let key = Self::native_thinking_type_key(
             request,
@@ -5630,14 +5730,7 @@ impl ApiService {
         }
         // Bedrock carries a narrow beta subset in `anthropic_beta` inside the
         // body. Other Anthropic-family routes carry their betas in headers.
-        let body_betas = if matches!(
-            prepared.route.protocol,
-            crate::ProtocolFamily::BedrockClaude
-        ) {
-            bedrock_extra_body_betas(&self.beta_context(prepared))
-        } else {
-            Vec::new()
-        };
+        let body_betas = self.planned_bedrock_body_betas(prepared);
         let extra_body = prepared.extra_body.clone().unwrap_or_else(|| {
             lingxi_llm_client::protocol::JsonPayload::parse("{}")
                 .expect("empty object is valid JSON")
@@ -5915,7 +6008,7 @@ impl ApiService {
                         &["context_hint"],
                     ),
             );
-            let custom_betas = self.custom_cli_betas(prepared);
+            let custom_betas = self.custom_cli_betas_for_header(prepared);
             apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
                 provider,
@@ -5983,7 +6076,7 @@ impl ApiService {
                         &["context_hint"],
                     ),
             );
-            let custom_betas = self.custom_cli_betas(prepared);
+            let custom_betas = self.custom_cli_betas_for_header(prepared);
             apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
                 provider,
@@ -7173,15 +7266,7 @@ impl ApiService {
             NonStreamDrivePolicy::ModelValidation => None,
         };
         let mut timeout_retries = crate::model::request_timeout::TimeoutRetryCount::default();
-        let mut last_native_main_error = None;
         loop {
-            if self.is_native_main_request_route(&req)
-                && !retry_scope.native_main_attempt_available()
-            {
-                if let Some(error) = last_native_main_error.take() {
-                    return Err(error);
-                }
-            }
             if policy == NonStreamDrivePolicy::Standard {
                 self.apply_native_main_thinking_policy(&mut req)?;
             }
@@ -7254,14 +7339,6 @@ impl ApiService {
             let mctc_header_sent = Self::request_beta_tokens(&prepared).iter().any(|beta| {
                 beta == lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges.header()
             });
-            let native_main_dispatch = policy == NonStreamDrivePolicy::Standard
-                && request_query_source_category(&req) == Some(QuerySourceCategory::Main)
-                && req.execution.anthropic_request_kind
-                    == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-                && is_native_main_anthropic_route(
-                    &prepared.route.resolved_route.provider_id,
-                    prepared.route.protocol,
-                );
             let thinking_recovery_scope = prepared.thinking_recovery_scope.clone();
             let call = prepared.wire_call.take().expect("sealed call");
             let pricing =
@@ -7305,9 +7382,6 @@ impl ApiService {
                             dispatch_callback_rejected = true;
                             return Err(crate::execution::wire_error(error));
                         }
-                        if native_main_dispatch {
-                            retry_scope.record_native_main_dispatch();
-                        }
                         if mctc_header_sent {
                             if let Some(scope) = thinking_recovery_scope.as_ref() {
                                 scope.mark_mid_conversation_tool_changes_sent();
@@ -7340,10 +7414,8 @@ impl ApiService {
             match resp_result {
                 Err(mut transport_err) => {
                     Self::classify_native_invalid_request_413(&mut transport_err);
+                    self.observe_native_thinking_resumption_refusal(&transport_err);
                     safety.error(&transport_err);
-                    if native_main_dispatch {
-                        last_native_main_error = Some(transport_err.clone());
-                    }
                     if admission_rejected {
                         attempt.finish().await?;
                         return Err(LlmError::RequestDispatchRejected {
@@ -7667,10 +7739,8 @@ impl ApiService {
                         }
                         Err(mut decode_err) => {
                             Self::classify_native_invalid_request_413(&mut decode_err);
+                            self.observe_native_thinking_resumption_refusal(&decode_err);
                             safety.error(&decode_err);
-                            if native_main_dispatch {
-                                last_native_main_error = Some(decode_err.clone());
-                            }
                             if policy == NonStreamDrivePolicy::Standard
                                 && !context_1m_ordinary_retry_attempted
                                 && self.native_context_1m_ordinary_refusal(
@@ -8886,7 +8956,6 @@ impl ApiService {
         let mut server_fallback_beta_repair_attempted = false;
         let mut context_1m_ordinary_retry_attempted = false;
         let mut mark_context_1m_latch_on_message_start = false;
-        let mut last_native_main_error = None;
         // Reset per-query state and classify the actual source independently
         // of stream/body policy: prompt hooks and scheduled streams are auxiliary.
         let mut dispatch =
@@ -8907,13 +8976,6 @@ impl ApiService {
         let main_conversation = query_source_category(source) == Some(QuerySourceCategory::Main);
 
         loop {
-            if self.is_native_main_request_route(&req)
-                && !retry_scope.native_main_attempt_available()
-            {
-                if let Some(error) = last_native_main_error.take() {
-                    return Err(error);
-                }
-            }
             self.apply_native_main_thinking_policy(&mut req)?;
             req.execution.context_1m_beta_suppressed |= mark_context_1m_latch_on_message_start
                 || context_1m_scope
@@ -8939,14 +9001,6 @@ impl ApiService {
             prepared.thinking_display_probe = retry_scope.display_probe();
             let (dispatch_attempt, server_fallback_parameter_added) =
                 self.inject_stream_headers(&mut prepared, dispatch)?;
-
-            let native_main_dispatch = main_conversation
-                && req.execution.anthropic_request_kind
-                    == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-                && is_native_main_anthropic_route(
-                    &prepared.route.resolved_route.provider_id,
-                    prepared.route.protocol,
-                );
 
             let provider = &prepared.route.resolved_route.provider_id;
             let body_bytes = prepared.provider_request.wire_body_bytes()?.len();
@@ -9031,9 +9085,6 @@ impl ApiService {
                                 });
                             }
                             attempt.mark_dispatched()?;
-                            if native_main_dispatch {
-                                retry_scope.record_native_main_dispatch();
-                            }
                             if mctc_header_sent {
                                 if let Some(scope) = thinking_recovery_scope.as_ref() {
                                     scope.mark_mid_conversation_tool_changes_sent();
@@ -9054,10 +9105,8 @@ impl ApiService {
             match opened {
                 Err(mut transport_err) => {
                     Self::classify_native_invalid_request_413(&mut transport_err);
+                    self.observe_native_thinking_resumption_refusal(&transport_err);
                     safety.error(&transport_err);
-                    if native_main_dispatch {
-                        last_native_main_error = Some(transport_err.clone());
-                    }
                     if admission_rejected {
                         attempt.finish().await?;
                         return Err(LlmError::RequestDispatchRejected {
@@ -9196,6 +9245,7 @@ impl ApiService {
                         let collected = match result {
                             Ok(collected) => collected,
                             Err(error) => {
+                                self.observe_native_thinking_resumption_refusal(&error);
                                 safety.error(&error);
                                 attempt.finish().await?;
                                 return Err(error);
@@ -9223,10 +9273,8 @@ impl ApiService {
                             .map(crate::upstream::error)
                             .unwrap_or(LlmError::ProviderInternal);
                         Self::classify_native_invalid_request_413(&mut decode_err);
+                        self.observe_native_thinking_resumption_refusal(&decode_err);
                         safety.error(&decode_err);
-                        if native_main_dispatch {
-                            last_native_main_error = Some(decode_err.clone());
-                        }
                         collected.finish().await;
                         attempt.finish().await?;
                         // Native streaming Kie handles an AFK-only refusal
@@ -9742,6 +9790,7 @@ impl ApiService {
                             other => other,
                         };
                         if let Err(first_err) = &first {
+                            self.observe_native_thinking_resumption_refusal(first_err);
                             // Native x2 body classification requires a connection cause;
                             // SDK timeout/abort errors alone do not supply that cause.
                             if matches!(
@@ -9783,6 +9832,9 @@ impl ApiService {
                         attempt,
                         decoder,
                         frames,
+                        native_thinking_resumption_refused: self
+                            .native_thinking_resumption_refused
+                            .clone(),
                         pricing,
                         pricing_model,
                         server_fallback_lane: prepared.server_fallback_lane.clone(),
@@ -10167,6 +10219,7 @@ impl ApiService {
                                                 s.queue.extend(events);
                                             }
                                             Err(e) => {
+                                                s.native_thinking_resumption_refused.observe(&e);
                                                 s.safety.error(&e);
                                                 if let Some((mut usage, completeness)) =
                                                     s.decoder.observed_usage()
@@ -10258,6 +10311,7 @@ impl ApiService {
                                                 s.queue.extend(events);
                                             }
                                             Err(e) => {
+                                                s.native_thinking_resumption_refused.observe(&e);
                                                 s.safety.error(&e);
                                                 if let Some((mut usage, completeness)) =
                                                     s.decoder.observed_usage()
@@ -10294,6 +10348,7 @@ impl ApiService {
                                         }
                                     }
                                     Err(e) => {
+                                        s.native_thinking_resumption_refused.observe(&e);
                                         s.safety.error(&e);
                                         if let Some((usage, completeness)) =
                                             s.decoder.observed_usage()
@@ -11463,8 +11518,19 @@ mod buffered_stream_test;
 #[path = "service_native_thinking_test.rs"]
 mod service_native_thinking_test;
 
+#[cfg(test)]
+#[path = "service_native_thinking_dispatch_test.rs"]
+mod service_native_thinking_dispatch_test;
+
 /// Prompt-free facts from the final prepared request. Defaults are recorded
 /// only for a documented native endpoint/model; other defaults remain unknown.
+fn json_payload_u64_at(
+    payload: &lingxi_llm_client::protocol::JsonPayload,
+    pointer: &str,
+) -> Option<u64> {
+    payload.raw_source_at(pointer)?.parse().ok()
+}
+
 fn prepared_output_budget_observation(
     prepared: &crate::PreparedLlmCall,
     request: &lingxi_llm_client::protocol::ChatRequest,
@@ -11473,7 +11539,8 @@ fn prepared_output_budget_observation(
     let mut field = None;
     let mut value = None;
     for key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
-        if let Some(n) = body.get(key).and_then(serde_json::Value::as_u64) {
+        let pointer = format!("/{key}");
+        if let Some(n) = json_payload_u64_at(body, &pointer) {
             field = Some(key);
             value = Some(n);
         }
@@ -11482,11 +11549,8 @@ fn prepared_output_budget_observation(
         ("generationConfig", "maxOutputTokens"),
         ("generation_config", "max_output_tokens"),
     ] {
-        if let Some(n) = body
-            .get(parent)
-            .and_then(|v| v.get(key))
-            .and_then(serde_json::Value::as_u64)
-        {
+        let pointer = format!("/{parent}/{key}");
+        if let Some(n) = json_payload_u64_at(body, &pointer) {
             field = Some(key);
             value = Some(n);
         }
@@ -11499,21 +11563,11 @@ fn prepared_output_budget_observation(
         && matches!(model.as_str(), "deepseek-flash" | "deepseek-v4-pro");
     let default = if value.is_none() && is_current_deepseek {
         Some(
-            if body
-                .get("reasoning_effort")
-                .and_then(serde_json::Value::as_str)
-                == Some("none")
-                || body
-                    .pointer("/thinking/type")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("disabled")
+            if body.string_at("/reasoning_effort").as_deref() == Some("none")
+                || body.string_at("/thinking/type").as_deref() == Some("disabled")
             {
                 8192
-            } else if body
-                .get("reasoning_effort")
-                .and_then(serde_json::Value::as_str)
-                == Some("max")
-            {
+            } else if body.string_at("/reasoning_effort").as_deref() == Some("max") {
                 131072
             } else {
                 65536
@@ -11522,23 +11576,21 @@ fn prepared_output_budget_observation(
     } else {
         None
     };
-    let hosted_wire_tools = body
-        .get("tools")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|tools| {
-            tools.iter().any(|tool| {
-                tool.get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|kind| !matches!(kind, "function" | "custom"))
-                    || tool
-                        .pointer("/function/name")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|name| name.starts_with('$'))
-            })
-        });
+    let hosted_wire_tools = body.array_len("/tools").is_some_and(|length| {
+        (0..length).any(|index| {
+            let Some(tool) = body.array_item_at("/tools", index) else {
+                return false;
+            };
+            tool.string_at("/type")
+                .is_some_and(|kind| !matches!(kind.as_str(), "function" | "custom"))
+                || tool
+                    .string_at("/function/name")
+                    .is_some_and(|name| name.starts_with('$'))
+        })
+    });
     let native_search = ["enable_search", "web_search"]
         .iter()
-        .any(|key| body.get(*key).and_then(serde_json::Value::as_bool) == Some(true));
+        .any(|key| body.bool_at(&format!("/{key}")) == Some(true));
     serde_json::json!({"field":field,"value":value,"provider_default":default,
         "can_repeat_original":request.hosted_tools.is_empty() && request.native_options.is_empty() && !hosted_wire_tools && !native_search,
         "source":if request.max_tokens.is_some() {"explicit"} else if value.is_some() {"application_default"} else {"provider_default"},

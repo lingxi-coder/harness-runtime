@@ -365,6 +365,8 @@ pub(crate) fn usage(
             provider_metadata: wire::JsonPayload::from_generated_value(&metadata)
                 .expect("generated usage counters serialize"),
             cost_estimate: None,
+            native_resume_context_exhausted: None,
+            native_resume_context_observed: false,
         },
         completeness,
     ))

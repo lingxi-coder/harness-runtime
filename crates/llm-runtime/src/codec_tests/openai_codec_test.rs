@@ -447,7 +447,7 @@ fn encode_multiple_tool_results_preserves_each_as_tool_message() {
 }
 
 #[test]
-fn decode_rejects_invalid_tool_call_arguments() {
+fn decode_preserves_diagnostic_for_invalid_tool_call_arguments() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let response = ProviderResponse::json(
         200,
@@ -458,8 +458,33 @@ fn decode_rejects_invalid_tool_call_arguments() {
         }),
     );
 
-    let err = codec.decode_response(response).unwrap_err();
-    assert!(matches!(err, llm_runtime::LlmError::InvalidRequest { .. }));
+    let decoded = codec.decode_response(response).unwrap();
+    assert!(
+        decoded.content.is_empty(),
+        "malformed arguments must not be executable"
+    );
+    let issues = &decoded.provider_metadata;
+    assert_eq!(issues.array_len("/llm_client/tool_input_issues"), Some(1));
+    assert_eq!(
+        issues.unsigned_integer_at("/llm_client/tool_input_issues/0/block_index"),
+        Some(0)
+    );
+    assert_eq!(
+        issues
+            .string_at("/llm_client/tool_input_issues/0/tool_name")
+            .as_deref(),
+        Some("Bash")
+    );
+    assert_eq!(
+        issues
+            .string_at("/llm_client/tool_input_issues/0/tool_id")
+            .as_deref(),
+        Some("call_1")
+    );
+    assert_eq!(
+        issues.unsigned_integer_at("/llm_client/tool_input_issues/0/input_bytes"),
+        Some(8)
+    );
 }
 
 #[test]

@@ -5112,14 +5112,30 @@ pub async fn build_with_credential_stack(
     let tools = Arc::new(tools_inner);
     // Desktop and Headless share this composition root. The main-loop model is
     // read from the live ToolRegistry so model switches affect the next policy
-    // attachment snapshot. Other Native policy facts remain absent until this
-    // host has an authoritative source for them.
+    // attachment snapshot. The experimental-beta and HIPAA facts below are
+    // locally observable. Native's two dynamic resumption flags are remote
+    // feature-service inputs and stay Unknown. The selected-route model
+    // capability and SDK refusal latch are supplied by ApiService during
+    // request preparation.
     let native_policy_host_facts_provider = {
         let tools = tools.clone();
         move || {
             let model = tools.main_loop_model();
             orchestrator::conversation::NativePolicyHostFacts {
                 simple_system_prompt: Some(tool_api::dh_simple_system_prompt(model.as_deref())),
+                thinking_resumption: orchestrator::conversation::NativeThinkingResumptionHostFacts {
+                    disable_experimental_betas: Some(
+                        llm_runtime::model::thinking_binding_controls::
+                            native_disable_experimental_betas(
+                                std::env::var_os("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+                                    .as_deref(),
+                            ),
+                    ),
+                    hipaa_mode: Some(
+                        lingxi_core::host::compliance_taints::is_tainted("hipaa"),
+                    ),
+                    ..Default::default()
+                },
                 ..Default::default()
             }
         }

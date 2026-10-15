@@ -108,7 +108,7 @@ pub fn strip_thinking_blocks_for_signature_recovery(messages: &mut [Message]) ->
                 return false;
             }
             match text_payload(block) {
-                Some(text) => !text.trim().is_empty(),
+                Some(text) => !lingxi_core::host::effort::trim_js_whitespace(text).is_empty(),
                 None => true,
             }
         });
@@ -159,7 +159,7 @@ pub fn strip_marked_conversation_thinking(
             index += 1;
             preserve_prefix
                 || (!is_thinking(block)
-                    && !matches!(block, Block::Text { text, ..} if text.trim().is_empty()))
+                    && !matches!(block, Block::Text { text, ..} if lingxi_core::host::effort::trim_js_whitespace(text).is_empty()))
         });
         if content.is_empty() {
             content.push(Block::Text {
@@ -364,6 +364,57 @@ mod tests {
     }
 
     #[test]
+    fn signature_recovery_uses_native_js_trim_for_feff_but_preserves_nel() {
+        let mut messages = vec![assistant(vec![
+            reasoning("hidden", Some("sig")),
+            text("\u{feff}"),
+            text("\u{0085}"),
+        ])];
+
+        assert!(strip_thinking_blocks_for_signature_recovery(&mut messages));
+        assert_eq!(messages[0].content, vec![text("\u{0085}")]);
+    }
+
+    #[test]
+    fn core_signature_recovery_uses_native_js_trim_for_feff_but_preserves_nel() {
+        use lingxi_core::types::{ContentBlock as Block, ConversationMessage, MessageId};
+
+        let id = MessageId::new();
+        let mut messages = vec![ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id,
+            content: vec![
+                Block::Thinking {
+                    thinking: "hidden".into(),
+                    signature: Some("sig".into()),
+                },
+                Block::Text {
+                    text: "\u{feff}".into(),
+                    citations: None,
+                },
+                Block::Text {
+                    text: "\u{0085}".into(),
+                    citations: None,
+                },
+            ],
+            stop_reason: None,
+            resumable: None,
+        }];
+
+        strip_marked_conversation_thinking(&mut messages, &[(id, 0)].into_iter().collect());
+        match &messages[0] {
+            ConversationMessage::Assistant { content, .. } => assert_eq!(
+                content,
+                &vec![Block::Text {
+                    text: "\u{0085}".into(),
+                    citations: None,
+                }]
+            ),
+            other => panic!("expected assistant history row, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn strip_inserts_placeholder_when_assistant_would_be_empty() {
         let mut messages = vec![assistant(vec![reasoning("only thinking", Some("sig"))])];
         assert!(strip_thinking_blocks_for_signature_recovery(&mut messages));
@@ -534,7 +585,7 @@ pub fn strip_input_thinking(request: &mut crate::LlmRequest) -> bool {
         |index, block| {
             !affected[index]
                 || !(is_thinking(block)
-                    || matches!(block, Block::Text { text, .. } if text.trim().is_empty()))
+                    || matches!(block, Block::Text { text, .. } if lingxi_core::host::effort::trim_js_whitespace(text).is_empty()))
         },
         Some("[Thinking removed]"),
     )

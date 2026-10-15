@@ -71,6 +71,15 @@ pub struct ExecutionUsage {
     /// Host-only estimate frozen from the completed physical stream. It is
     /// transferred to accounting and never serialized as provider metadata.
     pub cost_estimate: Option<CostEstimate>,
+    /// SDK-computed Native Anthropic resume context predicate for this
+    /// response. This is an execution fact and is deliberately omitted by the
+    /// durable usage adapter.
+    pub native_resume_context_exhausted: Option<bool>,
+    /// Whether the latest SDK response snapshot observed this predicate,
+    /// including an explicit Unknown (`None`). Stream snapshots use this to
+    /// clear an earlier zero-usage `Some(false)` when later usage removes the
+    /// SDK's basis for a decision. This is never persisted.
+    pub native_resume_context_observed: bool,
 }
 
 impl ExecutionUsage {

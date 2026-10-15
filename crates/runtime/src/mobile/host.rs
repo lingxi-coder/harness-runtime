@@ -8798,7 +8798,7 @@ impl MobileEngineHandle {
             crate::mobile::local_app_host::LocalAppHost::for_config_home(
                 self.fs.clone(),
                 &self.lingxi_home,
-                self.runtime.handle().clone(),
+                self.runtime().handle().clone(),
             ),
         )
     }

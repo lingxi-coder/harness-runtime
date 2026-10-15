@@ -649,7 +649,7 @@ fn encode_strict_tool_with_bad_schema_falls_back_to_non_strict() {
 }
 
 #[test]
-fn encode_request_pins_default_max_tokens_to_4096() {
+fn encode_request_uses_current_sonnet4_application_output_default() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let request = HistoryFixture::new("claude-sonnet-4-20250514");
 
@@ -657,7 +657,7 @@ fn encode_request_pins_default_max_tokens_to_4096() {
 
     assert_eq!(
         super::json_payload_value(&provider_request.body_json)["max_tokens"],
-        4096
+        32000
     );
 }
 

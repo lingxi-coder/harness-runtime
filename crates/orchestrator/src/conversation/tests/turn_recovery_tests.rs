@@ -2185,6 +2185,110 @@ async fn session_start_without_additional_context_pushes_nothing() {
     );
 }
 
+#[tokio::test]
+async fn native_resume_streaming_request_keeps_signed_block_and_sets_sdk_intent() {
+    use crate::conversation::{NativePolicyHostFacts, NativeThinkingResumptionHostFacts};
+    use crate::test_support_stream::{
+        content_block_start_thinking, message_delta_stop_with_resumable_usage, message_start,
+        message_stop, thinking_delta, MockStreamingApiClient,
+    };
+
+    let mut usage = llm_runtime::ExecutionUsage::from_counts(lingxi_llm_client::protocol::Usage {
+        input_tokens: 100,
+        output_tokens: 200,
+        ..Default::default()
+    });
+    usage.native_resume_context_exhausted = Some(false);
+    usage.native_resume_context_observed = true;
+    usage.provider_metadata =
+        lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!({
+            "llm_client": { "output_budget": { "can_repeat_original": true } }
+        }))
+        .expect("Native frozen retry metadata is valid JSON");
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![
+        crate::scripted![
+            message_start("resume-partial", "claude-opus-4-7"),
+            content_block_start_thinking(0),
+            thinking_delta(0, "unfinished thought"),
+            llm_runtime::HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: llm_runtime::HistoryContentDelta::SignatureDelta {
+                    signature: "signed-block".into(),
+                },
+            },
+            crate::test_support_stream::content_block_stop(0),
+            message_delta_stop_with_resumable_usage("max_tokens", true, usage),
+            message_stop(),
+        ],
+        crate::scripted![
+            message_start("resume-complete", "claude-opus-4-7"),
+            crate::test_support_stream::content_block_start_text(0),
+            crate::test_support_stream::text_delta(0, "done"),
+            crate::test_support_stream::content_block_stop(0),
+            crate::test_support_stream::message_delta_stop("end_turn"),
+            message_stop(),
+        ],
+    ]));
+    let api = Arc::new(MockApiClient::new(Vec::new()).with_recovery_budget(64_000));
+    api.set_native_request_route(Some(llm_runtime::ProtocolFamily::AnthropicMessages), true);
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            api,
+            streaming.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_native_policy_host_facts_provider(|| NativePolicyHostFacts {
+            thinking_resumption: NativeThinkingResumptionHostFacts {
+                feature_gate_enabled: Some(true),
+                request_gate_enabled: Some(true),
+                provider_route_allowed: Some(true),
+                model_capability_allowed: Some(true),
+                disable_experimental_betas: Some(false),
+                hipaa_mode: Some(false),
+                thinking_resumption_refused: Some(false),
+            },
+            ..Default::default()
+        }),
+    );
+
+    assert!(matches!(
+        orch.run_turn_streaming("hello").await.expect("turn ends"),
+        ConversationOutcome::EndTurn { .. }
+    ));
+    let calls = streaming.captured_calls().await;
+    assert_eq!(calls.len(), 2, "calls={calls:?}");
+    assert!(!calls[0]
+        .native_anthropic_request_context
+        .as_ref()
+        .is_some_and(|context| context.resume_incomplete_thinking));
+    assert!(calls[1]
+        .native_anthropic_request_context
+        .as_ref()
+        .is_some_and(|context| context.resume_incomplete_thinking));
+    assert_eq!(
+        calls[1].output_budget, None,
+        "eligible Native resume wins over the frozen output-budget retry"
+    );
+    assert!(calls[1].messages.iter().any(|message| {
+        matches!(message, lingxi_core::types::ConversationMessage::Assistant { content, .. }
+            if content.iter().any(|block| matches!(block, lingxi_core::types::ContentBlock::Thinking { signature: Some(signature), .. }
+                if signature == "signed-block")))
+    }), "streaming resume must retain the completed signed assistant block");
+    assert!(
+        !calls[1]
+            .messages
+            .iter()
+            .any(|message| { message.text_content() == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE }),
+        "qualifying resume omits the ordinary max-token nudge"
+    );
+}
+
 // -------- RECOV.4 — recovery budget reset on stop-hook continuation -----
 
 #[tokio::test]

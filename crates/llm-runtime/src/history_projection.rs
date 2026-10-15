@@ -7,6 +7,7 @@ use crate::upstream::{error, usage};
 use crate::*;
 use lingxi_llm_client::providers::anthropic::stream_observation::{self, NativeDelta, TextBlock};
 use lingxi_llm_client::{self as client, protocol as wire};
+use serde_json::Value;
 use std::collections::BTreeSet;
 
 fn invalid(error: impl std::fmt::Display) -> LlmError {
@@ -406,6 +407,11 @@ pub(crate) struct HistoryProjector {
     /// Latest exact Native Anthropic resumability payload observed on the
     /// stream. An explicit JSON null remains present as `Some(null)`.
     resumable: Option<wire::JsonPayload>,
+    /// SDK-computed Native context headroom decision for the current response.
+    /// `None` stays unknown; the host never re-derives it from normalized usage.
+    native_resume_context_exhausted: Option<bool>,
+    /// Distinguishes a newly observed Unknown from no new SDK snapshot.
+    native_resume_context_observed: bool,
     force_observation_snapshot: bool,
     done: bool,
     started: bool,
@@ -996,6 +1002,12 @@ impl HistoryProjector {
                             out.push(HistoryEvent::ContentBlockStop { index: *index });
                         }
                         let mut final_usage = usage(&report, &inference);
+                        if let Some((usage, _)) = final_usage.as_mut() {
+                            usage.native_resume_context_exhausted =
+                                self.native_resume_context_exhausted;
+                            usage.native_resume_context_observed =
+                                self.native_resume_context_observed;
+                        }
                         let usage_is_final =
                             final_usage.as_ref().is_some_and(|(_, completeness)| {
                                 *completeness == ModelAttemptUsageCompleteness::Complete
@@ -1080,6 +1092,12 @@ impl HistoryProjector {
                             self.stop_delta_seen = true;
                             let mut observed_usage =
                                 usage(&self.observation.0, &self.observation.1);
+                            if let Some((usage, _)) = observed_usage.as_mut() {
+                                usage.native_resume_context_exhausted =
+                                    self.native_resume_context_exhausted;
+                                usage.native_resume_context_observed =
+                                    self.native_resume_context_observed;
+                            }
                             if self.metadata.as_json_source().trim() != "null" {
                                 if let Some((usage, _)) = observed_usage.as_mut() {
                                     set_root_metadata_field(
@@ -1203,9 +1221,11 @@ pub(crate) fn project_model_response(
             &serialized_payload(fallback)?,
         )?;
     }
-    let normalized = usage(&decoded.usage, &decoded.inference)
+    let mut normalized = usage(&decoded.usage, &decoded.inference)
         .map(|(u, _)| u)
         .unwrap_or_default();
+    normalized.native_resume_context_exhausted = decoded.native_resume_context_exhausted;
+    normalized.native_resume_context_observed = true;
     let mut content = Vec::new();
     for block in decoded.message.content {
         let replay = if needs_replay_companion(&block) {
@@ -1293,6 +1313,8 @@ impl HistoryProjector {
         if let Some(resumable) = stream.anthropic_resumable() {
             self.resumable = Some(resumable.clone());
         }
+        self.native_resume_context_exhausted = stream.native_resume_context_exhausted();
+        self.native_resume_context_observed = true;
         Ok(())
     }
     pub(crate) fn observed_usage(&self) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)> {
@@ -1330,6 +1352,8 @@ impl HistoryProjector {
             opaque_text_blocks: BTreeSet::new(),
             metadata,
             resumable: None,
+            native_resume_context_exhausted: None,
+            native_resume_context_observed: false,
             force_observation_snapshot: false,
             done: false,
             started: false,

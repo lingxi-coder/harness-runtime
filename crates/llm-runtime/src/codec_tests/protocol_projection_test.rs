@@ -25,6 +25,7 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
         ))
         .unwrap();
     let mut request = HistoryFixture::new("chat-model");
+    request.request.input.max_tokens = Some(4096);
     request.messages.push(Message {
         api_output_config: None,
         role: "assistant".into(),

@@ -22,12 +22,22 @@ use crate::{
 };
 use futures::stream::{BoxStream, StreamExt};
 use lingxi_llm_client::protocol::JsonPayload;
-#[cfg(test)]
 use serde_json::Value;
 use std::collections::HashMap;
 
 fn projected_response_model(metadata: &JsonPayload) -> Option<String> {
     metadata.string_at("/llm_client/response_model")
+}
+
+fn attach_tool_input_issues(metadata: &mut JsonPayload, issues: &[Value]) {
+    if !metadata.is_root_object() {
+        *metadata = JsonPayload::parse("{}").expect("empty object is valid JSON");
+    }
+    let issues = JsonPayload::from_generated_value(&serde_json::json!(issues))
+        .expect("tool input diagnostics are generated JSON");
+    *metadata = metadata
+        .with_object_field("tool_input_issues", &issues)
+        .expect("tool input diagnostics are attached to an object");
 }
 
 // The SDK owns text/signature/JSON assembly. This map only remembers the host
@@ -394,6 +404,13 @@ pub(crate) fn merge_usage(seed: &ExecutionUsage, delta: &ExecutionUsage) -> Exec
             .cost_estimate
             .clone()
             .or_else(|| seed.cost_estimate.clone()),
+        native_resume_context_exhausted: if delta.native_resume_context_observed {
+            delta.native_resume_context_exhausted
+        } else {
+            seed.native_resume_context_exhausted
+        },
+        native_resume_context_observed: delta.native_resume_context_observed
+            || seed.native_resume_context_observed,
     }
 }
 
@@ -506,7 +523,6 @@ impl ResponseAccumulator {
         &mut self,
         event: HistoryEvent,
     ) -> Result<ResponseAccumulatorUpdate, (Vec<ContentBlock>, LlmError)> {
-
         match event {
             HistoryEvent::WebSearch { .. } => {} // Metadata is retained by the terminal snapshot.
             HistoryEvent::ResponseObserved {
@@ -682,7 +698,13 @@ impl ResponseAccumulator {
                         {
                             *has_other_tool_calls = true;
                         }
-                        if let LlmError::MalformedToolInput { tool_name, block_index, input_bytes, .. } = &error {
+                        if let LlmError::MalformedToolInput {
+                            tool_name,
+                            block_index,
+                            input_bytes,
+                            ..
+                        } = &error
+                        {
                             self.tool_input_issues.push(serde_json::json!({"tool_name":tool_name,"block_index":block_index,"input_bytes":input_bytes}));
                         }
                         self.malformed_input.get_or_insert(error);
@@ -718,13 +740,24 @@ impl ResponseAccumulator {
             }
             HistoryEvent::MessageStop => {
                 if let Some(mut error) = self.malformed_input.take() {
-                    if let LlmError::MalformedToolInput { has_other_tool_calls, .. } = &mut error {
+                    if let LlmError::MalformedToolInput {
+                        has_other_tool_calls,
+                        ..
+                    } = &mut error
+                    {
                         *has_other_tool_calls = self.acc.tool_calls_started > 1;
                     }
-                    if matches!(self.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")) {
-                        if !self.provider_metadata.is_object() { self.provider_metadata = serde_json::json!({}); }
-                        self.provider_metadata["tool_input_issues"] = serde_json::json!(self.tool_input_issues);
-                    } else { return Err((std::mem::take(&mut self.content), error)); }
+                    if matches!(
+                        self.stop_reason.as_deref(),
+                        Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")
+                    ) {
+                        attach_tool_input_issues(
+                            &mut self.provider_metadata,
+                            &self.tool_input_issues,
+                        );
+                    } else {
+                        return Err((std::mem::take(&mut self.content), error));
+                    }
                 }
                 return Ok(ResponseAccumulatorUpdate::Completed(HistoryResponse {
                     id: std::mem::take(&mut self.id),
@@ -747,11 +780,16 @@ impl ResponseAccumulator {
             // (llm-runtime protocol.rs:302; drops Ping/Error from api-client).
             HistoryEvent::Completed { mut response } => {
                 if let Some(error) = self.malformed_input.take() {
-                    if !matches!(response.stop_reason.as_deref(), Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")) {
+                    if !matches!(
+                        response.stop_reason.as_deref(),
+                        Some("max_tokens" | "tool_use" | "end_turn" | "stop_sequence")
+                    ) {
                         return Err((std::mem::take(&mut self.content), error));
                     }
-                    if !response.provider_metadata.is_object() { response.provider_metadata = serde_json::json!({}); }
-                    response.provider_metadata["tool_input_issues"] = serde_json::json!(self.tool_input_issues);
+                    attach_tool_input_issues(
+                        &mut response.provider_metadata,
+                        &self.tool_input_issues,
+                    );
                 }
                 return Ok(ResponseAccumulatorUpdate::Completed(*response));
             }
@@ -973,7 +1011,7 @@ pub fn response_to_stream_events(resp: HistoryResponse) -> Vec<HistoryEvent> {
 
 #[tokio::test]
 async fn resumable_response_round_trip_preserves_exact_source() {
-    use futures::{stream, StreamExt};
+    use futures::{StreamExt, stream};
 
     let source = r#"{"opaque":{"value":"\ud800"},"number":1e400}"#;
     let response = HistoryResponse {
@@ -1076,6 +1114,24 @@ mod tests {
             merge_usage(&seed, &ExecutionUsage::default()).report,
             seed.report
         );
+    }
+
+    #[test]
+    fn observed_unknown_native_resume_context_clears_prior_zero_usage_fact() {
+        let seed = ExecutionUsage {
+            native_resume_context_exhausted: Some(false),
+            native_resume_context_observed: true,
+            ..Default::default()
+        };
+        let terminal = ExecutionUsage {
+            native_resume_context_exhausted: None,
+            native_resume_context_observed: true,
+            ..Default::default()
+        };
+
+        let merged = merge_usage(&seed, &terminal);
+        assert_eq!(merged.native_resume_context_exhausted, None);
+        assert!(merged.native_resume_context_observed);
     }
 
     #[tokio::test]
@@ -2103,24 +2159,65 @@ mod tests {
     }
     #[tokio::test]
     async fn malformed_tool_keeps_later_valid_tool_terminal_and_complete_usage() {
-        let mut events = vec![message_start("m1","deepseek-flash")];
-        for (index,name,args) in [(0,"Write","{\"content\":\"unfinished_secret_html"),(1,"Read","{}") ] {
+        let mut events = vec![message_start("m1", "deepseek-flash")];
+        for (index, name, args) in [
+            (0, "Write", "{\"content\":\"unfinished_secret_html"),
+            (1, "Read", "{}"),
+        ] {
             events.extend([
-                HistoryEvent::ContentBlockStart {index,content_block:ContentBlock::ToolCall {input_projection:None,id:format!("call-{index}"),name:name.into(),input:Value::Null}},
-                HistoryEvent::ContentBlockDelta {index,delta:HistoryContentDelta::InputJsonDelta {partial_json:args.into()}},
-                HistoryEvent::ContentBlockStop {index},
+                HistoryEvent::ContentBlockStart {
+                    index,
+                    content_block: ContentBlock::ToolCall {
+                        id: format!("call-{index}"),
+                        name: name.into(),
+                        input: payload(Value::Null),
+                    },
+                },
+                HistoryEvent::ContentBlockDelta {
+                    index,
+                    delta: HistoryContentDelta::InputJsonDelta {
+                        partial_json: args.into(),
+                    },
+                },
+                HistoryEvent::ContentBlockStop { index },
             ]);
         }
         events.extend([
-            HistoryEvent::MessageDelta {delta:HistoryMessageDelta {stop_reason:Some("max_tokens".into()),stop_details:None},usage:Some(ExecutionUsage::from_counts(lingxi_llm_client::protocol::Usage {input_tokens:20,output_tokens:65536,..Default::default()}))},
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
+                    stop_reason: Some("max_tokens".into()),
+                    stop_details: None,
+                    resumable: None,
+                },
+                usage: Some(ExecutionUsage::from_counts(
+                    lingxi_llm_client::protocol::Usage {
+                        input_tokens: 20,
+                        output_tokens: 65536,
+                        ..Default::default()
+                    },
+                )),
+            },
             HistoryEvent::MessageStop,
         ]);
-        let response=accumulate_stream(boxed(events)).await.unwrap();
-        assert_eq!(response.stop_reason.as_deref(),Some("max_tokens"));
-        assert_eq!(response.usage.report.complete().unwrap().output_tokens,65536);
-        assert!(matches!(response.content.as_slice(),[ContentBlock::ToolCall {name,..}] if name=="Read"));
-        assert_eq!(response.provider_metadata["tool_input_issues"][0]["tool_name"],"Write");
-        assert!(!serde_json::to_string(&response).unwrap().contains("unfinished_secret_html"));
+        let response = accumulate_stream(boxed(events)).await.unwrap();
+        assert_eq!(response.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(
+            response.usage.report.complete().unwrap().output_tokens,
+            65536
+        );
+        assert!(
+            matches!(response.content.as_slice(),[ContentBlock::ToolCall {name,..}] if name=="Read")
+        );
+        let provider_metadata: Value =
+            serde_json::from_str(response.provider_metadata.as_json_source()).unwrap();
+        assert_eq!(
+            provider_metadata["tool_input_issues"][0]["tool_name"],
+            "Write"
+        );
+        assert!(
+            !serde_json::to_string(&response)
+                .unwrap()
+                .contains("unfinished_secret_html")
+        );
     }
-
 }

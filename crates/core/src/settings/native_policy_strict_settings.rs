@@ -1614,7 +1614,7 @@ fn validate_model_pricing_overrides(value: &Utf16JsonProjection) -> ValueValidat
                 path_segments: join_path_segments(&prefix, &issue.path_segments),
                 message_units: issue.message_units,
             }));
-        if let Some(key) = String::from_utf16(entry.code_units).ok() {
+        if let Ok(key) = String::from_utf16(entry.code_units) {
             report.unresolved.extend(
                 row_report
                     .unresolved
@@ -2602,7 +2602,7 @@ fn validate_map(value: &Utf16JsonProjection, rule: MapValueRule) -> ValueValidat
                 message_units: child_issue.message_units,
             });
         }
-        if let Some(key) = String::from_utf16(entry.code_units).ok() {
+        if let Ok(key) = String::from_utf16(entry.code_units) {
             for child_path in child_report.unresolved {
                 report.unresolved.push(join_path(&key, &child_path));
             }

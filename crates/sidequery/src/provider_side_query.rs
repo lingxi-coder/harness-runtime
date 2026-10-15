@@ -733,12 +733,13 @@ impl SideQueryClient for ProviderSideQueryClient {
             input,
             profile: request.profile,
             stream: false,
-            execution: llm_runtime::ExecutionContext {
-                input_protocol: Some(family),
-                capture_retry_count: true,
-                query_source: Some(query_source),
-                message_json_string_overrides: overrides,
-                ..Default::default()
+            execution: {
+                let mut context = llm_runtime::ExecutionContext::default();
+                context.input_protocol = Some(family);
+                context.capture_retry_count = true;
+                context.query_source = Some(query_source);
+                context.message_json_string_overrides = overrides;
+                context
             },
         };
         llm_req.set_tool_choice(convert_tool_choice(request.tool_choice.as_ref()));
@@ -857,12 +858,13 @@ impl SideQueryClient for ProviderSideQueryClient {
                     input,
                     profile: request.profile,
                     stream: false,
-                    execution: llm_runtime::ExecutionContext {
-                        input_protocol: Some(family),
-                        capture_retry_count: true,
-                        query_source: Some(request.query_source.as_str().to_string()),
-                        message_json_string_overrides: overrides,
-                        ..Default::default()
+                    execution: {
+                        let mut context = llm_runtime::ExecutionContext::default();
+                        context.input_protocol = Some(family);
+                        context.capture_retry_count = true;
+                        context.query_source = Some(request.query_source.as_str().to_string());
+                        context.message_json_string_overrides = overrides;
+                        context
                     },
                 };
                 llm_req.execution.enable_prompt_caching = Some(false);

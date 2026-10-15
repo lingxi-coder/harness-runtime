@@ -2786,10 +2786,9 @@ mod shared_client_regression {
             let client = client.clone().with_credential_provider(Arc::new(
                 crate::StaticCredentialProvider::new(crate::Credential::ApiKey(secret.into())),
             ));
-            let prepared = client
-                .prepare(&LlmRequest::new("claude-test"))
-                .await
-                .unwrap();
+            let mut request = LlmRequest::new("claude-test");
+            request.input.max_tokens = Some(4096);
+            let prepared = client.prepare(&request).await.unwrap();
             assert_eq!(
                 prepared
                     .provider_request

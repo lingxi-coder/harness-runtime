@@ -549,7 +549,7 @@ fn insights_request(
         tools: Vec::new(),
         tool_choice: None,
         output_format: None,
-        max_tokens: 8192,
+        max_tokens: Some(8192),
         max_retries: 0,
         temperature: None,
         thinking: Some(llm_runtime::model::thinking::ThinkingConfig::Disabled),

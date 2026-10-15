@@ -503,6 +503,7 @@ mod tests {
         let client = crate::ModelRuntime::from_config(config).unwrap();
         let journal = Arc::new(Journal::default());
         let mut request = crate::LlmRequest::new("model").with_user_text("test");
+        request.input.max_tokens = Some(4096);
         request.execution.computer_submission = Some(submission(journal.clone()));
         let prepared = client.prepare(&request).await.unwrap();
         assert!(journal.0.lock().unwrap().is_empty());
@@ -574,6 +575,7 @@ mod tests {
         }]})).unwrap();
         let client = crate::ModelRuntime::from_config(config).unwrap();
         let mut request = crate::LlmRequest::new("model").with_user_text("test");
+        request.input.max_tokens = Some(4096);
         scope_computer_request(
             Some(ComputerRequestProjection {
                 native: None,
@@ -605,6 +607,7 @@ mod tests {
         let client = crate::ModelRuntime::from_config(config).unwrap();
         let journal = Arc::new(Journal::default());
         let mut request = crate::LlmRequest::new("model").with_user_text("test");
+        request.input.max_tokens = Some(4096);
         request.execution.computer_submission = Some(submission(journal.clone()));
         let transport = Arc::new(ReceiptTransport::default());
         client.execute(&request, transport.clone()).await.unwrap();
@@ -637,6 +640,7 @@ mod tests {
                 None,
             );
             let mut request = crate::LlmRequest::new("model").with_user_text("test");
+            request.input.max_tokens = Some(4096);
             request.execution.computer_submission = Some(receipt.clone());
             request.execution.request_dispatch_admission =
                 Some(crate::RequestDispatchAdmission::new(|| false));
@@ -689,6 +693,7 @@ mod tests {
                 None,
             ));
             let mut request = crate::LlmRequest::new("model").with_user_text("test");
+            request.input.max_tokens = Some(4096);
             for attempt in 1..=2 {
                 let admitted = Arc::new(AtomicBool::new(true));
                 let flag = admitted.clone();
@@ -770,6 +775,7 @@ mod tests {
         };
         let first = client("https://api.anthropic.com", "account-key");
         let mut request = crate::LlmRequest::new("model").with_user_text("test");
+        request.input.max_tokens = Some(4096);
         request.execution.computer_request = true;
         let prepared = first.prepare(&request).await.unwrap();
         let binding = prepared.computer_binding.unwrap();

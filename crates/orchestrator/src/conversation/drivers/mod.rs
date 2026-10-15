@@ -1956,6 +1956,13 @@ impl ConversationOrchestrator {
         // this is the one point every streamed response passes through.
         self.turn_span
             .note_assistant_response(pumped.tool_uses.len());
+        let has_api_error = pumped.assistant_rows.iter().any(|row| row.is_api_error);
+        if !has_api_error {
+            loop_state.recovery.successful_assistant_messages = loop_state
+                .recovery
+                .successful_assistant_messages
+                .saturating_add(1);
+        }
         let persisted_retry_row_ids = pumped
             .assistant_rows
             .iter()
@@ -2382,22 +2389,67 @@ impl ConversationOrchestrator {
                 if loop_state.recovery.output_recovery_actions
                     < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT =>
             {
+                let native_resume_eligible = loop_state
+                    .recovery
+                    .last_generation
+                    .as_ref()
+                    .filter(|_| {
+                        loop_state.recovery.max_output_tokens_recovery_count
+                            < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+                            && loop_state.recovery.output_recovery_actions
+                                < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+                    })
+                    .is_some_and(|frozen| {
+                        let resumable = pumped
+                            .resumable
+                            .as_ref()
+                            .map(crate::output_recovery::utf16_projection_is_true);
+                        crate::output_recovery::native_thinking_resumption_eligible(
+                            &frozen.thinking_resumption_host_facts,
+                            pumped.stop_reason.as_deref(),
+                            loop_state.recovery.successful_assistant_messages,
+                            has_api_error,
+                            pumped.assistant_blocks.len(),
+                            crate::output_recovery::conversation_has_resumable_thinking_block(
+                                &pumped.assistant_blocks,
+                            ),
+                            resumable,
+                            pumped
+                                .usage
+                                .as_ref()
+                                .and_then(|usage| usage.native_resume_context_exhausted),
+                        )
+                    });
+                if native_resume_eligible {
+                    if let Some(frozen) = loop_state.recovery.last_generation.as_ref() {
+                        loop_state.recovery.resume_incomplete_thinking_next_request =
+                            Some(crate::turn_loop::NativeThinkingResumeIntent {
+                                model: frozen.model.clone(),
+                                profile: frozen.profile.clone(),
+                            });
+                        loop_state.recovery.max_output_tokens_recovery_count = loop_state
+                            .recovery
+                            .max_output_tokens_recovery_count
+                            .saturating_add(1);
+                        loop_state.recovery.output_recovery_actions += 1;
+                        return Ok(StreamingIterationDisposition::Continue(
+                            crate::turn_loop::NativeQueryTransition::InPlaceRetry,
+                        ));
+                    }
+                }
                 // The nudge is a META user message carrying the byte-exact
                 // string — CC 2.1.207 builds it via `createUserMessage({…,
                 // isMeta:!0})`, so it persists with top-level `isMeta:true`.
                 let can_repeat_original = pumped
                     .usage
                     .as_ref()
-                    .and_then(|usage| {
-                        usage
-                            .provider_metadata
-                            .get("stream")
-                            .or(Some(&usage.provider_metadata))
+                    .map(|usage| {
+                        let provider_metadata = &usage.provider_metadata;
+                        provider_metadata
+                            .payload_at("/stream")
+                            .unwrap_or_else(|| provider_metadata.clone())
                     })
-                    .and_then(|meta| meta.get("llm_client"))
-                    .and_then(|meta| meta.get("output_budget"))
-                    .and_then(|budget| budget.get("can_repeat_original"))
-                    .and_then(serde_json::Value::as_bool)
+                    .and_then(|meta| meta.bool_at("/llm_client/output_budget/can_repeat_original"))
                     == Some(true);
                 let no_hosted_effects = !pumped.hosted_tool_observed
                     && pumped.assistant_blocks.iter().all(|block| {
@@ -2427,7 +2479,12 @@ impl ConversationOrchestrator {
                             loop_state.recovery.max_output_tokens_override = Some(next);
                             loop_state.recovery.max_output_tokens_escalated = true;
                             loop_state.recovery.output_recovery_actions += 1;
-                            self.discard_retry_attempt(assistant_id).await;
+                            loop_state.recovery.successful_assistant_messages = loop_state
+                                .recovery
+                                .successful_assistant_messages
+                                .saturating_sub(u32::from(!has_api_error));
+                            self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
+                                .await;
                             return Ok(StreamingIterationDisposition::Continue(
                                 crate::turn_loop::NativeQueryTransition::InPlaceRetry,
                             ));
@@ -3791,9 +3848,8 @@ pub(super) fn llm_response_to_pumped_turn(
         }),
         tool_input_issues: resp
             .provider_metadata
-            .get("tool_input_issues")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
+            .raw_source_at("/tool_input_issues")
+            .and_then(|source| serde_json::from_str::<Vec<serde_json::Value>>(&source).ok())
             .unwrap_or_default(),
         stop_reason,
         resumable: resp

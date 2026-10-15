@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use command_api::{BundledPromptFn, CommandRegistry, CommandSource, SlashCommandKind};
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use local_app::LocalAppStore;
 
 /// `loaded_from` tag of the registered skill; `/reload-skills` leaves it alone.
@@ -38,15 +39,23 @@ pub fn register_tool(
     registry.register_builtin(Arc::new(tool_ui::LocalAppTool::new(ctx, store)));
 }
 
-struct LocalAppPrompt(String);
+struct LocalAppPrompt(Utf16JsonProjection);
 
 impl BundledPromptFn for LocalAppPrompt {
-    fn build(&self, args: &str) -> String {
-        if args.trim().is_empty() {
-            self.0.clone()
-        } else {
-            format!("{}\n\n## User Request\n\n{args}", self.0)
+    fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+        let args = args.string_units("").expect("prompt arguments are text");
+        if args
+            .iter()
+            .all(|unit| char::from_u32(u32::from(*unit)).is_some_and(char::is_whitespace))
+        {
+            return self.0.clone();
         }
+
+        let mut units = self.0.string_units("").expect("prompt template is text");
+        units.extend("\n\n## User Request\n\n".encode_utf16());
+        units.extend(args);
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("prompt display matches its source units")
     }
 }
 
@@ -92,4 +101,50 @@ pub fn register_skill(
     command.loaded_from = Some(SKILL_LOADED_FROM.into());
     command.skill_root = None;
     registry.register_command(command);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_appends_exact_argument_and_template_units() {
+        let template_units = vec![b't' as u16, 0xd800];
+        let template = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&template_units),
+            template_units.clone(),
+        )
+        .unwrap();
+        let prompt = LocalAppPrompt(template);
+        let argument_units = vec![b'x' as u16, 0xd83d, 0xde03, 0xdfff];
+        let args = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&argument_units),
+            argument_units.clone(),
+        )
+        .unwrap();
+
+        let expanded = prompt.build(&args);
+        let mut expected = template_units;
+        expected.extend("\n\n## User Request\n\n".encode_utf16());
+        expected.extend(argument_units);
+        assert_eq!(expanded.string_units(""), Some(expected));
+    }
+
+    #[test]
+    fn prompt_omits_whitespace_only_arguments() {
+        let template = Utf16JsonProjection::root_string(
+            "template".into(),
+            "template".encode_utf16().collect(),
+        )
+        .unwrap();
+        let prompt = LocalAppPrompt(template.clone());
+        let args =
+            Utf16JsonProjection::root_string(" \n\t".into(), " \n\t".encode_utf16().collect())
+                .unwrap();
+
+        assert_eq!(
+            prompt.build(&args).string_units(""),
+            template.string_units("")
+        );
+    }
 }

@@ -90,6 +90,24 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
+    /// Native QTe model-option observation for the selected request route.
+    /// `None` means no local override was observed; callers then apply the
+    /// route's baked Native default.
+    fn native_model_option_capability_for_request(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _capability: &str,
+    ) -> Option<bool> {
+        None
+    }
+
+    /// Service-lifetime Native thinking-resumption refusal latch. Clients
+    /// without the SDK error consumer leave this Unknown.
+    fn native_thinking_resumption_refused(&self) -> Option<bool> {
+        None
+    }
+
     /// Native YKe capability for a resolved Foundry deployment. `Some(false)`
     /// is an observed unsupported `tool_search_server` or `tool_search`;
     /// `Some(true)` includes the Native default for an unobserved deployment.
@@ -1566,6 +1584,7 @@ pub struct NativeSandboxHostFacts {
 pub use native_policy_attachments::{
     NativeBashFirstSessionAssignment, NativePolicyHostFacts, NativeProactivityLevel,
     NativeProactivityResponse, NativeProactivitySnapshot, NativeProactivityState,
+    NativeThinkingResumptionHostFacts,
 };
 
 pub struct ConversationOrchestrator {

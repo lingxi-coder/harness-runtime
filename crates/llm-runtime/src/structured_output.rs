@@ -155,7 +155,7 @@ mod native_hun_tests {
             native_hun_enabled_for(
                 &ProviderId::FoundryClaude,
                 ProtocolFamily::FoundryClaude,
-                "claude-sonnet-3-7",
+                "claude-3-7-sonnet",
                 false,
                 false,
             ),

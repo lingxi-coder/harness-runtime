@@ -1165,7 +1165,13 @@ fn decode_response_usage_missing_details_objects_zero_tolerantly() {
 #[test]
 fn decode_response_missing_usage_defaults_to_zero() {
     let decoded = decode(completed_body(&serde_json::json!([])));
-    assert_eq!(decoded.usage, llm_runtime::ExecutionUsage::default());
+    assert_eq!(
+        decoded.usage,
+        llm_runtime::ExecutionUsage {
+            native_resume_context_observed: true,
+            ..Default::default()
+        }
+    );
 }
 
 #[test]

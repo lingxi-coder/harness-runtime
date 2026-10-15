@@ -167,6 +167,7 @@ async fn prompt_cache_subscriber_uses_the_request_credential_snapshot_scopes() {
     let overage = Arc::new(AtomicBool::new(false));
     let client = runtime(first_party, store.clone());
     let mut request = crate::LlmRequest::new("snapshot-model").with_profile("snapshot");
+    request.input.max_tokens = Some(4096);
     request.execution.prompt_cache = Some(crate::PromptCacheRequestContext {native_system_prefix:None,
         system: Some(SystemPromptInput::source_vector(
             vec![PromptText::from_string("system text")],
@@ -258,6 +259,7 @@ async fn account_change_after_request_build_binds_the_current_credential_generat
     let current_epoch = Arc::new(AtomicU64::new(7));
     let overage = Arc::new(AtomicBool::new(false));
     let mut request = crate::LlmRequest::new("snapshot-model").with_profile("snapshot");
+    request.input.max_tokens = Some(4096);
     request.execution.prompt_cache = Some(crate::PromptCacheRequestContext {
         native_system_prefix: None,
         system: Some(SystemPromptInput::source_vector(
@@ -354,6 +356,7 @@ async fn account_change_during_credential_load_keeps_the_request_generation_sepa
     let current_epoch = Arc::new(AtomicU64::new(7));
     let overage = Arc::new(AtomicBool::new(true));
     let mut request = crate::LlmRequest::new("snapshot-model").with_profile("snapshot");
+    request.input.max_tokens = Some(4096);
     request.execution.prompt_cache = Some(crate::PromptCacheRequestContext {
         native_system_prefix: None,
         system: Some(SystemPromptInput::source_vector(
@@ -783,7 +786,8 @@ async fn request_snapshot_signs_final_http_policy_body_and_headers() {
         store.clone(),
     );
     let transport = Arc::new(SignedHttpCapture::default());
-    let request = LlmRequest::new("snapshot-model").with_user_text("final signed request");
+    let mut request = LlmRequest::new("snapshot-model").with_user_text("final signed request");
+    request.input.max_tokens = Some(17);
     let mut prepared = tokio::time::timeout(WAIT, client.prepare_on(&request, transport.clone()))
         .await
         .unwrap()
@@ -1044,6 +1048,7 @@ async fn public_prepare_at_reuses_first_credentials_to_sign_final_http_policy() 
     );
     let transport = Arc::new(SignedHttpCapture::default());
     let mut request = LlmRequest::new("snapshot-model").with_user_text("public signed request");
+    request.input.max_tokens = Some(23);
     request.execution.query_source = Some(SOURCE.into());
     let inspection_time = std::time::UNIX_EPOCH + Duration::from_secs(1_440_938_160);
     let mut prepared = tokio::time::timeout(WAIT, client.prepare_at(&request, inspection_time))
@@ -1194,7 +1199,7 @@ async fn chatgpt_host_seal_keeps_exact_text_and_applies_final_body_policy() {
         .message_json_string_overrides
         .insert("/messages/0/content/0/text".into(), vec![0xd800]);
 
-    let mut prepared = tokio::time::timeout(
+    let mut rejected_budget_draft = tokio::time::timeout(
         WAIT,
         client.prepare_at(&request, std::time::SystemTime::UNIX_EPOCH),
     )
@@ -1203,11 +1208,14 @@ async fn chatgpt_host_seal_keeps_exact_text_and_applies_final_body_policy() {
     .unwrap();
     assert_eq!(store.loads.load(Ordering::SeqCst), 1);
     assert_eq!(
-        prepared.provider_request.body_json.bool_at("/store"),
+        rejected_budget_draft
+            .provider_request
+            .body_json
+            .bool_at("/store"),
         Some(false)
     );
     assert_eq!(
-        prepared
+        rejected_budget_draft
             .provider_request
             .body_json
             .string_at("/instructions")
@@ -1215,8 +1223,64 @@ async fn chatgpt_host_seal_keeps_exact_text_and_applies_final_body_policy() {
         Some("")
     );
 
-    // Late host policy can add fields after the draft's first policy pass;
-    // final sealing must reapply OAuth policy through semantic JSON.
+    // The resolved generation budget is immutable after preparation, even
+    // when another host-added field is removed by ChatGPT's OAuth policy.
+    rejected_budget_draft.provider_request.body_json = rejected_budget_draft
+        .provider_request
+        .body_json
+        .with_object_field(
+            "max_tokens",
+            &wire::JsonPayload::from_generated_value(&json!(97)).unwrap(),
+        )
+        .unwrap();
+    rejected_budget_draft.provider_request.body_json = rejected_budget_draft
+        .provider_request
+        .body_json
+        .with_object_field(
+            "max_output_tokens",
+            &wire::JsonPayload::string_from_utf16_code_units(&[0xd803]),
+        )
+        .unwrap();
+    // `prepare_at` retained an exact byte image; discard it after editing the
+    // source-backed body so this fixture serializes its current JSON payload.
+    rejected_budget_draft.provider_request.body_bytes = None;
+    rejected_budget_draft.provider_request.body_bytes = Some(
+        rejected_budget_draft
+            .provider_request
+            .wire_body_bytes()
+            .unwrap(),
+    );
+    assert!(std::str::from_utf8(
+        rejected_budget_draft
+            .provider_request
+            .body_bytes
+            .as_deref()
+            .unwrap()
+    )
+    .unwrap()
+    .contains("\\ud803"));
+    let error = tokio::time::timeout(WAIT, client.seal_prepared(&mut rejected_budget_draft))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("draft changed the resolved output budget before sealing"),
+        "unexpected seal rejection: {error}"
+    );
+    assert_eq!(store.loads.load(Ordering::SeqCst), 1);
+
+    // A fresh request keeps its resolved budget unchanged while final sealing
+    // reapplies OAuth policy to the remaining host-added semantic JSON.
+    let mut prepared = tokio::time::timeout(
+        WAIT,
+        client.prepare_at(&request, std::time::SystemTime::UNIX_EPOCH),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(store.loads.load(Ordering::SeqCst), 2);
     prepared.provider_request.body_json = prepared
         .provider_request
         .body_json
@@ -1230,15 +1294,7 @@ async fn chatgpt_host_seal_keeps_exact_text_and_applies_final_body_policy() {
         .body_json
         .with_object_field(
             "metadata",
-            &wire::JsonPayload::from_generated_value(&json!({"annotation":"�"})).unwrap(),
-        )
-        .unwrap();
-    prepared.provider_request.body_json = prepared
-        .provider_request
-        .body_json
-        .with_object_field(
-            "max_output_tokens",
-            &wire::JsonPayload::from_generated_value(&json!("discarded exact field")).unwrap(),
+            &wire::JsonPayload::parse(r#"{"annotation":"�","discarded":"\ud803"}"#).unwrap(),
         )
         .unwrap();
     prepared.provider_request.body_json = prepared
@@ -1271,11 +1327,9 @@ async fn chatgpt_host_seal_keeps_exact_text_and_applies_final_body_policy() {
     prepared
         .provider_request
         .json_string_overrides
-        .insert("/max_output_tokens".into(), vec![0xd803]);
-    prepared
-        .provider_request
-        .json_string_overrides
         .insert("/top_p/annotation".into(), vec![0xd804]);
+    // Rebuild the exact image from the edited body and its current overrides.
+    prepared.provider_request.body_bytes = None;
     prepared.provider_request.body_bytes =
         Some(prepared.provider_request.wire_body_bytes().unwrap());
     tokio::time::timeout(WAIT, client.seal_prepared(&mut prepared))
@@ -1283,7 +1337,7 @@ async fn chatgpt_host_seal_keeps_exact_text_and_applies_final_body_policy() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(store.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(store.loads.load(Ordering::SeqCst), 2);
     assert_eq!(
         sealed_auth(&prepared),
         "Bearer synthetic-chatgpt-access-token"

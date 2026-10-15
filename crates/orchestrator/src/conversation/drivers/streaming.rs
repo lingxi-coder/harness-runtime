@@ -1008,7 +1008,8 @@ impl StreamingTurnDriver<'_> {
             outgoing_history_rewriter,
             mut turn_reminders,
             tool_result_reminder_suffixes,
-            native_anthropic_request_context,
+            mut native_anthropic_request_context,
+            thinking_resumption_host_facts,
             mut guarded_async_hook_reminders,
             context_announcements,
             mut wire_tools,
@@ -1136,7 +1137,17 @@ impl StreamingTurnDriver<'_> {
                 messages: snapshot.clone(),
                 tools: wire_tools.clone(),
                 skip_global_cache: skip_global_cache_for_system_prompt,
+                thinking_resumption_host_facts: thinking_resumption_host_facts.clone(),
             });
+        }
+        if turn_step_hook_active || !retry_generation_allowed {
+            loop_state.recovery.resume_incomplete_thinking_next_request = None;
+        } else {
+            loop_state.recovery.apply_native_thinking_resume_intent(
+                &model,
+                model_profile.as_deref(),
+                &mut native_anthropic_request_context,
+            );
         }
         let mut mod_model_state = None;
         let stream_result = if let Some(host) = mod_host {

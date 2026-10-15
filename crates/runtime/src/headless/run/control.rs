@@ -80,11 +80,6 @@ pub(super) fn resolve_set_model_target(field: Option<JsonValueView<'_>>) -> SetM
     }
 }
 
-fn nonnegative_u32_integer(value: f64) -> Option<u32> {
-    (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= f64::from(u32::MAX))
-        .then_some(value as u32)
-}
-
 /// Dispatch a single `control_request` frame using initialization data collected
 /// before the asynchronous dispatcher task starts.
 #[allow(clippy::too_many_arguments)]

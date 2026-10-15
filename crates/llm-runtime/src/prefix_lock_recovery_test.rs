@@ -13,6 +13,7 @@ fn native_facts() -> NativeAnthropicErrorFacts {
         thinking_resumption_refused: false,
         thinking_resumption_beta_requested: None,
         thinking_resumption_beta_refused: false,
+        native_thinking_type_rejection: None,
         native_thinking_binding_controls_beta_requested: None,
         native_thinking_binding_controls_error_evidence: None,
         native_hq_model_source: None,
@@ -65,11 +66,11 @@ fn request_with_target(signature: &str) -> ChatRequest {
             role: MessageRole::Assistant,
             content: vec![
                 ContentBlock::Thinking {
-                    thinking: "prefix".into(),
+                    text: "prefix".into(),
                     signature: Some("prefix-signature".into()),
                 },
                 ContentBlock::Thinking {
-                    thinking: "target".into(),
+                    text: "target".into(),
                     signature: Some(signature.into()),
                 },
                 ContentBlock::Text {
@@ -474,7 +475,7 @@ fn partial_request_strip_preserves_prefix_and_reindexes_cache_string_and_source_
                     citations: None,
                 },
                 ContentBlock::Thinking {
-                    thinking: "preserve".into(),
+                    text: "preserve".into(),
                     signature: Some("prefix-signature".into()),
                 },
                 ContentBlock::Text {
@@ -483,7 +484,7 @@ fn partial_request_strip_preserves_prefix_and_reindexes_cache_string_and_source_
                     citations: None,
                 },
                 ContentBlock::Thinking {
-                    thinking: "strip".into(),
+                    text: "strip".into(),
                     signature: Some("target-signature".into()),
                 },
                 ContentBlock::Text {
@@ -523,19 +524,299 @@ fn partial_request_strip_preserves_prefix_and_reindexes_cache_string_and_source_
         [
             ContentBlock::Text { text: lead, .. },
             ContentBlock::Thinking { signature: Some(prefix), .. },
+            ContentBlock::Text { text: blank, .. },
             ContentBlock::Text { text: keep, .. },
-        ] if lead == "lead" && prefix == "prefix-signature" && keep == "keep"
+        ] if lead == "lead" && prefix == "prefix-signature" && blank == "  " && keep == "keep"
     ));
-    assert_eq!(request.execution.request_content_source_ids[0].len(), 3);
+    assert_eq!(request.execution.request_content_source_ids[0].len(), 4);
     assert_eq!(
         request
             .execution
             .message_json_string_overrides
-            .get("/messages/0/content/2/text"),
+            .get("/messages/0/content/3/text"),
         Some(&vec![0xd800])
     );
     assert_eq!(
         request.input.prompt_cache.breakpoints[0].position,
-        lingxi_llm_client::protocol::CachePosition::Message { index: 0, block: 2 }
+        lingxi_llm_client::protocol::CachePosition::Message { index: 0, block: 3 }
+    );
+}
+
+#[test]
+fn partial_first_thinking_strip_removes_blank_text_before_and_after_target() {
+    let id = MessageId::new();
+    let mut request = crate::LlmRequest::new("claude-sonnet-4-5");
+    request
+        .input
+        .messages
+        .push(lingxi_llm_client::protocol::ConversationMessage {
+            role: MessageRole::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "lead".into(),
+                    thought_signature: None,
+                    citations: None,
+                },
+                ContentBlock::Text {
+                    text: "  ".into(),
+                    thought_signature: None,
+                    citations: None,
+                },
+                ContentBlock::Thinking {
+                    text: "target".into(),
+                    signature: Some("signature".into()),
+                },
+                ContentBlock::Text {
+                    text: "\n".into(),
+                    thought_signature: None,
+                    citations: None,
+                },
+                ContentBlock::Text {
+                    text: "keep".into(),
+                    thought_signature: None,
+                    citations: None,
+                },
+            ],
+            native_options: Vec::new(),
+        });
+    request.execution.request_content_source_ids = vec![vec![HashSet::from([id]); 5]];
+    request
+        .execution
+        .message_json_string_overrides
+        .insert("/messages/0/content/4/text".into(), vec![0xd800]);
+    request
+        .input
+        .prompt_cache
+        .breakpoints
+        .push(lingxi_llm_client::protocol::CacheBreakpoint {
+            position: lingxi_llm_client::protocol::CachePosition::Message { index: 0, block: 4 },
+            scope: None,
+            ttl: lingxi_llm_client::protocol::CacheTtl::FiveMinutes,
+        });
+    assert!(strip_partial_request(
+        &mut request,
+        PrefixLockTarget {
+            request_message_index: 0,
+            request_block_index: 2,
+            source_message_id: id,
+            source_thinking_index: 0,
+        }
+    ));
+    assert!(matches!(request.input.messages[0].content.as_slice(), [
+        ContentBlock::Text { text: lead, .. },
+        ContentBlock::Text { text: keep, .. },
+    ] if lead == "lead" && keep == "keep"));
+    assert_eq!(request.execution.request_content_source_ids[0].len(), 2);
+    assert_eq!(
+        request
+            .execution
+            .message_json_string_overrides
+            .get("/messages/0/content/1/text"),
+        Some(&vec![0xd800])
+    );
+    assert_eq!(
+        request.input.prompt_cache.breakpoints[0].position,
+        lingxi_llm_client::protocol::CachePosition::Message { index: 0, block: 1 }
+    );
+}
+
+#[test]
+fn partial_and_all_request_strips_use_native_js_trim_and_reindex_source_sidecars() {
+    let target_id = MessageId::new();
+    let after_thinking_id = MessageId::new();
+    let after_nel_id = MessageId::new();
+    let keep_id = MessageId::new();
+    let make_request = || {
+        let mut request = crate::LlmRequest::new("claude-sonnet-4-5");
+        request
+            .input
+            .messages
+            .push(lingxi_llm_client::protocol::ConversationMessage {
+                role: MessageRole::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "\u{feff}".into(),
+                        thought_signature: None,
+                        citations: None,
+                    },
+                    ContentBlock::Text {
+                        text: "\u{0085}".into(),
+                        thought_signature: None,
+                        citations: None,
+                    },
+                    ContentBlock::Thinking {
+                        text: "target".into(),
+                        signature: Some("target-signature".into()),
+                    },
+                    ContentBlock::Text {
+                        text: "\u{feff}".into(),
+                        thought_signature: None,
+                        citations: None,
+                    },
+                    ContentBlock::Text {
+                        text: "\u{0085}".into(),
+                        thought_signature: None,
+                        citations: None,
+                    },
+                    ContentBlock::Text {
+                        text: "keep".into(),
+                        thought_signature: None,
+                        citations: None,
+                    },
+                ],
+                native_options: Vec::new(),
+            });
+        request.execution.request_content_source_ids = vec![vec![
+            HashSet::from([target_id]),
+            HashSet::from([target_id]),
+            HashSet::from([target_id]),
+            HashSet::from([after_thinking_id]),
+            HashSet::from([after_nel_id]),
+            HashSet::from([keep_id]),
+        ]];
+        for (block, units) in [
+            (0, vec![0xfeff]),
+            (1, vec![0x0085]),
+            (3, vec![0xfeff]),
+            (4, vec![0x0085]),
+            (5, vec![0xd800]),
+        ] {
+            request
+                .execution
+                .message_json_string_overrides
+                .insert(format!("/messages/0/content/{block}/text"), units);
+            request.input.prompt_cache.breakpoints.push(
+                lingxi_llm_client::protocol::CacheBreakpoint {
+                    position: lingxi_llm_client::protocol::CachePosition::Message {
+                        index: 0,
+                        block,
+                    },
+                    scope: None,
+                    ttl: lingxi_llm_client::protocol::CacheTtl::FiveMinutes,
+                },
+            );
+        }
+        request
+    };
+
+    for partial in [true, false] {
+        let mut request = make_request();
+        if partial {
+            assert!(strip_partial_request(
+                &mut request,
+                PrefixLockTarget {
+                    request_message_index: 0,
+                    request_block_index: 2,
+                    source_message_id: target_id,
+                    source_thinking_index: 0,
+                },
+            ));
+        } else {
+            assert!(strip_all_request_thinking(&mut request));
+        }
+
+        assert!(matches!(request.input.messages[0].content.as_slice(), [
+            ContentBlock::Text { text: first_nel, .. },
+            ContentBlock::Text { text: second_nel, .. },
+            ContentBlock::Text { text: keep, .. },
+        ] if first_nel == "\u{0085}" && second_nel == "\u{0085}" && keep == "keep"));
+        assert_eq!(
+            request.execution.request_content_source_ids[0],
+            vec![
+                HashSet::from([target_id]),
+                HashSet::from([after_nel_id]),
+                HashSet::from([keep_id]),
+            ]
+        );
+        assert_eq!(
+            request.execution.message_json_string_overrides,
+            std::collections::BTreeMap::from([
+                ("/messages/0/content/0/text".into(), vec![0x0085]),
+                ("/messages/0/content/1/text".into(), vec![0x0085]),
+                ("/messages/0/content/2/text".into(), vec![0xd800]),
+            ])
+        );
+        assert_eq!(
+            request
+                .input
+                .prompt_cache
+                .breakpoints
+                .iter()
+                .map(|breakpoint| breakpoint.position)
+                .collect::<Vec<_>>(),
+            vec![
+                lingxi_llm_client::protocol::CachePosition::Message { index: 0, block: 0 },
+                lingxi_llm_client::protocol::CachePosition::Message { index: 0, block: 1 },
+                lingxi_llm_client::protocol::CachePosition::Message { index: 0, block: 2 },
+            ]
+        );
+    }
+}
+
+#[test]
+fn partial_first_source_thinking_preserves_earlier_merged_source_prefix() {
+    let previous = MessageId::new();
+    let target = MessageId::new();
+    let mut request = crate::LlmRequest::new("claude-sonnet-4-5");
+    request
+        .input
+        .messages
+        .push(lingxi_llm_client::protocol::ConversationMessage {
+            role: MessageRole::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "earlier row".into(),
+                    signature: Some("previous".into()),
+                },
+                ContentBlock::Text {
+                    text: "  ".into(),
+                    thought_signature: None,
+                    citations: None,
+                },
+                ContentBlock::Text {
+                    text: "\t".into(),
+                    thought_signature: None,
+                    citations: None,
+                },
+                ContentBlock::Thinking {
+                    text: "target row".into(),
+                    signature: Some("target".into()),
+                },
+                ContentBlock::Text {
+                    text: "keep".into(),
+                    thought_signature: None,
+                    citations: None,
+                },
+            ],
+            native_options: Vec::new(),
+        });
+    request.execution.request_content_source_ids = vec![vec![
+        HashSet::from([previous]),
+        HashSet::from([previous]),
+        HashSet::from([target]),
+        HashSet::from([target]),
+        HashSet::from([target]),
+    ]];
+    assert!(strip_partial_request(
+        &mut request,
+        PrefixLockTarget {
+            request_message_index: 0,
+            request_block_index: 3,
+            source_message_id: target,
+            source_thinking_index: 0,
+        }
+    ));
+    assert!(matches!(request.input.messages[0].content.as_slice(), [
+        ContentBlock::Thinking { signature: Some(signature), .. },
+        ContentBlock::Text { text: prefix_blank, .. },
+        ContentBlock::Text { text: keep, .. },
+    ] if signature == "previous" && prefix_blank == "  " && keep == "keep"));
+    assert_eq!(
+        request.execution.request_content_source_ids[0],
+        vec![
+            HashSet::from([previous]),
+            HashSet::from([previous]),
+            HashSet::from([target]),
+        ]
     );
 }

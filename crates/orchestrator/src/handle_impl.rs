@@ -5778,7 +5778,6 @@ mod tests {
                 transcript_only_message_ids: vec![transcript_only],
                 compact_summary_message_ids: vec![compact_summary],
                 virtual_user_message_ids: vec![virtual_user],
-                api_error_message_ids: Vec::new(),
                 compacted_user_turns: 7,
                 model_context_excluded_message_ids: Vec::new(),
                 loaded_tool_names: vec!["DeferredTool".to_string()],

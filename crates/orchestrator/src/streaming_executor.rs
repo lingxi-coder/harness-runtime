@@ -1605,25 +1605,24 @@ mod synthetic_denial_kind_tests {
         ) -> Result<ToolCallResult, ToolError> {
             let token = ctx.cancel.clone();
             tokio::select! {
-                () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                    Ok(ToolCallResult {
-                        data: tool_api::tool_trait::generated_builtin_result(
-                            &json!({ "content": "ran-to-end" }),
-                        ),
-                        model_content: None,
-                        new_messages: vec![],
-                        context_modifier: None,
-                        is_error: false,
-                        subagent_hooks_fired: false,
-                        mcp_meta: None,
+                            () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                                Ok(ToolCallResult {
+                                    data: tool_api::tool_trait::generated_builtin_result(
+                                        &json!({ "content": "ran-to-end" }),
+                                    ),
+                                    model_content: None,
+                                    new_messages: vec![],
+                                    context_modifier: None,
+                                    is_error: false,
+                                    subagent_hooks_fired: false,
+                                    mcp_meta: None,
 
-            data_projection:None,model_content_projection:None,mcp_meta_projection:None,
-})
-                }
-                () = async { match token { Some(t) => t.cancelled().await, None => std::future::pending().await } } => {
-                    Err(ToolError::Aborted)
-                }
-            }
+            })
+                            }
+                            () = async { match token { Some(t) => t.cancelled().await, None => std::future::pending().await } } => {
+                                Err(ToolError::Aborted)
+                            }
+                        }
         }
     }
 

@@ -31,6 +31,9 @@ pub(crate) struct PreparedTurnStep {
     /// for this main request; kept outside conversation history.
     pub(crate) native_anthropic_request_context:
         Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+    /// Host gate snapshot used only if this model response reaches max_tokens.
+    pub(crate) thinking_resumption_host_facts:
+        crate::conversation::NativeThinkingResumptionHostFacts,
     /// Keep async-hook producer generations through PTL/fallback snapshot
     /// rebuilds so reset can remove an old completion at model admission.
     pub(crate) guarded_async_hook_reminders:
@@ -142,6 +145,7 @@ impl ConversationOrchestrator {
             turn_reminders,
             tool_result_reminder_suffixes,
             native_anthropic_request_context: previous.native_anthropic_request_context.clone(),
+            thinking_resumption_host_facts: previous.thinking_resumption_host_facts.clone(),
             guarded_async_hook_reminders,
             context_announcements: previous.context_announcements.clone(),
             deferred_context_announcement_rows: Vec::new(),
@@ -873,6 +877,40 @@ impl ConversationOrchestrator {
         } else {
             None
         };
+        let mut thinking_resumption_host_facts = self
+            .native_policy_host_facts_provider
+            .as_ref()
+            .map(|provider| provider().thinking_resumption)
+            .unwrap_or_default();
+        let native_resume_route_allowed = crate::output_recovery::native_route_supports_resumption(
+            self.api.as_ref(),
+            &prepared_call.model,
+            prepared_call.model_profile.as_deref(),
+        );
+        thinking_resumption_host_facts.provider_route_allowed = Some(native_resume_route_allowed);
+        let model_capability = if native_resume_route_allowed {
+            self.api
+                .native_model_option_capability_for_request(
+                    &prepared_call.model,
+                    prepared_call.model_profile.as_deref(),
+                    "interleaved_thinking",
+                )
+                .or_else(|| {
+                    crate::output_recovery::native_interleaved_thinking_default(
+                        self.api.as_ref(),
+                        &prepared_call.model,
+                        prepared_call.model_profile.as_deref(),
+                    )
+                })
+        } else {
+            Some(false)
+        };
+        thinking_resumption_host_facts.model_capability_allowed =
+            model_capability.or(thinking_resumption_host_facts.model_capability_allowed);
+        thinking_resumption_host_facts.thinking_resumption_refused = self
+            .api
+            .native_thinking_resumption_refused()
+            .or(thinking_resumption_host_facts.thinking_resumption_refused);
         crate::prompt::async_hook_response::retain_current_async_hook_reminders(
             &mut snapshot,
             &mut turn_reminders,
@@ -887,6 +925,7 @@ impl ConversationOrchestrator {
             turn_reminders,
             tool_result_reminder_suffixes,
             native_anthropic_request_context,
+            thinking_resumption_host_facts,
             guarded_async_hook_reminders,
             context_announcements,
             deferred_context_announcement_rows,

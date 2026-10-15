@@ -69,6 +69,10 @@ pub(super) fn process_visible_response<'a>(
                 tool_requested_end: false,
             });
         }
+        if let Some(state) = recovery.as_deref_mut() {
+            state.successful_assistant_messages =
+                state.successful_assistant_messages.saturating_add(1);
+        }
         if !assistant_blocks.is_empty() {
             if let Some(capture) = &timing_capture {
                 // A batched response has no SSE block completion event, so
@@ -577,9 +581,8 @@ pub(super) fn process_visible_response<'a>(
         if (response.stop_reason.as_deref() != Some("tool_use")
             && response
                 .provider_metadata
-                .get("tool_input_issues")
-                .and_then(serde_json::Value::as_array)
-                .is_none_or(Vec::is_empty))
+                .array_len("/tool_input_issues")
+                .is_none_or(|len| len == 0))
             || !tool_uses.is_empty()
         {
             if let Some(state) = recovery.as_deref_mut() {
@@ -626,9 +629,8 @@ pub(super) fn process_visible_response<'a>(
         } else {
             match if response
                 .provider_metadata
-                .get("tool_input_issues")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|issues| !issues.is_empty())
+                .array_len("/tool_input_issues")
+                .is_some_and(|len| len > 0)
                 && matches!(
                     response.stop_reason.as_deref(),
                     Some("end_turn" | "stop_sequence")
@@ -656,9 +658,8 @@ pub(super) fn process_visible_response<'a>(
                 _ if !tool_uses.is_empty() => {
                     let issues = response
                         .provider_metadata
-                        .get("tool_input_issues")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|items| !items.is_empty());
+                        .array_len("/tool_input_issues")
+                        .is_some_and(|len| len > 0);
                     if issues {
                         if let Some(state) = recovery.as_deref_mut() {
                             if state.output_recovery_actions >= MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
@@ -717,11 +718,50 @@ pub(super) fn process_visible_response<'a>(
                 Some("max_tokens") if recovery.is_some() => {
                     // `recovery.is_some()` guarded above — unwrap is infallible.
                     let state = recovery.expect("recovery is Some");
+                    let native_resume_eligible = state
+                        .last_generation
+                        .as_ref()
+                        .filter(|_| {
+                            state.max_output_tokens_recovery_count
+                                < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+                                && state.output_recovery_actions < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+                        })
+                        .is_some_and(|frozen| {
+                            crate::output_recovery::native_thinking_resumption_eligible(
+                                &frozen.thinking_resumption_host_facts,
+                                response.stop_reason.as_deref(),
+                                state.successful_assistant_messages,
+                                false,
+                                response.content.len(),
+                                crate::output_recovery::history_has_resumable_thinking_block(
+                                    &response.content,
+                                ),
+                                response
+                                    .resumable
+                                    .as_ref()
+                                    .map(crate::output_recovery::json_payload_is_true),
+                                response.usage.native_resume_context_exhausted,
+                            )
+                        });
+                    if native_resume_eligible {
+                        if let Some(frozen) = state.last_generation.as_ref() {
+                            state.resume_incomplete_thinking_next_request =
+                                Some(crate::turn_loop::NativeThinkingResumeIntent {
+                                    model: frozen.model.clone(),
+                                    profile: frozen.profile.clone(),
+                                });
+                            state.max_output_tokens_recovery_count =
+                                state.max_output_tokens_recovery_count.saturating_add(1);
+                            state.output_recovery_actions += 1;
+                            return Ok(TurnStepOutcome::Continue(
+                                NativeQueryTransition::InPlaceRetry,
+                            ));
+                        }
+                    }
                     let malformed_tool = response
                         .provider_metadata
-                        .get("tool_input_issues")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|items| !items.is_empty());
+                        .array_len("/tool_input_issues")
+                        .is_some_and(|len| len > 0);
                     let no_hosted_effects = response.content.iter().all(|block| {
                         matches!(
                             block,
@@ -733,8 +773,7 @@ pub(super) fn process_visible_response<'a>(
                     if (malformed_tool || !has_visible_text(&assistant_blocks))
                         && response
                             .provider_metadata
-                            .pointer("/llm_client/output_budget/can_repeat_original")
-                            .and_then(serde_json::Value::as_bool)
+                            .bool_at("/llm_client/output_budget/can_repeat_original")
                             == Some(true)
                         && no_hosted_effects
                         && !state.max_output_tokens_escalated
@@ -754,7 +793,9 @@ pub(super) fn process_visible_response<'a>(
                                 state.max_output_tokens_override = Some(next);
                                 state.max_output_tokens_escalated = true;
                                 state.output_recovery_actions += 1;
-                                orch.discard_retry_attempt(assistant_id).await;
+                                state.successful_assistant_messages =
+                                    state.successful_assistant_messages.saturating_sub(1);
+                                orch.discard_retry_attempt(assistant_id, &[]).await;
                                 return Ok(TurnStepOutcome::Continue(
                                     NativeQueryTransition::InPlaceRetry,
                                 ));
@@ -765,11 +806,10 @@ pub(super) fn process_visible_response<'a>(
                         orch,
                         assistant_id,
                         state,
-                        !response
+                        response
                             .provider_metadata
-                            .get("tool_input_issues")
-                            .and_then(serde_json::Value::as_array)
-                            .is_none_or(Vec::is_empty),
+                            .array_len("/tool_input_issues")
+                            .is_some_and(|len| len > 0),
                     )
                     .await?
                 }

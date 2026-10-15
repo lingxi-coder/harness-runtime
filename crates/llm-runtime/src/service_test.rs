@@ -99,26 +99,42 @@ mod tests {
         for (thinking, expected) in [
             (ThinkingConfig::Disabled, Some(true)),
             (ThinkingConfig::Adaptive, Some(false)),
+            // Automatic has no explicit Native thinking type. Applying Main
+            // policy preserves that absence while retaining the base snapshot.
             (ThinkingConfig::Automatic, None),
         ] {
-            let service = make_adapter(FakeTransport::always(ProviderResponse::json(
-                200,
-                ok_response_json(),
-            )))
+            let service = make_adapter_for_protocol_with_transport(
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://api.anthropic.com",
+                "native",
+                "claude-opus-4-6",
+                FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+            )
             .with_thinking(thinking);
-            let request = service
-                .build_main_message_request(
-                    MessagesCreateRequest::new(
-                        "claude-sonnet-4-20250514",
-                        None,
-                        None,
-                        vec![text_user_msg("hello")],
-                        vec![],
-                    ),
-                    false,
-                )
+            let mut main = MessagesCreateRequest::new(
+                "claude-opus-4-6",
+                None,
+                None,
+                vec![text_user_msg("hello")],
+                vec![],
+            );
+            main.opts.query_source = Some("sdk".into());
+            let mut request = service
+                .build_main_message_request(main, false)
                 .expect("build a StandardMain request from the captured session config")
                 .0;
+            assert_eq!(
+                request
+                    .execution
+                    .native_thinking_state_snapshot
+                    .map(|state| state.base()),
+                Some(thinking),
+                "the main request captures the session base before native preparation"
+            );
+            service
+                .apply_native_main_thinking_policy(&mut request)
+                .expect("apply the Native Main policy before SDK preparation");
             assert_eq!(
                 request.execution.native_thinking_request_type_disabled,
                 expected
@@ -137,7 +153,7 @@ mod tests {
 
             let utility_request = service
                 .build_request(
-                    "claude-sonnet-4-20250514",
+                    "claude-opus-4-6",
                     None,
                     None,
                     vec![text_user_msg("utility query")],
@@ -164,7 +180,7 @@ mod tests {
             let scheduled_request = service
                 .build_scheduled_request(
                     MessagesCreateRequest::new(
-                        "claude-sonnet-4-20250514",
+                        "claude-opus-4-6",
                         None,
                         None,
                         vec![text_user_msg("scheduled turn")],
@@ -322,6 +338,33 @@ mod tests {
         ]);
         let mut request = LlmRequest::new(model).with_user_text("Hi");
         request.profile = Some("bedrock".into());
+        let mut prepared = service.client.prepare(&request).await.expect("prepare");
+        service
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        let planned = prepared
+            .planned_native_beta_context
+            .as_ref()
+            .expect("planned Native beta context is captured");
+        assert!(
+            planned
+                .generated_body
+                .iter()
+                .any(|beta| beta == crate::model::betas::CONTEXT_1M),
+            "filtered Bedrock CLI body beta is recorded as planned"
+        );
+        assert!(!planned
+            .generated_body
+            .iter()
+            .any(|beta| beta == "not-in-native-static-list"));
+        assert!(!request_header_has_beta(
+            &prepared.provider_request.headers,
+            crate::model::betas::CONTEXT_1M
+        ));
+        assert!(request_body_has_beta(
+            &prepared.provider_request.body_json,
+            crate::model::betas::CONTEXT_1M
+        ));
 
         service
             .execute_non_stream_request(
@@ -333,6 +376,10 @@ mod tests {
             .expect("Bedrock request succeeds");
 
         let body = transport.seen_body(0);
+        assert!(!request_header_has_beta(
+            &transport.seen_headers(0),
+            crate::model::betas::CONTEXT_1M
+        ));
         assert!(request_body_has_beta(
             &body,
             crate::model::betas::CONTEXT_1M
@@ -1553,6 +1600,10 @@ mod tests {
         let mut request = LlmRequest::new(model).with_user_text("Hi");
         request.profile = Some("foundry".into());
         request.execution.thinking_recovery_scope = Some(scope.clone());
+        request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
 
         service
             .execute_non_stream_request(
@@ -1635,7 +1686,7 @@ mod tests {
         assert_eq!(transport.seen_count(), 2);
         let headers = transport.seen_headers(0);
         let tbc = "thinking-binding-controls-2026-08-01";
-        assert!(request_header_has_beta(
+        assert!(!request_header_has_beta(
             &headers,
             crate::model::betas::CONTEXT_1M
         ));
@@ -1644,7 +1695,7 @@ mod tests {
             &transport.seen_body(0),
             crate::model::betas::CONTEXT_1M
         ));
-        assert!(request_header_has_beta(
+        assert!(!request_header_has_beta(
             &transport.seen_headers(1),
             crate::model::betas::CONTEXT_1M
         ));
@@ -3835,7 +3886,8 @@ mod tests {
         base_url: &str,
     ) -> BTreeMap<String, String> {
         let adapter = make_adapter_for_protocol(protocol, provider_id, base_url);
-        let request = LlmRequest::new("model").with_user_text("hi");
+        let mut request = LlmRequest::new("model").with_user_text("hi");
+        request.input.max_tokens = Some(4096);
         let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
         adapter
             .inject_headers(&mut prepared, DispatchHeaderState::default())
@@ -4410,7 +4462,6 @@ mod tests {
                     api_message_override: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolResult {
-                        content_projection: None,
                         tool_use_id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         content: String::new().into(),
                         is_error: Some(false),
@@ -4587,8 +4638,8 @@ mod tests {
     /// questionnaire stage picked 4096, and on `deepseek-v4-pro` a 3123-token
     /// reasoning pass hit `finish_reason: length` at 4098, cutting the tool call
     /// mid-JSON.
-    #[test]
-    fn a_side_query_without_a_ceiling_uses_the_model_request_default() {
+    #[tokio::test]
+    async fn a_side_query_without_a_ceiling_uses_the_model_request_default() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let model = "claude-sonnet-4-20250514";
@@ -4606,27 +4657,50 @@ mod tests {
                     PromptCacheQuerySource::Unspecified,
                 )
                 .expect("build_request")
-                .input
-                .max_tokens
         };
 
         let model_default =
             u32::try_from(crate::model::context_window::default_output_tokens_for_model(model))
                 .expect("the model default fits u32");
+        let automatic = build(None);
+        assert_eq!(automatic.input.max_tokens, None);
+        let prepared = adapter
+            .client
+            .prepare(&automatic)
+            .await
+            .expect("SDK resolves the current model-aware application default");
+        let default_raw = model_default.to_string();
         assert_eq!(
-            build(None),
-            Some(model_default),
-            "an absent ceiling must resolve to the model-aware request default"
+            prepared
+                .provider_request
+                .body_json
+                .raw_source_at("/max_tokens"),
+            Some(default_raw.clone()),
+            "an absent ceiling reaches the wire as the current model-aware default"
         );
         assert!(
             model_default > 4096,
             "this model must have headroom above the figure the app stages \
              used to invent, or the test cannot tell the two apart"
         );
+        let explicit = build(Some(4096));
         assert_eq!(
-            build(Some(4096)),
+            explicit.input.max_tokens,
             Some(4096),
             "an explicit ceiling must still be honored verbatim"
+        );
+        let prepared = adapter
+            .client
+            .prepare(&explicit)
+            .await
+            .expect("the explicit ceiling prepares");
+        assert_eq!(
+            prepared
+                .provider_request
+                .body_json
+                .raw_source_at("/max_tokens"),
+            Some("4096".to_owned()),
+            "an explicit ceiling remains unchanged on the wire"
         );
     }
 
@@ -6152,7 +6226,7 @@ mod tests {
         let unset = body_after_inject(&adapter, &request).await;
         assert_eq!(
             unset.as_json_source(),
-            r#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[],"max_tokens":4096}"#,
+            r#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[],"max_tokens":32000}"#,
             "unset extra body retains the Native main-template source"
         );
 
@@ -6339,7 +6413,8 @@ mod tests {
                 name: "response".into(),
                 schema: provider_payload(serde_json::json!({
                     "type": "object",
-                    "properties": {"ok": {"type": "boolean"}}
+                    "properties": {"ok": {"type": "boolean"}},
+                    "additionalProperties": false
                 })),
                 strict: true,
             };
@@ -6594,7 +6669,8 @@ mod tests {
             ProviderId::AnthropicFirstParty,
             "https://gateway.example",
         );
-        let request = LlmRequest::new("model").with_user_text("hi");
+        let mut request = LlmRequest::new("model").with_user_text("hi");
+        request.input.max_tokens = Some(4096);
         let body = body_after_inject(&adapter, &request).await;
         assert!(body.raw_source_at("/speed").is_none());
         std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
@@ -6607,7 +6683,8 @@ mod tests {
             ProviderId::AnthropicFirstParty,
             "http://api.anthropic.com",
         );
-        let request = LlmRequest::new("model").with_user_text("hi");
+        let mut request = LlmRequest::new("model").with_user_text("hi");
+        request.input.max_tokens = Some(4096);
         let prepared = adapter.client.prepare(&request).await.expect("prepare");
         assert!(!ApiService::direct_anthropic_api_route(&prepared));
     }
@@ -6690,6 +6767,7 @@ mod tests {
             "https://bedrock-runtime.us-east-1.amazonaws.com",
         );
         let mut request = LlmRequest::new("model").with_user_text("hi");
+        request.input.max_tokens = Some(4096);
         request.input.tools.push(serde_json::from_value(serde_json::json!({"name":"ToolSearch", "description":"discover tools", "input_schema":{"type":"object"}})).unwrap());
         let body = body_after_inject(&adapter, &request).await;
         assert!(body.array_len("/anthropic_beta").is_some_and(|len| {
@@ -7131,7 +7209,8 @@ mod tests {
             ProviderId::AnthropicFirstParty,
             "https://api.anthropic.com",
         );
-        let request = LlmRequest::new("model").with_user_text("hi");
+        let mut request = LlmRequest::new("model").with_user_text("hi");
+        request.input.max_tokens = Some(4096);
         let mut aux = adapter.client.prepare(&request).await.expect("prepare");
         adapter
             .inject_headers(&mut aux, DispatchHeaderState::AUXILIARY)
@@ -7674,7 +7753,8 @@ mod tests {
             ProviderId::AnthropicFirstParty,
             "https://api.anthropic.com",
         );
-        let request = LlmRequest::new("model").with_user_text("hi");
+        let mut request = LlmRequest::new("model").with_user_text("hi");
+        request.input.max_tokens = Some(4096);
         let mut query = DispatchHeaderState::default();
         let mut prepared = adapter.client.prepare(&request).await.unwrap();
         let (attempt, _) = adapter.inject_headers(&mut prepared, query).unwrap();
@@ -8043,7 +8123,10 @@ mod tests {
                 ..Default::default()
             };
             adapter.version = "0.12.0".into();
-            let request = LlmRequest::new("model").with_user_text("hi");
+            let mut request = LlmRequest::new("model").with_user_text("hi");
+            if protocol == ProtocolFamily::AnthropicMessages {
+                request.input.max_tokens = Some(4096);
+            }
             let mut prepared = adapter.client.prepare(&request).await.unwrap();
             adapter.apply_user_agent(&mut prepared);
             assert_eq!(prepared.provider_request.headers["user-agent"], expected);
@@ -8119,6 +8202,7 @@ mod tests {
             Box::pin(async move { Some(owner.lock().unwrap().clone()) })
         }));
         let mut admitted = LlmRequest::new("model").with_user_text("hi");
+        admitted.input.max_tokens = Some(4096);
         admitted.input.metadata = lingxi_llm_client::protocol::JsonPayload::from_generated_value(
             &serde_json::json!({"user_id":metadata}),
         )
@@ -8430,7 +8514,6 @@ mod tests {
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 ContentBlock::ToolResult {
-                    content_projection: None,
                     tool_use_id: lingxi_core::types::ToolUseId::new(),
                     content: "lots of text, no media".to_string().into(),
                     is_error: Some(false),
@@ -8459,7 +8542,6 @@ mod tests {
             api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                content_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see images".to_string().into(),
                 is_error: Some(false),
@@ -8487,7 +8569,6 @@ mod tests {
             api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                content_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see image".to_string().into(),
                 is_error: Some(false),
@@ -8516,7 +8597,6 @@ mod tests {
             api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                content_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "imgs".to_string().into(),
                 is_error: Some(false),
@@ -9842,15 +9922,15 @@ mod tests {
         let adapter = make_adapter(transport.clone())
             .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
 
-        let result = adapter
-            .messages_create(crate::MessagesCreateRequest::new(
-                "claude-sonnet-4-20250514",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-            ))
-            .await;
+        let mut request = crate::MessagesCreateRequest::new(
+            "claude-sonnet-4-20250514",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        request.opts.max_output_tokens = Some(32_000);
+        let result = adapter.messages_create(request).await;
 
         assert!(matches!(
             classified_error(&result),
@@ -9978,7 +10058,11 @@ mod tests {
             )
             .await;
 
-        assert!(stream.is_ok(), "stream retry should open: {stream:?}");
+        assert!(
+            stream.is_ok(),
+            "stream retry should open: {:?}",
+            stream.as_ref().err()
+        );
         assert_eq!(transport.stream_call_count(), 2);
         assert_eq!(
             transport
@@ -10655,7 +10739,7 @@ mod tests {
             crate::model::betas::CONTEXT_1M
         ));
         assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
-        assert!(request_header_has_beta(
+        assert!(!request_header_has_beta(
             &transport.seen_headers(1),
             crate::model::betas::CONTEXT_1M
         ));
@@ -10838,7 +10922,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
                 false,
                 Some("main"),
                 Some(crate::RequestDispatchAdmission::new(|| false)),
@@ -10884,7 +10967,6 @@ mod tests {
                 None,
                 Vec::new(),
                 Vec::new(),
-                None,
                 None,
                 None,
                 None,
@@ -10937,7 +11019,6 @@ mod tests {
                     "hello".into(),
                 )],
                 Vec::new(),
-                None,
                 None,
                 None,
                 None,
@@ -11144,12 +11225,15 @@ mod tests {
         );
 
         let result = adapter
-            .stream(
+            .stream_with_attempt_opts(
                 model,
                 Some("openrouter"),
                 None,
                 Vec::new(),
                 Vec::new(),
+                None,
+                None,
+                Some(32_000),
                 None,
                 None,
             )
@@ -11219,12 +11303,15 @@ mod tests {
         );
 
         let result = adapter
-            .stream(
+            .stream_with_attempt_opts(
                 model,
                 Some("openrouter"),
                 None,
                 Vec::new(),
                 Vec::new(),
+                None,
+                None,
+                Some(32_000),
                 None,
                 None,
             )
@@ -11281,12 +11368,15 @@ mod tests {
         );
 
         let result = adapter
-            .stream(
+            .stream_with_attempt_opts(
                 model,
                 Some("openrouter"),
                 None,
                 Vec::new(),
                 Vec::new(),
+                None,
+                None,
+                Some(32_000),
                 None,
                 None,
             )
@@ -12680,15 +12770,10 @@ mod tests {
         let aws = Arc::new(CountingAwsRefresh::default());
         let adapter = make_bedrock_adapter_with_aws(transport.clone(), aws.clone());
 
-        let out = adapter
-            .messages_create(crate::MessagesCreateRequest::new(
-                "model",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-            ))
-            .await;
+        let mut request =
+            crate::MessagesCreateRequest::new("model", None, None, Vec::new(), Vec::new());
+        request.opts.max_output_tokens = Some(4096);
+        let out = adapter.messages_create(request).await;
         assert!(out.is_ok(), "retry after refresh must succeed: {out:?}");
         assert_eq!(
             aws.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -12707,15 +12792,10 @@ mod tests {
         let aws = Arc::new(CountingAwsRefresh::default());
         let adapter = make_bedrock_adapter_with_aws(transport.clone(), aws.clone());
 
-        let out = adapter
-            .messages_create(crate::MessagesCreateRequest::new(
-                "model",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-            ))
-            .await;
+        let mut request =
+            crate::MessagesCreateRequest::new("model", None, None, Vec::new(), Vec::new());
+        request.opts.max_output_tokens = Some(4096);
+        let out = adapter.messages_create(request).await;
         assert!(
             matches!(
                 classified_error(&out),
@@ -12911,8 +12991,16 @@ mod tests {
             )
             .unwrap();
         assert!(request.execution.resolve_native_effort);
-        assert!(adapter.is_first_party_route("claude-sonnet-5-5", None).unwrap());
-        assert!(!adapter.client.fast_account_identity("claude-sonnet-5-5", None).unwrap().first_party);
+        assert!(adapter
+            .is_first_party_route("claude-sonnet-5-5", None)
+            .unwrap());
+        assert!(
+            !adapter
+                .client
+                .fast_account_identity("claude-sonnet-5-5", None)
+                .unwrap()
+                .first_party
+        );
         let mut prepared = adapter.client.prepare(&request).await.unwrap();
         adapter
             .inject_headers(&mut prepared, DispatchHeaderState::default())
@@ -13141,6 +13229,7 @@ mod tests {
             vec![text_user_msg("Return marker.")],
             vec![],
         );
+        request.opts.max_output_tokens = Some(4096);
         request.opts.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
             mid_conversation_tool_changes: true,
             ..Default::default()
@@ -13177,6 +13266,7 @@ mod tests {
             vec![text_user_msg("Return marker.")],
             vec![],
         );
+        same_model_request.opts.max_output_tokens = Some(4096);
         same_model_request.opts.native_anthropic_request_context =
             Some(NativeAnthropicRequestContext {
                 mid_conversation_tool_changes: true,
@@ -13207,6 +13297,7 @@ mod tests {
             vec![text_user_msg("Return marker.")],
             vec![],
         );
+        other_model_request.opts.max_output_tokens = Some(4096);
         other_model_request.opts.native_anthropic_request_context =
             Some(NativeAnthropicRequestContext {
                 mid_conversation_tool_changes: true,
@@ -13240,6 +13331,7 @@ mod tests {
             vec![text_user_msg("Return marker.")],
             vec![],
         );
+        foundry_request.opts.max_output_tokens = Some(4096);
         foundry_request.opts.native_anthropic_request_context =
             Some(NativeAnthropicRequestContext {
                 mid_conversation_tool_changes: true,
@@ -13290,6 +13382,7 @@ mod tests {
             vec![text_user_msg("Return marker.")],
             vec![],
         );
+        request.opts.max_output_tokens = Some(4096);
         request.opts.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
             afk_mode: true,
             ..Default::default()
@@ -13390,6 +13483,7 @@ mod tests {
         )
         .with_native_anthropic_endpoint("https://api.anthropic.com");
         let mut request = LlmRequest::new(model).with_user_text("Return marker.");
+        request.input.max_tokens = Some(4096);
         request.execution.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
             afk_mode: true,
             mid_conversation_tool_changes: true,
@@ -13775,6 +13869,7 @@ mod tests {
             request.execution.native_anthropic_request_context =
                 Some(lingxi_llm_client::NativeAnthropicRequestContext {
                     server_classifier,
+                    resume_incomplete_thinking: false,
                     afk_mode: permission_mode == "auto" && afk_route,
                     // In 2.1.295 V$n() defaults true. These recorded models
                     // pass the Native model capability gate; vh() still

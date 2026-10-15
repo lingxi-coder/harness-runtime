@@ -180,7 +180,6 @@ pub mod repo_root_reload;
 // The rooted filesystem primitives live in the `rooted-fs` crate; re-exporting
 // the crate keeps `host::rooted_fs::…` resolving for every caller.
 pub use ::rooted_fs;
-pub mod agent_statistics;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;

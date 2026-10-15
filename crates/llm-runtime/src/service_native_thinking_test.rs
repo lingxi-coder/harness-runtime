@@ -1,4 +1,4 @@
-//! End-to-end Native Main thinking latch and physical-attempt budget tests.
+//! End-to-end Native Main thinking latch and retry-budget tests.
 
 use super::*;
 use crate::test_support::FixtureTransport;
@@ -6,7 +6,7 @@ use crate::{
     AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, LlmError, ModelProfile,
     PricingConfig, ProviderProfile, ProviderRequest, ProviderResponse, StreamingResponse,
 };
-use lingxi_llm_client::protocol::{NativeThinkingTypeRejection, ThinkingConfig as SourceThinking};
+use lingxi_llm_client::protocol::NativeThinkingTypeRejection;
 use std::sync::{Arc, Mutex};
 
 struct ScriptedNativeTransport {
@@ -51,7 +51,7 @@ impl FixtureTransport for ScriptedNativeTransport {
     ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
         Box::pin(async {
             Err(LlmError::UnsupportedCapability {
-                message: "streaming is not used by this test".into(),
+                capability: "streaming is not used by this test".into(),
             })
         })
     }
@@ -77,7 +77,7 @@ fn native_success() -> ProviderResponse {
         200,
         serde_json::json!({
             "id": "msg_test",
-            "model": "claude-opus-4-8",
+            "model": "claude-opus-4-6",
             "content": [{"type": "text", "text": "hello"}],
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 5, "output_tokens": 2}
@@ -98,9 +98,9 @@ fn service(transport: Arc<ScriptedNativeTransport>) -> ApiService {
                 auth: AuthStrategy::None,
                 credential: CredentialConfig::None,
                 models: vec![ModelProfile {
-                    display_model: "claude-opus-4-8".into(),
-                    request_model: "claude-opus-4-8".into(),
-                    billing_model: "claude-opus-4-8".into(),
+                    display_model: "claude-opus-4-6".into(),
+                    request_model: "claude-opus-4-6".into(),
+                    billing_model: "claude-opus-4-6".into(),
                     aliases: Vec::new(),
                     description: None,
                     metadata: Default::default(),
@@ -140,7 +140,7 @@ fn service(transport: Arc<ScriptedNativeTransport>) -> ApiService {
 }
 
 fn main_request() -> LlmRequest {
-    let mut request = LlmRequest::new("claude-opus-4-8").with_user_text("hello");
+    let mut request = LlmRequest::new("claude-opus-4-6").with_user_text("hello");
     request.stream = false;
     request.input.max_tokens = Some(4096);
     request.execution.query_source = Some("sdk".into());
@@ -181,7 +181,7 @@ fn request_thinking_type(request: &ProviderRequest) -> Option<String> {
 fn retry_control(max_retries: u32) -> crate::model::retry::RetryControl {
     crate::model::retry::RetryControl {
         max_retries,
-        primary_model: "claude-opus-4-8".into(),
+        primary_model: "claude-opus-4-6".into(),
         ..Default::default()
     }
 }
@@ -233,7 +233,7 @@ fn native_main_route_uses_lsn_before_generic_overlay_validation() {
 
     assert_eq!(
         service.main_request_thinking_config(
-            "claude-opus-4-8",
+            "claude-opus-4-6",
             Some("native"),
             crate::PromptCacheQuerySource::Named("sdk"),
             state,
@@ -242,7 +242,7 @@ fn native_main_route_uses_lsn_before_generic_overlay_validation() {
     );
     assert!(matches!(
         service.main_request_thinking_config(
-            "claude-opus-4-8",
+            "claude-opus-4-6",
             Some("native"),
             crate::PromptCacheQuerySource::Named("agent:child"),
             state,
@@ -252,11 +252,14 @@ fn native_main_route_uses_lsn_before_generic_overlay_validation() {
 }
 
 #[tokio::test]
-async fn native_type_retry_respects_zero_and_one_retry_attempt_budgets() {
-    // max_retries=0 permits only the original dispatch. Its matched response
-    // still updates the service-lifetime model latch for the next logical call.
-    let zero_transport =
-        ScriptedNativeTransport::new(vec![native_error("adaptive"), native_success()]);
+async fn native_type_retry_is_one_shot_outside_zero_and_one_retry_budgets() {
+    // The matched typed 400 gets one dedicated repair even when no ordinary
+    // retries remain; it still updates the service-lifetime model latch.
+    let zero_transport = ScriptedNativeTransport::new(vec![
+        native_error("adaptive"),
+        native_success(),
+        native_success(),
+    ]);
     let zero_service = service(zero_transport.clone());
     let initial = main_request();
     set_type_override(
@@ -264,19 +267,23 @@ async fn native_type_retry_respects_zero_and_one_retry_attempt_budgets() {
         &initial,
         NativeThinkingTypeRejection::Adaptive,
     );
-    let error = zero_service
+    zero_service
         .drive_non_stream(
             initial.clone(),
             retry_control(0),
             DispatchHeaderState::default(),
         )
         .await
-        .expect_err("zero retries must surface the original 400");
-    assert_eq!(ApiService::status_of(&error), Some(400));
-    assert_eq!(zero_transport.requests().len(), 1);
+        .expect("zero ordinary retries still allow the dedicated typed repair");
+    let first_call_requests = zero_transport.requests();
+    assert_eq!(first_call_requests.len(), 2);
     assert_eq!(
-        request_thinking_type(&zero_transport.requests()[0]).as_deref(),
+        request_thinking_type(&first_call_requests[0]).as_deref(),
         Some("adaptive")
+    );
+    assert_eq!(
+        request_thinking_type(&first_call_requests[1]).as_deref(),
+        Some("enabled")
     );
 
     zero_service
@@ -288,15 +295,15 @@ async fn native_type_retry_respects_zero_and_one_retry_attempt_budgets() {
         .await
         .expect("the next logical call uses the latched enabled type");
     let zero_requests = zero_transport.requests();
-    assert_eq!(zero_requests.len(), 2);
+    assert_eq!(zero_requests.len(), 3);
     assert_eq!(
-        request_thinking_type(&zero_requests[1]).as_deref(),
+        request_thinking_type(&zero_requests[2]).as_deref(),
         Some("enabled")
     );
 
-    // max_retries=1 allows one dedicated type retry. A second type error
-    // writes its opposite target before retry admission, but cannot dispatch a
-    // third request; the next logical call observes that updated latch.
+    // The dedicated repair is also independent of a one-retry ordinary
+    // budget. A second typed error updates the latch, but the one-shot gate
+    // prevents a third request in this logical call.
     let one_transport = ScriptedNativeTransport::new(vec![
         native_error("adaptive"),
         native_error("enabled"),

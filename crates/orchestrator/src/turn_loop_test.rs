@@ -5163,13 +5163,15 @@ mod read_file_state_tests {
 // ============================================================================
 #[cfg(test)]
 mod max_output_tokens_recovery_tests {
-    use crate::conversation::ConversationOrchestrator;
+    use crate::conversation::{
+        ConversationOrchestrator, NativePolicyHostFacts, NativeThinkingResumptionHostFacts,
+    };
     use crate::test_support::{
         mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
         NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::turn_loop::{
-        execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome,
+        execute_one_turn_with_recovery, NativeQueryTransition, RecoveryState, TurnStepOutcome,
         MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
         TEST_RECOVERY_OUTPUT_BUDGET,
     };
@@ -5206,6 +5208,38 @@ mod max_output_tokens_recovery_tests {
             }],
             Some("max_tokens"),
         )
+    }
+
+    /// A signed, resumable max-token response with the real Native frozen
+    /// output-budget metadata. This intentionally qualifies for both recovery
+    /// paths so the typed Native gates decide which one wins.
+    fn repeatable_partial_thinking_response() -> HistoryResponse {
+        let mut partial = mock_message_response(
+            vec![llm_runtime::ContentBlock::Reasoning {
+                text: "unfinished thought".into(),
+                signature: Some("signed-block".into()),
+            }],
+            Some("max_tokens"),
+        );
+        partial.resumable = Some(
+            lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!(
+                true
+            ))
+            .expect("resumable fixture is valid JSON"),
+        );
+        partial.usage =
+            llm_runtime::ExecutionUsage::from_counts(lingxi_llm_client::protocol::Usage {
+                input_tokens: 100,
+                output_tokens: 200,
+                ..Default::default()
+            });
+        partial.usage.native_resume_context_exhausted = Some(false);
+        partial.provider_metadata =
+            lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!({
+                "llm_client": { "output_budget": { "can_repeat_original": true } }
+            }))
+            .expect("Native frozen retry metadata is valid JSON");
+        partial
     }
 
     /// Snapshot the current session history.
@@ -5328,6 +5362,207 @@ mod max_output_tokens_recovery_tests {
             }
             other => panic!("expected User nudge message, got {other:?}"),
         }
+    }
+
+    fn fully_known_resumption_facts() -> NativeThinkingResumptionHostFacts {
+        NativeThinkingResumptionHostFacts {
+            feature_gate_enabled: Some(true),
+            request_gate_enabled: Some(true),
+            provider_route_allowed: Some(true),
+            model_capability_allowed: Some(true),
+            disable_experimental_betas: Some(false),
+            hipaa_mode: Some(false),
+            thinking_resumption_refused: Some(false),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_resume_preserves_partial_thinking_on_the_actual_next_request() {
+        let api = Arc::new(
+            MockApiClient::new(vec![
+                repeatable_partial_thinking_response(),
+                mock_message_response(
+                    vec![llm_runtime::ContentBlock::Text {
+                        text: "done".into(),
+                        cache_control: None,
+                        citations: None,
+                    }],
+                    Some("end_turn"),
+                ),
+            ])
+            .with_recovery_budget(64_000),
+        );
+        api.set_native_request_route(Some(llm_runtime::ProtocolFamily::AnthropicMessages), true);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_native_policy_host_facts_provider(|| NativePolicyHostFacts {
+            thinking_resumption: fully_known_resumption_facts(),
+            ..Default::default()
+        });
+        let mut state = RecoveryState::default();
+
+        assert!(matches!(
+            execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+                .await
+                .expect("max_tokens step"),
+            TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry)
+        ));
+        assert!(state.retry_generation.is_none());
+        assert_eq!(state.max_output_tokens_override, None);
+        assert!(state.resume_incomplete_thinking_next_request.is_some());
+        assert!(matches!(
+            history(&orch).await.last(),
+            Some(ConversationMessage::Assistant {
+                stop_reason: Some(reason),
+                ..
+            }) if reason == "max_tokens"
+        ));
+        assert!(!history(&orch).await.iter().any(|message| {
+            matches!(message, ConversationMessage::User { content, .. }
+                if content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. }
+                    if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)))
+        }));
+
+        assert!(matches!(
+            execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+                .await
+                .expect("resumed request"),
+            TurnStepOutcome::Ended { .. }
+        ));
+        let requests = api.captured_requests().await;
+        let [crate::OrchestratorApiRequest::Main(first), crate::OrchestratorApiRequest::Main(second)] =
+            requests.as_slice()
+        else {
+            panic!("expected exactly two physical main requests: {requests:?}");
+        };
+        assert!(!first
+            .opts
+            .native_anthropic_request_context
+            .as_ref()
+            .is_some_and(|context| context.resume_incomplete_thinking));
+        assert!(second
+            .opts
+            .native_anthropic_request_context
+            .as_ref()
+            .is_some_and(|context| context.resume_incomplete_thinking));
+        assert_eq!(second.opts.max_output_tokens, None);
+        assert!(
+            second.messages.iter().any(|message| {
+                message.role() == lingxi_core::types::MessageRole::Assistant
+                    && matches!(
+                        message,
+                        ConversationMessage::Assistant { content, .. }
+                            if content.iter().any(|block| {
+                                matches!(
+                                    block,
+                                    ContentBlock::Thinking {
+                                        signature: Some(signature),
+                                        ..
+                                    } if signature == "signed-block"
+                                )
+                            })
+                    )
+            }),
+            "Native resume must receive the retained assistant thinking block"
+        );
+        assert!(
+            !second.messages.iter().any(|message| {
+                message.role() == lingxi_core::types::MessageRole::User
+                    && matches!(
+                        message,
+                        ConversationMessage::User { content, .. }
+                            if content.iter().any(|block| {
+                                matches!(block, ContentBlock::Text { text, .. }
+                                if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
+                            })
+                    )
+            }),
+            "a qualifying resume omits the ordinary max-token nudge"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_native_gates_keep_frozen_budget_retry_and_discard_partial_assistant() {
+        let api = Arc::new(
+            MockApiClient::new(vec![
+                repeatable_partial_thinking_response(),
+                mock_message_response(
+                    vec![llm_runtime::ContentBlock::Text {
+                        text: "done after frozen retry".into(),
+                        cache_control: None,
+                        citations: None,
+                    }],
+                    Some("end_turn"),
+                ),
+            ])
+            .with_recovery_budget(64_000),
+        );
+        api.set_native_request_route(Some(llm_runtime::ProtocolFamily::AnthropicMessages), true);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_native_policy_host_facts_provider(|| NativePolicyHostFacts::default());
+        let mut state = RecoveryState::default();
+
+        assert!(matches!(
+            execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+                .await
+                .expect("max_tokens step"),
+            TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry)
+        ));
+        assert!(state.resume_incomplete_thinking_next_request.is_none());
+        assert!(state.retry_generation.is_some());
+        assert_eq!(state.max_output_tokens_override, Some(64_000));
+        assert!(
+            history(&orch).await.iter().all(|message| !matches!(
+                message,
+                ConversationMessage::Assistant {
+                    stop_reason: Some(reason),
+                    ..
+                } if reason == "max_tokens"
+            )),
+            "when Native facts are Unknown, the existing frozen retry still discards its partial assistant"
+        );
+        assert!(history(&orch).await.iter().all(|message| !matches!(
+            message,
+            ConversationMessage::User { content, .. }
+                if content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. }
+                    if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE))
+        )));
+
+        assert!(matches!(
+            execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+                .await
+                .expect("frozen-budget retry ends"),
+            TurnStepOutcome::Ended { .. }
+        ));
+        let requests = api.captured_requests().await;
+        let [crate::OrchestratorApiRequest::Main(_first), crate::OrchestratorApiRequest::Main(second)] =
+            requests.as_slice()
+        else {
+            panic!("expected initial and frozen-budget requests: {requests:?}");
+        };
+        assert_eq!(second.opts.max_output_tokens, Some(64_000));
+        assert!(!second
+            .opts
+            .native_anthropic_request_context
+            .as_ref()
+            .is_some_and(|context| context.resume_incomplete_thinking));
     }
 
     /// (parity 2.1.207 P2-05) End-to-end persist: driving a real `max_tokens`

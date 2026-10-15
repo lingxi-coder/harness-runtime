@@ -810,7 +810,7 @@ fn array_index(units: &[u16]) -> Option<u32> {
     }
     let text = String::from_utf16(units).ok()?;
     let index = text.parse::<u32>().ok()?;
-    (index <= u32::MAX - 1).then_some(index)
+    (index < u32::MAX).then_some(index)
 }
 
 fn join_path(parent: &[u16], component: &[u16]) -> Vec<u16> {

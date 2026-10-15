@@ -598,10 +598,11 @@ pub(crate) fn normalize_native_permissions(
         }
     }
 
-    if uncertain_restriction && !known_unreadable {
-        if !unresolved_fields.iter().any(|path| path == "permissions") {
-            unresolved_fields.push("permissions".to_owned());
-        }
+    if uncertain_restriction
+        && !known_unreadable
+        && !unresolved_fields.iter().any(|path| path == "permissions")
+    {
+        unresolved_fields.push("permissions".to_owned());
     }
 
     if default_mode.status == NativePermissionDefaultModeStatus::Absent {
@@ -677,7 +678,7 @@ fn native_default_mode_due_issue() -> NativePermissionDueIssue {
             parts.push(TextPart::Static("|"));
         }
         parts.push(TextPart::Static("\""));
-        parts.push(TextPart::Static(*mode));
+        parts.push(TextPart::Static(mode));
         parts.push(TextPart::Static("\""));
     }
     NativePermissionDueIssue {
@@ -1359,7 +1360,7 @@ fn js_uppercase_first_unit(unit: u16) -> Vec<u16> {
         0x019B => vec![(i32::from(unit) + (42561)) as u16],
         0x01C6..=0x01CC if unit % 3 == 1 => vec![(i32::from(unit) + (-2)) as u16],
         0x013A..=0x0148 | 0x017A..=0x017E | 0x01D0..=0x01DC | 0x04C2..=0x04CE | 0x2C68..=0x2C6C
-            if unit % 2 == 0 =>
+            if unit.is_multiple_of(2) =>
         {
             vec![(i32::from(unit) + (-1)) as u16]
         }
@@ -1390,7 +1391,7 @@ fn js_uppercase_first_unit(unit: u16) -> Vec<u16> {
         {
             vec![(i32::from(unit) + (-1)) as u16]
         }
-        0x01C5..=0x01CE if unit % 3 == 0 => vec![(i32::from(unit) + (-1)) as u16],
+        0x01C5..=0x01CE if unit.is_multiple_of(3) => vec![(i32::from(unit) + (-1)) as u16],
         0x1F51..=0x1F57 if unit % 2 == 1 => vec![(i32::from(unit) + (8)) as u16],
         0x00DF => vec![0x0053, 0x0053],
         0x0149 => vec![0x02BC, 0x004E],

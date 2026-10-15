@@ -741,7 +741,7 @@ impl InsightsSideQueryExecutor {
                 tools: Vec::new(),
                 tool_choice: None,
                 output_format: None,
-                max_tokens,
+                max_tokens: Some(max_tokens),
                 // ProviderSideQueryClient leaves caller retry budgets to the
                 // ApiService. Native has no per-call maxRetries override.
                 max_retries: 0,

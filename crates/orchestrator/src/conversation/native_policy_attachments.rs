@@ -386,6 +386,44 @@ fn native_js_env_truthy(value: Option<&OsStr>) -> bool {
     value.is_some_and(|value| !value.is_empty())
 }
 
+/// Exact Host observations used to admit Native incomplete-thinking resumption.
+/// Every field is optional because the local host may not own Native's dynamic
+/// feature service or request-scoped refusal latch. Missing evidence disables
+/// resumption.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeThinkingResumptionHostFacts {
+    /// Native `Vr("tengu_thinking_block_resumption", false)` result.
+    pub feature_gate_enabled: Option<bool>,
+    /// Native independent `k("tengu_thinking_block_resumption", false)` result.
+    pub request_gate_enabled: Option<bool>,
+    /// Native provider-family gate (`firstParty`, Anthropic AWS/Google, Foundry).
+    pub provider_route_allowed: Option<bool>,
+    /// Native `interleaved_thinking` per-model capability result.
+    pub model_capability_allowed: Option<bool>,
+    /// Native experimental-beta disable environment setting.
+    pub disable_experimental_betas: Option<bool>,
+    /// Whether this process is in HIPAA mode.
+    pub hipaa_mode: Option<bool>,
+    /// Native service-lifetime thinking-resumption refusal latch, set only
+    /// from the SDK's exact beta-specific HTTP 400 fact.
+    pub thinking_resumption_refused: Option<bool>,
+}
+
+impl NativeThinkingResumptionHostFacts {
+    /// Every Native policy gate must be positively known and admitted.
+    /// Context-window headroom is evaluated from the selected request model
+    /// separately, and is only consulted when Native's usage total is nonzero.
+    pub(crate) fn gates_admitted(&self) -> bool {
+        self.feature_gate_enabled == Some(true)
+            && self.request_gate_enabled == Some(true)
+            && self.provider_route_allowed == Some(true)
+            && self.model_capability_allowed == Some(true)
+            && self.disable_experimental_betas == Some(false)
+            && self.hipaa_mode == Some(false)
+            && self.thinking_resumption_refused == Some(false)
+    }
+}
+
 /// Live facts the host can authoritatively source from its current session.
 /// `None` means the host has no corresponding value; policy generation keeps
 /// the Native default or omits an active announcement rather than guessing.
@@ -413,6 +451,8 @@ pub struct NativePolicyHostFacts {
     pub proactivity_level: Option<NativeProactivityLevel>,
     /// Whether Native attachment rendering is enabled for this session.
     pub attachments_enabled: Option<bool>,
+    /// Source-backed gates for the max-output incomplete-thinking continuation.
+    pub thinking_resumption: NativeThinkingResumptionHostFacts,
 }
 
 fn source_object(fields: Vec<(&str, Source)>) -> Source {
