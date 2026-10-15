@@ -1,3 +1,4 @@
+//! Production adapter contracts for DeepSeek hosted web-search responses.
 use llm_runtime::services::sdk;
 use llm_runtime::{ApiService, ClientConfig, ModelRuntime, SubscriberState};
 use orchestrator::ProviderApiAdapter;

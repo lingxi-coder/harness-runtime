@@ -99,6 +99,7 @@ impl Tool for PermissionInputFixture {
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
