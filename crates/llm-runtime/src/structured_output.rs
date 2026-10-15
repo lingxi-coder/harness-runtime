@@ -100,7 +100,7 @@ mod native_hun_tests {
     use super::{bool_value, native_hun_enabled_for};
     use crate::{ProtocolFamily, ProviderId};
 
-    const MODEL: &str = "claude-sonnet-4-20250514";
+    const MODEL: &str = "claude-sonnet-4-5-20250929";
 
     #[test]
     fn native_structured_output_disable_uses_native_typed_boolean_parser() {

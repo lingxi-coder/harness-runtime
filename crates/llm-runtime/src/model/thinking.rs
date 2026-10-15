@@ -133,6 +133,84 @@ pub fn model_supports_adaptive_thinking(model: &str) -> bool {
     true
 }
 
+/// Native qPt's no-latch model default. The adaptive-disable setting is
+/// consulted only for Opus 4.6 and Sonnet 4.6; other adaptive-capable models
+/// keep their source-selected default.
+#[must_use]
+pub fn native_adaptive_default(model: &str) -> bool {
+    let model_option_capability =
+        crate::model::betas::native_model_option_capability_from_process_env(
+            model,
+            true,
+            "adaptive_thinking",
+        );
+    native_adaptive_default_from_inputs(
+        model,
+        model_option_capability,
+        std::env::var(branding::MODEL_CAPABILITIES_ENV)
+            .ok()
+            .as_deref(),
+        true,
+    )
+}
+
+/// Resolve the source qPt/Uyo adaptive default from route-selected inputs.
+#[must_use]
+pub(crate) fn native_adaptive_default_from_inputs(
+    resolved_model: &str,
+    model_option_capability: Option<bool>,
+    model_capabilities: Option<&str>,
+    provider_default: bool,
+) -> bool {
+    // QTe's exact per-model environment observation precedes h_ capability
+    // overrides and the model/provider fallback. `None` is a cached absence,
+    // not a negative capability.
+    let canonical = lingxi_core::host::model_capabilities::normalize_model_id(resolved_model);
+    let adaptive = if let Some(capability) = model_option_capability {
+        capability
+    } else if native_non_adaptive_model(&canonical) {
+        false
+    } else if let Some(capability) = lingxi_core::host::model_capabilities::capability_override(
+        &canonical,
+        "adaptive_thinking",
+        model_capabilities,
+    ) {
+        capability
+    } else if let Some(baked_capability) = native_baked_adaptive_capability(&canonical) {
+        baked_capability
+    } else {
+        canonical == "claude-mythos-5" || provider_default
+    };
+    if !adaptive {
+        return false;
+    }
+
+    // qPt applies this process gate after Uyo and only to the 4.6 canonical
+    // models. It suppresses the adaptive type; it does not disable thinking.
+    !is_thinking_env_disabled("LINGXI_DISABLE_ADAPTIVE_THINKING")
+        || !matches!(canonical.as_str(), "claude-opus-4-6" | "claude-sonnet-4-6")
+}
+
+fn native_non_adaptive_model(canonical_model: &str) -> bool {
+    canonical_model.contains("claude-3-")
+        || matches!(
+            canonical_model,
+            "claude-opus-4-0"
+                | "claude-opus-4-1"
+                | "claude-opus-4-5"
+                | "claude-sonnet-4-0"
+                | "claude-sonnet-4-5"
+                | "claude-haiku-4-5"
+        )
+}
+
+fn native_baked_adaptive_capability(canonical_model: &str) -> Option<bool> {
+    lingxi_core::host::model_capabilities::is_known_model_id(canonical_model).then(|| {
+        lingxi_core::host::model_capabilities::capabilities_for(canonical_model)
+            .contains(&"adaptive_thinking")
+    })
+}
+
 /// `rhn` — the v2.1.185 temperature-gate model set (binary `function rhn`
 /// @195164989). When thinking is disabled, claude-code sends `temperature:1`
 /// ONLY for these models; for every OTHER model — including the default
@@ -467,6 +545,93 @@ mod tests {
         }
         // Unknown → firstParty default true.
         assert!(model_supports_adaptive_thinking("claude-some-future-9"));
+    }
+
+    #[test]
+    fn native_qpt_resolves_model_capability_then_provider_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _adaptive = EnvGuard::unset("LINGXI_DISABLE_ADAPTIVE_THINKING");
+
+        // Exact QTe per-model fact precedes static exclusions, while h_ cannot
+        // reopen the excluded model family.
+        assert!(!native_adaptive_default_from_inputs(
+            "claude-opus-4-8",
+            Some(false),
+            Some("adaptive_thinking"),
+            true,
+        ));
+        assert!(native_adaptive_default_from_inputs(
+            "claude-opus-4-5",
+            Some(true),
+            None,
+            false,
+        ));
+
+        assert!(!native_adaptive_default_from_inputs(
+            "vendor-claude-3-unlisted",
+            None,
+            None,
+            true,
+        ));
+
+        // A static exclusion precedes h_; absent h_ then falls through the
+        // baked table, the Mythos special, and finally provider default.
+        assert!(!native_adaptive_default_from_inputs(
+            "claude-opus-4-5",
+            None,
+            Some("claude-opus-4-5=adaptive_thinking"),
+            true,
+        ));
+        assert!(!native_adaptive_default_from_inputs(
+            "claude-opus-4-5",
+            None,
+            None,
+            true,
+        ));
+        assert!(native_adaptive_default_from_inputs(
+            "claude-opus-4-8",
+            None,
+            None,
+            false,
+        ));
+        assert!(!native_adaptive_default_from_inputs(
+            "claude-future-model",
+            None,
+            None,
+            false,
+        ));
+        assert!(native_adaptive_default_from_inputs(
+            "claude-future-model",
+            None,
+            None,
+            true,
+        ));
+    }
+
+    #[test]
+    fn native_adaptive_disable_only_suppresses_46_after_capability_resolution() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _adaptive = EnvGuard::set("LINGXI_DISABLE_ADAPTIVE_THINKING", "1");
+        assert!(!native_adaptive_default_from_inputs(
+            "claude-opus-4-6",
+            None,
+            Some("adaptive_thinking"),
+            false,
+        ));
+        assert!(native_adaptive_default_from_inputs(
+            "claude-opus-4-8",
+            None,
+            Some("adaptive_thinking"),
+            false,
+        ));
+        // A target that never resolved adaptive stays manual regardless of the
+        // 4.6-only disable input.
+        assert!(!native_adaptive_default_from_inputs(
+            "claude-opus-4-6",
+            None,
+            None,
+            false,
+        ));
     }
 
     #[test]

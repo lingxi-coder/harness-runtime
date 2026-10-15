@@ -1040,6 +1040,7 @@ async fn provider_invalid_request_uses_status_gated_native_error_copy() {
                 native_hq_model_provider_family: None,
                 native_hq_known_error_evidence: None,
                 native_hq_hrn15_evidence: None,
+                native_thinking_type_rejection: None,
                 response: None,
             }),
         }

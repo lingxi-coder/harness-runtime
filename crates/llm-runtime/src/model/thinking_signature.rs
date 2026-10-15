@@ -427,6 +427,13 @@ pub(crate) fn retain_input_blocks(
     use lingxi_llm_client::protocol::{CachePosition, ContentBlock as Block};
     let previous = std::mem::take(&mut request.execution.message_json_string_overrides);
     let mut remapped = previous.clone();
+    let previous_sources = std::mem::take(&mut request.execution.request_content_source_ids);
+    let sources_aligned = previous_sources.len() == request.input.messages.len()
+        && previous_sources
+            .iter()
+            .zip(&request.input.messages)
+            .all(|(sources, message)| sources.len() == message.content.len());
+    let mut remapped_sources = sources_aligned.then(|| previous_sources.clone());
     let mut changed = false;
     let mut positions = std::collections::BTreeMap::new();
     let mut affected = std::collections::HashSet::new();
@@ -460,6 +467,7 @@ pub(crate) fn retain_input_blocks(
         }
         let message_changed = message.content.len() != old_len;
         changed |= message_changed;
+        let mut placeholder_inserted = false;
         if message_changed && message.content.is_empty() {
             if let Some(text) = empty_placeholder {
                 message.content.push(Block::Text {
@@ -467,7 +475,20 @@ pub(crate) fn retain_input_blocks(
                     thought_signature: None,
                     citations: None,
                 });
+                placeholder_inserted = true;
             }
+        }
+        if let Some(remapped_sources) = remapped_sources.as_mut() {
+            let mut next_sources = Vec::with_capacity(message.content.len());
+            for old_index in 0..old_len {
+                if positions.contains_key(&(mi, old_index)) {
+                    next_sources.push(previous_sources[mi][old_index].clone());
+                }
+            }
+            if placeholder_inserted {
+                next_sources.push(std::collections::HashSet::new());
+            }
+            remapped_sources[mi] = next_sources;
         }
     }
     request
@@ -487,6 +508,7 @@ pub(crate) fn retain_input_blocks(
             true
         });
     request.execution.message_json_string_overrides = remapped;
+    request.execution.request_content_source_ids = remapped_sources.unwrap_or_default();
     changed
 }
 

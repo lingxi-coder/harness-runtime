@@ -8,7 +8,7 @@ use lingxi_llm_client::replay::{
     has_replay_metadata, native_cited_text, ReplayContext, ReplayPolicy,
 };
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 fn computer_marker(block: &ContentBlock) -> Option<(&str, &wire::JsonPayload, &str)> {
     let ContentBlock::ProviderContent { protocol, value } = block else {
@@ -660,8 +660,59 @@ pub fn history_input(
     tools: &[ToolDeclaration],
     protocol: wire::ProtocolFamily,
 ) -> Result<(wire::ChatRequest, BTreeMap<String, Vec<u16>>), LlmError> {
+    let (request, overrides, _) =
+        history_input_inner(model, messages, None, system, tools, protocol)?;
+    Ok((request, overrides))
+}
+
+/// Build canonical request input and carry the exact source ids for each
+/// projected content block. The sidecar follows project_message's original
+/// content indexes and is incomplete by construction when an input source row
+/// is missing.
+pub(crate) fn history_input_with_sources(
+    model: &str,
+    messages: &[Message],
+    source_block_ids: &[Vec<HashSet<lingxi_core::types::MessageId>>],
+    system: &[SystemBlock],
+    tools: &[ToolDeclaration],
+    protocol: wire::ProtocolFamily,
+) -> Result<
+    (
+        wire::ChatRequest,
+        BTreeMap<String, Vec<u16>>,
+        Vec<Vec<HashSet<lingxi_core::types::MessageId>>>,
+    ),
+    LlmError,
+> {
+    let (request, overrides, source_rows) = history_input_inner(
+        model,
+        messages,
+        Some(source_block_ids),
+        system,
+        tools,
+        protocol,
+    )?;
+    Ok((request, overrides, source_rows.unwrap_or_default()))
+}
+
+fn history_input_inner(
+    model: &str,
+    messages: &[Message],
+    source_block_ids: Option<&[Vec<HashSet<lingxi_core::types::MessageId>>]>,
+    system: &[SystemBlock],
+    tools: &[ToolDeclaration],
+    protocol: wire::ProtocolFamily,
+) -> Result<
+    (
+        wire::ChatRequest,
+        BTreeMap<String, Vec<u16>>,
+        Option<Vec<Vec<HashSet<lingxi_core::types::MessageId>>>>,
+    ),
+    LlmError,
+> {
     let mut result = wire::ChatRequest::new(model);
     let mut overrides = BTreeMap::new();
+    let mut projected_source_rows = source_block_ids.map(|_| Vec::new());
     let computer_ids = computer_tool_ids(messages)?;
     let acknowledged_receipts = acknowledged_computer_receipts(messages)?;
     let abandoned_calls = abandoned_computer_calls(messages)?;
@@ -694,6 +745,18 @@ pub fn history_input(
         {
             continue;
         }
+        let projected_sources = source_block_ids.map(|source_rows| {
+            projected
+                .iter()
+                .map(|(original, _)| {
+                    source_rows
+                        .get(message_index)
+                        .and_then(|row| row.get(*original))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+        });
         // Retain malformed UTF-16 text at a protocol-neutral message/content
         // pointer; the SDK codec maps that source coordinate to the final
         // provider body after it has encoded the request.
@@ -775,6 +838,11 @@ pub fn history_input(
             }
         }
         result.messages.push(wire_message);
+        if let (Some(rows), Some(projected_sources)) =
+            (projected_source_rows.as_mut(), projected_sources)
+        {
+            rows.push(projected_sources);
+        }
     }
     let toolsets: BTreeMap<_, _> = result
         .messages
@@ -909,7 +977,7 @@ pub fn history_input(
                 .map_err(invalid)?;
         }
     }
-    Ok((result, overrides))
+    Ok((result, overrides, projected_source_rows))
 }
 
 #[cfg(test)]

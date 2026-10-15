@@ -403,6 +403,7 @@ mod upgrade_tests {
             native_hq_model_provider_family: None,
             native_hq_known_error_evidence: None,
             native_hq_hrn15_evidence: None,
+            native_thinking_type_rejection: None,
             response: Some(wire::NativeAnthropicErrorResponse {
                 body: Some(
                     wire::JsonPayload::parse(
@@ -481,6 +482,7 @@ mod upgrade_tests {
             native_hq_model_provider_family: None,
             native_hq_known_error_evidence: None,
             native_hq_hrn15_evidence: None,
+            native_thinking_type_rejection: None,
             response: None,
         };
         let mut units = "407 ".encode_utf16().collect::<Vec<_>>();

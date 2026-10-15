@@ -122,9 +122,8 @@ fn sort_selected_first_in_reverse_scan(
         .iter()
         .any(|attachment| trailing_typed_attachment_ids.contains(&attachment.id()))
     {
-        pending_attachments.sort_by_key(|attachment| {
-            !trailing_typed_attachment_ids.contains(&attachment.id())
-        });
+        pending_attachments
+            .sort_by_key(|attachment| !trailing_typed_attachment_ids.contains(&attachment.id()));
     }
 }
 
@@ -300,8 +299,7 @@ mod tests {
             current_nar.id(),
             current_upe_context.id(),
         ]);
-        let current_upe_ids =
-            HashSet::from([current_upe_success.id(), current_upe_context.id()]);
+        let current_upe_ids = HashSet::from([current_upe_success.id(), current_upe_context.id()]);
         let mut messages = vec![
             prior_user.clone(),
             prior_upe_success.clone(),

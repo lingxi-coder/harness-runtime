@@ -522,6 +522,13 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.set_thinking(thinking);
     }
 
+    fn set_max_thinking_tokens_override(
+        &self,
+        value: Option<llm_runtime::model::thinking_state::NativeIntegerNumber>,
+    ) {
+        self.service.set_max_thinking_tokens_override(value);
+    }
+
     fn set_effort(&self, effort: lingxi_core::host::effort_table::SessionEffort) {
         self.service.set_session_effort(effort.clone());
         let effort = match effort {

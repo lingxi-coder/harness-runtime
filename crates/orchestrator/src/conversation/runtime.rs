@@ -995,9 +995,7 @@ impl PromptRuntime {
             .insert(id);
     }
 
-    pub(crate) fn current_prompt_upe_attachment_ids(
-        &self,
-    ) -> std::collections::HashSet<MessageId> {
+    pub(crate) fn current_prompt_upe_attachment_ids(&self) -> std::collections::HashSet<MessageId> {
         self.current_prompt_upe_attachment_ids
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1015,8 +1013,9 @@ impl PromptRuntime {
             mod_prompt_context: Mutex::new(ModPromptContextCache::default()),
             mod_prompt_attachments: Mutex::new(ModPromptAttachmentCache::default()),
             mod_persisted_attachments: Mutex::new(std::collections::HashMap::new()),
-            current_prompt_upe_attachment_ids:
-                std::sync::Mutex::new(std::collections::HashSet::new()),
+            current_prompt_upe_attachment_ids: std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            ),
             guarded_prompt_messages: Mutex::new(Vec::new()),
             mod_tool_descriptions: Mutex::new(ModToolDescribeCache::default()),
             mod_command_descriptions: Arc::new(Mutex::new(ModCommandDescribeCache::default())),

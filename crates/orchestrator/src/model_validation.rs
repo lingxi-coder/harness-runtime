@@ -1325,6 +1325,7 @@ mod tests {
                 native_hq_model_provider_family: None,
                 native_hq_known_error_evidence: None,
                 native_hq_hrn15_evidence: None,
+                native_thinking_type_rejection: None,
                 response: Some(lingxi_llm_client::protocol::NativeAnthropicErrorResponse {
                     body: lingxi_llm_client::protocol::JsonPayload::parse(body).ok(),
                     thinking_prefix_mismatch: None,

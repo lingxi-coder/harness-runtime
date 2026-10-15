@@ -182,6 +182,29 @@ impl ModelRuntime {
     ) -> Result<lingxi_llm_client::client::OutputTokenLimits, LlmError> {
         self.registry.output_token_limits_in(model, profile)
     }
+
+    /// Resolve the output budget against the exact selected route profile and
+    /// provider-local model id. This preserves route metadata such as an
+    /// application output default while keeping the SDK as the policy owner.
+    pub(crate) fn resolve_output_budget_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        requested: Option<u32>,
+    ) -> Result<lingxi_llm_client::client::ResolvedOutputBudget, LlmError> {
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        lingxi_llm_client::client::resolve_output_budget(
+            &entry.profile,
+            &route.request_model,
+            requested,
+        )
+        .map_err(crate::upstream::error)
+    }
+
     /// Resolve the SDK wire family before adapting durable history. Per-model
     /// protocol selection is provider-owned, while the host selects the route.
     pub fn protocol_for_model(
@@ -2584,6 +2607,86 @@ mod shared_client_regression {
                 .await
                 .unwrap(),
             crate::CredentialSource::Unknown
+        );
+    }
+
+    #[test]
+    fn output_budget_resolution_uses_selected_profile_default_and_cap() {
+        let model = |request_model: &str| {
+            serde_json::json!({
+                "display_model": "claude-opus-4-6",
+                "request_model": request_model,
+                "billing_model": request_model,
+                "capabilities": {
+                    "streaming": true,
+                    "tools": false,
+                    "vision": false,
+                    "documents": false,
+                    "reasoning": true,
+                    "structured_output": false
+                }
+            })
+        };
+        let provider = |profile_name: &str, request_model: &str| {
+            serde_json::json!({
+                "provider_id": "anthropic_first_party",
+                "profile_name": profile_name,
+                "base_url": "https://api.anthropic.com",
+                "protocol": "anthropic_messages",
+                "auth": "none",
+                "credential": {"type": "none"},
+                "models": [model(request_model)]
+            })
+        };
+        let config: ClientConfig = serde_json::from_value(serde_json::json!({
+            "providers": [
+                provider("primary", "primary-wire-model"),
+                provider("alternate", "alternate-wire-model")
+            ]
+        }))
+        .unwrap();
+        let mut client = ModelRuntime::from_config(config).unwrap();
+        for (profile_name, application_default, maximum) in
+            [("primary", 18_000, 24_000), ("alternate", 7_000, 9_000)]
+        {
+            let routes = Arc::make_mut(&mut client.routes);
+            let selected = routes
+                .get_mut(profile_name)
+                .expect("test profile was configured");
+            let selected_model = selected
+                .profile
+                .models
+                .iter_mut()
+                .find(|model| model.request_model.ends_with("wire-model"))
+                .expect("test model was configured");
+            selected_model.metadata.application_output_tokens = Some(application_default);
+            selected_model.metadata.max_output_tokens = Some(maximum);
+        }
+
+        let primary_default = client
+            .resolve_output_budget_in("claude-opus-4-6", Some("primary"), None)
+            .unwrap();
+        assert_eq!(primary_default.value, Some(18_000));
+        assert_eq!(primary_default.maximum, Some(24_000));
+        assert_eq!(
+            primary_default.source,
+            lingxi_llm_client::client::OutputBudgetSource::ApplicationDefault
+        );
+
+        let alternate_default = client
+            .resolve_output_budget_in("claude-opus-4-6", Some("alternate"), None)
+            .unwrap();
+        assert_eq!(alternate_default.value, Some(7_000));
+        assert_eq!(alternate_default.maximum, Some(9_000));
+
+        let primary_capped = client
+            .resolve_output_budget_in("claude-opus-4-6", Some("primary"), Some(30_000))
+            .unwrap();
+        assert_eq!(primary_capped.value, Some(24_000));
+        assert_eq!(primary_capped.maximum, Some(24_000));
+        assert_eq!(
+            primary_capped.source,
+            lingxi_llm_client::client::OutputBudgetSource::ClampedExplicit
         );
     }
 

@@ -4,8 +4,8 @@
 //! authority or carry account identity across sessions. This context is never
 //! forwarded to a provider; selected account scopes are passed as SDK options.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 type AdmissionCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
@@ -227,6 +227,14 @@ pub struct ExecutionContext {
     /// Native Lsn's separate `mechanical` exclusion. Only the standard main
     /// request builder proves this absent; utility callers keep it unknown.
     pub native_thinking_mechanically_disabled: Option<bool>,
+    /// Immutable session base/overlay snapshot captured when the logical
+    /// request is built. Retries may refresh route caps and type latches but
+    /// never observe a mid-call settings mutation.
+    pub native_thinking_state_snapshot: Option<crate::model::thinking_state::ThinkingState>,
+    /// Exact Native Lsn manual budget and the selected request output ceiling
+    /// that justified its min/max normalization. SDK uses this process-local
+    /// fact only to validate the matching admitted Claude route.
+    pub native_lsn_manual_budget: Option<lingxi_llm_client::client::NativeLsnManualBudget>,
     /// Native ordinary-turn context-1m refusal latch for this logical model.
     /// The SDK applies it to the final request after host body merging and
     /// before authentication, so Bedrock body tokens cannot be reintroduced.
@@ -291,10 +299,19 @@ pub struct ExecutionContext {
     /// fork's parent breakpoint through consecutive-message merges.
     pub request_message_source_indices:
         std::collections::HashMap<lingxi_core::types::MessageId, usize>,
+    /// Content-block sources aligned to the canonical request messages after
+    /// history projection. Missing rows are intentionally treated as
+    /// ambiguous provenance by source-aware repairs.
+    pub(crate) request_content_source_ids:
+        Vec<Vec<std::collections::HashSet<lingxi_core::types::MessageId>>>,
     /// Stable parent identity for Native's optional fork cache pin.
     pub fork_point_message_id: Option<lingxi_core::types::MessageId>,
     /// Historical identities used by signature recovery; never provider wire.
     pub thinking_source_message_ids: Vec<::lingxi_core::types::MessageId>,
+    /// Thinking keys in the source conversation before request projection.
+    /// Used only to prove that a prefix-lock signature identifies one source
+    /// block; never serialized, sent to providers, or persisted.
+    pub(crate) source_thinking_messages: Vec<crate::prefix_lock_recovery::SourceThinkingMessage>,
     /// Query ownership for retries and lazy streams; never provider wire.
     pub thinking_recovery_scope: Option<crate::thinking_scope::ThinkingRecoveryScope>,
     /// Trusted account identity for provider continuations and hosted resources.
@@ -325,6 +342,14 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Read the Host's request-local Native thinking-resume intent.
+    /// The SDK context is the only owner of this fact.
+    pub fn resume_incomplete_thinking(&self) -> bool {
+        self.native_anthropic_request_context
+            .as_ref()
+            .is_some_and(|context| context.resume_incomplete_thinking)
+    }
+
     /// Install request admission after the canonical message vector is built.
     /// Row-scoped checks for pruned content disappear; global checks remain.
     pub fn set_request_dispatch_admission(&mut self, admission: Option<RequestDispatchAdmission>) {
@@ -373,23 +398,19 @@ mod tests {
         let source_id = lingxi_core::types::MessageId::new();
         let message_only =
             RequestDispatchAdmission::for_message_sources([(source_id, check(false))]);
-        assert!(
-            message_only
-                .retaining_message_sources(&HashSet::new())
-                .is_none()
-        );
+        assert!(message_only
+            .retaining_message_sources(&HashSet::new())
+            .is_none());
 
         let mixed = RequestDispatchAdmission::with_global_and_message_sources(
             [check(true)],
             [(source_id, check(false))],
         );
         assert!(!mixed.is_admitted(), "unprojected stale row rejects");
-        assert!(
-            mixed
-                .retaining_message_sources(&HashSet::new())
-                .expect("global admission remains after row pruning")
-                .is_admitted()
-        );
+        assert!(mixed
+            .retaining_message_sources(&HashSet::new())
+            .expect("global admission remains after row pruning")
+            .is_admitted());
 
         let global_rejection = RequestDispatchAdmission::with_global_and_message_sources(
             [check(false)],

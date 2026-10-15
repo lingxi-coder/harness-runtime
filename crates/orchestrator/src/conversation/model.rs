@@ -1257,8 +1257,10 @@ impl ConversationOrchestrator {
             tools: Vec::new(),
             tool_choice: None,
             output_format: None,
-            max_tokens: Some(u32::try_from(max_tokens.saturating_add(reserve).min(upper_limit))
-                .unwrap_or(64_000)),
+            max_tokens: Some(
+                u32::try_from(max_tokens.saturating_add(reserve).min(upper_limit))
+                    .unwrap_or(64_000),
+            ),
             max_retries: 2,
             temperature: None,
             thinking,
@@ -3300,6 +3302,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Update the thinking policy for the next API request.
     pub fn set_thinking_config(&self, thinking: llm_runtime::model::thinking::ThinkingConfig) {
         self.api.set_thinking_config(thinking);
+    }
+
+    /// Set or clear Native's nullable max-thinking-token overlay. The base
+    /// session thinking configuration remains independent.
+    pub fn set_max_thinking_tokens_override(
+        &self,
+        value: Option<llm_runtime::model::thinking_state::NativeIntegerNumber>,
+    ) {
+        self.api.set_max_thinking_tokens_override(value);
     }
 
     /// Capture the originating session's safety observation capability before

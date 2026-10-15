@@ -620,7 +620,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                 convert_tool_choice(request.tool_choice.as_ref()),
                 request.stop_sequences,
                 if prompt_suggestion {
-                    Some(service.thinking())
+                    Some(service.thinking()?)
                 } else {
                     request.thinking
                 },

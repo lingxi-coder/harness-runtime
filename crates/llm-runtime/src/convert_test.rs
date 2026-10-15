@@ -538,9 +538,9 @@ mod tests {
     // ── to_tool_declarations ─────────────────────────────────────────────────
     // Required-field omissions are not runtime inputs to this API anymore:
     // `SourceToolWireDefinition` requires name, description, and input_schema at
-    // construction time. The tests below cover reachable source conversion and
-    // reachable invalid description-root handling; omitted fields are not counted
-    // as runtime validation passes.
+    // construction time. The tests below cover reachable source conversion,
+    // invalid description roots, and a typed null schema carried to the SDK's
+    // codec preflight; omitted fields are not runtime validation cases.
 
     fn source_tool(
         description: &str,
@@ -581,6 +581,61 @@ mod tests {
         assert!(
             matches!(err, LlmError::InvalidRequest { message } if message.contains("description"))
         );
+    }
+
+    #[test]
+    fn source_tool_null_schema_reaches_and_is_rejected_by_anthropic_codec() {
+        use lingxi_llm_client::{self as sdk, WireCodec};
+
+        let host_tool = to_tool_declarations(vec![source_tool(r#""Read a file""#, "null")])
+            .unwrap()
+            .pop()
+            .expect("one typed source tool");
+        assert_eq!(
+            host_tool
+                .input_schema_projection
+                .as_ref()
+                .expect("Host retains its source schema")
+                .to_json_string()
+                .expect("typed null is valid JSON"),
+            "null"
+        );
+        assert_eq!(host_tool.input_schema.as_json_source(), "null");
+
+        let sdk_tool = sdk::protocol::ToolSpec {
+            name: host_tool.name,
+            description: host_tool.description,
+            input_schema: host_tool.input_schema,
+            strict: host_tool.strict,
+            defer_loading: host_tool.defer_loading,
+            native_options: Vec::new(),
+            tool_type: None,
+            extra: sdk::protocol::JsonPayload::default(),
+        };
+        assert_eq!(sdk_tool.input_schema.as_json_source(), "null");
+
+        let mut request = sdk::protocol::ChatRequest::new("claude-sonnet-4-6");
+        request.tools.push(sdk_tool);
+        let profile: sdk::protocol::ProviderProfile = serde_json::from_value(serde_json::json!({
+            "provider_id": "anthropic",
+            "profile_name": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "protocol": sdk::protocol::ProtocolFamily::AnthropicMessages,
+            "auth": "none",
+            "models": []
+        }))
+        .expect("minimal Anthropic codec profile");
+        let codec = sdk::codecs::anthropic::AnthropicMessagesCodec;
+        let context =
+            sdk::CodecContext::new(&profile, "claude-sonnet-4-6", sdk::RequestMode::Complete);
+        let error = codec
+            .validate_request(&request, &context)
+            .expect_err("SDK codec owns the JSON Schema root-shape check");
+        assert!(matches!(
+            error,
+            sdk::protocol::LlmError::InvalidRequest { message }
+                if message == "tool input schema must be a JSON object"
+        ));
     }
 
     #[test]

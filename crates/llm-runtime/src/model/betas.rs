@@ -462,8 +462,11 @@ pub(crate) fn native_mid_conversation_system_supported(
     if force_enabled {
         return true;
     }
-    let option_overrides =
-        native_model_option_capability_from_process_env(raw_model, model_option_overrides_allowed);
+    let option_overrides = native_model_option_capability_from_process_env(
+        raw_model,
+        model_option_overrides_allowed,
+        "mid_conversation_system",
+    );
     native_mid_conversation_system_supported_with_inputs(
         resolved_model,
         model_option_overrides_allowed,
@@ -511,19 +514,19 @@ fn native_mid_conversation_system_supported_with_inputs(
 const NATIVE_MODEL_OPTION_CAPABILITY_ENVS: [(&str, &str); 5] = [
     (
         "ANTHROPIC_DEFAULT_FABLE_MODEL",
-        "ANTHROPIC_DEFAULT_FABLE_SUPPORTED_CAPABILITIES",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES",
     ),
     (
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_SUPPORTED_CAPABILITIES",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES",
     ),
     (
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
     ),
     (
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_SUPPORTED_CAPABILITIES",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES",
     ),
     (
         "ANTHROPIC_CUSTOM_MODEL_OPTION",
@@ -531,18 +534,23 @@ const NATIVE_MODEL_OPTION_CAPABILITY_ENVS: [(&str, &str); 5] = [
     ),
 ];
 
-fn native_model_option_capability_from_process_env(
+pub(crate) fn native_model_option_capability_from_process_env(
     raw_model: &str,
     model_option_overrides_allowed: bool,
+    capability: &str,
 ) -> Option<bool> {
-    native_model_option_capability_in(raw_model, model_option_overrides_allowed, |name| {
-        std::env::var(name).ok()
-    })
+    native_model_option_capability_in(
+        raw_model,
+        model_option_overrides_allowed,
+        capability,
+        |name| std::env::var(name).ok(),
+    )
 }
 
 fn native_model_option_capability_in(
     raw_model: &str,
     model_option_overrides_allowed: bool,
+    capability: &str,
     mut get_environment: impl FnMut(&str) -> Option<String>,
 ) -> Option<bool> {
     if !model_option_overrides_allowed {
@@ -561,11 +569,11 @@ fn native_model_option_capability_in(
         if !configured_model.trim().eq_ignore_ascii_case(raw_model) {
             continue;
         }
-        return Some(capabilities.split(',').any(|capability| {
-            capability
-                .trim()
-                .eq_ignore_ascii_case("mid_conversation_system")
-        }));
+        return Some(
+            capabilities
+                .split(',')
+                .any(|candidate| candidate.trim().eq_ignore_ascii_case(capability)),
+        );
     }
     None
 }
@@ -1432,12 +1440,12 @@ mod tests {
         let env = [
             ("ANTHROPIC_DEFAULT_FABLE_MODEL", " "),
             (
-                "ANTHROPIC_DEFAULT_FABLE_SUPPORTED_CAPABILITIES",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES",
                 "mid_conversation_system",
             ),
             ("ANTHROPIC_DEFAULT_OPUS_MODEL", " CLAUDE-OPUS-4-8 "),
             (
-                "ANTHROPIC_DEFAULT_OPUS_SUPPORTED_CAPABILITIES",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES",
                 "FAST_MODE, MID_CONVERSATION_SYSTEM",
             ),
             ("ANTHROPIC_CUSTOM_MODEL_OPTION", "claude-opus-4-8"),
@@ -1452,15 +1460,30 @@ mod tests {
                 .map(|(_, value)| (*value).to_string())
         };
         assert_eq!(
-            native_model_option_capability_in("claude-opus-4-8", true, lookup),
+            native_model_option_capability_in(
+                "claude-opus-4-8",
+                true,
+                "mid_conversation_system",
+                lookup,
+            ),
             Some(true)
         );
         assert_eq!(
-            native_model_option_capability_in("claude-opus-4-8", false, lookup),
+            native_model_option_capability_in(
+                "claude-opus-4-8",
+                false,
+                "mid_conversation_system",
+                lookup,
+            ),
             None
         );
         assert_eq!(
-            native_model_option_capability_in("other-model", true, lookup),
+            native_model_option_capability_in(
+                "other-model",
+                true,
+                "mid_conversation_system",
+                lookup,
+            ),
             None
         );
     }

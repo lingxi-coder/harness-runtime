@@ -3953,13 +3953,13 @@ mod tests {
             "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
             "CLAUDE_CODE_MODEL_CAPABILITIES",
             "ANTHROPIC_DEFAULT_FABLE_MODEL",
-            "ANTHROPIC_DEFAULT_FABLE_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES",
             "ANTHROPIC_CUSTOM_MODEL_OPTION",
             "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
         ]);
@@ -3977,13 +3977,13 @@ mod tests {
         // QTe's explicit false wins before the model-age floor and is memoized
         // by the raw requested model string in this host/profile.
         std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", model);
-        std::env::set_var("ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES", "");
+        std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES", "");
         assert!(!first_host.supports_native_mid_conversation_system(model, Some("foundry")));
 
         // The Native hQ/ Ta result stays stable for the same host and raw key
         // after process configuration changes.
         std::env::set_var(
-            "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
             "mid_conversation_system",
         );
         assert!(!first_host.supports_native_mid_conversation_system(model, Some("foundry")));
@@ -4007,20 +4007,20 @@ mod tests {
             "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
             "CLAUDE_CODE_MODEL_CAPABILITIES",
             "ANTHROPIC_DEFAULT_FABLE_MODEL",
-            "ANTHROPIC_DEFAULT_FABLE_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES",
             "ANTHROPIC_CUSTOM_MODEL_OPTION",
             "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
         ]);
         let model = "claude-sonnet-4-6";
         std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", model);
         std::env::set_var(
-            "ANTHROPIC_DEFAULT_SONNET_SUPPORTED_CAPABILITIES",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
             "mid_conversation_system",
         );
         let adapter = native_capability_adapter(vec![
@@ -6323,11 +6323,16 @@ mod tests {
             "CLAUDE_CODE_EXTRA_BODY",
         ]);
 
-        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
-            200,
-            ok_response_json(),
-        )));
-        let model = "claude-sonnet-4-20250514";
+        let model = "claude-sonnet-4-5-20250929";
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+            "native-hun",
+            model,
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+        )
+        .with_native_anthropic_endpoint("https://api.anthropic.com");
         let make_schema_request = || {
             let mut request = LlmRequest::new(model).with_user_text("Return JSON.");
             request.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
@@ -9873,6 +9878,124 @@ mod tests {
         }
     }
 
+    fn prefix_lock_error_body() -> serde_json::Value {
+        serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "This message is not created in this conversation"
+            }
+        })
+    }
+
+    fn prefix_lock_error_response() -> ProviderResponse {
+        ProviderResponse {
+            status: 400,
+            headers: BTreeMap::from([(
+                "anthropic-thinking-prefix-mismatch".into(),
+                "block=messages.0.content.0;kind=signature".into(),
+            )]),
+            body_json: provider_payload(prefix_lock_error_body()),
+            request_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_prefix_lock_partial_repair_uses_source_marker_and_retries_nonstream() {
+        let model = "claude-sonnet-4-20250514";
+        let original = assistant_with_thinking();
+        let source_id = match &original {
+            lingxi_core::types::ConversationMessage::Assistant { id, .. } => *id,
+            _ => unreachable!(),
+        };
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(prefix_lock_error_response()),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let adapter = make_adapter(transport.clone());
+
+        let response = adapter
+            .messages_create(crate::MessagesCreateRequest::new(
+                model,
+                None,
+                None,
+                vec![original],
+                Vec::new(),
+            ))
+            .await;
+
+        assert!(
+            response.is_ok(),
+            "prefix retry should complete: {response:?}"
+        );
+        assert_eq!(transport.seen_count(), 2);
+        let first = transport.seen_body(0);
+        let second = transport.seen_body(1);
+        assert_eq!(
+            first.string_at("/messages/0/content/0/type").as_deref(),
+            Some("thinking")
+        );
+        assert_eq!(
+            second.string_at("/messages/0/content/0/text").as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            adapter.thinking_stripped_messages().get(&source_id),
+            Some(&0),
+            "persist the earliest source block range, without changing transcript content"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_prefix_lock_partial_repair_uses_the_same_chain_on_stream_connect() {
+        let model = "claude-sonnet-4-20250514";
+        let transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Status {
+                status: 400,
+                headers: BTreeMap::from([(
+                    "anthropic-thinking-prefix-mismatch".into(),
+                    "block=messages.0.content.0;kind=signature".into(),
+                )]),
+                body_json: Some(prefix_lock_error_body()),
+            },
+            FakeStreamResp::Status {
+                status: 200,
+                headers: BTreeMap::new(),
+                body_json: None,
+            },
+        ]);
+        let adapter = make_adapter(transport.clone());
+
+        let stream = adapter
+            .stream(
+                model,
+                None,
+                None,
+                vec![assistant_with_thinking()],
+                Vec::new(),
+                None,
+                None,
+            )
+            .await;
+
+        assert!(stream.is_ok(), "stream retry should open: {stream:?}");
+        assert_eq!(transport.stream_call_count(), 2);
+        assert_eq!(
+            transport
+                .seen_body(0)
+                .string_at("/messages/0/content/0/type")
+                .as_deref(),
+            Some("thinking")
+        );
+        assert_eq!(
+            transport
+                .seen_body(1)
+                .string_at("/messages/0/content/0/text")
+                .as_deref(),
+            Some("hello")
+        );
+    }
+
     #[tokio::test]
     async fn thinking_recovery_uses_captured_request_scope_after_stream_handoff() {
         use crate::thinking_scope::{scope_thinking_recovery, ThinkingRecoveryScope};
@@ -13132,7 +13255,11 @@ mod tests {
         let _guard = CACHE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let _env = CacheEnvRestore::clear(&["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"]);
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "ANTHROPIC_BEDROCK_BASE_URL",
+        ]);
         use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
         use lingxi_llm_client::NativeAnthropicRequestContext;
 
@@ -13167,22 +13294,36 @@ mod tests {
         });
         request.opts.fallback = crate::FallbackPolicy::Disabled;
         assert!(
+            !lingxi_core::host::compliance_taints::is_tainted("hipaa"),
+            "this fixture requires the initialized-empty compliance taint state"
+        );
+        assert!(
             service.messages_create(request).await.is_err(),
-            "Native nested non-stream fallback has no Kie/AFK retry callback"
+            "the HQ TBC-only retry still ends on the repeated AFK refusal"
         );
 
         let afk = Beta::AfkMode.header();
-        assert_eq!(transport.seen_count(), 1);
-        let first = request_body_value(&transport.seen.lock().unwrap()[0].body_json);
-        assert!(first["anthropic_beta"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|beta| { beta.as_str() == Some(afk) }));
-        assert!(!transport
-            .seen_headers(0)
-            .get("anthropic-beta")
-            .is_some_and(|value| value.contains(afk)));
+        let tbc = Beta::ThinkingBindingControls.header();
+        assert_eq!(
+            transport.seen_count(),
+            2,
+            "the AFK text is an unknown 400 to HQ, so the sent TBC beta is retried once"
+        );
+        for attempt in 0..2 {
+            assert!(
+                request_body_has_beta(&transport.seen_body(attempt), afk),
+                "AFK remains in Bedrock body across the TBC-only retry (attempt {attempt})"
+            );
+            assert!(
+                !request_header_has_beta(&transport.seen_headers(attempt), afk),
+                "Bedrock carries AFK in body, not the anthropic-beta header"
+            );
+        }
+        assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
+        assert!(
+            !request_header_has_beta(&transport.seen_headers(1), tbc),
+            "HQ's unknown-400 retry strips TBC but does not trip the AFK/Kie circuit"
+        );
     }
 
     #[tokio::test]
@@ -13215,7 +13356,7 @@ mod tests {
                     400,
                     error_headers.clone(),
                     vec![body(
-                        "afk-mode-2026-01-31 was rejected; tool_addition is not supported on this model",
+                        "anthropic-beta afk-mode-2026-01-31 was rejected; tool_addition is not supported on this model",
                     )],
                 ),
                 (
@@ -13270,6 +13411,143 @@ mod tests {
         assert!(first.contains(afk) && first.contains(mctc));
         assert!(!second.contains(afk) && second.contains(mctc));
         assert!(!third.contains(afk) && !third.contains(mctc));
+    }
+
+    async fn run_bedrock_afk_stream_retry(
+        model: &str,
+        first_error: &str,
+        second_error: &str,
+    ) -> Arc<FakeStreamTransport> {
+        use futures::StreamExt;
+        use lingxi_llm_client::NativeAnthropicRequestContext;
+
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
+        ]);
+        assert!(
+            !lingxi_core::host::compliance_taints::is_tainted("hipaa"),
+            "this fixture requires the initialized-empty compliance taint state"
+        );
+        let error_response = |message: &str| FakeStreamResp::Status {
+            status: 400,
+            headers: BTreeMap::new(),
+            body_json: Some(serde_json::json!({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": message}
+            })),
+        };
+        let transport = FakeStreamTransport::sequence(vec![
+            error_response(first_error),
+            error_response(second_error),
+            FakeStreamResp::Frames {
+                status: 200,
+                headers: BTreeMap::new(),
+                frames: successful_bedrock_anthropic_frames(model),
+            },
+        ]);
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://bedrock.example.test",
+            "bedrock",
+            model,
+            transport.clone(),
+        );
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        let mut request = LlmRequest::new(model).with_user_text("Hi");
+        request.profile = Some("bedrock".into());
+        request.execution.thinking_recovery_scope = Some(scope);
+        request.execution.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
+            afk_mode: true,
+            ..Default::default()
+        });
+        request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+            mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+            ..Default::default()
+        });
+
+        let mut stream = service
+            .stream_request(request)
+            .await
+            .expect("the Native AFK/TBC request is admitted");
+        while let Some(event) = stream.next().await {
+            event.expect("the final retry stream decodes");
+        }
+        transport
+    }
+
+    #[tokio::test]
+    async fn native_stream_afk_kie_precedes_context_1m_retry() {
+        use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
+
+        let model = "claude-opus-4-7[1m]";
+        let afk = Beta::AfkMode.header();
+        let context_1m = crate::model::betas::CONTEXT_1M;
+        let tbc = Beta::ThinkingBindingControls.header();
+        let transport = run_bedrock_afk_stream_retry(
+            model,
+            "anthropic-beta afk-mode-2026-01-31 was rejected; context-1m-2025-08-07 beta is not supported",
+            "context-1m-2025-08-07 beta is not supported",
+        )
+        .await;
+
+        assert_eq!(transport.stream_call_count(), 3);
+        for attempt in 0..3 {
+            assert!(request_header_has_beta(
+                &transport.seen_headers(attempt),
+                tbc
+            ));
+        }
+        assert!(request_body_has_beta(&transport.seen_body(0), afk));
+        assert!(request_body_has_beta(&transport.seen_body(0), context_1m));
+        assert!(
+            !request_body_has_beta(&transport.seen_body(1), afk),
+            "the first retry removes only AFK"
+        );
+        assert!(request_body_has_beta(&transport.seen_body(1), context_1m));
+        assert!(!request_body_has_beta(&transport.seen_body(2), afk));
+        assert!(
+            !request_body_has_beta(&transport.seen_body(2), context_1m),
+            "context-1m is removed only after its later refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_stream_afk_kie_precedes_explicit_tbc_retry() {
+        use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
+
+        let model = "claude-opus-4-7";
+        let afk = Beta::AfkMode.header();
+        let tbc = Beta::ThinkingBindingControls.header();
+        let transport = run_bedrock_afk_stream_retry(
+            model,
+            "anthropic-beta afk-mode-2026-01-31 was rejected; thinking-binding-controls-2026-08-01 is unsupported",
+            "thinking-binding-controls-2026-08-01 is unsupported",
+        )
+        .await;
+
+        assert_eq!(transport.stream_call_count(), 3);
+        assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
+        assert!(request_header_has_beta(&transport.seen_headers(1), tbc));
+        assert!(
+            !request_header_has_beta(&transport.seen_headers(2), tbc),
+            "TBC remains until the retry reports its own refusal"
+        );
+        assert!(request_body_has_beta(&transport.seen_body(0), afk));
+        assert!(
+            !request_body_has_beta(&transport.seen_body(1), afk),
+            "the first retry removes AFK while retaining TBC"
+        );
+        assert!(!request_body_has_beta(&transport.seen_body(2), afk));
     }
 
     #[tokio::test]

@@ -322,13 +322,16 @@ pub(super) async fn dispatch_control_request(
             }
         }
         "set_max_thinking_tokens" => {
-            let max_tokens = match field("max_thinking_tokens") {
-                Some(value) if value.is_null() => None,
-                Some(value) => value.as_number().and_then(nonnegative_u32_integer),
+            let max_tokens_update = match field("max_thinking_tokens") {
                 None => None,
+                Some(value) if value.is_null() => Some(None),
+                Some(value) => value
+                    .as_number()
+                    .and_then(llm_runtime::model::thinking_state::NativeIntegerNumber::new)
+                    .map(Some),
             };
-            let max_tokens_valid = field("max_thinking_tokens").is_some_and(JsonValueView::is_null)
-                || max_tokens.is_some();
+            let max_tokens_valid =
+                field("max_thinking_tokens").is_none() || max_tokens_update.is_some();
             let display_valid = match field("thinking_display") {
                 None => true,
                 Some(value) if value.is_null() => true,
@@ -343,16 +346,12 @@ pub(super) async fn dispatch_control_request(
                 );
                 return writer.finish();
             }
-            let thinking = match max_tokens {
-                Some(0) => llm_runtime::model::thinking::ThinkingConfig::Disabled,
-                Some(budget_tokens) => {
-                    llm_runtime::model::thinking::ThinkingConfig::Enabled { budget_tokens }
-                }
-                None => llm_runtime::model::thinking::ThinkingConfig::Adaptive,
-            };
-            orchestrator.set_thinking_config(thinking);
-            orchestrator
-                .set_thinking_display(field("thinking_display").and_then(JsonValueView::as_str));
+            if let Some(value) = max_tokens_update {
+                orchestrator.set_max_thinking_tokens_override(value);
+            }
+            if let Some(value) = field("thinking_display") {
+                orchestrator.set_thinking_display(value.as_str());
+            }
             writer.reply_success(request_id, None);
         }
         "rename_session" => {

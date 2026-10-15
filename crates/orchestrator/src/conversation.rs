@@ -309,6 +309,14 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// no-op; the production provider adapter overrides it.
     fn set_thinking_config(&self, _thinking: llm_runtime::model::thinking::ThinkingConfig) {}
 
+    /// Set or clear Native's nullable max-thinking-token overlay without
+    /// replacing the session's base thinking policy.
+    fn set_max_thinking_tokens_override(
+        &self,
+        _value: Option<llm_runtime::model::thinking_state::NativeIntegerNumber>,
+    ) {
+    }
+
     /// Replace the main-loop effort used for subsequent provider requests.
     /// Inherit, explicit automatic default and a pinned value stay distinct.
     fn set_effort(&self, _effort: lingxi_core::host::effort_table::SessionEffort) {}

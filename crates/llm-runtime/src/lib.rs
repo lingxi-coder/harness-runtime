@@ -64,6 +64,7 @@ mod history_usage;
 pub mod mod_turn_step;
 pub mod model;
 pub mod model_attempt;
+mod prefix_lock_recovery;
 pub mod prompt_cache;
 pub mod protocol;
 pub mod provider_settings;

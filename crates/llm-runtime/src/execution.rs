@@ -261,6 +261,7 @@ pub(crate) async fn prepare(
                     native_thinking_binding_controls_beta_requested: request
                         .execution
                         .native_thinking_binding_controls_beta_requested,
+                    native_lsn_manual_budget: request.execution.native_lsn_manual_budget,
                     native_hq_model_source,
                     native_hq_model_provider_family,
                     ..Default::default()
