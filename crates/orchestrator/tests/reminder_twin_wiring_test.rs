@@ -61,7 +61,15 @@ fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
             collect_rs_files(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
+        } else if path.extension().is_some_and(|ext| ext == "rs")
+            && !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("_tests.rs"))
+        {
+            // `prepare.rs` includes these only behind `#[cfg(test)]`; they
+            // exercise the collector but cannot be reachable from a runtime
+            // driver and must not inflate the production call-site count.
             out.push(path);
         }
     }
