@@ -125,13 +125,12 @@ pub struct ForkedAgentRunner {
     /// Optional single-turn backend: `(client, model)`. `None` until a caller
     /// configures it via [`Self::with_side_query_client`].
     side_query: Option<(Arc<dyn SideQueryClient>, String)>,
-    /// Session thinking configuration this runner's forked calls INHERIT
-    /// (cc 2.1.198 "Subagents + compaction inherit extended thinking config"
-    /// — binary `mXt(r)` threads the session `options.thinkingConfig` into
-    /// the summarizer call @216945141). Wired by the composition root for the
-    /// COMPACTION runner via [`Self::with_session_thinking`]; `None` (default
-    /// — memory extraction, tests) keeps the legacy no-`thinking` wire.
-    session_thinking: Option<llm_runtime::model::thinking::ThinkingConfig>,
+    /// Session thinking projection for forked calls. Native Main can retain a
+    /// wider overlay than the generic fork API can represent, so keep that
+    /// error until a fork is actually requested. `Ok(None)` (default) keeps
+    /// the legacy no-`thinking` wire for runners without session inheritance.
+    session_thinking:
+        Result<Option<llm_runtime::model::thinking::ThinkingConfig>, llm_runtime::LlmError>,
 }
 
 impl Default for ForkedAgentRunner {
@@ -147,7 +146,7 @@ impl ForkedAgentRunner {
     pub fn new() -> Self {
         Self {
             side_query: None,
-            session_thinking: None,
+            session_thinking: Ok(None),
         }
     }
 
@@ -221,9 +220,12 @@ impl ForkedAgentRunner {
     #[must_use]
     pub fn with_session_thinking(
         mut self,
-        thinking: llm_runtime::model::thinking::ThinkingConfig,
+        thinking: Result<llm_runtime::model::thinking::ThinkingConfig, llm_runtime::LlmError>,
     ) -> Self {
-        self.session_thinking = Some(thinking);
+        // Keep an unrepresentable Native overlay attached to this runner. A
+        // host may still use the main request successfully; only the actual
+        // generic fork should surface this projection error.
+        self.session_thinking = thinking.map(Some);
         self
     }
 
@@ -262,6 +264,9 @@ impl ForkedAgentRunner {
         let Some((client, model)) = &self.side_query else {
             return Err(ForkError::MissingBackend);
         };
+        let session_thinking = self.session_thinking.as_ref().copied().map_err(|error| {
+            ForkError::Api(crate::side_query::SideQueryError::Api(error.clone()))
+        })?;
 
         let cp = &req.cache_safe_params;
 
@@ -330,7 +335,7 @@ impl ForkedAgentRunner {
             temperature: None,
             // cc 2.1.198: the forked (compaction) call inherits the session
             // thinking config wired at the composition root; `None` = legacy.
-            thinking: self.session_thinking,
+            thinking: session_thinking,
             effort: if matches!(
                 req.query_source,
                 QuerySource::Compaction | QuerySource::PromptSuggestion
@@ -889,7 +894,7 @@ mod tests {
         });
         let runner = ForkedAgentRunner::new()
             .with_side_query_client(client.clone(), "claude-opus-4-6".into())
-            .with_session_thinking(llm_runtime::model::thinking::ThinkingConfig::default());
+            .with_session_thinking(Ok(llm_runtime::model::thinking::ThinkingConfig::default()));
         let req = request_with(vec![], vec![user_msg("PROMPT")], Some(512));
         runner.run(req).await.expect("wired run succeeds");
         let sent = client.seen.lock().unwrap().clone().expect("client called");

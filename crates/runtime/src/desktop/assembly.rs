@@ -3296,7 +3296,7 @@ pub async fn build_with_credential_stack(
             // MAX_THINKING_TOKENS / --max-thinking-tokens / alwaysThinkingEnabled
             // resolution) — and the model predicates + `LINGXI_DISABLE_THINKING`
             // kill switches still apply per request inside `reasoning_for_request`.
-            .with_session_thinking(cfg.session_thinking),
+            .with_session_thinking(Ok(cfg.session_thinking)),
     );
     // `/recap` reuses the SAME single-turn forked runner the autocompact
     // summarizer uses — CLONE the `Arc` here BEFORE `forked_runner` moves into

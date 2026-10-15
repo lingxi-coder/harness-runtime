@@ -7,22 +7,12 @@ use tokio::sync::RwLock;
 pub fn compaction(
     api: Arc<llm_runtime::ApiService>,
     model: &str,
-) -> Result<
-    (
-        Arc<compaction::CompactionOrchestrator>,
-        Arc<sidequery::CacheSafeParamsSlot>,
-    ),
-    llm_runtime::LlmError,
-> {
+) -> (
+    Arc<compaction::CompactionOrchestrator>,
+    Arc<sidequery::CacheSafeParamsSlot>,
+) {
     let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
-    let query = Arc::new(sidequery::ProviderSideQueryClient::from_service(
-        api.clone(),
-    ));
-    let thinking = api.thinking()?;
-    let runner = sidequery::ForkedAgentRunner::new()
-        .with_side_query_client(query, model.to_string())
-        .with_session_thinking(thinking);
-    let runner = Arc::new(runner);
+    let runner = compaction_runner(api, model);
     let compactor = Arc::new(
         compaction::CompactionOrchestrator::with_autocompactor(
             compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
@@ -30,7 +20,21 @@ pub fn compaction(
         )
         .with_model_derived_threshold(),
     );
-    Ok((compactor, slot))
+    (compactor, slot)
+}
+
+fn compaction_runner(
+    api: Arc<llm_runtime::ApiService>,
+    model: &str,
+) -> Arc<sidequery::ForkedAgentRunner> {
+    let query = Arc::new(sidequery::ProviderSideQueryClient::from_service(
+        api.clone(),
+    ));
+    Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(query, model.to_string())
+            .with_session_thinking(api.thinking()),
+    )
 }
 
 /// Expose only eligible inline skills from the child registry and read state.
@@ -190,36 +194,50 @@ pub async fn credential_ready_model_refs(
 
 #[cfg(test)]
 mod tests {
-    use super::compaction;
+    use super::{compaction, compaction_runner};
     use llm_runtime::test_support::FixtureTransport;
     use llm_runtime::{
         ApiService, AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig,
         LlmError, ModelProfile, ModelRuntime, PricingConfig, ProviderProfile, ProviderRequest,
         ProviderResponse, Region, StreamingResponse,
     };
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
-    struct UnusedTransport;
+    #[derive(Default)]
+    struct CountingTransport(AtomicUsize);
 
-    impl FixtureTransport for UnusedTransport {
+    impl FixtureTransport for CountingTransport {
         fn execute<'a>(
             &'a self,
             _: &'a ProviderRequest,
         ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
-            Box::pin(async { panic!("thinking projection tests must not send provider traffic") })
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Err(LlmError::UnsupportedCapability {
+                    capability: "unexpected test transport dispatch".into(),
+                })
+            })
         }
 
         fn open_stream<'a>(
             &'a self,
             _: &'a ProviderRequest,
         ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
-            Box::pin(async { panic!("thinking projection tests must not stream") })
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Err(LlmError::UnsupportedCapability {
+                    capability: "unexpected test stream dispatch".into(),
+                })
+            })
         }
     }
 
-    llm_runtime::impl_fixture_transport!(UnusedTransport);
+    llm_runtime::impl_fixture_transport!(CountingTransport);
 
-    fn api() -> Arc<ApiService> {
+    fn api() -> (Arc<ApiService>, Arc<CountingTransport>) {
         let profile = ProviderProfile {
             wire_profile: None,
             regions: Region::all(),
@@ -257,38 +275,88 @@ mod tests {
             })
             .expect("test provider config"),
         );
-        Arc::new(ApiService::new(
+        let transport = Arc::new(CountingTransport::default());
+        let api = Arc::new(ApiService::new(
             client,
-            Arc::new(UnusedTransport),
+            transport.clone(),
             Default::default(),
             Default::default(),
             "test",
             None,
             None,
-        ))
+        ));
+        (api, transport)
     }
 
-    #[test]
-    fn compaction_propagates_unrepresentable_native_thinking_overlay() {
-        let api = api();
+    fn fork_request() -> sidequery::ForkedAgentRequest {
+        sidequery::ForkedAgentRequest {
+            prompt_messages: Vec::new(),
+            cache_safe_params: sidequery::CacheSafeParams {
+                system_prompt: Arc::new(lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                    "",
+                )),
+                system_prompt_input: None,
+                user_context: Default::default(),
+                system_context: Default::default(),
+                user_context_message: None,
+                tool_use_options: tool_api::ToolUseOptions {
+                    debug: false,
+                    verbose: false,
+                    main_loop_model: "claude-opus-4-6".into(),
+                    model_profile: None,
+                    max_budget_nano_usd: None,
+                    mcp_clients: Vec::new(),
+                    is_non_interactive_session: false,
+                    custom_system_prompt: None,
+                    append_system_prompt: None,
+                },
+                model_source: None,
+                tools: Vec::new(),
+                effort: None,
+                fork_context_messages: Vec::new(),
+                transcript_path: None,
+                typed_attachment_ids: Default::default(),
+                task_deliveries: Default::default(),
+                generation: 0,
+            },
+            fork_label: "test-fork".into(),
+            query_source: sidequery::QuerySource::Compaction,
+            max_output_tokens: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_only_overlay_is_deferred_to_fork_and_stops_before_transport() {
+        let (api, transport) = api();
         api.set_max_thinking_tokens_override(Some(
             llm_runtime::model::thinking_state::NativeIntegerNumber::new(f64::from(u32::MAX) + 1.0)
                 .expect("valid Native safe integer outside generic u32 budget"),
         ));
+        let expected = api
+            .thinking()
+            .expect_err("generic fork cannot represent the Native overlay");
 
-        assert!(matches!(
-            compaction(api, "claude-opus-4-6"),
-            Err(LlmError::InvalidRequest { .. })
-        ));
+        let _compaction = compaction(api.clone(), "claude-opus-4-6");
+        let runner = compaction_runner(api, "claude-opus-4-6");
+        let error = runner
+            .run(fork_request())
+            .await
+            .expect_err("the deferred Native overlay error reaches the actual fork");
+        let actual = match error {
+            sidequery::ForkError::Api(sidequery::SideQueryError::Api(error)) => error,
+            other => panic!("unexpected fork error: {other:?}"),
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
     }
 
     #[test]
     fn compaction_accepts_generic_session_thinking() {
-        let api = api();
+        let (api, _) = api();
         api.set_thinking(llm_runtime::model::thinking::ThinkingConfig::Enabled {
             budget_tokens: 4096,
         });
 
-        assert!(compaction(api, "claude-opus-4-6").is_ok());
+        let _compaction = compaction(api, "claude-opus-4-6");
     }
 }

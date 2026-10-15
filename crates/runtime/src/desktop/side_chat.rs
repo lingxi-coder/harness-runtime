@@ -172,8 +172,7 @@ impl SideChatFactory for DesktopSideChatFactory {
         );
         let output = Arc::new(AdapterOutputStream::new(sink));
         let (compactor, cache_safe_slot) =
-            crate::side_chat::composition::compaction(api, &snapshot.config.model)
-                .map_err(|error| error.to_string())?;
+            crate::side_chat::composition::compaction(api, &snapshot.config.model);
         let skill_listing = crate::side_chat::composition::skill_listing(
             commands.clone(),
             ctx.read_file_state.clone(),
