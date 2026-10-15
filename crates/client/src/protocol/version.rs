@@ -140,4 +140,4 @@
 /// Bumped to 21.0.0 for persisted message clocks. `MessageDto` gains an optional
 /// timestamp; JSON remains additive, while the UniFFI record layout grows and
 /// native clients must regenerate their version-locked bindings.
-pub const CLIENT_PROTOCOL_VERSION: &str = "21.0.0";
+pub const CLIENT_PROTOCOL_VERSION: &str = "22.0.0";

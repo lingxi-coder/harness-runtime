@@ -84,6 +84,14 @@ impl std::fmt::Debug for OpenAiOAuthSessionDto {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClientEvent {
+    SideChatCreated { request_id: String, side_id: String },
+    SideChatList { side_ids: Vec<String> },
+    SideChatSnapshot { side_id: String, events_json: Vec<String> },
+    SideChatEvent { side_id: String, event_json: String },
+    SideChatPermission { side_id: String, request: crate::protocol::permission::PermissionRequest },
+    SideChatSubmitted { side_id: String, request_id: String },
+    SideChatEnded { side_id: String },
+    SideChatError { #[serde(default, skip_serializing_if = "Option::is_none")] request_id: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] side_id: Option<String>, message: String },
     /// Native realtime JSON with authoritative current-session identity.
     RealtimeAudioEvent {
         session_id: String,

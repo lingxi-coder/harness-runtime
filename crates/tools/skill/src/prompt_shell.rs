@@ -65,6 +65,10 @@ use tool_api::builtin_context::BuiltinToolContext;
 /// the BASH.4 persistent-cwd `pwd -P` readback is omitted (one-shot expansion
 /// keeps no shell-cwd state).
 pub struct PromptShellRunner {
+    side_chat: bool,
+    cleanup_failed: Option<Arc<std::sync::atomic::AtomicBool>>,
+    owner: Option<String>,
+    cancel: Option<lingxi_core::host::CancellationToken>,
     process: Arc<dyn lingxi_core::host::process::ProcessRunner>,
     sandbox: Arc<dyn lingxi_core::host::sandbox::Sandbox>,
     workspace: std::path::PathBuf,
@@ -267,6 +271,27 @@ impl ShellRunner for PromptShellRunner {
         command: &str,
         _shell: Option<FrontmatterShell>,
     ) -> Result<ShellOut, ShellRunError> {
+        if self.side_chat
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            return Err(ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
+                interrupted: true,
+                generic_message: None,
+            });
+        }
+        if self.side_chat && self.owner.is_none() {
+            return Err(ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
+                interrupted: false,
+                generic_message: Some("Side Chat shell owner is absent".into()),
+            });
+        }
         use lingxi_core::host::sandbox::ProcessCommand;
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
@@ -283,7 +308,7 @@ impl ShellRunner for PromptShellRunner {
         }
 
         let shell_path = self.shell_path.as_str();
-        let snapshot = if self.mobile_shell {
+        let snapshot = if self.mobile_shell || self.side_chat {
             None
         } else {
             self.snapshot
@@ -373,7 +398,7 @@ impl ShellRunner for PromptShellRunner {
             },
             cwd: Some(self.workspace.clone()),
             env: HashMap::new(),
-            timeout: None,
+            timeout: self.side_chat.then(|| std::time::Duration::from_secs(120)),
             stdin: None,
         };
         let sandboxed = if self.force_platform_sandbox {
@@ -396,10 +421,59 @@ impl ShellRunner for PromptShellRunner {
             self.sandbox
                 .bypass_with_audit(pcmd, "prompt_shell_expansion")
         };
-        let run_result = self.process.run(&sandboxed).await;
+        let sandboxed = if self.side_chat {
+            sandboxed.with_process_owner(self.owner.clone())
+        } else {
+            sandboxed
+        };
+        let run = self.process.run(&sandboxed);
+        tokio::pin!(run);
+        let run_result = if self.side_chat {
+            if let Some(cancel) = &self.cancel {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        if let Some(owner) = &self.owner {
+                            loop {
+                                self.process.kill_owner_processes(owner).await;
+                                tokio::select! {
+                                    result = &mut run => {
+                                        if let Err(error) = result {
+                                            if error.to_string().contains(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE) {
+                                                if let Some(flag) = &self.cleanup_failed { flag.store(true, std::sync::atomic::Ordering::SeqCst); }
+                                                return Err(ShellRunError { stdout: String::new(), stderr: String::new(), interrupted: true, generic_message: Some(error.to_string()) });
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                                }
+                            }
+                        }
+                        Err(mobile_linux_api::ProcessError::Timeout)
+                    }
+                    result = &mut run => result,
+                }
+            } else {
+                run.await
+            }
+        } else {
+            run.await
+        };
         // The wrapped command has finished: tear down any per-command sandbox
         // state. No-op for the default `LegacyWrapRunner`.
         self.sandbox_runner.cleanup_after_command().await;
+        if let Err(error) = &run_result {
+            if self.side_chat
+                && error
+                    .to_string()
+                    .contains(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE)
+            {
+                if let Some(flag) = &self.cleanup_failed {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
         match run_result {
             // A timeout maps to the TS interrupted `ShellError` path so the engine
             // formats "Shell command interrupted …" (mirrors bash's timeout->error).
@@ -593,7 +667,22 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
     fn build(
         &self,
         allowed_tools: &[String],
+        shell: Option<FrontmatterShell>,
+    ) -> ShellExpansionCtx {
+        self.build_for_call(
+            allowed_tools,
+            shell,
+            self.ctx.session_id.map(|id| id.to_string()),
+            None,
+        )
+    }
+
+    fn build_for_call(
+        &self,
+        allowed_tools: &[String],
         _shell: Option<FrontmatterShell>,
+        owner: Option<String>,
+        cancel: Option<lingxi_core::host::CancellationToken>,
     ) -> ShellExpansionCtx {
         // NOTE: the `_shell` build-time hint is redundant with the per-command
         // `shell` that `execute_shell_commands_in_prompt` threads into both
@@ -603,6 +692,14 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
         let mobile_shell = self.ctx.mobile_shell();
         let shell_enabled = mobile_shell.is_some_and(|carrier| carrier.enabled);
         let runner = Arc::new(PromptShellRunner {
+            side_chat: self.ctx.side_chat,
+            cleanup_failed: self.ctx.side_chat_cleanup_failed.clone(),
+            owner: if self.ctx.side_chat {
+                owner.map(|owner| format!("side:{owner}"))
+            } else {
+                owner
+            },
+            cancel,
             process: self.ctx.process.clone(),
             sandbox: self.ctx.sandbox.clone(),
             workspace: self.ctx.cwd(),

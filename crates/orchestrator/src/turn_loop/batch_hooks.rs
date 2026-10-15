@@ -4,8 +4,8 @@ use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use lingxi_core::types::{ConversationMessage, MessageId, ToolUseId};
 use std::sync::Arc;
-use tool_api::context::ToolUseContext;
 use tool_api::ContextModifier;
+use tool_api::context::ToolUseContext;
 
 /// Host-only carrier for a Native `PostToolBatch` event and the session/W1
 /// generation that owns its publications. The guard never enters HookEvent or
@@ -114,7 +114,8 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
         permission_mode: Some(if plan_mode {
             "plan".to_string()
         } else {
-            orch.permission_mode().unwrap_or_else(|| "default".to_string())
+            orch.permission_mode()
+                .unwrap_or_else(|| "default".to_string())
         }),
         publication_guard: Some(Arc::clone(&publication_guard)),
         ..Default::default()
@@ -470,6 +471,19 @@ async fn apply_resolved_model_context(
     let target_profile = context.options.model_profile;
     if target_model == current && target_profile == current_profile {
         return Ok(());
+    }
+    if orch.side_chat {
+        let target =
+            lingxi_core::host::qualified_model_ref(&target_model, target_profile.as_deref());
+        if !orch
+            .side_chat_model_refs
+            .as_ref()
+            .is_some_and(|models| models.contains(&target))
+        {
+            return Err(model_context_error(
+                "model is not ready in this side chat".into(),
+            ));
+        }
     }
     {
         let mut session = orch.session.lock().await;

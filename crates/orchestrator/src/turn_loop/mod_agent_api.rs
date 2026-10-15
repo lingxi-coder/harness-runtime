@@ -3,11 +3,11 @@
 //! its own signal and retains the Host's plugin spawn slot.
 
 use super::{
-    dispatch_tool_uses_tracked_deferred_core_with_tool, mod_tool_call_agent_result,
-    with_virtual_mod_result_stage, ConversationOrchestrator, AGENT_TOOL_NAME,
+    AGENT_TOOL_NAME, ConversationOrchestrator, dispatch_tool_uses_tracked_deferred_core_with_tool,
+    mod_tool_call_agent_result, with_virtual_mod_result_stage,
 };
 use hooks::mods::{ModAgentSpawnContext, ModAgentSpawnInput, ModError};
-use lingxi_core::host::mod_agent_list::{reduce_agent_list, AgentListSnapshot};
+use lingxi_core::host::mod_agent_list::{AgentListSnapshot, reduce_agent_list};
 use lingxi_core::host::task_registry::{FieldPresence, TaskListFilter, TaskRecord};
 use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
 use serde_json::Value;
@@ -138,7 +138,7 @@ impl ConversationOrchestrator {
             _ => {
                 return Err(ModError::Protocol(
                     "agent.spawn needs its trusted plugin caller".into(),
-                ))
+                ));
             }
         };
         let registry = self.task_registry.as_ref().ok_or_else(|| {
@@ -180,7 +180,9 @@ impl ConversationOrchestrator {
         if stage.denial_kind().is_some() {
             let reason = content.strip_prefix("<tool_use_error>").unwrap_or(content);
             let reason = reason.strip_suffix("</tool_use_error>").unwrap_or(reason);
-            return Ok(hooks::mods::ModUtf16ValueProjection::plain(serde_json::json!({"deny":reason})));
+            return Ok(hooks::mods::ModUtf16ValueProjection::plain(
+                serde_json::json!({"deny":reason}),
+            ));
         }
         let raw_result = stage
             .tool_use_result
@@ -209,16 +211,32 @@ impl ConversationOrchestrator {
                     }
                 });
                 let mut projected = raw_result.clone();
-                projected.rebase_display_value(result).map_err(|error| ModError::Protocol(error.to_string()))?;
-                let mut answer = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({"result":projected.value,"text":""}));
-                answer.set_pointer("/result", projected).map_err(|error| ModError::Protocol(error.to_string()))?;
+                projected
+                    .rebase_display_value(result)
+                    .map_err(|error| ModError::Protocol(error.to_string()))?;
+                let mut answer = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    serde_json::json!({"result":projected.value,"text":""}),
+                );
+                answer
+                    .set_pointer("/result", projected)
+                    .map_err(|error| ModError::Protocol(error.to_string()))?;
                 return hooks::mods::ModUtf16ValueProjection::from_core_projection(answer);
             }
         }
         let projected = self.mod_agent_teammate_result(raw_result, registry).await?;
-        let mut result = stage.mod_answer_projection(content).map_err(|error| ModError::Protocol(error.to_string()))?;
-        result.set_pointer("/result", projected).map_err(|error| ModError::Protocol(error.to_string()))?;
-        if is_error.unwrap_or(false) { result.value.as_object_mut().unwrap().insert("isError".into(), Value::Bool(true)); }
+        let mut result = stage
+            .mod_answer_projection(content)
+            .map_err(|error| ModError::Protocol(error.to_string()))?;
+        result
+            .set_pointer("/result", projected)
+            .map_err(|error| ModError::Protocol(error.to_string()))?;
+        if is_error.unwrap_or(false) {
+            result
+                .value
+                .as_object_mut()
+                .unwrap()
+                .insert("isError".into(), Value::Bool(true));
+        }
         hooks::mods::ModUtf16ValueProjection::from_core_projection(result)
     }
 
@@ -272,7 +290,9 @@ impl ConversationOrchestrator {
                 })?;
             result["resolvedModel"] = Value::String(self.mod_agent_child_resolved_model(facts)?);
         }
-        source.rebase_display_value(result).map_err(|error| ModError::Protocol(error.to_string()))?;
+        source
+            .rebase_display_value(result)
+            .map_err(|error| ModError::Protocol(error.to_string()))?;
         Ok(source)
     }
 
@@ -309,8 +329,8 @@ mod tests {
 
     fn route_test_orchestrator() -> ConversationOrchestrator {
         use crate::test_support::{
-            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-            StaticMemoryProvider,
+            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+            noop_hook_executor,
         };
         ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),

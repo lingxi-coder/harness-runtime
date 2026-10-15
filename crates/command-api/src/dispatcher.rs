@@ -3,19 +3,19 @@
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` Task 5.
 
-use crate::expand::{expand_markdown_command, ExpandCtx};
+use crate::ModCommandRunContext;
+use crate::expand::{ExpandCtx, expand_markdown_command};
 use crate::model::{CommandResult, CommandSource, SlashCommandKind};
 use crate::parser::parse_slash_command;
 use crate::registry::CommandRegistry;
 use crate::shell_expansion::{
-    execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionProvider, ShellOut,
-    ShellPermissionDecision, ShellPermissionGate, ShellRunError, ShellRunner,
+    ShellExpansionCtx, ShellExpansionProvider, ShellOut, ShellPermissionDecision,
+    ShellPermissionGate, ShellRunError, ShellRunner, execute_shell_commands_in_prompt,
 };
-use crate::ModCommandRunContext;
 use async_trait::async_trait;
+use hooks::HookExecutorImpl;
 use hooks::events::{HookEvent, PromptExpansionType};
 use hooks::registry::HookContext;
-use hooks::HookExecutorImpl;
 use lingxi_core::host::permission_gate::PermissionGate;
 use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
 use lingxi_core::types::McpConnectionId;
@@ -163,6 +163,8 @@ impl ShellPermissionGate for DenyShellPermissionGate {
 /// runtime. Dispatching only takes a read lock.
 pub struct RegistrySlashDispatcher {
     registry: Arc<RwLock<CommandRegistry>>,
+    expansion_cancel: Option<lingxi_core::host::CancellationToken>,
+    expansion_owner: Option<String>,
     mod_command_interceptor: Option<Arc<dyn ModCommandRunInterceptor>>,
     /// `UserPromptExpansion` firing deps (#39). `None` keeps the dispatcher a
     /// strict no-op for that event — the default for every existing caller and
@@ -246,6 +248,8 @@ impl RegistrySlashDispatcher {
             registry,
             mod_command_interceptor: None,
             expansion_hooks: None,
+            expansion_cancel: None,
+            expansion_owner: None,
             shell_expansion: None,
             skill_usage_home: None,
             background_prompt_launcher: None,
@@ -421,6 +425,8 @@ impl RegistrySlashDispatcher {
     pub fn clone_shared(&self) -> Self {
         Self {
             registry: self.registry.clone(),
+            expansion_cancel: self.expansion_cancel.clone(),
+            expansion_owner: self.expansion_owner.clone(),
             mod_command_interceptor: self.mod_command_interceptor.clone(),
             // The `UserPromptExpansion` wiring (executor + context provider) is
             // cheap to clone (two `Arc`s) and must travel with the shared
@@ -493,6 +499,20 @@ impl RegistrySlashDispatcher {
 impl RegistrySlashDispatcher {
     /// Execute an already-admitted slash command without firing Mod middleware.
     /// A `command.run` core callback uses this to prevent recursive dispatch.
+    /// Run one slash command with foreground shell cancellation scoped to its turn.
+    pub async fn dispatch_with_cancel(
+        &self,
+        raw: &str,
+        owner: String,
+        cancel: lingxi_core::host::CancellationToken,
+    ) -> SlashDispatchResult {
+        let mut dispatcher = self.clone_shared();
+        dispatcher.expansion_cancel = Some(cancel);
+        dispatcher.expansion_owner = Some(owner);
+        dispatcher.dispatch(raw).await
+    }
+
+    /// Execute the core command path without Mod middleware.
     pub async fn dispatch_without_mod_hooks(&self, raw: &str) -> SlashDispatchResult {
         // 1. Detect slash prefix.
         if !raw.starts_with('/') {
@@ -526,6 +546,13 @@ impl RegistrySlashDispatcher {
                 display: Self::unknown_command_literal(&parsed.name),
             };
         };
+
+        if !reg.execution_allowed(&command) {
+            return SlashDispatchResult::Unknown {
+                name: parsed.name.clone(),
+                display: format!("/{0} is unavailable in Side Chat", parsed.name),
+            };
+        }
 
         // 4a. Honor the `DISABLE_*_COMMAND` env gates for the affected builtins
         //     (claude-code `isEnabled:()=>!je.DISABLE_X`). A disabled command is
@@ -578,7 +605,7 @@ impl RegistrySlashDispatcher {
                             Err(error) => {
                                 return SlashDispatchResult::Handled {
                                     display: format!("{} expansion failed: {error}", command.name),
-                                }
+                                };
                             }
                         },
                         None => None,
@@ -596,7 +623,7 @@ impl RegistrySlashDispatcher {
                         Err(error) => {
                             return SlashDispatchResult::Handled {
                                 display: format!("{} expansion failed: {error}", command.name),
-                            }
+                            };
                         }
                     };
                     self.observe_skill_invocation(&command.name).await;
@@ -717,9 +744,13 @@ impl RegistrySlashDispatcher {
             // denies any embedded command, but a body with no `!`cmd`` patterns is
             // returned unchanged regardless, so unwired / MCP behavior is preserved.
             let shell_ctx = match self.shell_expansion.as_ref() {
-                Some(provider) if !matches!(command.source, CommandSource::Mcp) => {
-                    provider.build(&allowed_tools, fm_shell)
-                }
+                Some(provider) if !matches!(command.source, CommandSource::Mcp) => provider
+                    .build_for_call(
+                        &allowed_tools,
+                        fm_shell,
+                        self.expansion_owner.clone(),
+                        self.expansion_cancel.clone(),
+                    ),
                 _ => ShellExpansionCtx {
                     runner: Arc::new(UnavailableShellRunner),
                     permission_gate: Arc::new(DenyShellPermissionGate),
@@ -782,7 +813,10 @@ impl RegistrySlashDispatcher {
         // 5. Drop the registry lock before awaiting handler (handler may
         //    re-lock the registry or take a while).
         drop(reg);
-        let result = handler.handle(&parsed).await;
+        let result = match &self.expansion_cancel {
+            Some(cancel) => handler.handle_with_cancel(&parsed, cancel.clone()).await,
+            None => handler.handle(&parsed).await,
+        };
 
         match result {
             // M5-09 placeholders only ever return Done — but route the
@@ -814,7 +848,12 @@ impl RegistrySlashDispatcher {
                             .iter()
                             .map(|s| (*s).to_string())
                             .collect();
-                        let shell_ctx = provider.build(&allowed, None);
+                        let shell_ctx = provider.build_for_call(
+                            &allowed,
+                            None,
+                            self.expansion_owner.clone(),
+                            self.expansion_cancel.clone(),
+                        );
                         match execute_shell_commands_in_prompt(
                             &content,
                             &shell_ctx,
@@ -842,6 +881,18 @@ impl RegistrySlashDispatcher {
 #[async_trait]
 impl SlashCommandDispatcher for RegistrySlashDispatcher {
     async fn dispatch(&self, raw: &str) -> SlashDispatchResult {
+        if let Some(parsed) = parse_slash_command(raw) {
+            let registry = self.registry.read().await;
+            if registry
+                .resolve(&parsed.name)
+                .is_some_and(|command| !registry.execution_allowed(command))
+            {
+                return SlashDispatchResult::Unknown {
+                    name: parsed.name.clone(),
+                    display: format!("/{0} is unavailable in Side Chat", parsed.name),
+                };
+            }
+        }
         // Clear or replace this input's command-scoped tool restrictions even
         // when a Mod answers without calling the core command.
         if let Some(gate) = self.permission_gate.as_ref() {
@@ -968,7 +1019,7 @@ fn render_mcp_prompt_content(content: &Value) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin_support::names::{core_description, BUILTIN_COMMAND_NAMES};
+    use crate::builtin_support::names::{BUILTIN_COMMAND_NAMES, core_description};
     use crate::builtin_support::unimplemented::UnimplementedCommandHandler;
     use crate::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
     use crate::registry::CommandRegistry;
@@ -1130,6 +1181,44 @@ mod tests {
             SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "Use this"),
             other => panic!("expected markdown command to run-as-turn, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn side_rejects_dynamic_fork_and_loop_before_builder_runs() {
+        struct NeverBuild;
+        impl crate::model::BundledPromptFn for NeverBuild {
+            fn build(&self, _: &str) -> String {
+                panic!("rejected command expanded")
+            }
+        }
+        let mut registry = CommandRegistry::new();
+        registry.set_side_chat(true);
+        for name in ["forked", "loop"] {
+            registry.register_command(SlashCommand {
+                name: name.into(),
+                source: CommandSource::Bundled,
+                kind: SlashCommandKind::Bundled {
+                    frontmatter: CommandFrontmatter {
+                        context: (name == "forked").then(|| "fork".into()),
+                        ..CommandFrontmatter::default()
+                    },
+                    prompt_fn: Some(Arc::new(NeverBuild)),
+                },
+                ..SlashCommand::default()
+            });
+        }
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+        for raw in ["/forked", "/loop"] {
+            assert!(matches!(
+                dispatcher.dispatch(raw).await,
+                SlashDispatchResult::Unknown { .. }
+            ));
+            assert!(matches!(
+                dispatcher.dispatch_without_mod_hooks(raw).await,
+                SlashDispatchResult::Unknown { .. }
+            ));
+        }
+        assert!(dispatcher.list_palette_commands().await.is_empty());
     }
 
     #[tokio::test]
@@ -1525,11 +1614,11 @@ mod tests {
     // no-op otherwise.
 
     use async_trait::async_trait;
+    use hooks::HookRegistry;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
     use hooks::events::HookEventType;
     use hooks::executor::BuiltinHookHandler;
     use hooks::response::{HookOutcome, HookResult};
-    use hooks::HookRegistry;
     use lingxi_core::types::{HookId, HttpRequest, HttpResponse};
     use std::time::Duration;
 

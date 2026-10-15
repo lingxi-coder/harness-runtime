@@ -1,7 +1,7 @@
-use super::{dispatch_tool_uses_tracked, ConversationOrchestrator};
+use super::{ConversationOrchestrator, dispatch_tool_uses_tracked};
+use crate::OrchestratorConfig;
 use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
 use crate::tool_result_persistence::{PERSISTED_OUTPUT_OPEN, TOOL_RESULTS_DIR};
-use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use lingxi_core::types::{ContentBlock, ToolUseId};
 use serde_json::json;
@@ -95,7 +95,10 @@ impl Tool for SizedTool {
         {
             body.replace_range(1999..2001, "😀");
         }
-        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+        Ok(ToolCallResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             data: json!(body),
             model_content: Some(body),
             new_messages: vec![],
@@ -155,10 +158,12 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
     let orch = orch_with(Arc::new(SizedTool), Some(tmp.path().into())).with_jsonl_writer(writer);
     let mut call = use_of("Sized", 4000).remove(0);
     call.2["split_surrogate"] = json!(true);
-    let assistant = ConversationMessage::Assistant { per_turn_effort: None,
+    let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         stop_reason: Some("tool_use".into()),
-        content: vec![ContentBlock::ToolUse { input_projection: None,
+        content: vec![ContentBlock::ToolUse {
+            input_projection: None,
             id: call.0.clone(),
             name: "Sized".into(),
             input: call.2.clone(),
@@ -458,7 +463,10 @@ async fn persisting_an_mcp_array_result_drops_the_array() {
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             let body = "y".repeat(THRESHOLD * 4);
-            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!([{ "type": "text", "text": body }]),
                 model_content: Some(body),
                 new_messages: vec![],

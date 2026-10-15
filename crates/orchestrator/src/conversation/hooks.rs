@@ -1228,6 +1228,10 @@ impl ConversationOrchestrator {
         projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         message_id: MessageId,
     ) -> bool {
+        // Side inputs stay in their RAM owner; no hook, export, or derived facility.
+        if self.side_chat {
+            return false;
+        }
         let prompt = projection
             .value
             .as_str()

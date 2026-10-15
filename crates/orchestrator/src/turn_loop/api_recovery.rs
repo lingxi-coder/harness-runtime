@@ -70,6 +70,8 @@ pub(crate) enum PtlCallOutcome {
     /// message and end the turn with `reason:"rapid_refill_breaker"`
     /// (`bin/claude.exe` offset 202942256).
     RapidRefillBreaker,
+    /// Child caller cancelled a provider request before it completed.
+    Cancelled,
 }
 
 /// Wrap the batched `messages_create` with the 413 / prompt-too-long reactive
@@ -112,7 +114,23 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // first provider dispatch. Explicit recovery calls reuse it rather than
     // resolving whichever session happens to be active later.
     cost_scope: Option<&cost::CostSessionScope>,
+    side_cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
+    // Only physical model requests are dropped; recovery/compaction state and
+    // foreground tool owners remain under their existing lifetimes.
+    macro_rules! side_request {
+        ($request:expr) => {{
+            if let Some(cancel) = side_cancel.filter(|_| orch.side_chat) {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Ok(PtlCallOutcome::Cancelled),
+                    response = $request => response,
+                }
+            } else {
+                $request.await
+            }
+        }};
+    }
     crate::prompt::async_hook_response::retain_current_async_hook_reminders(
         &mut history_snapshot,
         &mut turn_reminders,
@@ -286,13 +304,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
             guarded_async_hook_reminders,
         );
     let request_history = request.messages.clone();
-    let first = orch
-        .model_runtime
-        .prompt_cache_capture
-        .scope(
-            crate::native_computer::call_model(orch, request),
-        )
-        .await;
+    let first = side_request!(
+        orch.model_runtime
+            .prompt_cache_capture
+            .scope(crate::native_computer::call_model(orch, request),)
+    );
 
     // Map `LlmError::ContextOverflow` to the PTL recovery path.
     // The `token_gap` field carries the actual-minus-limit count parsed from the
@@ -408,14 +424,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                             guarded_async_hook_reminders,
                         );
                     let request_history = request.messages.clone();
-                    return match orch
-                        .model_runtime
-                        .prompt_cache_capture
-                        .scope(
-                            crate::native_computer::call_model(orch, request),
-                        )
-                        .await
-                    {
+                    return match side_request!(
+                        orch.model_runtime
+                            .prompt_cache_capture
+                            .scope(crate::native_computer::call_model(orch, request),)
+                    ) {
                         Ok(resp) => {
                             if let Some(observation) = &mut output_observation {
                                 observation.observe(&resp.usage);
@@ -506,13 +519,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         guarded_async_hook_reminders,
                     );
                 let request_history = request.messages.clone();
-                let retry_result = orch
-                    .model_runtime
-                    .prompt_cache_capture
-                    .scope(
-                        crate::native_computer::call_model(orch, request),
-                    )
-                    .await;
+                let retry_result = side_request!(
+                    orch.model_runtime
+                        .prompt_cache_capture
+                        .scope(crate::native_computer::call_model(orch, request),)
+                );
                 match retry_result {
                     Ok(resp) => {
                         if let Some(observation) = &mut output_observation {
@@ -576,7 +587,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
         let tracking_for_core = tracking.clone();
         let error_for_core = core_error.clone();
         let phase_output = orch.output.clone();
+        let side_token = side_cancel.filter(|_| orch.side_chat).cloned();
         let core: SessionCompactCore = Arc::new(move |source_messages, instructions| {
+            let cancel = side_token.clone();
             let compactor = compact_for_core.clone();
             let tracking = tracking_for_core.clone();
             let core_error = error_for_core.clone();
@@ -586,14 +599,20 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 let api_started = std::time::Instant::now();
                 let result = {
                     let mut tracking = tracking.lock().await;
-                    compactor
-                        .process_reactive_tracked(
-                            source_messages.clone(),
-                            &mut tracking,
-                            instructions.as_deref(),
-                            (token_gap > 0).then_some(token_gap),
-                        )
-                        .await
+                    let request = compactor.process_reactive_tracked(
+                        source_messages.clone(),
+                        &mut tracking,
+                        instructions.as_deref(),
+                        (token_gap > 0).then_some(token_gap),
+                    );
+                    if let Some(cancel) = cancel {
+                        tokio::select! { biased;
+                            () = cancel.cancelled() => return Err(hooks::mods::ModError::Native("compaction cancelled".into())),
+                            result = request => result,
+                        }
+                    } else {
+                        request.await
+                    }
                 };
                 match result {
                     Ok(result) => Ok(SessionCompactCoreOutput::new(
@@ -616,6 +635,12 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 core,
             )
             .await;
+        if side_cancel.is_some_and(|cancel| orch.side_chat && cancel.is_cancelled()) {
+            orch.output
+                .emit_compaction_finished(Some("Compaction canceled."))
+                .await;
+            return Ok(PtlCallOutcome::Cancelled);
+        }
         *orch.compaction_runtime.compaction_tracking.lock().await = tracking.lock().await.clone();
         let (compact_result, compact_duration, source_messages) = match compacted {
             Ok(SessionCompactDecision::Continue {
@@ -774,14 +799,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         guarded_async_hook_reminders,
                     );
                 let request_history = request.messages.clone();
-                match orch
-                    .model_runtime
-                    .prompt_cache_capture
-                    .scope(
-                        crate::native_computer::call_model(orch, request),
-                    )
-                    .await
-                {
+                match side_request!(
+                    orch.model_runtime
+                        .prompt_cache_capture
+                        .scope(crate::native_computer::call_model(orch, request),)
+                ) {
                     Ok(resp) => {
                         if let Some(observation) = &mut output_observation {
                             observation.observe(&resp.usage);

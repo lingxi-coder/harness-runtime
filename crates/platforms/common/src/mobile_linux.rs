@@ -10,7 +10,7 @@ use lingxi_core::host::{
 use mobile_linux_api::{
     LinuxCommandRequest, LinuxProcessHandle, MobileLinuxError, MobileLinuxRuntime,
     MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskStatus, MountSpec, ProcessError,
-    ProcessOutput, ProcessStreamSink, SandboxBackend,
+    ProcessOutput, ProcessStreamSink, RawStdioOpenRequest, RawStdioSessionHandle, SandboxBackend,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -523,6 +523,7 @@ pub struct MobileLinuxProcessRunner {
     runtime: Arc<dyn MobileLinuxRuntime>,
     backend: SandboxBackend,
     background_handles: Arc<Mutex<HashMap<String, LinuxProcessHandle>>>,
+    side_foreground: Mutex<HashMap<String, HashMap<String, RawStdioSessionHandle>>>,
 }
 
 impl MobileLinuxProcessRunner {
@@ -532,7 +533,120 @@ impl MobileLinuxProcessRunner {
             backend: runtime.backend(),
             runtime,
             background_handles: Arc::new(Mutex::new(HashMap::new())),
+            side_foreground: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn remove_side_handle(&self, owner: &str, id: &str) {
+        let mut owners = self
+            .side_foreground
+            .lock()
+            .expect("side foreground owner map poisoned");
+        if let Some(handles) = owners.get_mut(owner) {
+            handles.remove(id);
+            if handles.is_empty() {
+                owners.remove(owner);
+            }
+        }
+    }
+
+    async fn run_side_foreground(
+        &self,
+        owner: &str,
+        request: LinuxCommandRequest,
+    ) -> Result<ProcessOutput, ProcessError> {
+        if request.stdin.is_some() {
+            return Err(ProcessError::Unsupported);
+        }
+        let mut args = request.args;
+        // Side shell carriers pass `-c` scripts. Raw stdio owns an open input
+        // pipe; explicitly retain normal foreground EOF for absent stdin.
+        if let Some(index) = args.iter().position(|arg| arg == "-c") {
+            if let Some(script) = args.get_mut(index + 1) {
+                *script = format!("{{\n{script}\n}} </dev/null");
+            }
+        }
+        let timeout =
+            std::time::Duration::from_millis(request.timeout_ms.unwrap_or(120_000).min(120_000));
+        let deadline = tokio::time::Instant::now() + timeout;
+        let handle = self
+            .runtime
+            .open_raw_stdio(RawStdioOpenRequest {
+                command: request.command,
+                args,
+                cwd: request.cwd,
+                env: request.env,
+                network: request.network,
+                resource_limits: request.resource_limits,
+                mounts: request.mounts,
+            })
+            .await
+            .map_err(to_process_error)?;
+        self.side_foreground
+            .lock()
+            .expect("side foreground owner map poisoned")
+            .entry(owner.to_owned())
+            .or_default()
+            .insert(handle.id.clone(), handle.clone());
+        if let Err(error) = handle
+            .enforcement
+            .ensure_for(request.network, request.resource_limits)
+        {
+            self.runtime
+                .close_raw_stdio(&handle)
+                .await
+                .map_err(|cleanup| {
+                    ProcessError::Io(format!(
+                        "{} {cleanup}",
+                        lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                    ))
+                })?;
+            self.remove_side_handle(owner, &handle.id);
+            return Err(to_process_error(error));
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let collect = async {
+            loop {
+                let output = self
+                    .runtime
+                    .read_raw_stdio(&handle, 64 * 1024)
+                    .await
+                    .map_err(to_process_error)?;
+                let empty = output.stdout.is_empty() && output.stderr.is_empty();
+                stdout.extend(output.stdout);
+                stderr.extend(output.stderr);
+                if output.closed {
+                    return Ok(output.exit_code.unwrap_or(-1));
+                }
+                if empty {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        };
+        let result = tokio::time::timeout_at(deadline, collect).await;
+        // The pinned API closes stdin, signals the guest group, joins its
+        // owner/reaper and drains both output streams before returning.
+        self.runtime
+            .close_raw_stdio(&handle)
+            .await
+            .map_err(|error| {
+                ProcessError::Io(format!(
+                    "{} {error}",
+                    lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                ))
+            })?;
+        self.remove_side_handle(owner, &handle.id);
+        let (exit_code, timed_out) = match result {
+            Ok(result) => (result?, false),
+            Err(_) => (-1, true),
+        };
+        Ok(ProcessOutput {
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            exit_code,
+            timed_out,
+        })
     }
 
     fn spawn_background_reaper(&self, task_id: String) {
@@ -620,6 +734,12 @@ impl MobileLinuxProcessRunner {
 impl ProcessRunner for MobileLinuxProcessRunner {
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
         let plan = self.admitted_plan(cmd)?;
+        if let Some(owner) = cmd
+            .process_owner()
+            .filter(|owner| owner.starts_with("side:"))
+        {
+            return self.run_side_foreground(owner, plan.request.clone()).await;
+        }
         let result = self
             .runtime
             .run(plan.request.clone())
@@ -640,6 +760,22 @@ impl ProcessRunner for MobileLinuxProcessRunner {
             .await
             .map_err(to_process_error)?;
         Ok(result.into())
+    }
+
+    async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+        let handles = self
+            .side_foreground
+            .lock()
+            .expect("side foreground owner map poisoned")
+            .get(owner)
+            .map(|handles| handles.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for handle in handles {
+            if self.runtime.close_raw_stdio(&handle).await.is_ok() {
+                self.remove_side_handle(owner, &handle.id);
+            }
+        }
+        Vec::new()
     }
 
     async fn spawn_background(
@@ -734,6 +870,8 @@ mod tests {
         backend: SandboxBackend,
         mode: MobileLinuxRuntimeMode,
         capability: MobileLinuxCapability,
+        last_raw: Mutex<Vec<RawStdioOpenRequest>>,
+        raw_closed: std::sync::atomic::AtomicBool,
         last_run: Mutex<Vec<LinuxCommandRequest>>,
         last_background: Mutex<Vec<LinuxCommandRequest>>,
         killed: Mutex<Vec<String>>,
@@ -757,6 +895,8 @@ mod tests {
                     bind_mounts: true,
                     rootfs_integrity: false,
                 },
+                last_raw: Mutex::new(Vec::new()),
+                raw_closed: std::sync::atomic::AtomicBool::new(false),
                 last_run: Mutex::new(Vec::new()),
                 last_background: Mutex::new(Vec::new()),
                 killed: Mutex::new(Vec::new()),
@@ -792,6 +932,38 @@ mod tests {
         }
 
         async fn shutdown(&self) -> Result<(), MobileLinuxError> {
+            Ok(())
+        }
+
+        async fn open_raw_stdio(
+            &self,
+            request: RawStdioOpenRequest,
+        ) -> Result<RawStdioSessionHandle, MobileLinuxError> {
+            self.last_raw.lock().unwrap().push(request);
+            Ok(RawStdioSessionHandle {
+                id: "raw-side".into(),
+                enforcement: LinuxEnforcementReceipt {
+                    network_policy_enforced: true,
+                    memory_limit_enforced: true,
+                },
+            })
+        }
+        async fn read_raw_stdio(
+            &self,
+            _: &RawStdioSessionHandle,
+            _: usize,
+        ) -> Result<mobile_linux_api::RawStdioReadResult, MobileLinuxError> {
+            let closed = self.raw_closed.load(std::sync::atomic::Ordering::SeqCst);
+            Ok(mobile_linux_api::RawStdioReadResult {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                closed,
+                exit_code: closed.then_some(-1),
+            })
+        }
+        async fn close_raw_stdio(&self, _: &RawStdioSessionHandle) -> Result<(), MobileLinuxError> {
+            self.raw_closed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
@@ -1184,6 +1356,44 @@ mod tests {
         let error = MobileLinuxSandbox::new(runtime, mounts)
             .expect_err("symlinked mount root must be rejected");
         assert!(matches!(error, SandboxError::Unavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn side_raw_foreground_cancellation_reaps_and_never_spawns_background() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("workspace")).unwrap();
+        fs::create_dir_all(temp.path().join("readonly")).unwrap();
+        let runtime = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        let sandbox = MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp)).unwrap();
+        let mut request = sample_command(&temp);
+        request.stdin = None;
+        request.args = vec!["-c".into(), "pwd".into()];
+        let command = sandbox
+            .prepare(request, &sample_policy(&temp))
+            .unwrap()
+            .with_process_owner(Some("side:one".into()));
+        let runner = Arc::new(MobileLinuxProcessRunner::new(runtime.clone()));
+        let run_runner = runner.clone();
+        let running = tokio::spawn(async move { run_runner.run(&command).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !runner
+                .side_foreground
+                .lock()
+                .unwrap()
+                .contains_key("side:one")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        runner.kill_owner_processes("side:other").await;
+        assert!(!runtime.raw_closed.load(std::sync::atomic::Ordering::SeqCst));
+        runner.kill_owner_processes("side:one").await;
+        running.await.unwrap().unwrap();
+        assert!(runtime.raw_closed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(runtime.last_background.lock().unwrap().is_empty());
+        assert!(runtime.last_run.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -187,7 +187,7 @@ impl ConversationOrchestrator {
         );
         self.seed_compact_cache_safe_params(display_system.as_deref())
             .await;
-        self.maybe_compact_before_call().await;
+        self.maybe_compact_before_call(user_cancel).await;
         // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
         // before the outgoing snapshot is cloned from history.
         let _ = self.drain_peer_inbox(false).await;

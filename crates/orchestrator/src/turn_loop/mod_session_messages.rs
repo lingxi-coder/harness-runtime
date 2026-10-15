@@ -4,7 +4,7 @@ use base64::Engine as _;
 use hooks::mods::{ModUtf16StringSidecar, ModUtf16ValueProjection};
 use lingxi_core::types::{ContentBlock, ConversationMessage};
 use llm_runtime::history::ContentBlock as ModelBlock;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -39,10 +39,7 @@ fn exact_text_of(blocks: &[ContentBlock]) -> (String, Option<Vec<u16>>) {
         }
     }
     if !has_exact_units {
-        return (
-            blocks.iter().filter_map(text_of).collect::<String>(),
-            None,
-        );
+        return (blocks.iter().filter_map(text_of).collect::<String>(), None);
     }
     let text = String::from_utf16_lossy(&code_units);
     let sidecar = String::from_utf16(&code_units)
@@ -117,7 +114,8 @@ pub(super) fn summarize_projection(history: &[ConversationMessage]) -> ModUtf16V
                         name,
                         input,
                         provider_id,
-                     .. } = block
+                        ..
+                    } = block
                     {
                         let tool_id = provider_id.clone().unwrap_or_else(|| id.to_string());
                         let mut call = json!({
@@ -168,7 +166,9 @@ fn api_block(
             }
             value
         }
-        ModelBlock::Text { text, citations, .. } => {
+        ModelBlock::Text {
+            text, citations, ..
+        } => {
             let mut block = json!({"type":"text","text":text});
             if let Some(citations) = citations {
                 block["citations"] = citations.unwrap_or(Value::Null);
@@ -206,7 +206,9 @@ fn api_block(
             "source":{"type":"base64","media_type":media_type,
                 "data":base64::engine::general_purpose::STANDARD.encode(bytes)}
         }),
-        ModelBlock::ToolCall { id, name, input , .. } => {
+        ModelBlock::ToolCall {
+            id, name, input, ..
+        } => {
             json!({"type":"tool_use","id":id,"name":name,"input":input})
         }
         ModelBlock::ToolResult {
@@ -300,7 +302,11 @@ pub(super) fn api_projection(
         let removed_rows = start + first_complete_user;
         rows.drain(..removed_rows);
         strings.retain_mut(|sidecar| {
-            let Some((row, rest)) = sidecar.pointer.strip_prefix('/').and_then(|path| path.split_once('/')) else {
+            let Some((row, rest)) = sidecar
+                .pointer
+                .strip_prefix('/')
+                .and_then(|path| path.split_once('/'))
+            else {
                 return false;
             };
             let Some(row) = row.parse::<usize>().ok() else {
@@ -407,7 +413,8 @@ mod tests {
     use lingxi_core::types::{ImageSource, MessageId, ToolUseId};
 
     fn user(content: Vec<ContentBlock>, is_meta: bool) -> ConversationMessage {
-        ConversationMessage::User { api_message_override: None,
+        ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content,
             is_meta,
@@ -434,14 +441,16 @@ mod tests {
                 }],
                 true,
             ),
-            ConversationMessage::Assistant { per_turn_effort: None,
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![
                     ContentBlock::Text {
                         text: "before".into(),
                         citations: None,
                     },
-                    ContentBlock::ToolUse { input_projection: None,
+                    ContentBlock::ToolUse {
+                        input_projection: None,
                         id: id.clone(),
                         name: "Read".into(),
                         input: json!({"file_path":"a.txt"}),
@@ -455,7 +464,8 @@ mod tests {
                 stop_reason: None,
             },
             user(
-                vec![ContentBlock::ToolResult { content_projection: None,
+                vec![ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: id,
                     content: "not found".into(),
                     is_error: Some(true),
@@ -510,14 +520,16 @@ mod tests {
                 }],
                 true,
             ),
-            ConversationMessage::Assistant { per_turn_effort: None,
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "reason".into(),
                         signature: Some("signed".into()),
                     },
-                    ContentBlock::ToolUse { input_projection: None,
+                    ContentBlock::ToolUse {
+                        input_projection: None,
                         id: id.clone(),
                         name: "Read".into(),
                         input: json!({"file_path":"a.txt"}),
@@ -527,7 +539,8 @@ mod tests {
                 stop_reason: None,
             },
             user(
-                vec![ContentBlock::ToolResult { content_projection: None,
+                vec![ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: id,
                     content: "found".into(),
                     is_error: Some(false),
@@ -576,9 +589,11 @@ mod tests {
                 }],
                 false,
             ),
-            ConversationMessage::Assistant { per_turn_effort: None,
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolUse { input_projection: None,
+                content: vec![ContentBlock::ToolUse {
+                    input_projection: None,
                     id: id.clone(),
                     name: "View".into(),
                     input: json!({}),
@@ -587,7 +602,8 @@ mod tests {
                 stop_reason: None,
             },
             user(
-                vec![ContentBlock::ToolResult { content_projection: None,
+                vec![ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: id,
                     content: "image".into(),
                     is_error: Some(true),
@@ -629,9 +645,11 @@ mod tests {
                 }],
                 false,
             ),
-            ConversationMessage::Assistant { per_turn_effort: None,
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolUse { input_projection: None,
+                content: vec![ContentBlock::ToolUse {
+                    input_projection: None,
                     id: id.clone(),
                     name: "Read".into(),
                     input: json!({}),
@@ -640,7 +658,8 @@ mod tests {
                 stop_reason: None,
             },
             user(
-                vec![ContentBlock::ToolResult { content_projection: None,
+                vec![ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: id,
                     content: "result".into(),
                     is_error: Some(false),
@@ -649,7 +668,8 @@ mod tests {
                 }],
                 false,
             ),
-            ConversationMessage::Assistant { per_turn_effort: None,
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: "done".into(),
@@ -672,7 +692,8 @@ mod tests {
                 citations: None,
             }];
             if assistant {
-                history.push(ConversationMessage::Assistant { per_turn_effort: None,
+                history.push(ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: MessageId::new(),
                     content,
                     stop_reason: None,
@@ -734,9 +755,11 @@ mod tests {
         let path = temp.path().join("session.jsonl");
         let id = ToolUseId::from("toolu_example");
         let history = [
-            ConversationMessage::Assistant { per_turn_effort: None,
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolUse { input_projection: None,
+                content: vec![ContentBlock::ToolUse {
+                    input_projection: None,
                     id: id.clone(),
                     name: "Read".into(),
                     input: json!({}),
@@ -745,7 +768,8 @@ mod tests {
                 stop_reason: None,
             },
             user(
-                vec![ContentBlock::ToolResult { content_projection: None,
+                vec![ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: id,
                     content: "file text".into(),
                     is_error: Some(false),

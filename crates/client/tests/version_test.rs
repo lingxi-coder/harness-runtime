@@ -42,5 +42,5 @@ fn version_is_semver() {
 /// along on this bump without anyone choosing it.
 #[test]
 fn version_is_twenty_one_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "21.0.0");
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "22.0.0");
 }

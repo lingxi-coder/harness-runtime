@@ -40,6 +40,7 @@ async fn dispatch(
             "off",
             None,
             &StreamFileSuggestionIndex::default(),
+            &SdkPromptSuggestions::new(false),
             runtime.services.as_ref(),
             owner,
             &runtime.execution_errors,

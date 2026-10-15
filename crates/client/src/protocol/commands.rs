@@ -221,6 +221,16 @@ pub enum UiSurfaceDto {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClientCommand {
+    /// Create an independent, RAM-only child conversation.
+    SideChatCreate { request_id: String, #[serde(default, skip_serializing_if = "Option::is_none")] initial_input: Option<String> },
+    /// List retained children in this host generation.
+    SideChatList {},
+    /// Replay a child timeline.
+    SideChatGet { side_id: String },
+    /// Close admission, cancel and drain a child.
+    SideChatEnd { side_id: String },
+    /// Submit one ordinary child command, deduplicated by request ID.
+    SideChatSubmit { side_id: String, request_id: String, command_json: String },
     /// Start native Agent realtime on this authenticated connection.
     StartRealtimeAudio {
         request_json: String,

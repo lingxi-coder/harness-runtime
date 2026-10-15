@@ -17,9 +17,10 @@ fn suggestion(case_name: &str) -> String {
         .to_string()
 }
 
-fn description(tools: Vec<serde_json::Value>) -> String {
+fn description(tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>) -> String {
     tools
         .into_iter()
+        .map(|tool| tool.value)
         .find(|tool| tool["name"] == "Shell")
         .unwrap()["description"]
         .as_str()

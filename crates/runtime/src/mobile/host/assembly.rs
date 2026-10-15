@@ -616,10 +616,16 @@ pub(super) async fn build_mobile_inner_with_ask(
     // subscriber (`SubscriberState::default()` — api-key-only inference), and
     // binds no live subscription slot / availability map / CostTracker (out of
     // scope; mobile parity did not).
-    let audio_services = llm_runtime.provider_services(provider_region, llm_transport.clone())
-        .map_err(|error| MobileBuildError::ApiBase(format!("audio service configuration: {error}")))?;
-    let audio_credential_ids = assembled.credential_sources.iter()
-        .map(|source| (source.profile_name.clone(), source.credential_id.clone())).collect();
+    let audio_services = llm_runtime
+        .provider_services(provider_region, llm_transport.clone())
+        .map_err(|error| {
+            MobileBuildError::ApiBase(format!("audio service configuration: {error}"))
+        })?;
+    let audio_credential_ids = assembled
+        .credential_sources
+        .iter()
+        .map(|source| (source.profile_name.clone(), source.credential_id.clone()))
+        .collect();
     let api_service = Arc::new(
         llm_runtime::ApiService::new_with_routing(
             llm_runtime,
@@ -1720,6 +1726,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     local_agent_status_sink.bind(task_registry.clone());
     let tool_ctx = BuiltinToolContext {
+        side_chat: false,
+        side_chat_cleanup_failed: None,
         // No session: this context never persists tool output.
         session_id: None,
         // FILE.B / P1-06: file tools share the ONE per-session read-state map
@@ -1964,6 +1972,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // bodies identically to desktop. Mobile reports `sandbox_available:false`, so
     // `should_use_sandbox` short-circuits to `NoSandbox` and the expansion runs
     // via the plain `ProcessRunner` — consistent with mobile's own Bash tool.
+    let side_chat_context = tool_ctx.clone();
     let shell_expansion_provider = tool_skill::build_prompt_shell_provider(&tool_ctx);
     let ask_resolver = ask_user_question_tx.map(|tx| {
         let timeout = tool_ui::ask_user_question::AskUserQuestionTimeout::parse_or_default(
@@ -2260,9 +2269,12 @@ pub(super) async fn build_mobile_inner_with_ask(
         // `cwd` is reused below by the batch-8 registration, so clone here.
         cwd.clone(),
     )
-    .with_mod_settings_reader(Arc::new(super::settings_commands::MobileModSettingsReader::new(
-        cfg.lingxi_home.clone(), cwd.clone(),
-    )))
+    .with_mod_settings_reader(Arc::new(
+        super::settings_commands::MobileModSettingsReader::new(
+            cfg.lingxi_home.clone(),
+            cwd.clone(),
+        ),
+    ))
     .with_hook_agent_inheritance(parked_agent_restore_inheritance.clone())
     .with_dynamic_workflows_gate(dynamic_workflows_gate)
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())
@@ -2664,7 +2676,13 @@ pub(super) async fn build_mobile_inner_with_ask(
         })
         .await;
 
+    let side_chat_factory = Arc::new(super::side_chat::MobileSideChatFactory {
+        api: api_service,
+        context: side_chat_context,
+        commands: shared_command_registry.clone(),
+    });
     Ok(MobileRuntime {
+        side_chat_factory,
         provider_region,
         audio_services,
         audio_credential_ids,
@@ -3180,7 +3198,15 @@ pub fn build_mobile_engine_inner(
         active: Arc::new(std::sync::RwLock::new(active)),
         managed,
     });
+    let side_chats = runtime.block_on(async {
+        crate::side_chat::SideChatManager::new(
+            inner.orchestrator.clone(),
+            inner.side_chat_factory.clone(),
+            connection_sink.clone(),
+        )
+    });
     let handle = Arc::new(MobileEngineHandle {
+        side_chats,
         session_cron,
         scheduled_reload: std::sync::atomic::AtomicBool::new(false),
         settings,

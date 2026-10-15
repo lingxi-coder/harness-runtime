@@ -38,24 +38,30 @@ fn bash_isimage_result_maps_stdout_data_uri_with_sniffed_media_type() {
 fn bash_isimage_misses_fall_back_to_none() {
     use super::bash_image_tool_result_blocks;
     // Not flagged as image.
-    assert!(bash_image_tool_result_blocks(
-        &json!({"stdout":"data:image/png;base64,iVBORw0KGgo=","isImage":false})
-    )
-    .is_none());
+    assert!(
+        bash_image_tool_result_blocks(
+            &json!({"stdout":"data:image/png;base64,iVBORw0KGgo=","isImage":false})
+        )
+        .is_none()
+    );
     // Flagged, but stdout is not a data-URI → text fallback (`hKn` null).
     assert!(
         bash_image_tool_result_blocks(&json!({"stdout":"plain text","isImage":true})).is_none()
     );
     // Valid URI shape but undecodable base64.
-    assert!(bash_image_tool_result_blocks(
-        &json!({"stdout":"data:image/png;base64,@@not-base64@@","isImage":true})
-    )
-    .is_none());
+    assert!(
+        bash_image_tool_result_blocks(
+            &json!({"stdout":"data:image/png;base64,@@not-base64@@","isImage":true})
+        )
+        .is_none()
+    );
     // Decodable but unrecognized magic (claimed image, actually text bytes).
-    assert!(bash_image_tool_result_blocks(
-        &json!({"stdout":"data:image/png;base64,aGVsbG8gd29ybGQh","isImage":true})
-    )
-    .is_none());
+    assert!(
+        bash_image_tool_result_blocks(
+            &json!({"stdout":"data:image/png;base64,aGVsbG8gd29ybGQh","isImage":true})
+        )
+        .is_none()
+    );
 }
 
 #[test]

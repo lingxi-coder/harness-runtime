@@ -1,8 +1,8 @@
-use super::{dispatch_tool_uses_tracked, ConversationOrchestrator};
-use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-};
+use super::{ConversationOrchestrator, dispatch_tool_uses_tracked};
 use crate::OrchestratorConfig;
+use crate::test_support::{
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+};
 use async_trait::async_trait;
 use lingxi_core::types::ToolUseId;
 use serde_json::json;

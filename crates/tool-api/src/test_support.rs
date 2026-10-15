@@ -6,7 +6,7 @@
 //! M5 sandbox wiring but never touched by the tools themselves.
 
 use crate::context::{ToolUseContext, ToolUseOptions};
-use crate::progress::{ToolProgressSender, progress_channel};
+use crate::progress::{progress_channel, ToolProgressSender};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -827,6 +827,8 @@ pub fn ctx_for_file_tools(
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
     super::BuiltinToolContext {
+        side_chat: false,
+        side_chat_cleanup_failed: None,
         // No session: this context never persists tool output.
         session_id: None,
         fs,
@@ -904,6 +906,8 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
     use telemetry::AnalyticsBus;
 
     super::BuiltinToolContext {
+        side_chat: false,
+        side_chat_cleanup_failed: None,
         // No session: this context never persists tool output.
         session_id: None,
         fs: make_dummy_fs(),
@@ -982,6 +986,8 @@ pub fn shell_test_ctx_in(
     let ctx = shell_test_ctx(out);
     let trusted = ctx.trusted_dirs();
     super::BuiltinToolContext {
+        side_chat: false,
+        side_chat_cleanup_failed: None,
         // No session: this context never persists tool output.
         session_id: None,
         session_cwd: crate::session_cwd::SessionCwd::new(workspace, trusted),

@@ -116,10 +116,7 @@ fn sole_preliminary_ask_returns_its_child_rule_directly() {
     let PermissionDecisionReason::MatchedRule { rule } = reason else {
         panic!("Native a6t returns its sole preliminary Ask directly: {reason:?}");
     };
-    assert_eq!(
-        rule.value.to_rule_string(),
-        "Bash(rm:*)"
-    );
+    assert_eq!(rule.value.to_rule_string(), "Bash(rm:*)");
 }
 
 #[test]
@@ -183,10 +180,7 @@ fn compound_tool_wide_deny_returns_before_the_child_producer() {
     let PermissionDecisionReason::MatchedRule { rule } = reason else {
         panic!("tool-wide denial returns before Native's children: {reason:?}");
     };
-    assert_eq!(
-        rule.value.to_rule_string(),
-        "Bash"
-    );
+    assert_eq!(rule.value.to_rule_string(), "Bash");
 }
 
 #[test]
@@ -195,7 +189,8 @@ fn unmatched_sibling_keeps_the_preliminary_ask_in_a_compound_tree() {
     let policy = PermissionPolicy::from_rules(
         PermissionMode::Default,
         [bash_rule("rm:*", PermissionBehavior::Ask, source)],
-    ).with_roots(roots());
+    )
+    .with_roots(roots());
     let result = policy.authorize("Bash", &json!({"command":"rm -rf build && curl https://x"}));
     let PermissionResult::Ask { reason, prompt, .. } = &result else {
         panic!("the unmatched sibling also requires approval: {result:?}");
@@ -205,7 +200,13 @@ fn unmatched_sibling_keeps_the_preliminary_ask_in_a_compound_tree() {
     };
     assert_eq!(reasons.len(), 2);
     assert_eq!(prompt.message, "This Bash command contains multiple operations. The following parts require approval: rm -rf build, curl https://x");
-    assert_eq!(first_subcommand_rule_for_behavior(reasons, PermissionBehavior::Ask).unwrap().value.to_rule_string(), "Bash(rm:*)");
+    assert_eq!(
+        first_subcommand_rule_for_behavior(reasons, PermissionBehavior::Ask)
+            .unwrap()
+            .value
+            .to_rule_string(),
+        "Bash(rm:*)"
+    );
 }
 
 #[cfg(feature = "bash-ast")]
@@ -513,12 +514,22 @@ fn recovered_open_if_keeps_an_explicit_child_ask() {
 fn pipeline_keeps_the_single_preliminary_ask_in_its_tree() {
     let policy = PermissionPolicy::from_rules(
         PermissionMode::Default,
-        [bash_rule("rm:*", PermissionBehavior::Ask, PermissionRuleSource::FlagSettings)],
-    ).with_roots(roots());
-    let PermissionResult::Ask { reason, prompt, .. } = policy.authorize("Bash", &json!({"command":"echo ok | rm -rf build"})) else {
+        [bash_rule(
+            "rm:*",
+            PermissionBehavior::Ask,
+            PermissionRuleSource::FlagSettings,
+        )],
+    )
+    .with_roots(roots());
+    let PermissionResult::Ask { reason, prompt, .. } =
+        policy.authorize("Bash", &json!({"command":"echo ok | rm -rf build"}))
+    else {
         panic!("the pipeline must ask");
     };
-    assert!(matches!(reason, PermissionDecisionReason::SubcommandResults { .. }));
+    assert!(matches!(
+        reason,
+        PermissionDecisionReason::SubcommandResults { .. }
+    ));
     assert_eq!(prompt.message, "This Bash command contains multiple operations. The following part requires approval: rm -rf build");
 }
 
@@ -665,7 +676,8 @@ fn native_pipeline_deny_copies_child_message_but_ast_keeps_parent_message() {
             bash_rule("rm:*", PermissionBehavior::Deny, source),
             bash_rule("echo:*", PermissionBehavior::Deny, source),
         ],
-    ).with_roots(roots());
+    )
+    .with_roots(roots());
     for (command, denied_command) in [
         ("echo ok | rm -rf build", "echo ok"),
         ("rm -rf build | echo ok", "rm -rf build"),
@@ -678,9 +690,14 @@ fn native_pipeline_deny_copies_child_message_but_ast_keeps_parent_message() {
         let PermissionResult::Deny { explanation, .. } = result else {
             panic!("Native policy fixture must deny {command}");
         };
-        assert_eq!(explanation.as_deref(), Some(format!(
-            "Permission to use Bash with command {denied_command} has been denied."
-        ).as_str()), "{command}");
+        assert_eq!(
+            explanation.as_deref(),
+            Some(
+                format!("Permission to use Bash with command {denied_command} has been denied.")
+                    .as_str()
+            ),
+            "{command}"
+        );
     }
 }
 
@@ -694,7 +711,8 @@ fn native_compound_allow_retains_original_input() {
             bash_rule("echo:*", PermissionBehavior::Allow, source),
             bash_rule("pwd:*", PermissionBehavior::Allow, source),
         ],
-    ).with_roots(roots());
+    )
+    .with_roots(roots());
     for command in ["echo ok | pwd", "echo ok && pwd"] {
         let input = json!({"command":command,"timeout":1000});
         let result = policy.authorize("Bash", &input);
@@ -710,20 +728,43 @@ fn native_ast_ask_duplicate_prefers_safety_but_not_a_rule() {
     let ast = ShellReasonTree::Ast(vec!["same".into(), "same".into()]);
     let ordinary = bare_result(PermissionBehavior::Ask);
     let mut safety = bare_result(PermissionBehavior::Ask);
-    let PermissionResult::Ask { reason, .. } = &mut safety else { unreachable!() };
+    let PermissionResult::Ask { reason, .. } = &mut safety else {
+        unreachable!()
+    };
     *reason = PermissionDecisionReason::SafetyCheck {
         reason: "safety".into(),
         classifier_approvable: false,
         circuit_breaker: None,
     };
-    assert!(replace_duplicate_child(&ast, PermissionBehavior::Ask, &ordinary, &safety));
-    assert!(!replace_duplicate_child(&ast, PermissionBehavior::Ask, &safety, &ordinary));
+    assert!(replace_duplicate_child(
+        &ast,
+        PermissionBehavior::Ask,
+        &ordinary,
+        &safety
+    ));
+    assert!(!replace_duplicate_child(
+        &ast,
+        PermissionBehavior::Ask,
+        &safety,
+        &ordinary
+    ));
     let mut rule = bare_result(PermissionBehavior::Ask);
-    let PermissionResult::Ask { reason, .. } = &mut rule else { unreachable!() };
-    *reason = PermissionDecisionReason::MatchedRule { rule: bash_rule(
-        "rm:*", PermissionBehavior::Ask, PermissionRuleSource::FlagSettings,
-    ) };
-    assert!(!replace_duplicate_child(&ast, PermissionBehavior::Ask, &ordinary, &rule));
+    let PermissionResult::Ask { reason, .. } = &mut rule else {
+        unreachable!()
+    };
+    *reason = PermissionDecisionReason::MatchedRule {
+        rule: bash_rule(
+            "rm:*",
+            PermissionBehavior::Ask,
+            PermissionRuleSource::FlagSettings,
+        ),
+    };
+    assert!(!replace_duplicate_child(
+        &ast,
+        PermissionBehavior::Ask,
+        &ordinary,
+        &rule
+    ));
 }
 
 #[test]
@@ -735,7 +776,9 @@ fn global_stdin_guard_precedes_child_read_path_denial() {
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::FlagSettings,
         }],
-    ).with_roots(roots()).with_block_reads_outside_working_directories(true);
+    )
+    .with_roots(roots())
+    .with_block_reads_outside_working_directories(true);
     let result = policy.authorize("Bash", &json!({"command":"cat secret.env | python"}));
     let PermissionResult::Ask { reason, prompt, .. } = result else {
         panic!("Native a6t returns the complete-input stdin guard first");

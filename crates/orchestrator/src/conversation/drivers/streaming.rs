@@ -9,21 +9,62 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::hooks_impl::ModPromptScreen;
 use super::{
-    is_env_truthy, llm_response_to_pumped_turn, loop_state, prepare, pumped_assistant_message,
-    token_aborted, QueuedPromptInput, StepExit, StreamingIterationDisposition, TurnLoopState,
+    QueuedPromptInput, StepExit, StreamingIterationDisposition, TurnLoopState, is_env_truthy,
+    llm_response_to_pumped_turn, loop_state, prepare, pumped_assistant_message, token_aborted,
 };
 use crate::conversation::{
-    assistant_usage_value, classify_api_error, output_accounting_impl, ApiErrorEnvelope,
-    ConversationOrchestrator, ConversationOutcome, ModelCallPath, OutgoingHistoryRewriter,
-    PreparedContextAnnouncements, INTERRUPT_MESSAGE, INTERRUPT_MESSAGE_FOR_TOOL_USE,
+    ApiErrorEnvelope, ConversationOrchestrator, ConversationOutcome, INTERRUPT_MESSAGE,
+    INTERRUPT_MESSAGE_FOR_TOOL_USE, ModelCallPath, OutgoingHistoryRewriter,
+    PreparedContextAnnouncements, assistant_usage_value, classify_api_error,
+    output_accounting_impl,
 };
 use crate::error::OrchestratorError;
 use crate::mod_turn_step::{TurnStepDecoder, TurnStepEncoder};
 use crate::streaming_loop::ExecutorPump;
 use crate::turn_loop::{
-    call_api_with_ptl_recovery, surface_prompt_too_long, surface_rapid_refill_thrashing,
-    PtlCallOutcome, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+    MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, PtlCallOutcome, call_api_with_ptl_recovery,
+    surface_prompt_too_long, surface_rapid_refill_thrashing,
 };
+
+// Cancel request opening without dropping foreground tool execution. An empty
+// stream takes the normal executor cancellation and drain path.
+async fn open_side_stream<F>(
+    orch: &ConversationOrchestrator,
+    cancel: &Option<CancellationToken>,
+    request: F,
+) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>
+where
+    F: std::future::Future<
+            Output = Result<
+                futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
+                LlmError,
+            >,
+        >,
+{
+    if orch.side_chat {
+        if let Some(cancel) = cancel {
+            return tokio::select! {
+                biased;
+                () = cancel.cancelled() => Ok(futures::stream::empty().boxed()),
+                result = request => result,
+            };
+        }
+    }
+    request.await
+}
+
+async fn side_model_request<F: std::future::Future>(
+    orch: &ConversationOrchestrator,
+    cancel: &Option<CancellationToken>,
+    request: F,
+) -> Option<F::Output> {
+    if orch.side_chat {
+        if let Some(cancel) = cancel {
+            return tokio::select! { biased; () = cancel.cancelled() => None, result = request => Some(result) };
+        }
+    }
+    Some(request.await)
+}
 
 fn observe_main_dispatch(
     admission: Option<llm_runtime::RequestDispatchAdmission>,
@@ -185,6 +226,7 @@ enum StreamErrorFallback<'a> {
         cost_receipt: Option<cost::CostResponseReceipt>,
     },
     Declined(MessageId),
+    Cancelled,
 }
 
 type ModStepFrame = (
@@ -1017,28 +1059,29 @@ impl StreamingTurnDriver<'_> {
                 );
             let request_dispatch_admission =
                 observe_main_dispatch(request_dispatch_admission, &orch.output);
-            retry_scope
-                .run(
-                    orch.model_runtime
-                        .prompt_cache_capture
-                        .scope(orch.streaming_api.stream(
-                            &model,
-                            model_profile.as_deref(),
-                            system_prompt.as_ref(),
-                            snapshot,
-                            wire_tools.clone(),
-                            crate::config::sanitize_query_source(&orch.config.query_source),
-                            skip_global_cache_for_system_prompt,
-                            request_dispatch_admission,
-                        )),
+            open_side_stream(
+                orch,
+                user_cancel,
+                retry_scope.run(orch.model_runtime.prompt_cache_capture.scope(
+                    orch.streaming_api.stream(
+                        &model,
+                        model_profile.as_deref(),
+                        system_prompt.as_ref(),
+                        snapshot,
+                        wire_tools.clone(),
+                        crate::config::sanitize_query_source(&orch.config.query_source),
+                        skip_global_cache_for_system_prompt,
+                        request_dispatch_admission,
+                    ),
+                )),
+            )
+            .await
+            .map(|stream| {
+                output_accounting_impl::account_stream(
+                    stream,
+                    first_output_observation.take().flatten(),
                 )
-                .await
-                .map(|stream| {
-                    output_accounting_impl::account_stream(
-                        stream,
-                        first_output_observation.take().flatten(),
-                    )
-                })
+            })
         };
         orch.persist_thinking_signature_strip_latch().await;
         if stream_result.is_err() {
@@ -1114,6 +1157,7 @@ impl StreamingTurnDriver<'_> {
                     &mut guarded_async_hook_reminders,
                     &context_announcements,
                     cost_scope.as_ref(),
+                    user_cancel.as_ref(),
                 )
                 .await?;
                 let mut no_snapshot = Vec::new();
@@ -1155,7 +1199,9 @@ impl StreamingTurnDriver<'_> {
                         if !display_hook_active {
                             for blk in &pumped_from_recovery.assistant_blocks {
                                 if let Some(text) = blk.visible_text() {
-                                    orch.output.emit_text(text, blk.visible_text_utf16_units()).await;
+                                    orch.output
+                                        .emit_text(text, blk.visible_text_utf16_units())
+                                        .await;
                                 }
                             }
                         }
@@ -1193,6 +1239,11 @@ impl StreamingTurnDriver<'_> {
                             });
                         }
                         OpenedModelStream::Recovered(pumped_from_recovery)
+                    }
+                    PtlCallOutcome::Cancelled => {
+                        let cost = orch.snapshot_cost_real().await;
+                        orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                        return Ok(OpenStreamingOutcome::Complete(assistant_id));
                     }
                     PtlCallOutcome::PromptTooLong => {
                         // Reactive recovery exhausted — end with the reactive
@@ -1411,8 +1462,10 @@ impl StreamingTurnDriver<'_> {
             profile: non_stream_profile.clone(),
         });
         let request_history = non_stream_snapshot.clone();
-        let mut resp = retry_scope
-            .run(
+        let resp = side_model_request(
+            orch,
+            user_cancel,
+            retry_scope.run(
                 orch.model_runtime
                     .prompt_cache_capture
                     .scope(
@@ -1445,9 +1498,13 @@ impl StreamingTurnDriver<'_> {
                                 request
                             })),
                     ),
-            )
-            .await
-            .map_err(OrchestratorError::ApiCall)?;
+            ),
+        )
+        .await;
+        let Some(resp_result) = resp else {
+            return Ok(StreamErrorFallback::Cancelled);
+        };
+        let mut resp = resp_result.map_err(OrchestratorError::ApiCall)?;
 
         if let Some(observation) = &mut output_observation {
             observation.observe(&resp.usage);
@@ -1526,7 +1583,9 @@ impl StreamingTurnDriver<'_> {
         for blk in &pumped_from_fallback.assistant_blocks {
             if let Some(text) = blk.visible_text() {
                 if !display_hook_active {
-                    orch.output.emit_text(text, blk.visible_text_utf16_units()).await;
+                    orch.output
+                        .emit_text(text, blk.visible_text_utf16_units())
+                        .await;
                 }
                 continue;
             }
@@ -1990,8 +2049,10 @@ impl StreamingTurnDriver<'_> {
                                 );
                             let request_dispatch_admission =
                                 observe_main_dispatch(request_dispatch_admission, &orch.output);
-                            let retry_stream = retry_scope
-                                .run(orch.model_runtime.prompt_cache_capture.scope(
+                            let retry_stream = open_side_stream(
+                                orch,
+                                user_cancel,
+                                retry_scope.run(orch.model_runtime.prompt_cache_capture.scope(
                                     orch.streaming_api.stream(
                                         &re_model,
                                         re_profile.as_deref(),
@@ -2004,8 +2065,9 @@ impl StreamingTurnDriver<'_> {
                                         skip_global_cache_for_system_prompt,
                                         request_dispatch_admission,
                                     ),
-                                ))
-                                .await;
+                                )),
+                            )
+                            .await;
                             orch.persist_thinking_signature_strip_latch().await;
                             if retry_stream.is_err() {
                                 if let Some(reason) = retry_scope.take_model_fallback_request() {
@@ -2327,6 +2389,12 @@ impl StreamingTurnDriver<'_> {
                             }
                             StreamErrorFallback::Declined(message_id) => {
                                 return Ok(PumpStreamingOutcome::Complete(message_id));
+                            }
+                            StreamErrorFallback::Cancelled => {
+                                orch.settle_stream_error_attempt(&mut exec, &mut f.partial, &mut settlement, assistant_id, INTERRUPT_MESSAGE).await;
+                                let cost = orch.snapshot_cost_real().await;
+                                orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                                return Ok(PumpStreamingOutcome::Complete(assistant_id));
                             }
                         }
                     }
@@ -2697,20 +2765,28 @@ impl StreamingTurnDriver<'_> {
                 match orch.fire_message_display_completed(&turn_id, &joined).await {
                     Some(on_screen) => orch.output.emit_text(&on_screen, None).await,
                     None => {
-                        let joined_units = pumped.assistant_blocks.iter().any(|block| block.visible_text_utf16_units().is_some()).then(|| {
-                            let mut units = Vec::new();
-                            for block in &pumped.assistant_blocks {
-                                if let Some(text) = block.visible_text() {
-                                    if let Some(original_units) = block.visible_text_utf16_units() {
-                                        units.extend_from_slice(original_units);
-                                    } else {
-                                        units.extend(text.encode_utf16());
+                        let joined_units = pumped
+                            .assistant_blocks
+                            .iter()
+                            .any(|block| block.visible_text_utf16_units().is_some())
+                            .then(|| {
+                                let mut units = Vec::new();
+                                for block in &pumped.assistant_blocks {
+                                    if let Some(text) = block.visible_text() {
+                                        if let Some(original_units) =
+                                            block.visible_text_utf16_units()
+                                        {
+                                            units.extend_from_slice(original_units);
+                                        } else {
+                                            units.extend(text.encode_utf16());
+                                        }
                                     }
                                 }
-                            }
-                            units
-                        });
-                        orch.output.emit_text(&joined, joined_units.as_deref()).await;
+                                units
+                            });
+                        orch.output
+                            .emit_text(&joined, joined_units.as_deref())
+                            .await;
                     }
                 }
             }
@@ -3027,7 +3103,8 @@ impl StreamingTurnDriver<'_> {
             original_model: failed.into(),
             fallback_model: next.model,
         };
-        let notice = ConversationMessage::System { api_system: None,
+        let notice = ConversationMessage::System {
+            api_system: None,
             id,
             content: content.clone(),
             subtype: Some("model_fallback".into()),

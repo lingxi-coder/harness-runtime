@@ -12,6 +12,7 @@ pub struct CommandRegistry {
     aliases: HashMap<String, String>,
     builtin_handlers: HashMap<String, Arc<dyn BuiltinCommandHandler>>,
     plugin_commands: HashMap<PluginId, Vec<String>>,
+    side_chat: bool,
     session_skill_allowlist: Option<Vec<String>>,
     /// Loaded plugin display name -> (owner id, storage identity, native provider).
     plugin_describe_providers: HashMap<String, (PluginId, String, Value)>,
@@ -28,10 +29,43 @@ impl CommandRegistry {
             aliases: HashMap::new(),
             builtin_handlers: HashMap::new(),
             plugin_commands: HashMap::new(),
+            side_chat: false,
             session_skill_allowlist: None,
             plugin_describe_providers: HashMap::new(),
             managed_mcp_servers: HashSet::new(),
             mod_commands: HashMap::new(),
+        }
+    }
+
+    /// Restrict this registry instance to lightweight side conversation commands.
+    pub fn set_side_chat(&mut self, enabled: bool) {
+        self.side_chat = enabled;
+    }
+
+    /// Validate before handlers, hooks or prompt expansion execute.
+    #[must_use]
+    pub fn execution_allowed(&self, command: &SlashCommand) -> bool {
+        if !self.side_chat {
+            return true;
+        }
+        if self.mod_owner_of(&command.name).is_some()
+            || matches!(command.source, CommandSource::Plugin | CommandSource::Mcp)
+        {
+            return false;
+        }
+        match &command.kind {
+            SlashCommandKind::Builtin { .. } => {
+                matches!(command.name.as_str(), "help" | "model" | "compact")
+            }
+            SlashCommandKind::Markdown { frontmatter, .. }
+            | SlashCommandKind::Bundled { frontmatter, .. } => side_skill_allowed(
+                &command.name,
+                frontmatter.context.as_deref(),
+                frontmatter.background,
+                frontmatter.agent.as_deref(),
+                frontmatter.allowed_tools.as_deref().unwrap_or(&[]),
+            ),
+            SlashCommandKind::Plugin { .. } | SlashCommandKind::Mcp { .. } => false,
         }
     }
 
@@ -305,6 +339,7 @@ impl CommandRegistry {
         self.commands
             .values()
             .filter(|c| !c.disable_model_invocation)
+            .filter(|c| self.execution_allowed(c))
             .filter(|c| self.session_skill_allowed(c))
             .collect()
     }
@@ -319,6 +354,9 @@ impl CommandRegistry {
     /// suffixes for ordinary skills. MCP prompts require their exact name.
     #[must_use]
     pub fn session_skill_allowed(&self, command: &SlashCommand) -> bool {
+        if !self.execution_allowed(command) {
+            return false;
+        }
         let Some(names) = self.session_skill_allowlist.as_ref() else {
             return true;
         };
@@ -350,6 +388,7 @@ impl CommandRegistry {
         self.commands
             .values()
             .filter(|command| command.user_invocable != Some(false))
+            .filter(|command| self.execution_allowed(command))
             .filter(|command| {
                 !matches!(command.kind, SlashCommandKind::Builtin { .. })
                     || !crate::builtin_support::names::is_command_env_disabled(&command.name)
@@ -944,5 +983,59 @@ mod tests {
         assert!(palette.contains(&"manual-only".to_string()));
         assert!(!palette.contains(&"internal".to_string()));
         assert!(!palette.contains(&"login".to_string()));
+    }
+}
+
+/// Shared pre-expansion check for manual slash commands and Skill calls.
+#[must_use]
+pub fn side_skill_allowed(
+    name: &str,
+    context: Option<&str>,
+    background: Option<bool>,
+    agent: Option<&str>,
+    allowed_tools: &[String],
+) -> bool {
+    name != "loop"
+        && !context.is_some_and(|s| s.eq_ignore_ascii_case("fork"))
+        && background != Some(true)
+        && agent.is_none()
+        && !allowed_tools.iter().any(|t| {
+            matches!(
+                t.split(['(', ':']).next().unwrap_or(t).trim(),
+                "Agent" | "Task" | "TeamCreate" | "TeamDelete"
+            )
+        })
+}
+
+#[cfg(test)]
+mod side_policy_tests {
+    use super::*;
+    #[test]
+    fn side_policy_is_per_instance_and_does_not_expand_broad_grants() {
+        let mut side = CommandRegistry::new();
+        side.set_side_chat(true);
+        let main = CommandRegistry::new();
+        let command = SlashCommand {
+            name: "side".into(),
+            ..SlashCommand::default()
+        };
+        assert!(main.execution_allowed(&command));
+        assert!(!side.execution_allowed(&command));
+        assert!(side_skill_allowed(
+            "inline",
+            None,
+            None,
+            None,
+            &["*".into()]
+        ));
+        assert!(!side_skill_allowed("fork", Some("fork"), None, None, &[]));
+        assert!(!side_skill_allowed("loop", None, None, None, &[]));
+        assert!(!side_skill_allowed(
+            "agents",
+            None,
+            None,
+            None,
+            &["Agent(*)".into()]
+        ));
     }
 }

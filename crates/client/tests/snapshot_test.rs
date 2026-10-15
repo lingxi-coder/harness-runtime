@@ -164,6 +164,16 @@ where
 #[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
+        ("event/prompt_suggestion.json",ClientEvent::PromptSuggestion {suggestion:"Continue tests".into(),uuid:"suggestion-1".into(),session_id:"session-1".into()}),
+        ("event/prompt_suggestion_state.json",ClientEvent::PromptSuggestionState {enabled:true,notice:None}),
+        ("event/side_chat_created.json", ClientEvent::SideChatCreated {request_id:"create-1".into(),side_id:"side-1".into()}),
+        ("event/side_chat_list.json", ClientEvent::SideChatList {side_ids:vec!["side-1".into()]}),
+        ("event/side_chat_snapshot.json", ClientEvent::SideChatSnapshot {side_id:"side-1".into(),events_json:vec![r#"{"type":"turn_started","turn_id":1}"#.into()]}),
+        ("event/side_chat_event.json", ClientEvent::SideChatEvent {side_id:"side-1".into(),event_json:r#"{"type":"turn_started","turn_id":1}"#.into()}),
+        ("event/side_chat_permission.json", ClientEvent::SideChatPermission {side_id:"side-1".into(),request: PermissionRequest {request_id:7,kind:PermissionKindDto::ToolUseConfirm {tool_name:"Bash".into(),tool_input_json:r#"{"command":"pwd"}"#.into(),default_allow:false},worker:None,owner:None,suppress_always_allow_rule:false,auto_mode_prompt:None}}),
+        ("event/side_chat_submitted.json", ClientEvent::SideChatSubmitted {side_id:"side-1".into(),request_id:"submit-1".into()}),
+        ("event/side_chat_ended.json", ClientEvent::SideChatEnded {side_id:"side-1".into()}),
+        ("event/side_chat_error.json", ClientEvent::SideChatError {request_id:None,side_id:Some("side-1".into()),message:"side chat is closing".into()}),
         ("event/audio_session_context.json", ClientEvent::AudioSessionContext {session_id:"session-1".into(),profile_id:"profile-1".into(),account_scope:"profile:profile-1".into()}),
         ("event/realtime_audio_event.json", ClientEvent::RealtimeAudioEvent {session_id:"session-1".into(),event_json:r#"{"type":"closed","reason":"Cancelled"}"#.into()}),
         ("event/cron_run_bound.json", ClientEvent::CronRunBound {run_id: "run-1".into(), error: None}),
@@ -1199,6 +1209,14 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
 #[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
+        ("command/update_prompt_suggestion_context.json",ClientCommand::UpdatePromptSuggestionContext {session_id:"session-1".into(),focus:"focused".into(),input_empty:true,pending_permission:false,elicitation_active:false}),
+        ("command/prompt_suggestion_feedback.json",ClientCommand::PromptSuggestionFeedback {session_id:"session-1".into(),uuid:"suggestion-1".into(),action:"accepted".into()}),
+        ("command/record_prompt_suggestion_submission.json",ClientCommand::RecordPromptSuggestionSubmission {text:"Continue tests".into()}),
+        ("command/side_chat_create.json",ClientCommand::SideChatCreate {request_id:"create-1".into(),initial_input:Some("Review this".into())}),
+        ("command/side_chat_list.json",ClientCommand::SideChatList {}),
+        ("command/side_chat_get.json",ClientCommand::SideChatGet {side_id:"side-1".into()}),
+        ("command/side_chat_end.json",ClientCommand::SideChatEnd {side_id:"side-1".into()}),
+        ("command/side_chat_submit.json",ClientCommand::SideChatSubmit {side_id:"side-1".into(),request_id:"submit-1".into(),command_json:r#"{"type":"cancel"}"#.into()}),
         ("command/get_audio_session_context.json", ClientCommand::GetAudioSessionContext),
         ("command/start_realtime_audio.json", ClientCommand::StartRealtimeAudio {request_json:r#"{"operationId":"audio-1"}"#.into()}),
         ("command/realtime_audio_input.json", ClientCommand::RealtimeAudioInput {input_json:r#"{"type":"commit_input"}"#.into()}),

@@ -29,12 +29,13 @@
 //!
 //! # The rule this enforces
 //!
-//! The variants frozen below are the ones that existed when 9.0.0 was blessed
-//! (commit `391d89fff`, `client/src/protocol/{commands,events}.rs`). Each must
-//! still sit at exactly the index recorded here.
+//! The variants frozen below are the complete current declaration order blessed
+//! for 22.0.0, including Side Chat and earlier protocol additions. The desktop
+//! host and regenerated Swift/Kotlin bindings share this major. Each variant
+//! must still sit at exactly the index recorded here.
 //!
 //! - Appending a variant AFTER the frozen prefix: allowed, no bump. Do not add
-//!   it to the frozen lists — they are the 9.0.0 snapshot, not a mirror of the
+//!   it to the frozen lists — they are the 22.0.0 snapshot, not a mirror of the
 //!   current enum.
 //! - Inserting, removing, or reordering anything inside the frozen prefix: this
 //!   test goes red and NAMES the ordinal. Move the variant to the end instead.
@@ -54,24 +55,18 @@
 const COMMANDS_SRC: &str = include_str!("../src/protocol/commands.rs");
 const EVENTS_SRC: &str = include_str!("../src/protocol/events.rs");
 
-/// `ClientCommand`'s variants in declaration order as of the 9.0.0 bless
-/// (`391d89fff`), MINUS one row. 49 entries; ordinal N here is UniFFI ordinal
-/// N+1.
-///
-/// 🚨 PROVENANCE, stated as fact rather than as policy: the 9.0.0 bless froze
-/// 50 entries, with `ResolveAppRuntimeProfileSelection` at ordinal 38. Commit
-/// `77d1ec7fb` deleted that one row from this list. It was NOT a re-cut: at
-/// `77d1ec7fb^` and at `77d1ec7fb` alike `CLIENT_PROTOCOL_VERSION` reads
-/// `"10.0.0"` and `snapshots/blessed_major.txt` reads `10`, so nothing was
-/// bumped and nothing was re-blessed. Per this file's own rule above, dropping
-/// a row from the frozen prefix is a MAJOR bump plus a re-bless, and a re-cut
-/// then takes the FULL current order — not the old list minus a row. So this
-/// 49-entry list is a hybrid that has never been sanctioned; do not read it as
-/// precedent, and do not shrink it further to turn a red run green. Resolving
-/// it (restore ordinal 38, or re-cut both lists from the blessed 11.0.0 and
-/// rename them `_AT_11_0_0`) belongs with the owner of
-/// `client/src/protocol/{commands,events}.rs`.
-const CLIENT_COMMAND_ORDINALS_AT_9_0_0: &[&str] = &[
+/// `ClientCommand` declaration order frozen with the 22.0.0 major bless.
+/// Entries are positional: array index N corresponds to UniFFI ordinal N+1.
+const CLIENT_COMMAND_ORDINALS_AT_22_0_0: &[&str] = &[
+    "SideChatCreate",
+    "SideChatList",
+    "SideChatGet",
+    "SideChatEnd",
+    "SideChatSubmit",
+    "StartRealtimeAudio",
+    "RealtimeAudioInput",
+    "StopRealtimeAudio",
+    "GetAudioSessionContext",
     "SendPrompt",
     "Cancel",
     "ApprovePermission",
@@ -101,31 +96,62 @@ const CLIENT_COMMAND_ORDINALS_AT_9_0_0: &[&str] = &[
     "TaskOutput",
     "TaskStop",
     "ResumeWorkflow",
-    "ListApps",
-    "GetAppDetails",
-    "CreateApp",
-    "StartApp",
-    "StopApp",
-    "RestartApp",
-    "ExecuteAppBridgeRequest",
-    "ResolveAppUiRequest",
-    "ResolveAppCapabilityRequest",
-    "ResolveAppProfileProposal",
-    "ResetAppPermissions",
-    "ListAppSessions",
-    "ListAppCheckpoints",
-    "RestoreAppCheckpoint",
-    "DeleteApp",
     "RequestExit",
     "GetConversationControls",
     "SetReasoningSelection",
     "SetFastMode",
-    "ResolveAppDependencyChangeConfirmation",
+    "SkillAdmin",
+    "McpAdmin",
+    "PluginAdmin",
+    "HookAdmin",
+    "UpdateSettings",
+    "UpdatePermissionRules",
+    "SetDefaultPermissionMode",
+    "UpdateWorkspaceDirectories",
+    "UpsertMcpServer",
+    "RemoveMcpServer",
+    "AudioResponse",
+    "AttachTurn",
+    "ResumeTurn",
+    "PauseTurn",
+    "SetTypescriptLspMode",
+    "ForkSession",
+    "TestProviderConnection",
+    "CronManage",
+    "TaskMessage",
+    "CronRunStarted",
+    "ScheduledRunTurn",
+    "CronRunCompleted",
+    "UpdateAudioCapabilities",
+    "UiAttach",
+    "UiDetach",
+    "UiRender",
+    "UiClientModule",
+    "UiMessage",
+    "UiClientFault",
+    "UiClientPress",
+    "UiPress",
+    "UiInput",
+    "UiSelect",
+    "UiClientOperation",
+    "UpdatePromptSuggestionContext",
+    "PromptSuggestionFeedback",
+    "RecordPromptSuggestionSubmission",
 ];
 
-/// `ClientEvent`'s variants in declaration order as of the 9.0.0 bless
-/// (`391d89fff`). 57 entries; ordinal N here is UniFFI ordinal N+1.
-const CLIENT_EVENT_ORDINALS_AT_9_0_0: &[&str] = &[
+/// `ClientEvent` declaration order frozen with the 22.0.0 major bless.
+/// Entries are positional: array index N corresponds to UniFFI ordinal N+1.
+const CLIENT_EVENT_ORDINALS_AT_22_0_0: &[&str] = &[
+    "SideChatCreated",
+    "SideChatList",
+    "SideChatSnapshot",
+    "SideChatEvent",
+    "SideChatPermission",
+    "SideChatSubmitted",
+    "SideChatEnded",
+    "SideChatError",
+    "RealtimeAudioEvent",
+    "AudioSessionContext",
     "Error",
     "SystemNotice",
     "AskUserQuestion",
@@ -147,6 +173,7 @@ const CLIENT_EVENT_ORDINALS_AT_9_0_0: &[&str] = &[
     "SessionAgentTranscript",
     "SessionAgentUpdated",
     "SessionAgentMessage",
+    "SessionAgentTombstone",
     "SessionList",
     "ModelList",
     "ModelChanged",
@@ -166,13 +193,6 @@ const CLIENT_EVENT_ORDINALS_AT_9_0_0: &[&str] = &[
     "TaskOutputChunk",
     "TaskStatusChanged",
     "CommandsChanged",
-    "AppsChanged",
-    "AppEvent",
-    "AppWorkflowChanged",
-    "AppRuntimeChanged",
-    "AppSessionsChanged",
-    "AppCheckpointCreated",
-    "AppOperationFailed",
     "CoordinatorStatus",
     "CoordinatorWorker",
     "ThinkingDelta",
@@ -183,6 +203,49 @@ const CLIENT_EVENT_ORDINALS_AT_9_0_0: &[&str] = &[
     "WorkflowResumed",
     "ConversationControlsChanged",
     "FastModeChanged",
+    "AudioRequest",
+    "TurnRecoveryState",
+    "TurnEventReplay",
+    "Skills",
+    "TypescriptLspModeChanged",
+    "SessionForked",
+    "ProviderConnectionTested",
+    "ConfigurationOperation",
+    "SkillCatalog",
+    "SkillDocument",
+    "McpConfigurationSnapshot",
+    "PluginCatalog",
+    "ProviderModelCatalog",
+    "CompactionStatus",
+    "CronResult",
+    "MessageRetracted",
+    "MessageIdentity",
+    "LoopWakeup",
+    "TaskLifecycle",
+    "OpenAiOAuthUpdated",
+    "CronRunBound",
+    "ScheduledRunFinished",
+    "CronRunRequested",
+    "ScheduledTaskFire",
+    "TaskListComplete",
+    "AudioCancel",
+    "AudioCapabilitiesChanged",
+    "QueryModelChange",
+    "AssistantBlockStart",
+    "AssistantBlockIdentity",
+    "Tombstone",
+    "RefusalContinuation",
+    "UserTranscriptRowIdentity",
+    "AssistantTranscriptRowUuids",
+    "UiLog",
+    "UiToast",
+    "UiStatus",
+    "UiControlResult",
+    "UiClientFrame",
+    "UiInvalidate",
+    "VisualizationBlock",
+    "PromptSuggestion",
+    "PromptSuggestionState",
 ];
 
 /// Strip `//`-comments so brace counting is not thrown off by prose. The enum
@@ -294,7 +357,7 @@ fn assert_frozen_prefix(enum_name: &str, source_path: &str, actual: &[String], f
     assert!(
         actual.len() >= frozen.len(),
         "`{enum_name}` ({source_path}) now has {} variants, fewer than the {} frozen at the \
-         9.0.0 bless. A REMOVED variant shifts every later ordinal on the positional UniFFI \
+         22.0.0 bless. A REMOVED variant shifts every later ordinal on the positional UniFFI \
          mobile bindings and is a breaking change: it needs a MAJOR CLIENT_PROTOCOL_VERSION \
          bump and a re-bless of snapshots/blessed_major.txt.\nCurrent order: {actual:?}",
         actual.len(),
@@ -307,12 +370,12 @@ fn assert_frozen_prefix(enum_name: &str, source_path: &str, actual: &[String], f
             found,
             *expected,
             "`{enum_name}` ordinal {ordinal} (UniFFI ordinal {uniffi}) is `{found}`, but \
-             `{expected}` was frozen there at the 9.0.0 bless.\n\
+             `{expected}` was frozen there at the 22.0.0 bless.\n\
              \n\
              UniFFI encodes a variant as its DECLARATION INDEX, so a variant inserted, removed \
              or reordered ahead of ordinal {ordinal} shifts this and every later variant. An \
              old mobile client and a new host would both still advertise \
-             CLIENT_PROTOCOL_VERSION 9.0.0, the handshake would accept, and `{expected}` would \
+             CLIENT_PROTOCOL_VERSION 22.0.0, the handshake would accept, and `{expected}` would \
              decode as `{found}`.\n\
              \n\
              FIX: move the new variant to the END of `{enum_name}` in {source_path}. Appending \
@@ -327,24 +390,30 @@ fn assert_frozen_prefix(enum_name: &str, source_path: &str, actual: &[String], f
 }
 
 #[test]
-fn client_command_keeps_every_9_0_0_variant_at_its_ordinal() {
+fn ordinal_bless_matches_protocol_major() {
+    assert_eq!(client::protocol::version::CLIENT_PROTOCOL_VERSION, "22.0.0");
+    assert_eq!(include_str!("../snapshots/blessed_major.txt").trim(), "22");
+}
+
+#[test]
+fn client_command_keeps_every_22_0_0_variant_at_its_ordinal() {
     let actual = variants_in_declaration_order(COMMANDS_SRC, "ClientCommand");
     assert_frozen_prefix(
         "ClientCommand",
         "client/src/protocol/commands.rs",
         &actual,
-        CLIENT_COMMAND_ORDINALS_AT_9_0_0,
+        CLIENT_COMMAND_ORDINALS_AT_22_0_0,
     );
 }
 
 #[test]
-fn client_event_keeps_every_9_0_0_variant_at_its_ordinal() {
+fn client_event_keeps_every_22_0_0_variant_at_its_ordinal() {
     let actual = variants_in_declaration_order(EVENTS_SRC, "ClientEvent");
     assert_frozen_prefix(
         "ClientEvent",
         "client/src/protocol/events.rs",
         &actual,
-        CLIENT_EVENT_ORDINALS_AT_9_0_0,
+        CLIENT_EVENT_ORDINALS_AT_22_0_0,
     );
 }
 
@@ -359,12 +428,12 @@ fn the_parser_reads_the_whole_enum_body() {
     let events = variants_in_declaration_order(EVENTS_SRC, "ClientEvent");
 
     assert!(
-        commands.len() >= CLIENT_COMMAND_ORDINALS_AT_9_0_0.len(),
+        commands.len() >= CLIENT_COMMAND_ORDINALS_AT_22_0_0.len(),
         "parsed only {} ClientCommand variants",
         commands.len()
     );
     assert!(
-        events.len() >= CLIENT_EVENT_ORDINALS_AT_9_0_0.len(),
+        events.len() >= CLIENT_EVENT_ORDINALS_AT_22_0_0.len(),
         "parsed only {} ClientEvent variants",
         events.len()
     );

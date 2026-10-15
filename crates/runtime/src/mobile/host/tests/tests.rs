@@ -178,6 +178,7 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
         &path,
         serde_json::to_string(&serde_json::json!({
             "message": lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "nested child".to_string(), citations: None,
@@ -278,7 +279,19 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         next_message_index: 6,
     };
 
-    let rows = super::parse_main_session_agent_message_rows(raw.as_bytes(), &identities).unwrap();
+    let messages = session::jsonl::reader::route_lines(&raw).messages_in_order;
+    let state = orchestrator::state_from_messages(uuid::Uuid::new_v4(), &messages);
+    let runtime_metadata = orchestrator::runtime_metadata_from_messages(&messages);
+    let replayed = orchestrator::ReplayedSession {
+        display_history: state.history.clone(),
+        state,
+        messages,
+        last_message_uuid: None,
+        runtime_metadata,
+        client_state_tool_results: Default::default(),
+        display_timestamps: Default::default(),
+    };
+    let rows = super::parse_main_session_agent_message_rows(&replayed, &identities).unwrap();
     assert_eq!(
         rows.len(),
         2,
@@ -300,7 +313,7 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         by_uuid: HashMap::new(),
         next_message_index: 6,
     };
-    let error = super::parse_main_session_agent_message_rows(raw.as_bytes(), &missing_identity)
+    let error = super::parse_main_session_agent_message_rows(&replayed, &missing_identity)
         .expect_err("a missing main-row identity must not be inferred from visible order");
     assert!(error.contains("stable identity index"));
 }
