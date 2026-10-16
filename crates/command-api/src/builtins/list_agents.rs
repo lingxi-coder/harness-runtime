@@ -551,10 +551,7 @@ fn current_time_ms() -> u64 {
 /// Native reserves factory spellings before filtering disabled commands.
 /// The provider is mandatory so a missing runtime service cannot become a
 /// successful empty listing.
-pub fn register(
-    registry: &mut crate::CommandRegistry,
-    provider: Arc<dyn ListAgentsProvider>,
-) {
+pub fn register(registry: &mut crate::CommandRegistry, provider: Arc<dyn ListAgentsProvider>) {
     registry.register_builtin_handler(Arc::new(ListAgentsHandler::new(provider)));
     registry.set_native_builtin_catalog_order(
         "list-agents",
@@ -848,7 +845,9 @@ mod tests {
         let mut disabled_registry = crate::CommandRegistry::new();
         register(&mut disabled_registry, disabled_provider);
         assert!(disabled_registry.get_handler(&canonical).is_some());
-        let disabled = disabled_registry.resolve(&alias).expect("factory is retained");
+        let disabled = disabled_registry
+            .resolve(&alias)
+            .expect("factory is retained");
         assert!(!disabled.is_enabled);
         assert!(disabled.native_catalog_order.is_some());
         assert!(!disabled_registry.headless_command_admitted(disabled));
