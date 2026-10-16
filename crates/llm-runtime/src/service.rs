@@ -2201,7 +2201,8 @@ impl ApiService {
     /// context so preparation, beta generation, and SDK encoding share it.
     pub fn native_tool_change_feature_gates(&self) -> (bool, bool) {
         let b6_disabled = crate::model::thinking_binding_controls::native_b6_disabled();
-        let foamy_spring_enabled = telemetry::feature_flags::flag_bool("tengu_foamy_spring", true);
+        let foamy_spring_enabled =
+            ::telemetry::feature_flags::flag_bool("tengu_foamy_spring", true);
         let session_profile_active =
             std::env::var_os("CCR_SESSION_PROFILE").is_some_and(|value| !value.is_empty());
         let inline_tools_env = std::env::var_os("CLAUDE_CODE_INLINE_TOOLS")
@@ -2211,7 +2212,7 @@ impl ApiService {
             && !session_profile_active
             && inline_tools_env.is_none()
         {
-            telemetry::feature_flags::flag_bool("tengu_brisk_meadow", false)
+            ::telemetry::feature_flags::flag_bool("tengu_brisk_meadow", false)
         } else {
             false
         };
