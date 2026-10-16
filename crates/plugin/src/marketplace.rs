@@ -52,8 +52,8 @@ pub struct MarketplaceIndexMetadata {
 pub enum MarketplacePluginSource {
     /// A path relative to the marketplace root.
     Relative(String),
-    /// A structured external or directory source.
-    Structured(MarketplaceExternalSource),
+    /// A structured external source.
+    Structured(MarketplacePluginExternalSource),
 }
 
 impl<'de> Deserialize<'de> for MarketplacePluginSource {
@@ -65,52 +65,31 @@ impl<'de> Deserialize<'de> for MarketplacePluginSource {
         if let serde_json::Value::String(s) = &value {
             return Ok(MarketplacePluginSource::Relative(s.clone()));
         }
-        let structured =
-            serde_json::from_value::<MarketplaceExternalSource>(value).unwrap_or_else(|error| {
-                MarketplaceExternalSource::Unsupported {
-                    error: Some(error.to_string()),
-                }
+        let structured = serde_json::from_value::<MarketplacePluginExternalSource>(value)
+            .unwrap_or_else(|error| MarketplacePluginExternalSource::Unsupported {
+                error: Some(error.to_string()),
             });
         Ok(MarketplacePluginSource::Structured(structured))
     }
 }
 
-/// Structured source variants accepted by marketplace catalogs.
+/// External source for one marketplace plugin entry (`plugins[].source`).
 ///
-/// This models the **plugin-entry** union (`plugins[].source`, oracle `ft`),
-/// which is a DIFFERENT union from the marketplace-registration source
-/// (`extraKnownMarketplaces`/`known_marketplaces.json`, oracle `dYe`; see
-/// `apps/cli/src/commands/plugin_marketplace.rs`). Conflating those two was a
-/// prior round's biggest error: oracle `ft` has NO `file`/`directory` arm at
-/// all (those are registration-only) and its `github`/`url` arms carry `sha`,
-/// not `path` beyond what's modeled here. `File`/`Directory`/the `path` on
-/// `Github`/`Git` are a port-only superset kept for backward compatibility
-/// with existing local-only entries; a real oracle-authored `marketplace.json`
-/// never emits them, so accepting them is permissive, not incorrect.
+/// Marketplace registration has a separate source pipeline in
+/// `configuration-admin::plugin_marketplace`: its current Native union accepts
+/// local `file` and `directory` sources. Those are not plugin-entry sources.
+/// Plugin entries use the Native external-source union below; `github` has a
+/// repository/ref/SHA, and the subdirectory form is `git-subdir`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "source", rename_all = "lowercase")]
-pub enum MarketplaceExternalSource {
+pub enum MarketplacePluginExternalSource {
     /// GitHub repository source.
     Github {
         repo: String,
         #[serde(rename = "ref", default)]
         git_ref: Option<String>,
-        #[serde(default)]
-        path: Option<String>,
-        /// Pin the checkout to this exact commit (40-hex); the checkout is
-        /// refused if HEAD does not match. Port-only superset field `path`
-        /// aside, this mirrors oracle `github`'s `sha`.
-        #[serde(default)]
-        sha: Option<String>,
-    },
-    /// Arbitrary git repository source (port-only superset — the oracle's
-    /// `ft` union has no plain `git` tag; use `url` for a git-repo source).
-    Git {
-        url: String,
-        #[serde(rename = "ref", default)]
-        git_ref: Option<String>,
-        #[serde(default)]
-        path: Option<String>,
+        /// Pin the checkout to this exact commit (40-hex); installation is
+        /// refused if HEAD does not match.
         #[serde(default)]
         sha: Option<String>,
     },
@@ -168,10 +147,6 @@ pub enum MarketplaceExternalSource {
         #[serde(default)]
         mode: Option<MarketplaceCommandMode>,
     },
-    /// File source (port-only superset; see the enum doc comment).
-    File { path: String },
-    /// Directory source (port-only superset; see the enum doc comment).
-    Directory { path: String },
     /// Parse-time placeholder for a source type this port does not recognize,
     /// or a known type whose fields failed validation. Never authored by
     /// hand — `MarketplacePluginSource::deserialize` rewrites an unparseable
@@ -328,12 +303,8 @@ impl MarketplaceManager {
         let source_path = match entry.source.as_ref() {
             Some(MarketplacePluginSource::Relative(path)) => Some(path.as_str()),
             Some(MarketplacePluginSource::Structured(
-                MarketplaceExternalSource::Directory { path }
-                | MarketplaceExternalSource::File { path },
-            )) => Some(path.as_str()),
-            Some(MarketplacePluginSource::Structured(MarketplaceExternalSource::Unsupported {
-                error,
-            })) => {
+                MarketplacePluginExternalSource::Unsupported { error },
+            )) => {
                 return Err(format!(
                     "This plugin's marketplace entry is invalid: '{}'{}",
                     entry.name,
@@ -464,27 +435,36 @@ mod tests {
     /// (`Vec<MarketplacePluginEntry>` is not allowed to go strict on one bad
     /// element; `detectDelistedPlugins` must not read this as a removal).
     #[test]
-    fn unknown_plugin_entry_source_becomes_unsupported_placeholder_not_a_parse_failure() {
+    fn unsupported_plugin_entry_sources_become_placeholders_not_catalog_failures() {
         let index: MarketplaceIndex = serde_json::from_value(serde_json::json!({
             "name": "demo-market",
             "plugins": [
                 { "name": "good", "source": "./bundle" },
-                { "name": "bad", "source": { "source": "totally-unknown-type", "foo": "bar" } }
+                { "name": "unknown", "source": { "source": "totally-unknown-type", "foo": "bar" } },
+                { "name": "registration-file", "source": { "source": "file", "path": "/tmp/marketplace.json" } },
+                { "name": "registration-directory", "source": { "source": "directory", "path": "/tmp/marketplace" } },
+                { "name": "registration-git", "source": { "source": "git", "url": "https://example.test/plugins.git" } }
             ]
         }))
         .expect("the whole index must still parse despite one bad entry");
 
-        assert_eq!(index.plugins.len(), 2, "the bad entry must stay listed");
-        match index.plugins[1].source.as_ref() {
-            Some(MarketplacePluginSource::Structured(MarketplaceExternalSource::Unsupported {
-                error,
-            })) => {
-                assert!(
-                    error.is_some(),
-                    "the placeholder should carry the parse reason"
-                );
+        assert_eq!(index.plugins.len(), 5, "unsupported rows must stay listed");
+        for entry in &index.plugins[1..] {
+            match entry.source.as_ref() {
+                Some(MarketplacePluginSource::Structured(
+                    MarketplacePluginExternalSource::Unsupported { error },
+                )) => {
+                    assert!(
+                        error.is_some(),
+                        "{} should carry the parse reason",
+                        entry.name
+                    );
+                }
+                other => panic!(
+                    "{}: expected an Unsupported placeholder, got {other:?}",
+                    entry.name
+                ),
             }
-            other => panic!("expected an Unsupported placeholder, got {other:?}"),
         }
     }
 
@@ -494,15 +474,16 @@ mod tests {
     /// arm. A prior port version conflated these under the same `url` tag.
     #[test]
     fn url_source_is_a_git_repo_shape_distinct_from_archive() {
-        let url_source: MarketplaceExternalSource = serde_json::from_value(serde_json::json!({
-            "source": "url",
-            "url": "https://example.test/repo.git",
-            "ref": "v1.0.0",
-            "sha": "a".repeat(40)
-        }))
-        .expect("parse url source");
+        let url_source: MarketplacePluginExternalSource =
+            serde_json::from_value(serde_json::json!({
+                "source": "url",
+                "url": "https://example.test/repo.git",
+                "ref": "v1.0.0",
+                "sha": "a".repeat(40)
+            }))
+            .expect("parse url source");
         match url_source {
-            MarketplaceExternalSource::Url { url, git_ref, sha } => {
+            MarketplacePluginExternalSource::Url { url, git_ref, sha } => {
                 assert_eq!(url, "https://example.test/repo.git");
                 assert_eq!(git_ref.as_deref(), Some("v1.0.0"));
                 assert_eq!(sha.as_deref(), Some("a".repeat(40)).as_deref());
@@ -510,14 +491,15 @@ mod tests {
             other => panic!("expected Url, got {other:?}"),
         }
 
-        let archive_source: MarketplaceExternalSource = serde_json::from_value(serde_json::json!({
-            "source": "archive",
-            "url": "https://example.test/plugin.zip",
-            "sha256": "b".repeat(64)
-        }))
-        .expect("parse archive source");
+        let archive_source: MarketplacePluginExternalSource =
+            serde_json::from_value(serde_json::json!({
+                "source": "archive",
+                "url": "https://example.test/plugin.zip",
+                "sha256": "b".repeat(64)
+            }))
+            .expect("parse archive source");
         match archive_source {
-            MarketplaceExternalSource::Archive { url, sha256 } => {
+            MarketplacePluginExternalSource::Archive { url, sha256 } => {
                 assert_eq!(url, "https://example.test/plugin.zip");
                 assert_eq!(sha256.as_deref(), Some("b".repeat(64)).as_deref());
             }
@@ -525,12 +507,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn github_plugin_source_does_not_use_a_nested_path_field() {
+        let entry: MarketplacePluginEntry = serde_json::from_value(serde_json::json!({
+            "name": "demo",
+            "source": {
+                "source": "github",
+                "repo": "acme/demo",
+                "path": "nested/plugin"
+            }
+        }))
+        .expect("unknown source keys are stripped without changing the source arm");
+
+        assert!(matches!(
+            entry.source.as_ref(),
+            Some(MarketplacePluginSource::Structured(
+                MarketplacePluginExternalSource::Github { .. }
+            ))
+        ));
+        let error = MarketplaceManager::plugin_dir_in_clone(Path::new("/tmp/clone"), &entry)
+            .expect_err("external GitHub sources do not resolve under a local marketplace clone");
+        assert!(error.contains("hosted outside the marketplace repo"));
+    }
+
     /// Oracle plugin command source: `{source:"command", command, timeout?,
     /// mode?: "link"|"copy"}`. `mode:"link"` uses the command's output
     /// directory in place; omitted mode is copy-into-cache.
     #[test]
     fn command_source_parses_command_timeout_and_link_mode() {
-        let source: MarketplaceExternalSource = serde_json::from_value(serde_json::json!({
+        let source: MarketplacePluginExternalSource = serde_json::from_value(serde_json::json!({
             "source": "command",
             "command": "printf '%s\\n' /tmp/produced-plugin",
             "timeout": 15,
@@ -538,7 +543,7 @@ mod tests {
         }))
         .expect("parse command source");
         match source {
-            MarketplaceExternalSource::Command {
+            MarketplacePluginExternalSource::Command {
                 command,
                 timeout,
                 mode,
@@ -553,13 +558,13 @@ mod tests {
 
     #[test]
     fn command_source_default_mode_is_copy_when_omitted() {
-        let source: MarketplaceExternalSource = serde_json::from_value(serde_json::json!({
+        let source: MarketplacePluginExternalSource = serde_json::from_value(serde_json::json!({
             "source": "command",
             "command": "echo /tmp/plugin"
         }))
         .expect("parse command source");
         match source {
-            MarketplaceExternalSource::Command {
+            MarketplacePluginExternalSource::Command {
                 command,
                 timeout,
                 mode,

@@ -16,6 +16,10 @@ pub struct PluginDependency {
     /// Optional marketplace override; bare dependencies inherit their owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marketplace: Option<String>,
+    /// Optional source SHA recorded by Native dependency metadata. The current
+    /// dependency selector checks `version`; this field is not a checkout pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
 }
 
 impl PluginDependency {
@@ -27,110 +31,70 @@ impl PluginDependency {
     }
 }
 
-/// Parse every dependency shape accepted by the public manifest schema:
-/// string/object array entries and the legacy `{name: version}` map.
+/// Parse Native's dependency constraint rows. Only object rows with a
+/// non-empty `name` and a string `version` or `sha` carry a constraint. Other
+/// rows are ignored, as in Native's raw-manifest constraint projection.
 pub fn parse_dependencies(value: Option<&Value>) -> Result<Vec<PluginDependency>, String> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
-    match value {
-        Value::Array(entries) => entries.iter().map(parse_entry).collect(),
-        Value::Object(entries) => entries
-            .iter()
-            .map(|(identity, requirement)| {
-                let (name, marketplace) = split_identity(identity)?;
-                let version = match requirement {
-                    Value::String(version) if !version.trim().is_empty() => {
-                        Some(version.trim().to_string())
-                    }
-                    Value::Null => None,
-                    _ => {
-                        return Err(format!(
-                            "dependency \"{identity}\" version must be a string"
-                        ));
-                    }
-                };
-                Ok(PluginDependency {
-                    name,
-                    version,
-                    marketplace,
-                })
-            })
-            .collect(),
-        _ => Err("dependencies must be an array or object".to_string()),
-    }
+    let Value::Array(entries) = value else {
+        return Ok(Vec::new());
+    };
+    Ok(entries.iter().filter_map(parse_entry).collect())
 }
 
-fn parse_entry(value: &Value) -> Result<PluginDependency, String> {
-    match value {
-        Value::String(identity) => {
-            let (name, marketplace) = split_identity(identity)?;
-            Ok(PluginDependency {
-                name,
-                version: None,
-                marketplace,
-            })
-        }
-        Value::Object(_) => {
-            let dependency: PluginDependency = serde_json::from_value(value.clone())
-                .map_err(|error| format!("invalid plugin dependency: {error}"))?;
-            validate(dependency)
-        }
-        _ => Err("dependency entries must be strings or objects".to_string()),
+fn parse_entry(value: &Value) -> Option<PluginDependency> {
+    let Value::Object(fields) = value else {
+        return None;
+    };
+    let name = fields.get("name")?.as_str()?;
+    if name.is_empty() {
+        return None;
     }
-}
+    let version = fields
+        .get("version")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let sha = fields
+        .get("sha")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    if version.is_none() && sha.is_none() {
+        return None;
+    }
+    let marketplace = fields
+        .get("marketplace")
+        .and_then(Value::as_str)
+        .filter(|marketplace| !marketplace.is_empty())
+        .map(ToOwned::to_owned);
 
-fn split_identity(identity: &str) -> Result<(String, Option<String>), String> {
-    let identity = identity.trim();
-    if identity.is_empty() {
-        return Err("dependency name cannot be empty".to_string());
-    }
-    match identity.split_once('@') {
-        Some((name, marketplace)) if !name.is_empty() && !marketplace.is_empty() => {
-            Ok((name.to_string(), Some(marketplace.to_string())))
-        }
-        Some(_) => Err(format!("invalid dependency identity \"{identity}\"")),
-        None => Ok((identity.to_string(), None)),
-    }
-}
-
-fn validate(mut dependency: PluginDependency) -> Result<PluginDependency, String> {
-    dependency.name = dependency.name.trim().to_string();
-    if dependency.name.is_empty() {
-        return Err("dependency name cannot be empty".to_string());
-    }
-    dependency.marketplace = dependency
-        .marketplace
-        .map(|marketplace| marketplace.trim().to_string())
-        .filter(|marketplace| !marketplace.is_empty());
-    dependency.version = dependency
-        .version
-        .map(|version| version.trim().to_string())
-        .filter(|version| !version.is_empty());
-    if let Some(requirement) = &dependency.version {
-        semver::VersionReq::parse(requirement).map_err(|error| {
-            format!(
-                "invalid version requirement for dependency \"{}\": {error}",
-                dependency.name
-            )
-        })?;
-    }
-    Ok(dependency)
+    Some(PluginDependency {
+        name: name.to_owned(),
+        version,
+        marketplace,
+        sha,
+    })
 }
 
 /// Merge dependency declarations while preserving first-seen order. Repeated
-/// identities accumulate semver requirements for the installer to intersect.
+/// identities accumulate version requirements; Native's constraint map keeps
+/// the last row's optional SHA metadata for an identity.
 pub fn merge_dependency_requirements(
     sources: impl IntoIterator<Item = PluginDependency>,
 ) -> Vec<(PluginDependency, Vec<String>)> {
     let mut order = Vec::<PluginDependency>::new();
+    let mut positions = HashMap::<(String, Option<String>), usize>::new();
     let mut requirements = HashMap::<(String, Option<String>), Vec<String>>::new();
-    for mut dependency in sources {
+    for dependency in sources {
         let key = (dependency.name.clone(), dependency.marketplace.clone());
-        if !requirements.contains_key(&key) {
+        if let Some(index) = positions.get(&key).copied() {
+            order[index].sha = dependency.sha.clone();
+        } else {
+            positions.insert(key.clone(), order.len());
             order.push(dependency.clone());
         }
-        if let Some(requirement) = dependency.version.take() {
+        if let Some(requirement) = dependency.version {
             requirements.entry(key).or_default().push(requirement);
         } else {
             requirements.entry(key).or_default();
@@ -154,6 +118,10 @@ pub fn version_satisfies_all(version: &str, requirements: &[String]) -> Result<b
     let version = semver::Version::parse(version)
         .map_err(|error| format!("plugin version \"{version}\" is not valid semver: {error}"))?;
     requirements.iter().try_fold(true, |matches, raw| {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(matches);
+        }
         let requirement = semver::VersionReq::parse(raw).map_err(|error| {
             format!("invalid dependency version requirement \"{raw}\": {error}")
         })?;
@@ -166,16 +134,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_all_public_dependency_shapes() {
+    fn parses_native_object_constraints_and_preserves_sha_only_rows() {
         let value = serde_json::json!([
-            "alpha",
-            "beta@community",
-            {"name":"gamma","version":"^2","marketplace":"approved"}
+            {"name":"alpha","version":"^1"},
+            {"name":"beta","version":"2.0.0","sha":"deadbeef","marketplace":"community"},
+            {"name":"gamma","sha":"deadbeef","marketplace":"approved"}
         ]);
         let parsed = parse_dependencies(Some(&value)).unwrap();
         assert_eq!(parsed[0].resolved_id("root"), "alpha@root");
         assert_eq!(parsed[1].resolved_id("root"), "beta@community");
-        assert_eq!(parsed[2].version.as_deref(), Some("^2"));
+        assert_eq!(parsed[1].version.as_deref(), Some("2.0.0"));
+        assert_eq!(parsed[1].sha.as_deref(), Some("deadbeef"));
+        assert_eq!(parsed[2].version, None);
+        assert_eq!(parsed[2].sha.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn legacy_map_and_string_rows_do_not_create_dependencies() {
+        assert!(
+            parse_dependencies(Some(&serde_json::json!({"alpha": "^1"})))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            parse_dependencies(Some(&serde_json::json!(["alpha", "beta@community"])))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn malformed_native_constraint_rows_are_skipped_without_losing_valid_rows() {
+        let value = serde_json::json!([
+            {"name":"", "version":"^1"},
+            {"name":"missing-constraint"},
+            {"name":"invalid-version-type", "version": 1},
+            {"name":"valid-sha", "version": 1, "sha":"abc"}
+        ]);
+        let parsed = parse_dependencies(Some(&value)).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "valid-sha");
+        assert_eq!(parsed[0].version, None);
+        assert_eq!(parsed[0].sha.as_deref(), Some("abc"));
     }
 
     #[test]
@@ -185,16 +185,37 @@ mod tests {
                 name: "shared".into(),
                 version: Some("^1".into()),
                 marketplace: None,
+                sha: None,
             },
             PluginDependency {
                 name: "shared".into(),
                 version: Some(">=1.4".into()),
                 marketplace: None,
+                sha: Some("deadbeef".into()),
             },
         ];
         let merged = merge_dependency_requirements(dependencies);
         assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].0.sha.as_deref(), Some("deadbeef"));
         assert!(version_satisfies_all("1.5.0", &merged[0].1).unwrap());
         assert!(!version_satisfies_all("1.2.0", &merged[0].1).unwrap());
+    }
+
+    #[test]
+    fn dependency_sha_is_metadata_not_a_version_or_checkout_override() {
+        let value = serde_json::json!([{"name":"pinned","sha":"not-a-version-range"}]);
+        let parsed = parse_dependencies(Some(&value)).unwrap();
+        let merged = merge_dependency_requirements(parsed);
+        assert_eq!(merged[0].0.sha.as_deref(), Some("not-a-version-range"));
+        assert!(merged[0].1.is_empty());
+        assert!(version_satisfies_all("1.2.3", &merged[0].1).unwrap());
+    }
+
+    #[test]
+    fn empty_string_version_constraint_behaves_as_the_native_wildcard() {
+        let value = serde_json::json!([{"name":"any-version", "version":""}]);
+        let parsed = parse_dependencies(Some(&value)).unwrap();
+        assert_eq!(parsed[0].version.as_deref(), Some(""));
+        assert!(version_satisfies_all("1.2.3", &[String::new()]).unwrap());
     }
 }
