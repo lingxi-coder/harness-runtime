@@ -799,6 +799,7 @@ Generate the guide immediately, then ask for revisions. Don't wait for answers f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::fs::{self, File, OpenOptions};
     use std::time::Duration;
 

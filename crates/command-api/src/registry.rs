@@ -1554,6 +1554,7 @@ mod tests {
             selected_model: Some("claude-sonnet-4-5".into()),
             workspace_available: Some(false),
             insights_policy_gate: Some(true),
+            team_onboarding_policy_gate: Some(true),
             usage_credits_enabled: Some(false),
             advisor_enabled: Some(false),
             ..NativeHeadlessCatalogContext::default()
