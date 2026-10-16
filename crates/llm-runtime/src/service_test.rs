@@ -13745,8 +13745,8 @@ mod tests {
 
     #[tokio::test]
     async fn native_295_mctc_and_inline_beta_gates_are_independent_in_main_headers() {
-        use lingxi_llm_client::NativeAnthropicRequestContext;
         use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
+        use lingxi_llm_client::NativeAnthropicRequestContext;
 
         let _guard = CACHE_ENV_LOCK
             .lock()
@@ -13781,7 +13781,7 @@ mod tests {
             .with_native_anthropic_endpoint("https://api.anthropic.com");
             let mut request = crate::MessagesCreateRequest::new(
                 model,
-                Some(profile.to_owned()),
+                Some(profile),
                 None,
                 vec![text_user_msg("Return marker.")],
                 vec![],
@@ -13811,8 +13811,8 @@ mod tests {
 
     #[tokio::test]
     async fn native_295_mctc_and_inline_beta_gates_apply_to_foundry_main_route() {
-        use lingxi_llm_client::NativeAnthropicRequestContext;
         use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
+        use lingxi_llm_client::NativeAnthropicRequestContext;
 
         let _guard = CACHE_ENV_LOCK
             .lock()
@@ -13847,7 +13847,7 @@ mod tests {
             );
             let mut request = crate::MessagesCreateRequest::new(
                 model,
-                Some(profile.to_owned()),
+                Some(profile),
                 None,
                 vec![text_user_msg("Return marker.")],
                 vec![],
