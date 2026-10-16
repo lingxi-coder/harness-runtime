@@ -254,6 +254,9 @@ pub struct SlashCommand {
     /// Command factories set it only when the source is authoritative.
     #[serde(skip)]
     pub native_source: Option<Utf16JsonProjection>,
+    /// Stable order of the selected Native command factory within its source group.
+    #[serde(skip)]
+    pub native_catalog_order: Option<usize>,
     /// Native synced-skill reservation fact used when resolving a bare name.
     #[serde(skip)]
     pub bare_name_reserved: bool,
@@ -270,6 +273,9 @@ pub struct SlashCommand {
     /// Whether a skill command is user-invocable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_invocable: Option<bool>,
+    /// Whether the current command descriptor belongs to the terminal host.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub terminal_oriented: bool,
     /// Raw markdown byte length for file-backed skills.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_length: Option<usize>,
@@ -315,10 +321,12 @@ impl Default for SlashCommand {
             unqualified_name: None,
             plugin_name: None,
             native_source: None,
+            native_catalog_order: None,
             bare_name_reserved: false,
             argument_names: Vec::new(),
             skill_root: None,
             user_invocable: None,
+            terminal_oriented: false,
             content_length: None,
             progress_message: None,
             requires: None,

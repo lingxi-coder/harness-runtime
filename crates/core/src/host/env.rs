@@ -37,7 +37,10 @@ pub fn is_eval_confined_value(value: Option<&str>) -> bool {
 #[must_use]
 pub fn is_env_truthy(value: Option<&str>) -> bool {
     let Some(v) = value else { return false };
-    matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on")
+    matches!(
+        super::effort::trim_js_whitespace(&v.to_lowercase()),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// `isAgentSwarmsEnabled()` — oracle 2.1.263 `zr()`
@@ -441,5 +444,12 @@ mod tests {
         // 31 chars of the same shape parses fully through the separator branch.
         let ok = format!("1{}", ",000".repeat(7)); // 29 chars
         assert_eq!(parse_int_env(&ok), 1_000_000_000_000_000_000_000.0);
+    }
+
+    #[test]
+    fn boolean_environment_values_use_javascript_whitespace() {
+        assert!(is_env_truthy(Some("\u{feff}TrUe\u{feff}")));
+        assert!(!is_env_truthy(Some("\u{85}true\u{85}")));
+        assert!(!is_env_truthy(Some("false")));
     }
 }

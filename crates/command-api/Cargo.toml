@@ -21,6 +21,7 @@ workflow = { path = "../workflow", optional = true }
 cron = { path = "../cron", optional = true }
 permission = { path = "../permission", optional = true }
 telemetry = { path = "../telemetry" }
+unicode-normalization = "=0.1.25"
 cost = { path = "../cost", optional = true }
 migrations = { path = "../migrations", optional = true }
 indexmap = { version = "2", optional = true }

@@ -341,6 +341,16 @@ pub struct RegistrySlashDispatcher {
     /// `None` — every existing caller — leaves the field inert, so a host that
     /// wires no gate behaves exactly as before.
     permission_gate: Option<Arc<dyn PermissionGate>>,
+    /// Optional admission boundary for the Headless ordinary slash path.
+    /// Interactive hosts keep the generic dispatcher behavior.
+    dispatch_mode: SlashDispatchMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SlashDispatchMode {
+    #[default]
+    Generic,
+    Headless,
 }
 
 impl RegistrySlashDispatcher {
@@ -406,6 +416,7 @@ impl RegistrySlashDispatcher {
             prompt_paths: None,
             bundled_prompt_model: None,
             permission_gate: None,
+            dispatch_mode: SlashDispatchMode::Generic,
         }
     }
 
@@ -661,6 +672,7 @@ impl RegistrySlashDispatcher {
             // the command denies would leave the previous skill's restrictions
             // standing for every input routed through the clone.
             permission_gate: self.permission_gate.clone(),
+            dispatch_mode: self.dispatch_mode,
         }
     }
 
@@ -719,6 +731,43 @@ impl RegistrySlashDispatcher {
 }
 
 impl RegistrySlashDispatcher {
+    /// Dispatch one ordinary Headless slash input through Native's currently
+    /// admitted command pool. This boundary is intentionally separate from the
+    /// generic interactive dispatcher and control-request path.
+    pub async fn dispatch_headless(
+        &self,
+        raw: Utf16JsonProjection,
+        cancellation: CancellationToken,
+    ) -> SlashDispatchResult {
+        let mut dispatcher = self.clone_shared();
+        dispatcher.dispatch_mode = SlashDispatchMode::Headless;
+        dispatcher.dispatch(raw, cancellation).await
+    }
+
+    /// Reject a resolved command outside the active dispatch mode before its
+    /// permission restrictions, Mod middleware, hook, or handler can run.
+    async fn headless_admission_rejection(
+        &self,
+        raw: &Utf16JsonProjection,
+    ) -> Option<SlashDispatchResult> {
+        if self.dispatch_mode != SlashDispatchMode::Headless || !starts_with_raw_slash(raw) {
+            return None;
+        }
+        let parsed = parse_slash_command(raw)?;
+        let registry = self.registry.read().await;
+        let (command, parsed) = resolve_command_invocation(&registry, parsed)?;
+        if registry.headless_command_admitted(&command) {
+            return None;
+        }
+        let name = parsed.name;
+        let suggestion = registry.headless_unknown_command_suggestion(&name);
+        Some(SlashDispatchResult::Unknown {
+            display: Self::unknown_command_literal(&name),
+            name,
+            suggestion,
+        })
+    }
+
     /// Dispatch a child-session command with its lifecycle owner and
     /// cancellation propagated through the existing source-preserving path.
     pub async fn dispatch_with_cancel(
@@ -770,6 +819,21 @@ impl RegistrySlashDispatcher {
                 suggestion,
             };
         };
+
+        if self.dispatch_mode == SlashDispatchMode::Headless
+            && !reg.headless_command_admitted(&command)
+        {
+            if let Some(gate) = self.permission_gate.as_ref() {
+                gate.set_command_input_denies(&[], false);
+            }
+            let name = parsed.name.clone();
+            let suggestion = reg.headless_unknown_command_suggestion(&name);
+            return SlashDispatchResult::Unknown {
+                display: Self::unknown_command_literal(&name),
+                name,
+                suggestion,
+            };
+        }
 
         // Side Chat admission runs before usage, hooks, prompt builders, or
         // handlers so rejected work cannot trigger an expansion side effect.
@@ -1387,6 +1451,16 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
         raw: Utf16JsonProjection,
         cancellation: CancellationToken,
     ) -> SlashDispatchResult {
+        if let Some(rejection) = self.headless_admission_rejection(&raw).await {
+            // An excluded command becomes ordinary model input. It must not
+            // inherit the previous skill's per-input denies or install the
+            // excluded command's own frontmatter restrictions.
+            if let Some(gate) = self.permission_gate.as_ref() {
+                gate.set_command_input_denies(&[], false);
+            }
+            return rejection;
+        }
+
         // Clear or replace this input's command-scoped tool restrictions even
         // when a Mod answers without calling the core command.
         if let Some(gate) = self.permission_gate.as_ref() {
@@ -2135,6 +2209,142 @@ mod tests {
             }
             other => panic!("expected Handled, got {other:?}"),
         }
+    }
+
+    fn headless_test_prompt(name: &str, disable_non_interactive: bool) -> SlashCommand {
+        SlashCommand {
+            name: name.into(),
+            description: "headless test prompt".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
+            disable_non_interactive,
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from(format!("/tmp/{name}.md")),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: "body".into(),
+            },
+            ..SlashCommand::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_dispatch_rejects_out_of_pool_before_side_effects() {
+        let mut registry = CommandRegistry::new();
+        let mut excluded = headless_test_prompt("manual-only", true);
+        if let SlashCommandKind::Markdown { frontmatter, .. } = &mut excluded.kind {
+            frontmatter.disallowed_tools = Some(vec!["Bash".into()]);
+        }
+        registry.register_command(excluded);
+        let permission_gate = Arc::new(RecordingDenyGate::default());
+        let middleware_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_permission_gate(permission_gate.clone())
+            .with_mod_command_interceptor(Arc::new(CountingInterceptor {
+                calls: middleware_calls.clone(),
+                rewritten: "/manual-only".into(),
+            }));
+
+        match dispatcher
+            .dispatch_headless(
+                "/manual-only".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
+            SlashDispatchResult::Unknown { name, display, .. } => {
+                assert_eq!(name.string_at(""), Some("manual-only"));
+                assert_eq!(display_text(&display), "Unknown command: /manual-only");
+            }
+            other => panic!("out-of-pool command must be unknown in Headless: {other:?}"),
+        }
+        assert_eq!(
+            middleware_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            *permission_gate.calls.lock().unwrap(),
+            vec![(Vec::new(), false)],
+            "fallback clears previous skill restrictions without applying the excluded command's denies"
+        );
+
+        assert!(matches!(
+            dispatcher
+                .dispatch(
+                    "/manual-only".into(),
+                    lingxi_core::host::CancellationToken::new()
+                )
+                .await,
+            SlashDispatchResult::RunSkillAsTurn { .. }
+        ));
+        assert_eq!(
+            middleware_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the generic dispatcher keeps its interactive behavior"
+        );
+    }
+
+    struct CountingInterceptor {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        rewritten: Utf16JsonProjection,
+    }
+
+    #[async_trait]
+    impl ModCommandRunInterceptor for CountingInterceptor {
+        async fn run(
+            &self,
+            dispatcher: &RegistrySlashDispatcher,
+            _command: &Utf16JsonProjection,
+            _args: &Utf16JsonProjection,
+            _context: ModCommandRunContext,
+            cancellation: lingxi_core::host::CancellationToken,
+        ) -> SlashDispatchResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            dispatcher
+                .dispatch_without_mod_hooks(&self.rewritten, cancellation)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_admission_survives_mod_next_rewriting() {
+        let mut registry = CommandRegistry::new();
+        let mut allowed = headless_test_prompt("allowed", false);
+        if let SlashCommandKind::Markdown { frontmatter, .. } = &mut allowed.kind {
+            frontmatter.disallowed_tools = Some(vec!["Write".into()]);
+        }
+        registry.register_command(allowed);
+        registry.register_command(headless_test_prompt("rewritten-manual", true));
+        let middleware_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let permission_gate = Arc::new(RecordingDenyGate::default());
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_permission_gate(permission_gate.clone())
+            .with_mod_command_interceptor(Arc::new(CountingInterceptor {
+                calls: middleware_calls.clone(),
+                rewritten: "/rewritten-manual".into(),
+            }));
+
+        match dispatcher
+            .dispatch_headless(
+                "/allowed".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+        {
+            SlashDispatchResult::Unknown { name, display, .. } => {
+                assert_eq!(name.string_at(""), Some("rewritten-manual"));
+                assert_eq!(display_text(&display), "Unknown command: /rewritten-manual");
+            }
+            other => panic!("Mod next must keep the Headless admission mode: {other:?}"),
+        }
+        assert_eq!(
+            middleware_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            *permission_gate.calls.lock().unwrap(),
+            vec![(vec!["Write".into()], false), (Vec::new(), false)],
+            "Mod next falling back to ordinary input releases the original skill's denies"
+        );
     }
 
     #[tokio::test]

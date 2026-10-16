@@ -41,6 +41,17 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
             ),
         );
         reg.register_builtin_handler(h);
+        reg.set_native_builtin_catalog_order(name, native_builtin_catalog_order(name));
+        // Native 2.1.295 selected descriptors: color @195548817,
+        // exit @196070491, focus @196084614, reload-plugins @196062882,
+        // statusline @196081289. Admission is a separate property.
+        reg.set_native_builtin_terminal_oriented(
+            name,
+            matches!(
+                name,
+                "color" | "exit" | "focus" | "reload-plugins" | "statusline"
+            ),
+        );
         if native_builtin_is_hidden(name) {
             reg.set_native_builtin_hidden(name, true);
         }
@@ -97,6 +108,97 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
     reg.register_builtin_handler(Arc::new(crate::builtins::PowerupHandler::new()));
 }
 
+/// Relative order of the selected 2.1.295 MZo descriptors. Conditional q4
+/// families occupy their call-site position; admission evaluates their gates
+/// separately. Non-Native extensions retain physical registration order last.
+pub(crate) fn native_builtin_catalog_order(name: &str) -> Option<usize> {
+    const ORDER: &[&str] = &[
+        "add-dir",
+        "advisor",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "fork",
+        "subtask",
+        "branch",
+        "btw",
+        "cd",
+        "chrome",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "output-style",
+        "copy",
+        "desktop",
+        "context",
+        "diff",
+        "background",
+        "stop",
+        "effort",
+        "exit",
+        "fast",
+        "focus",
+        "help",
+        "ide",
+        "init",
+        "keybindings",
+        "install-github-app",
+        "install-slack-app",
+        "mcp",
+        "memory",
+        "mobile",
+        "model",
+        "remote-env",
+        "plugin",
+        "release-notes",
+        "reload-plugins",
+        "reload-skills",
+        "rename",
+        "resume",
+        "session",
+        "skills",
+        "status",
+        "statusline",
+        "stickers",
+        "theme",
+        "tui",
+        "feedback",
+        "bug",
+        "ultraplan",
+        "rewind",
+        "security-review",
+        "terminal-setup",
+        "upgrade",
+        "usage-credits",
+        "extra-usage",
+        "rate-limit-options",
+        "usage",
+        "insights",
+        "brief",
+        "voice",
+        "recap",
+        "skill-doctor",
+        "permissions",
+        "plan",
+        "powerup",
+        "privacy-settings",
+        "goal",
+        "hooks",
+        "export",
+        "login",
+        "logout",
+        "passes",
+        "list-agents",
+        "tasks",
+        "autofix-pr",
+        "teleport",
+        "workflows",
+        "team-onboarding",
+    ];
+    ORDER.iter().position(|candidate| *candidate == name)
+}
+
 /// Native Headless factory facts for the corresponding 2.1.295 builtin. These
 /// rows are explicit source mappings keyed by command identity, never inferred
 /// from the Harness dispatcher. Native's missing optional properties retain
@@ -137,11 +239,11 @@ fn native_builtin_metadata(name: &str) -> (Option<crate::model::NativeCommandTyp
     }
 }
 
-/// Native 2.1.295 marks the removed `/agents` local command `isHidden: true`.
+/// Native 2.1.295 marks `/agents` and `/extra-usage` local commands hidden.
 /// Its Rust handler trait does not carry this source property, so keep it next
 /// to the other fixed command-object metadata and attach it after registration.
 fn native_builtin_is_hidden(name: &str) -> bool {
-    matches!(name, "agents")
+    matches!(name, "agents" | "extra-usage")
 }
 
 /// Overwrite the 6 batch-1 entries (`clear`, `compact`, `exit`, `help`,
@@ -633,6 +735,13 @@ mod registry_tests {
                 .disable_non_interactive
         );
         assert!(reg.resolve(&"agents".into()).unwrap().is_hidden);
+        for name in ["color", "exit", "focus", "reload-plugins", "statusline"] {
+            assert!(
+                reg.resolve(&name.into()).unwrap().terminal_oriented,
+                "{name}"
+            );
+        }
+        assert!(!reg.resolve(&"stop".into()).unwrap().terminal_oriented);
     }
 
     /// H-BIN-11 (cc2.1.207): the five newly-registered commands resolve, and

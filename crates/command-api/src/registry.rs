@@ -130,6 +130,28 @@ impl CommandRegistry {
         }
     }
 
+    /// Attach the selected Native factory's relative catalog position.
+    #[cfg(feature = "builtin-handlers")]
+    pub(crate) fn set_native_builtin_catalog_order(&mut self, name: &str, order: Option<usize>) {
+        let units = name.encode_utf16().collect::<Vec<_>>();
+        if let Some(command) = self.commands.get_mut(&units) {
+            if command.source == CommandSource::Builtin {
+                command.native_catalog_order = order;
+            }
+        }
+    }
+
+    /// Attach the source command object's terminal routing flag.
+    #[cfg(feature = "builtin-handlers")]
+    pub(crate) fn set_native_builtin_terminal_oriented(&mut self, name: &str, enabled: bool) {
+        let units = name.encode_utf16().collect::<Vec<_>>();
+        if let Some(command) = self.commands.get_mut(&units) {
+            if command.source == CommandSource::Builtin && command.native_type.is_some() {
+                command.terminal_oriented = enabled;
+            }
+        }
+    }
+
     /// Insert a fully-formed [`SlashCommand`] (used for markdown / plugin / MCP
     /// entries), indexing every entry in `cmd.aliases` so the command resolves by
     /// any of its alternate names. Mirrors the TS `findCommand` search over
@@ -255,6 +277,8 @@ impl CommandRegistry {
             is_hidden,
             is_enabled: h.is_enabled(),
             native_type,
+            terminal_oriented: existing_native.is_some_and(|command| command.terminal_oriented),
+            native_catalog_order: existing_native.and_then(|command| command.native_catalog_order),
             disable_non_interactive,
             supports_non_interactive,
             native_source,
@@ -556,8 +580,65 @@ impl CommandRegistry {
     #[must_use]
     pub fn native_source_ordered_commands(&self) -> Vec<&SlashCommand> {
         let mut commands = self.registration_ordered_commands();
-        commands.sort_by_key(|command| native_command_source_rank(command));
+        commands.sort_by_key(|command| {
+            (
+                native_command_source_rank(command),
+                command.native_catalog_order.unwrap_or(usize::MAX),
+            )
+        });
         commands
+    }
+
+    /// Native's ordinary non-interactive command pool (`bge(Pp(...))`).
+    /// Hidden and manual-only descriptors remain in this pool; init and the
+    /// unknown-command reminder apply their distinct projections afterwards.
+    #[must_use]
+    pub fn headless_init_commands(&self) -> Vec<&SlashCommand> {
+        self.native_source_ordered_commands()
+            .into_iter()
+            .filter(|command| self.headless_command_admitted(command))
+            .collect()
+    }
+
+    /// Admission to the ordinary Native Headless command pool. This applies
+    /// the current factory/policy state before dispatch as well as discovery;
+    /// hidden and manual-only rows are not excluded here.
+    #[must_use]
+    pub fn headless_command_admitted(&self, command: &SlashCommand) -> bool {
+        let policy_prompt = is_native_policy_prompt_row(command);
+        command.native_non_interactive_admission() == Some(true)
+            && (policy_prompt || native_factory_enabled(command))
+            && self.native_headless_factory_available(command, false)
+            && self.execution_allowed(command)
+    }
+
+    /// Skill candidates from Native `Cke` before init's user-invocable name
+    /// projection. This uses the shared command producer before `bge`, so a
+    /// skill disabled only for non-interactive execution can still be listed.
+    #[must_use]
+    pub fn headless_init_skills(&self) -> Vec<&SlashCommand> {
+        self.native_source_ordered_commands()
+            .into_iter()
+            .filter(|command| command.native_type == Some(NativeCommandType::Prompt))
+            .filter(|command| {
+                let policy_prompt = is_native_policy_prompt_row(command);
+                (policy_prompt || native_factory_enabled(command))
+                    && self.native_headless_factory_available(command, false)
+                    && self.execution_allowed(command)
+            })
+            .filter(|command| {
+                command
+                    .native_source
+                    .as_ref()
+                    .and_then(|source| source.string_at(""))
+                    != Some("builtin")
+                    && (command.has_user_specified_description || command.when_to_use.is_some())
+                    && (matches!(
+                        command.loaded_from.as_deref(),
+                        Some("skills" | "syncedSkills" | "attachedFolder" | "plugin" | "bundled")
+                    ) || command.disable_model_invocation)
+            })
+            .collect()
     }
 
     /// Build the Native headless unknown-command catalog. Native `bge` first
@@ -655,8 +736,9 @@ impl CommandRegistry {
         let Some(name) = projection_text(&command.name) else {
             return true;
         };
-        // `version` is always disabled and `extra-usage` always hidden in the
-        // Native source. The compiled-in LingXi `/cron` management extension
+        // `version` is disabled and absent from MZo. Hidden `extra-usage`
+        // stays in the raw pool when its entitlement gate allows it.
+        // The compiled-in LingXi `/cron` management extension
         // is not a Native 2.1.295 slash command; scope that exclusion to its
         // own Builtin/Bundled source metadata so a user or plugin skill named
         // `/cron` remains in the catalog.
@@ -666,7 +748,7 @@ impl CommandRegistry {
                 command.source,
                 CommandSource::Builtin | CommandSource::Bundled
             );
-        if matches!(name, "version" | "extra-usage") || local_cron_extension {
+        if (name == "version" && is_native_builtin_factory(command)) || local_cron_extension {
             return false;
         }
         if enforce_workspace_requirement
@@ -681,6 +763,17 @@ impl CommandRegistry {
                 .is_some_and(|context| context.workspace_available == Some(true))
         {
             return false;
+        }
+        // MZo's skillDoctor q4 family is absent unless vM() is enabled.
+        // Match only the source builtin; a user skill with this name is free
+        // to declare its own availability.
+        if name == "skill-doctor" && is_native_builtin_factory(command) {
+            let from_env = lingxi_core::host::env::is_env_truthy(
+                std::env::var("CLAUDE_CODE_LANTERN_PRISM").ok().as_deref(),
+            );
+            if !from_env && !telemetry::feature_flags::flag_bool("tengu_lantern_prism", false) {
+                return false;
+            }
         }
         if let Some(policy_gate) = command.policy_gate.as_ref() {
             let allowed = match policy_gate.policy.as_str() {
@@ -697,6 +790,11 @@ impl CommandRegistry {
             if !allowed {
                 return false;
             }
+        }
+        // These predicates belong to the selected builtin descriptor, not to
+        // any user/plugin prompt that happens to have the same name.
+        if !is_native_builtin_factory(command) {
+            return true;
         }
         let Some(context) = self.native_headless_context.as_ref() else {
             // Preserve unresolved host predicates for commands without an
@@ -717,7 +815,7 @@ impl CommandRegistry {
             // `entrypoint` fact distinguishes that route from ordinary
             // `sdk-cli`; the remote Cowork session route is outside this host.
             "explain-usage" => context.explain_usage_is_enabled() != Some(false),
-            "usage-credits" => context.usage_credits_enabled != Some(false),
+            "usage-credits" | "extra-usage" => context.usage_credits_enabled != Some(false),
             "advisor" => context.advisor_enabled != Some(false),
             _ => true,
         }
@@ -1069,7 +1167,8 @@ fn native_command_source_rank(command: &SlashCommand) -> (u8, u8) {
 }
 
 pub(crate) fn is_native_builtin_factory(command: &SlashCommand) -> bool {
-    matches!(command.kind, SlashCommandKind::Builtin { .. })
+    (command.source == CommandSource::Builtin
+        && matches!(command.kind, SlashCommandKind::Builtin { .. }))
         || (command.source == CommandSource::Bundled
             && command
                 .native_source
@@ -1535,6 +1634,77 @@ mod tests {
     }
 
     #[test]
+    fn headless_init_skills_use_pre_noninteractive_pool_without_mcp_bypass() {
+        let mut registry = CommandRegistry::new();
+        for (name, disable_non_interactive, described) in [
+            ("ordinary", false, true),
+            ("interactive-only", true, true),
+            ("undescribed", false, false),
+        ] {
+            let mut command = markdown_cmd(name, Vec::new());
+            command.native_type = Some(NativeCommandType::Prompt);
+            command.loaded_from = Some("skills".into());
+            command.has_user_specified_description = described;
+            command.disable_non_interactive = disable_non_interactive;
+            registry.register_command(command);
+        }
+        let mut mcp = mcp_prompt("server", "ordinary-prompt");
+        mcp.native_type = Some(NativeCommandType::Prompt);
+        mcp.loaded_from = Some("mcp".into());
+        mcp.has_user_specified_description = true;
+        let mcp_name = mcp.name.clone();
+        registry.register_command(mcp.clone());
+        let names = |registry: &CommandRegistry| {
+            registry
+                .headless_init_skills()
+                .iter()
+                .map(|command| command.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&registry),
+            ["ordinary".into(), "interactive-only".into()]
+        );
+        // Native Cke admits a manual prompt with disableModelInvocation even
+        // when its loadedFrom category is outside the regular Skill sources.
+        mcp.disable_model_invocation = true;
+        registry.register_command(mcp);
+        assert_eq!(
+            names(&registry),
+            ["ordinary".into(), "interactive-only".into(), mcp_name]
+        );
+    }
+
+    #[test]
+    fn headless_builtin_predicates_do_not_disable_same_named_user_skills() {
+        let mut registry = CommandRegistry::new();
+        for name in ["advisor", "usage-credits", "version", "add-dir"] {
+            registry.register_command(SlashCommand {
+                name: name.into(),
+                source: CommandSource::Settings(lingxi_core::types::SettingsScope::User),
+                native_type: Some(NativeCommandType::Prompt),
+                kind: SlashCommandKind::Markdown {
+                    file_path: std::path::PathBuf::from(format!("/skills/{name}.md")),
+                    frontmatter: Default::default(),
+                    prompt_template: "body".into(),
+                },
+                ..SlashCommand::default()
+            });
+        }
+        registry.set_native_headless_context(NativeHeadlessCatalogContext {
+            entrypoint: Some("sdk-cli".into()),
+            usage_credits_enabled: Some(false),
+            advisor_enabled: Some(false),
+            ..NativeHeadlessCatalogContext::default()
+        });
+        assert_eq!(registry.headless_init_commands().len(), 4);
+        assert_eq!(
+            registry.headless_command_catalog().available_command_count,
+            4
+        );
+    }
+
+    #[test]
     fn headless_factory_context_applies_add_dir_auto_mode_and_policy_prompt_gates() {
         let mut registry = CommandRegistry::new();
         registry.register_command(SlashCommand {
@@ -1610,6 +1780,7 @@ mod tests {
                 },
                 native_type: Some(native_type),
                 supports_non_interactive,
+                is_hidden: name == "extra-usage",
                 ..SlashCommand::default()
             });
         }
@@ -1655,6 +1826,13 @@ mod tests {
         });
         let remote = registry.headless_command_catalog();
         assert_eq!(remote.available_command_count, 5);
+        assert!(
+            registry
+                .headless_init_commands()
+                .iter()
+                .any(|command| command.name.string_at("") == Some("extra-usage")),
+            "hidden entitled rows remain in Native's raw init pool"
+        );
         assert_eq!(
             remote
                 .prompt_command_names
@@ -1669,7 +1847,14 @@ mod tests {
                 .iter()
                 .map(|command| command.name.string_at("").unwrap())
                 .collect::<Vec<_>>(),
-            ["add-dir", "usage-credits", "advisor", "rate-limit-options"]
+            [
+                "add-dir",
+                "extra-usage",
+                "usage-credits",
+                "advisor",
+                "rate-limit-options"
+            ],
+            "Native extra-usage is hidden but does not disable model invocation"
         );
 
         registry.set_native_headless_context(NativeHeadlessCatalogContext {

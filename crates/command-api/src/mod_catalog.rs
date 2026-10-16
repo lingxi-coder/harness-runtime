@@ -1,8 +1,8 @@
 //! Live slash-command projection for `$.command.list()`.
 
 use crate::{
-    BuiltinCommandHandler, CommandRegistry, CommandResult, CommandSource, ParsedSlashCommand,
-    SlashCommand, SlashCommandKind,
+    BuiltinCommandHandler, CommandRegistry, CommandResult, CommandSource, NativeCommandType,
+    ParsedSlashCommand, SlashCommand, SlashCommandKind,
 };
 use hooks::mods::{ModCommandCatalog, ModError};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -383,6 +383,11 @@ impl ModCommandCatalog for RegistryModCommandCatalog {
             kind: SlashCommandKind::Builtin {
                 handler_id: name_text.clone(),
             },
+            // Native 2.1.295's `g2n` projects `$.command.register` as
+            // `type: "local"`, `loadedFrom: "plugin"`, and
+            // `supportsNonInteractive: true`.
+            native_type: Some(NativeCommandType::Local),
+            supports_non_interactive: true,
             loaded_from: Some("plugin".into()),
             ..SlashCommand::default()
         };
@@ -570,6 +575,20 @@ mod tests {
             registry.read().await.mod_immediate_of(&"hello".into()),
             Some(true)
         );
+        let registered = registry
+            .read()
+            .await
+            .resolve(&"hello".into())
+            .unwrap()
+            .clone();
+        assert_eq!(registered.native_type, Some(NativeCommandType::Local));
+        assert!(registered.supports_non_interactive);
+        assert!(registry
+            .read()
+            .await
+            .headless_init_commands()
+            .iter()
+            .any(|command| command.name.string_at("") == Some("hello")));
         assert_eq!(
             catalog.list().await.unwrap(),
             source_json(&json!([
@@ -585,7 +604,7 @@ mod tests {
         let dispatcher = crate::RegistrySlashDispatcher::new(registry.clone());
         assert_eq!(
             dispatcher
-                .dispatch(
+                .dispatch_headless(
                     "/hello Ada".into(),
                     lingxi_core::host::CancellationToken::new()
                 )
@@ -598,7 +617,7 @@ mod tests {
         assert!(registry.read().await.resolve(&"hello".into()).is_none());
         assert!(matches!(
             dispatcher
-                .dispatch(
+                .dispatch_headless(
                     "/hello Ada".into(),
                     lingxi_core::host::CancellationToken::new()
                 )

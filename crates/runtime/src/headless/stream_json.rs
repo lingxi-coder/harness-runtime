@@ -734,13 +734,13 @@ pub struct StreamJsonInitParams {
     pub model_source: Option<Utf16JsonProjection>,
     /// Resolved permission mode reported to the client.
     pub permission_mode: String,
-    /// Slash-command names available to the current session.
-    pub slash_commands: Vec<String>,
+    /// Slash-command names available to the current session, preserving the
+    /// source UTF-16 units used by the Native init frame.
+    pub slash_commands: Vec<Utf16JsonProjection>,
     /// SLASH-15 (2.1.238): the subset of [`Self::slash_commands`] carrying the
-    /// oracle's `terminalOriented:!0` flag, so a thin/remote client knows to
-    /// route those four locally. Emitted immediately after `slash_commands` and
-    /// only when non-empty — see [`build_init_frame`].
-    pub terminal_slash_commands: Vec<String>,
+    /// source descriptor's `terminalOriented:!0` flag. Emitted immediately
+    /// after `slash_commands` and only when non-empty — see [`build_init_projection`].
+    pub terminal_slash_commands: Vec<Utf16JsonProjection>,
     /// Credential source label reported by the runtime.
     pub api_key_source: String,
     /// Claude Code reference version reported by the runtime.
@@ -750,7 +750,7 @@ pub struct StreamJsonInitParams {
     /// Agent types available to the current session.
     pub agents: Vec<String>,
     /// Skills available to the current session.
-    pub skills: Vec<String>,
+    pub skills: Vec<Utf16JsonProjection>,
     /// Metadata entries for plugins loaded by the host.
     pub plugins: Vec<Value>,
     /// Whether analytics collection is disabled for this session.
@@ -1532,13 +1532,11 @@ impl StreamJsonStream {
             .as_ref()
             .expect("set_init_params must be called before emit_init");
         let session_id = self.session_id.lock().await.clone();
-        let frame = build_init_frame(&session_id, &uuid, p);
-        let model_source = p.model_source.clone();
+        let frame = build_init_projection(&session_id, &uuid, p);
         drop(params_guard);
-        if let Some(model_source) = model_source {
-            self.enqueue_with_projection(&frame, "/model", &model_source, "Native model source");
-        } else {
-            self.enqueue(&frame);
+        match frame {
+            Ok(frame) => self.enqueue_projected(&frame),
+            Err(error) => self.abort_delivery(format!("invalid init-frame projection: {error}")),
         }
     }
 
@@ -3610,7 +3608,7 @@ impl OutputStream for StreamJsonStream {
 /// has NO `betas` key (a default-model run emits no `betas`). The separate
 /// SDK-subprocess `initialize` payload — a different structure — is the one
 /// that carries `betas`; the streaming `system/init` frame does not.
-fn build_init_frame(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> Value {
+fn build_init_frame_scaffold(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> Value {
     // Built by ordered insertion rather than one `json!` literal because
     // `mcp_server_errors` is CONDITIONAL: the oracle spreads it in only when
     // non-empty (`...r.length>0&&{mcp_server_errors:…}`), and it sits between
@@ -3625,7 +3623,10 @@ fn build_init_frame(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> V
     o.insert("mcp_servers".into(), json!(p.mcp_servers));
     o.insert("model".into(), json!(p.model));
     o.insert("permissionMode".into(), json!(p.permission_mode));
-    o.insert("slash_commands".into(), json!(p.slash_commands));
+    // The Value is a shape/order scaffold only. `build_init_projection`
+    // replaces these three arrays with their exact source projections before
+    // serialization so lone UTF-16 surrogates are not normalized by serde.
+    o.insert("slash_commands".into(), json!([]));
     // SLASH-15 (2.1.238): `terminal_slash_commands` is spread in directly AFTER
     // `slash_commands` and ONLY when the list is non-empty — the init emitter
     // `Fin` (@298685916):
@@ -3638,16 +3639,13 @@ fn build_init_frame(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> V
     // The key does not exist in 2.1.220 at all, so an empty list must OMIT it
     // rather than emit `[]`.
     if !p.terminal_slash_commands.is_empty() {
-        o.insert(
-            "terminal_slash_commands".into(),
-            json!(p.terminal_slash_commands),
-        );
+        o.insert("terminal_slash_commands".into(), json!([]));
     }
     o.insert("apiKeySource".into(), json!(p.api_key_source));
     o.insert("claude_code_version".into(), json!(p.claude_code_version));
     o.insert("output_style".into(), json!(p.output_style));
     o.insert("agents".into(), json!(p.agents));
-    o.insert("skills".into(), json!(p.skills));
+    o.insert("skills".into(), json!([]));
     o.insert("plugins".into(), json!(p.plugins));
     // 2.1.220: `...e.capabilities&&{capabilities:[...e.capabilities]}` —
     // between `plugins` and `mcp_server_errors` (live-captured position).
@@ -3679,6 +3677,33 @@ fn build_init_frame(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> V
         o.insert("view_mode".into(), json!(mode));
     }
     Value::Object(o)
+}
+
+fn build_init_projection(
+    session_id: &str,
+    uuid: &str,
+    params: &StreamJsonInitParams,
+) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
+    let frame = build_init_frame_scaffold(session_id, uuid, params);
+    let mut projection = project_json_value(&frame);
+    projection.replace_pointer_projection(
+        "/slash_commands",
+        Utf16JsonProjection::array(params.slash_commands.clone())?,
+    )?;
+    if !params.terminal_slash_commands.is_empty() {
+        projection.replace_pointer_projection(
+            "/terminal_slash_commands",
+            Utf16JsonProjection::array(params.terminal_slash_commands.clone())?,
+        )?;
+    }
+    projection.replace_pointer_projection(
+        "/skills",
+        Utf16JsonProjection::array(params.skills.clone())?,
+    )?;
+    if let Some(model_source) = &params.model_source {
+        projection.replace_pointer_projection("/model", model_source.clone())?;
+    }
+    Ok(projection)
 }
 
 /// `--mcp-config` / config-file entries that validation skipped, in the frame's
@@ -3745,7 +3770,7 @@ pub struct StreamJsonPlugin {
 /// Build `StreamJsonInitParams` from the CLI environment, the resolved
 /// permission mode, and the tool / slash-command registries.
 ///
-/// This is the `build_init_frame` collector called from `run.rs` before
+/// This is the init-frame collector called from `run.rs` before
 /// `run_turn`.
 pub fn build_init_params(
     session_id: &str,
@@ -3754,9 +3779,9 @@ pub fn build_init_params(
     model: &str,
     credential_source: &llm_runtime::CredentialSource,
     permission_mode: &str,
-    slash_commands: Vec<String>,
+    slash_commands: Vec<Utf16JsonProjection>,
     agents: Vec<String>,
-    skills: Vec<String>,
+    skills: Vec<Utf16JsonProjection>,
     plugins: Vec<StreamJsonPlugin>,
     output_style: &str,
     memory_auto_path: Option<&str>,
@@ -3791,19 +3816,6 @@ pub fn build_init_params(
 
     let api_key_source = credential_source_label(credential_source);
 
-    // SLASH-15: derive the `terminalOriented:!0` subset from the SAME advertised
-    // list the frame emits, mirroring the oracle's single-source filter over
-    // `e.commands` (`userInvocable!==!1 && terminalOriented===!0`) — the port's
-    // `slash_commands` argument is already the user-invocable list, and
-    // `command_api::builtin_support::names::TERMINAL_ORIENTED_COMMANDS` is the
-    // registry-side table this consumes. Order follows the advertised list, as
-    // upstream's `.filter().map()` does.
-    let terminal_slash_commands: Vec<String> = slash_commands
-        .iter()
-        .filter(|name| command_api::builtin_support::names::is_terminal_oriented(name.as_str()))
-        .cloned()
-        .collect();
-
     StreamJsonInitParams {
         cwd,
         session_id: session_id.to_string(),
@@ -3814,7 +3826,7 @@ pub fn build_init_params(
         model_source: None,
         permission_mode: permission_mode.to_string(),
         slash_commands,
-        terminal_slash_commands,
+        terminal_slash_commands: Vec::new(),
         api_key_source,
         claude_code_version: super::CLAUDE_CODE_REFERENCE_VERSION.to_string(),
         output_style: output_style.to_string(),
@@ -4810,6 +4822,12 @@ mod tests {
         )
     }
 
+    fn projected_init_value(session_id: &str, uuid: &str, params: &StreamJsonInitParams) -> Value {
+        let projection = build_init_projection(session_id, uuid, params)
+            .expect("test init frame projections are valid JSON");
+        super::projected_value(&projection)
+    }
+
     #[test]
     fn init_frame_uses_only_selected_route_credential_source() {
         use llm_runtime::CredentialSource;
@@ -4851,7 +4869,7 @@ mod tests {
                 None,
                 StreamJsonInitHostMetadata::default(),
             );
-            let frame = build_init_frame("source-test", "source-init", &params);
+            let frame = projected_init_value("source-test", "source-init", &params);
             assert_eq!(frame["apiKeySource"], expected);
             assert_eq!(frame["model"], "gemini-model");
         }
@@ -4883,6 +4901,46 @@ mod tests {
         };
         let wire = Utf16JsonProjection::parse(line.trim_end()).expect("projected init JSON");
         assert_eq!(wire.string_units("/model"), Some(units));
+    }
+
+    #[test]
+    fn init_command_and_skill_arrays_preserve_exact_utf16_names() {
+        let units = "skill-".encode_utf16().chain([0xd800]).collect::<Vec<_>>();
+        let name =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .expect("name projection owns its exact UTF-16 units");
+        let mut params = build_init_params(
+            "utf16-init",
+            vec![],
+            vec![],
+            "claude-opus-4-8",
+            &llm_runtime::CredentialSource::Unknown,
+            "default",
+            vec![name.clone()],
+            vec![],
+            vec![name.clone()],
+            vec![],
+            "default",
+            None,
+            "off",
+            None,
+            StreamJsonInitHostMetadata::default(),
+        );
+        params.terminal_slash_commands = vec![name.clone()];
+
+        let projected = build_init_projection("utf16-init", "uuid", &params)
+            .expect("all projected init arrays are valid JSON");
+        let line = serialize_projected_ndjson_line(&projected).expect("valid NDJSON");
+        let reparsed = Utf16JsonProjection::parse(line.trim_end()).expect("valid projected line");
+        assert_eq!(
+            reparsed.string_units("/slash_commands/0"),
+            Some(units.clone())
+        );
+        assert_eq!(
+            reparsed.string_units("/terminal_slash_commands/0"),
+            Some(units.clone())
+        );
+        assert_eq!(reparsed.string_units("/skills/0"), Some(units));
     }
 
     #[tokio::test]
@@ -4964,9 +5022,9 @@ mod tests {
             "claude-opus-4-8",
             &llm_runtime::CredentialSource::Unknown,
             "bypassPermissions",
-            vec!["graphify".to_string()],
+            vec!["graphify".into()],
             vec!["claude".to_string()],
-            vec!["deep-research".to_string()],
+            vec!["deep-research".into()],
             vec![StreamJsonPlugin {
                 name: "superpowers".to_string(),
                 path: "/path/to/superpowers".to_string(),
@@ -4984,7 +5042,7 @@ mod tests {
             Output::new(tokio::io::sink()),
         ));
         let params_guard = stream.init_params.lock().await;
-        let frame = build_init_frame(
+        let frame = projected_init_value(
             "test-session-id",
             "test-init-id",
             params_guard.as_ref().unwrap(),
@@ -4998,7 +5056,7 @@ mod tests {
         for (analytics, feedback) in [(false, false), (true, false), (true, true)] {
             params.analytics_disabled = analytics;
             params.product_feedback_disabled = feedback;
-            let frame = build_init_frame("sess", "uuid", &params);
+            let frame = projected_init_value("sess", "uuid", &params);
             assert_eq!(frame["analytics_disabled"], analytics);
             assert_eq!(frame["product_feedback_disabled"], feedback);
         }
@@ -6047,7 +6105,7 @@ mod tests {
         );
 
         params.mcp_server_errors = Vec::new();
-        let clean = build_init_frame("sess-e", "u", &params);
+        let clean = projected_init_value("sess-e", "u", &params);
         assert!(
             !clean.as_object().unwrap().contains_key("mcp_server_errors"),
             "a clean config must emit NO mcp_server_errors key"
@@ -6058,7 +6116,7 @@ mod tests {
             "path": "mcpServers.bad",
             "message": "skipped",
         })];
-        let dirty = build_init_frame("sess-e", "u", &params);
+        let dirty = projected_init_value("sess-e", "u", &params);
         let keys: Vec<&str> = dirty
             .as_object()
             .unwrap()
@@ -6099,7 +6157,7 @@ mod tests {
             None,
             StreamJsonInitHostMetadata::default(),
         );
-        let frame = build_init_frame("sess-oracle", "uuid-1234", &params);
+        let frame = projected_init_value("sess-oracle", "uuid-1234", &params);
         let obj = frame.as_object().expect("init frame is an object");
         let keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         assert_eq!(
@@ -6147,7 +6205,7 @@ mod tests {
     #[test]
     fn init_frame_emits_terminal_slash_commands_after_slash_commands() {
         // Advertised list deliberately interleaves flagged and unflagged names.
-        let params = build_init_params(
+        let mut params = build_init_params(
             "sess-terminal",
             vec![],
             vec![],
@@ -6155,12 +6213,12 @@ mod tests {
             &llm_runtime::CredentialSource::Unknown,
             "default",
             vec![
-                "color".to_string(),
-                "context".to_string(),
-                "exit".to_string(),
-                "reload-plugins".to_string(),
-                "statusline".to_string(),
-                "usage".to_string(),
+                "color".into(),
+                "context".into(),
+                "exit".into(),
+                "reload-plugins".into(),
+                "statusline".into(),
+                "usage".into(),
             ],
             vec![],
             vec![],
@@ -6171,18 +6229,36 @@ mod tests {
             None,
             StreamJsonInitHostMetadata::default(),
         );
+        params.terminal_slash_commands = ["color", "exit", "reload-plugins", "statusline"]
+            .into_iter()
+            .map(Utf16JsonProjection::from)
+            .collect();
         assert_eq!(
-            params.terminal_slash_commands,
-            vec![
-                "color".to_string(),
-                "exit".to_string(),
-                "reload-plugins".to_string(),
-                "statusline".to_string()
-            ],
-            "only the TERMINAL_ORIENTED_COMMANDS members, in advertised order"
+            params
+                .terminal_slash_commands
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            vec!["color", "exit", "reload-plugins", "statusline"],
+            "terminal subset follows the source descriptors' order"
         );
 
-        let frame = build_init_frame("sess-terminal", "u", &params);
+        let frame = projected_init_value("sess-terminal", "u", &params);
+        assert_eq!(
+            frame["slash_commands"],
+            json!([
+                "color",
+                "context",
+                "exit",
+                "reload-plugins",
+                "statusline",
+                "usage"
+            ])
+        );
+        assert_eq!(
+            frame["terminal_slash_commands"],
+            json!(["color", "exit", "reload-plugins", "statusline"])
+        );
         let obj = frame.as_object().unwrap();
         let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         let slash = keys.iter().position(|k| *k == "slash_commands").unwrap();
@@ -6209,7 +6285,7 @@ mod tests {
             "claude-opus-4-8",
             &llm_runtime::CredentialSource::Unknown,
             "default",
-            vec!["context".to_string(), "usage".to_string()],
+            vec!["context".into(), "usage".into()],
             vec![],
             vec![],
             vec![],
@@ -6220,7 +6296,8 @@ mod tests {
             StreamJsonInitHostMetadata::default(),
         );
         assert!(none.terminal_slash_commands.is_empty());
-        let frame = build_init_frame("sess-terminal-none", "u", &none);
+        let frame = projected_init_value("sess-terminal-none", "u", &none);
+        assert_eq!(frame["slash_commands"], json!(["context", "usage"]));
         assert!(
             !frame
                 .as_object()
@@ -6254,7 +6331,7 @@ mod tests {
             None,
             StreamJsonInitHostMetadata::default(),
         );
-        let frame = build_init_frame("sess-caps", "u", &params);
+        let frame = projected_init_value("sess-caps", "u", &params);
         assert_eq!(
             frame["capabilities"],
             serde_json::json!([
@@ -6273,7 +6350,7 @@ mod tests {
         );
 
         params.fast_mode_disabled_reason = Some("sdk_opt_in_required".to_string());
-        let reasoned = build_init_frame("sess-caps", "u", &params);
+        let reasoned = projected_init_value("sess-caps", "u", &params);
         let keys: Vec<&str> = reasoned
             .as_object()
             .unwrap()
@@ -6692,9 +6769,9 @@ mod tests {
             "claude-opus-4-8",
             &llm_runtime::CredentialSource::Unknown,
             "bypassPermissions",
-            vec!["graphify".to_string()],
+            vec!["graphify".into()],
             vec!["claude".to_string()],
-            vec!["graphify".to_string()],
+            vec!["graphify".into()],
             vec![],
             "default",
             Some(&memory_dir),
@@ -6715,9 +6792,21 @@ mod tests {
             assert_eq!(p.permission_mode, "bypassPermissions");
             assert!(!p.tools.is_empty(), "tools must be populated");
             assert_eq!(p.mcp_servers.len(), 1, "mcp_servers must have 1 entry");
-            assert_eq!(p.slash_commands, vec!["graphify"]);
+            assert_eq!(
+                p.slash_commands
+                    .iter()
+                    .map(|name| name.string_at("").unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["graphify"]
+            );
             assert_eq!(p.agents, vec!["claude"]);
-            assert_eq!(p.skills, vec!["graphify"]);
+            assert_eq!(
+                p.skills
+                    .iter()
+                    .map(|name| name.string_at("").unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["graphify"]
+            );
             assert!(
                 p.plugins.is_empty(),
                 "plugins: [] (no PluginManager surface from Runtime)"
@@ -7641,7 +7730,7 @@ mod verbose_json_tests {
             params.claude_code_version,
             super::super::CLAUDE_CODE_REFERENCE_VERSION
         );
-        let frame = build_init_frame("session", "uuid", &params);
+        let frame = projected_init_value("session", "uuid", &params);
         assert_eq!(frame["per_turn_effort_active"], true);
         assert_eq!(frame["view_mode"], "default");
         assert!(frame.get("memory_paths").is_none());

@@ -35,32 +35,31 @@ pub mod workflow_authoring_skill;
 /// `/loop` half mirrors the reference `isEnabled: isKairosCronEnabled` gate
 /// (loop.ts:83); `/cron` shares it so it cannot advertise a stopped scheduler.
 pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
-    // Keep the Native prompt-skill assembly order separate from the ASCII
-    // order used by slash palettes. The headless unknown-command preview reads
-    // this registration order directly.
+    // Native 2.1.295 Kbo puts workflow commands before v9's bundledSkills,
+    // then builtin-plugin skills afterwards. SEe/Ws append order is retained
+    // before the independent user/model invocation projections.
+    register_deep_research_skill(reg);
     register_dataviz_skill(reg);
     register_update_config_skill(reg);
+    register_keybindings_help_skill(reg);
+    register_verify_skill(reg);
+    register_debug_skill(reg);
     register_code_review_skill(reg);
+    register_commit_skill(reg);
     register_simplify_skill(reg);
+    register_batch_skill(reg);
     register_fewer_permission_prompts_skill(reg);
+    register_checkup_skill(reg);
+    register_explain_usage_skill(reg);
     register_loop_skill(reg, cron_enabled);
     register_claude_api_skill(reg);
     register_workflow_authoring_skill(reg);
     register_run_skill(reg);
+    register_run_skill_generator_skill(reg);
     register_plugin_authoring_skill(reg);
 
-    // Remaining bundles retain their source registration order after the
-    // prompt names above; manual-only bundles are counted but not named.
+    // LingXi's explicit scheduler extension is outside Native's factory list.
     register_cron_skill(reg, cron_enabled);
-    register_verify_skill(reg);
-    register_commit_skill(reg);
-    register_checkup_skill(reg);
-    register_debug_skill(reg);
-    register_run_skill_generator_skill(reg);
-    register_deep_research_skill(reg);
-    register_batch_skill(reg);
-    register_keybindings_help_skill(reg);
-    register_explain_usage_skill(reg);
 }
 
 /// Register `fo()` — the Native `/commit` bundled prompt. The GrowthBook gate
@@ -105,6 +104,13 @@ fn register_claude_api_skill(reg: &mut CommandRegistry) {
         },
         loaded_from: Some("bundled".into()),
         user_invocable: Some(true),
+        // SEe @204097258 checks the typed M.bool env value, not JS
+        // truthiness of the raw process.env string.
+        is_enabled: !lingxi_core::host::env::is_env_truthy(
+            std::env::var("CLAUDE_CODE_DISABLE_CLAUDE_API_SKILL")
+                .ok()
+                .as_deref(),
+        ),
         has_user_specified_description: true,
         ..SlashCommand::default()
     });
@@ -379,6 +385,7 @@ fn register_debug_skill(reg: &mut CommandRegistry) {
 fn register_checkup_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "doctor".into(),
+        terminal_oriented: true,
         description: checkup_skill::CHECKUP_DESCRIPTION.into(),
         menu_description: Some(checkup_skill::CHECKUP_MENU_DESCRIPTION.into()),
         source: CommandSource::Bundled,
@@ -712,6 +719,7 @@ mod tests {
             Some(crate::model::NativeCommandType::Prompt)
         );
         assert!(doctor.disable_model_invocation);
+        assert!(doctor.terminal_oriented);
         assert_eq!(
             reg.resolve(&"checkup".into())
                 .and_then(|command| command.name.string_at("")),

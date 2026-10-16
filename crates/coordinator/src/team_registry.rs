@@ -5,6 +5,7 @@
 //! teammates.
 
 use crate::mailbox::{MailboxRouter, TeammateMailbox};
+use indexmap::IndexMap;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::AgentId;
 use serde::{Deserialize, Serialize};
@@ -62,7 +63,8 @@ pub enum WorkerStatus {
 
 /// Registry of teammate workers owned by a coordinator session.
 pub struct TeamRegistry {
-    workers: RwLock<HashMap<AgentId, WorkerAgent>>,
+    // Native teamContext.teammates is enumerated in insertion order.
+    workers: RwLock<IndexMap<AgentId, WorkerAgent>>,
     permission_gate: RwLock<Option<Arc<dyn lingxi_core::host::PermissionGate>>>,
     message_forwarder:
         RwLock<Option<Arc<dyn lingxi_core::host::teammate_worker::PaneMessageForwarder>>>,
@@ -226,7 +228,7 @@ impl TeamRegistry {
     #[must_use]
     pub fn new(coordinator_id: AgentId) -> Self {
         Self {
-            workers: RwLock::new(HashMap::new()),
+            workers: RwLock::new(IndexMap::new()),
             permission_gate: RwLock::new(None),
             message_forwarder: RwLock::new(None),
             pending_handler_statuses: RwLock::new(HashMap::new()),
@@ -347,7 +349,7 @@ impl TeamRegistry {
     pub async fn delete_worker(&self, agent_id: &AgentId) {
         {
             let mut workers = self.workers.write().await;
-            workers.remove(agent_id);
+            workers.shift_remove(agent_id);
             self.observed_handler_statuses
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1209,5 +1211,42 @@ mod tests {
                 .unwrap()
                 .awaiting_plan_approval
         );
+    }
+
+    #[tokio::test]
+    async fn live_worker_roster_preserves_insertion_order_across_updates_and_removal() {
+        let registry = TeamRegistry::new(AgentId::new());
+        let mut ids = Vec::new();
+        for name in ["z-last", "a-first", "middle"] {
+            ids.push(
+                registry
+                    .spawn_worker("worker".into(), name.into(), name.into())
+                    .await
+                    .unwrap(),
+            );
+        }
+        registry
+            .update_status(
+                &ids[1],
+                WorkerStatus::Working {
+                    activity: "work".into(),
+                },
+            )
+            .await;
+        let names = || async {
+            registry
+                .list()
+                .await
+                .into_iter()
+                .map(|worker| worker.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names().await, ["z-last", "a-first", "middle"]);
+        registry.delete_worker(&ids[0]).await;
+        registry
+            .spawn_worker("worker".into(), "new-tail".into(), "tail".into())
+            .await
+            .unwrap();
+        assert_eq!(names().await, ["a-first", "middle", "new-tail"]);
     }
 }

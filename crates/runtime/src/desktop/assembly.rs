@@ -5542,6 +5542,8 @@ pub async fn build_with_credential_stack(
         cfg.native_settings_agent_context,
     );
     let mod_prompt_output = output.clone();
+    let command_visibility_settings_loader =
+        super::native_skill_listing_settings_loader_for_desktop(cfg.clone(), session_cwd.clone());
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -5665,6 +5667,7 @@ pub async fn build_with_credential_stack(
                 super::code_review_suggestion_provider(cfg.clone(), session_cwd.clone()),
                 cfg.clone(),
                 session_cwd.clone(),
+                command_visibility_settings_loader.clone(),
             );
             let child_provider = provider.clone();
             tools.set_bash_precommit_skills_provider(move || {
@@ -6227,6 +6230,15 @@ pub async fn build_with_credential_stack(
             "Bash",
         );
     }
+    command_api::builtins::list_agents::register(
+        &mut reg,
+        Arc::new(super::list_agents::DesktopListAgentsProvider::new(
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+            subagent_spawner_arc.agent_name_registry(),
+            coordinator.clone(),
+            cfg.lingxi_home.clone(),
+        )),
+    );
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::VersionHandler::with_build_info(cfg.build_info),
     ));
@@ -7234,6 +7246,7 @@ pub async fn build_with_credential_stack(
         native_insights_policy_gate,
         native_team_onboarding_policy_gate,
         session_cwd: runtime_session_cwd,
+        command_visibility_settings_loader,
         mcp_registry: runtime_mcp_registry,
         ide_handle,
         workflow_events: Some(workflow_event_rx),

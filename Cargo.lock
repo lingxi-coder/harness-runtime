@@ -1150,6 +1150,7 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
+ "unicode-normalization",
  "workflow",
 ]
 
@@ -1308,6 +1309,7 @@ dependencies = [
  "async-trait",
  "branding",
  "core",
+ "indexmap",
  "memory",
  "permission",
  "serde",

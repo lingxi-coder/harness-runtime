@@ -54,6 +54,7 @@ mod fusion_implement_e2e_test;
 mod fusion_pool_admission_test;
 pub mod fusion_recorder;
 pub mod ide;
+mod list_agents;
 mod managed_plist;
 mod oauth_refresh_lock;
 mod pane_teammate;
@@ -2646,6 +2647,7 @@ pub struct DesktopRuntime {
     /// Local policy verdict captured at assembly for `/team-onboarding`.
     pub native_team_onboarding_policy_gate: Option<bool>,
     pub session_cwd: Arc<SessionCwd>,
+    command_visibility_settings_loader: NativeSkillListingSettingsLoader,
     /// (P1-08 runtime `/add-dir`) The live MCP registry. The CLI `/add-dir`
     /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so
     /// every connected server's `roots/list` reflects the new working directory.
@@ -2682,6 +2684,16 @@ pub struct DesktopRuntime {
 }
 
 impl DesktopRuntime {
+    /// Resolve one current Native command-visibility settings snapshot for an
+    /// init projection. The captured config remains fixed to this runtime while
+    /// settings files, process environment, and session cwd are read live.
+    pub(crate) fn command_visibility_snapshot(
+        &self,
+    ) -> Result<CommandVisibilitySnapshot, lingxi_core::settings::SettingsError> {
+        (self.command_visibility_settings_loader)()
+            .map(|settings| CommandVisibilitySnapshot { settings })
+    }
+
     /// Actual assembled SDK services and credential sources for native audio.
     pub fn audio_provider_services(
         &self,
@@ -5612,14 +5624,8 @@ fn registry_skill_listing_provider_for_desktop(
     >,
     cfg: DesktopConfig,
     session_cwd: Arc<SessionCwd>,
+    settings_loader: NativeSkillListingSettingsLoader,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
-    let settings_cfg = cfg.clone();
-    let settings_cwd = session_cwd.clone();
-    let settings_loader: Arc<
-        dyn Fn() -> Result<NativeSkillListingSettings, lingxi_core::settings::SettingsError>
-            + Send
-            + Sync,
-    > = Arc::new(move || load_native_skill_listing_settings(&settings_cfg, &settings_cwd.cwd()));
     let cwd_source = session_cwd.clone();
     let cwd_provider: Arc<dyn Fn() -> PathBuf + Send + Sync> =
         { Arc::new(move || cwd_source.cwd()) };
@@ -5631,6 +5637,19 @@ fn registry_skill_listing_provider_for_desktop(
         cwd_provider,
         Some(cfg.lingxi_home.clone()),
     )
+}
+
+type NativeSkillListingSettingsLoader = Arc<
+    dyn Fn() -> Result<NativeSkillListingSettings, lingxi_core::settings::SettingsError>
+        + Send
+        + Sync,
+>;
+
+fn native_skill_listing_settings_loader_for_desktop(
+    cfg: DesktopConfig,
+    session_cwd: Arc<SessionCwd>,
+) -> NativeSkillListingSettingsLoader {
+    Arc::new(move || load_native_skill_listing_settings(&cfg, &session_cwd.cwd()))
 }
 
 #[derive(Clone, Default)]
@@ -5651,6 +5670,116 @@ struct NativeSkillListingSettings {
     policy_remembered_core_skills:
         Option<Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
     budget: orchestrator::prompt::skill_listing::SkillListingBudgetSettings,
+}
+
+/// One current settings snapshot used by non-interactive command projections.
+/// The loader remains on `DesktopRuntime`, so each init frame sees current
+/// settings and the current session cwd without duplicating source resolution.
+pub(crate) struct CommandVisibilitySnapshot {
+    settings: NativeSkillListingSettings,
+}
+
+impl CommandVisibilitySnapshot {
+    /// Native 2.1.295 `lC(e)` (main chunk local offset 395601, absolute byte
+    /// 194843455): local rows consult only the merged exact-key
+    /// `auto-mode-setup` override; other local/non-prompt rows stay visible.
+    /// Prompt rows use the shared listing-mode resolver, while plugin prompts
+    /// stay visible regardless of skill overrides. `userInvocable` remains a
+    /// separate predicate for the init projection.
+    pub(crate) fn command_is_off(&self, command: &command_api::model::SlashCommand) -> bool {
+        use command_api::NativeCommandType;
+        use lingxi_core::settings::SkillOverride;
+
+        match command.native_type {
+            Some(NativeCommandType::Local | NativeCommandType::LocalJsx) => {
+                let Some(name_units) = command.name.string_units("") else {
+                    return false;
+                };
+                if !name_units
+                    .iter()
+                    .copied()
+                    .eq("auto-mode-setup".encode_utf16())
+                {
+                    return false;
+                }
+                self.settings
+                    .base
+                    .as_ref()
+                    .and_then(|overrides| overrides.get_units(&name_units))
+                    == Some(SkillOverride::Off)
+            }
+            Some(NativeCommandType::Prompt)
+                if command.source == command_api::CommandSource::Plugin =>
+            {
+                false
+            }
+            Some(NativeCommandType::Prompt) => {
+                let entry = native_skill_listing_entry_for_command(command, 0.0);
+                self.settings.listing_mode_for_command(command, &entry) == SkillOverride::Off
+            }
+            None => false,
+        }
+    }
+}
+
+fn native_skill_listing_entry_for_command(
+    command: &command_api::model::SlashCommand,
+    priority: f64,
+) -> orchestrator::prompt::skill_listing::SkillListingEntry {
+    orchestrator::prompt::skill_listing::SkillListingEntry {
+        name: command.name.clone(),
+        display_name: command.name.clone(),
+        user_facing_name: command.user_facing_name.clone(),
+        unqualified_name: command.unqualified_name.clone(),
+        is_synced_skill: command.loaded_from.as_deref() == Some("syncedSkills"),
+        bare_name_reserved: command.bare_name_reserved,
+        aliases: command.aliases.clone(),
+        source: command.native_source.clone(),
+        plugin_name: command.plugin_name.clone(),
+        description: command.description.clone(),
+        when_to_use: command.when_to_use.clone().map(Into::into),
+        is_bundled_prompt: command.is_prompt()
+            && command.source == command_api::CommandSource::Bundled,
+        is_name_only: false,
+        priority,
+    }
+}
+
+impl NativeSkillListingSettings {
+    fn listing_mode_for_command(
+        &self,
+        command: &command_api::model::SlashCommand,
+        entry: &orchestrator::prompt::skill_listing::SkillListingEntry,
+    ) -> lingxi_core::settings::SkillOverride {
+        let override_value = orchestrator::prompt::skill_listing::native_skill_override(
+            entry,
+            self.base.as_ref(),
+            self.policy.as_ref(),
+            self.flag.as_ref(),
+        );
+        let no_verdict_remembered_core_skills: [lingxi_core::types::utf16_json::Utf16JsonProjection;
+            0] = [];
+        let remembered_core_skills = self
+            .policy_remembered_core_skills
+            .as_ref()
+            .map(|remembered| remembered.as_deref())
+            .unwrap_or(Some(&no_verdict_remembered_core_skills[..]));
+        let builtin_gate_active = command.is_prompt()
+            && command.source == command_api::CommandSource::Builtin
+            && orchestrator::prompt::skill_listing::native_builtin_skill_gate_active(
+                &entry.name,
+                self.disable_bundled_skills
+                    || std::env::var_os("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS")
+                        .is_some_and(|value| !value.is_empty()),
+                false,
+                remembered_core_skills,
+            );
+        orchestrator::prompt::skill_listing::native_skill_listing_mode(
+            override_value,
+            command.source == command_api::CommandSource::Plugin,
+            builtin_gate_active,
+        )
+    }
 }
 
 fn load_native_skill_listing_settings(
@@ -5819,64 +5948,17 @@ fn registry_skill_listing_provider_with_sources(
                         || c.when_to_use.is_some()
                 })
                 .filter_map(|c| {
-                    let mut entry = orchestrator::prompt::skill_listing::SkillListingEntry {
-                        name: c.name.clone(),
-                        display_name: c.name.clone(),
-                        user_facing_name: c.user_facing_name.clone(),
-                        unqualified_name: c.unqualified_name.clone(),
-                        is_synced_skill: c.loaded_from.as_deref() == Some("syncedSkills"),
-                        bare_name_reserved: c.bare_name_reserved,
-                        aliases: c.aliases.clone(),
-                        source: c.native_source.clone(),
-                        plugin_name: c.plugin_name.clone(),
-                        description: c.description.clone(),
-                        when_to_use: c.when_to_use.clone().map(Into::into),
-                        is_bundled_prompt: c.is_prompt() && c.source == CommandSource::Bundled,
-                        is_name_only: false,
-                        priority: usage
+                    let mut entry = native_skill_listing_entry_for_command(
+                        c,
+                        usage
                             .as_ref()
                             .map_or(0.0, |snapshot| snapshot.priority_for_command(&c.name)),
-                    };
+                    );
                     entry.display_name = orchestrator::prompt::skill_listing::native_display_name(
                         &entry,
                         &full_catalog,
                     );
-                    let override_value = orchestrator::prompt::skill_listing::native_skill_override(
-                        &entry,
-                        settings.base.as_ref(),
-                        settings.policy.as_ref(),
-                        settings.flag.as_ref(),
-                    );
-                    // Native `rQ` has no LingXi PolicyVerdictState source in
-                    // this composition, so absent host state maps to the
-                    // source's empty remembered-core array. Tests can model a
-                    // real verdict with a nullish list via `Some(None)`, which
-                    // selects Native's fixed remembered-core fallback.
-                    let no_verdict_remembered_core_skills: [
-                        lingxi_core::types::utf16_json::Utf16JsonProjection;
-                        0
-                    ] = [];
-                    let remembered_core_skills = settings
-                        .policy_remembered_core_skills
-                        .as_ref()
-                        .map(|remembered| remembered.as_deref())
-                        .unwrap_or(Some(&no_verdict_remembered_core_skills[..]));
-                    let builtin_gate_active = c.is_prompt()
-                        && c.source == CommandSource::Builtin
-                        && orchestrator::prompt::skill_listing::native_builtin_skill_gate_active(
-                            &entry.name,
-                            settings.disable_bundled_skills
-                                || std::env::var_os("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS")
-                                    .is_some_and(|value| !value.is_empty()),
-                            false,
-                            remembered_core_skills,
-                        );
-                    let listing_mode =
-                        orchestrator::prompt::skill_listing::native_skill_listing_mode(
-                            override_value,
-                            c.source == CommandSource::Plugin,
-                            builtin_gate_active,
-                        );
+                    let listing_mode = settings.listing_mode_for_command(c, &entry);
                     if matches!(
                         listing_mode,
                         SkillOverride::Off | SkillOverride::UserInvocableOnly

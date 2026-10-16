@@ -238,6 +238,115 @@ async fn desktop_skill_listing_uses_native_catalog_overrides_and_usage_snapshot(
         }
     );
 }
+
+#[test]
+fn command_visibility_snapshot_respects_native_modes_precedence_and_utf16_identity() {
+    use lingxi_core::settings::SettingsJson;
+
+    let overrides = |json: &str| {
+        let source = format!(r#"{{"skillOverrides":{json}}}"#);
+        serde_json::from_str::<SettingsJson>(&source)
+            .expect("valid Native skillOverrides layer")
+            .skill_overrides
+            .expect("skillOverrides present")
+    };
+    let snapshot = |base: Option<&str>, policy: Option<&str>, flag: Option<&str>| {
+        super::CommandVisibilitySnapshot {
+            settings: super::NativeSkillListingSettings {
+                base: base.map(|json| overrides(json)),
+                policy: policy.map(|json| overrides(json)),
+                flag: flag.map(|json| overrides(json)),
+                ..super::NativeSkillListingSettings::default()
+            },
+        }
+    };
+
+    let mut raw_name = command("placeholder", "skills");
+    raw_name.native_type = Some(command_api::NativeCommandType::Prompt);
+    raw_name.name =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""odd-\ud800-name""#)
+            .expect("valid JSON string with an isolated UTF-16 surrogate");
+    let raw_off = snapshot(Some(r#"{"odd-\ud800-name":"off"}"#), None, None);
+    assert!(raw_off.command_is_off(&raw_name));
+
+    let mut replacement_char_name = command("odd-�-name", "skills");
+    replacement_char_name.native_type = Some(command_api::NativeCommandType::Prompt);
+    assert!(
+        !raw_off.command_is_off(&replacement_char_name),
+        "a UTF-8 replacement character must not match the source's isolated surrogate"
+    );
+
+    for mode in ["name-only", "user-invocable-only"] {
+        let retained = snapshot(
+            Some(&format!(r#"{{"odd-\ud800-name":"{mode}"}}"#)),
+            None,
+            None,
+        );
+        assert!(
+            !retained.command_is_off(&raw_name),
+            "{mode} is not Native's init command-off mode"
+        );
+    }
+
+    let mut canonical = command("canonical", "skills");
+    canonical.native_type = Some(command_api::NativeCommandType::Prompt);
+    canonical.aliases = vec!["shared-alias".into()];
+    let policy_off = snapshot(
+        Some(r#"{"canonical":"on"}"#),
+        Some(r#"{"shared-alias":"off"}"#),
+        Some(r#"{"shared-alias":"name-only"}"#),
+    );
+    assert!(
+        policy_off.command_is_off(&canonical),
+        "lower-ranked flag alias state must not weaken the policy Off result"
+    );
+
+    let flag_off = snapshot(
+        Some(r#"{"canonical":"on"}"#),
+        Some(r#"{"shared-alias":"name-only"}"#),
+        Some(r#"{"shared-alias":"off"}"#),
+    );
+    assert!(
+        flag_off.command_is_off(&canonical),
+        "the existing Native alias-ranking helper must retain a higher-ranked flag Off"
+    );
+
+    let mut model = command("model", "builtin");
+    model.native_type = Some(command_api::NativeCommandType::Local);
+    model.kind = SlashCommandKind::Builtin {
+        handler_id: "model".into(),
+    };
+    let local_model_off = snapshot(Some(r#"{"model":"off"}"#), None, None);
+    assert!(
+        !local_model_off.command_is_off(&model),
+        "skillOverrides.model must not hide a Native local command"
+    );
+
+    let mut auto_mode_setup = command("auto-mode-setup", "builtin");
+    auto_mode_setup.native_type = Some(command_api::NativeCommandType::Local);
+    auto_mode_setup.kind = SlashCommandKind::Builtin {
+        handler_id: "auto-mode-setup".into(),
+    };
+    let auto_mode_off = snapshot(Some(r#"{"auto-mode-setup":"off"}"#), None, None);
+    assert!(auto_mode_off.command_is_off(&auto_mode_setup));
+
+    auto_mode_setup.aliases = vec!["setup-wizard".into()];
+    let alias_only_off = snapshot(Some(r#"{"setup-wizard":"off"}"#), None, None);
+    assert!(
+        !alias_only_off.command_is_off(&auto_mode_setup),
+        "the local auto-mode special case checks only the exact merged-base key"
+    );
+
+    let mut plugin_prompt = command("plugin-off", "plugin");
+    plugin_prompt.native_type = Some(command_api::NativeCommandType::Prompt);
+    plugin_prompt.source = CommandSource::Plugin;
+    let plugin_off = snapshot(Some(r#"{"plugin-off":"off"}"#), None, None);
+    assert!(
+        !plugin_off.command_is_off(&plugin_prompt),
+        "Native plugin prompt commands bypass skillOverrides"
+    );
+}
+
 struct LiveSkillGate(AtomicBool);
 
 #[async_trait::async_trait]

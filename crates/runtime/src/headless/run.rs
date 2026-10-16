@@ -36,12 +36,11 @@ use lifecycle::{
     finish_print_branch, run_print_owned, run_print_owned_with_cleanup,
     stop_background_agents_at_budget, stop_print_tasks, wind_down_print_tasks,
 };
-use lingxi_core::host::{
-    McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
-};
+use lingxi_core::host::{McpStatus, OrchestratorHandle, SlashDispatchResult};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 use suggestions::{SdkPromptSuggestions, StreamFileSuggestionIndex};
 mod control;
@@ -121,6 +120,61 @@ async fn init_plugins(runtime: &Runtime) -> Vec<crate::headless::stream_json::St
             }
         })
         .collect()
+}
+
+async fn init_command_projections(
+    runtime: &Runtime,
+) -> Result<
+    (
+        Vec<Utf16JsonProjection>,
+        Vec<Utf16JsonProjection>,
+        Vec<Utf16JsonProjection>,
+    ),
+    String,
+> {
+    let visibility = runtime
+        .command_visibility_snapshot()
+        .map_err(|error| error.to_string())?;
+    let registry = runtime.dispatcher.registry();
+    let registry = registry.read().await;
+
+    // Native init is `s7e({commands: obt(commands), skills})`: the slash list
+    // comes from the non-interactive command pool, then applies the
+    // user-invocable projection. Terminal metadata is taken from the same
+    // descriptors and keeps their source order.
+    let mut slash_commands = Vec::new();
+    let mut terminal_slash_commands = Vec::new();
+    for command in registry.headless_init_commands() {
+        if command.user_invocable == Some(false) || visibility.command_is_off(command) {
+            continue;
+        }
+        slash_commands.push(command.name.clone());
+        if command.terminal_oriented {
+            terminal_slash_commands.push(command.name.clone());
+        }
+    }
+
+    // Native's skill list is built from the pre-bge prompt pool and then
+    // projected by `userInvocable`; it is not the `loadedFrom === "skills"`
+    // subset of slash commands. Keep exact source order and deduplicate by
+    // UTF-16 identity, matching the source catalog merge without decoding
+    // lone surrogates through UTF-8.
+    let mut seen_skill_names = HashSet::new();
+    let skills = registry
+        .headless_init_skills()
+        .into_iter()
+        .filter(|command| !visibility.command_is_off(command))
+        .filter(|command| {
+            command
+                .name
+                .string_units("")
+                .is_some_and(|units| seen_skill_names.insert(units))
+        })
+        .filter(|command| command.user_invocable != Some(false))
+        .map(|command| command.name.clone())
+        .collect();
+
+    Ok((slash_commands, terminal_slash_commands, skills))
 }
 
 fn stream_json_error_subtype(err: &orchestrator::OrchestratorError) -> &'static str {
@@ -706,30 +760,16 @@ async fn run_stream_json_print_inner(
         })
         .collect();
 
-    // Slash commands + skills: read from the shared command registry.
-    // slash_commands = all registered commands (sorted by name).
-    // skills = commands loaded_from=="skills" (the model-invocable subset
-    //          contributed by plugin skill files).
-    let (slash_commands, skills) = {
-        let reg = runtime.dispatcher.registry();
-        let reg_guard = reg.read().await;
-        let mut all_cmds: Vec<String> = reg_guard
-            .list_all()
-            .into_iter()
-            .map(|c| c.name.string_at("").unwrap_or_default().to_owned())
-            .collect();
-        all_cmds.sort();
-        let mut skill_names: Vec<String> = reg_guard
-            .list_all()
-            .into_iter()
-            .filter(|c| c.loaded_from.as_deref() == Some("skills"))
-            .map(|c| c.name.string_at("").unwrap_or_default().to_owned())
-            .collect();
-        // sort for determinism.
-        skill_names.sort();
-        drop(reg_guard);
-        (all_cmds, skill_names)
-    };
+    let (slash_commands, terminal_slash_commands, skills) =
+        match init_command_projections(runtime).await {
+            Ok(projections) => projections,
+            Err(error) => {
+                let message = format!("Error: Failed to load command visibility settings: {error}");
+                runtime.record_execution_error(&message);
+                let _ = runtime.output.write_line(&message).await;
+                return exit_codes::RUNTIME_ERROR;
+            }
+        };
 
     // Agents: names from the agent catalog via the orchestrator handle.
     let agents: Vec<String> = runtime
@@ -783,6 +823,7 @@ async fn run_stream_json_print_inner(
         fast_mode_disabled_reason,
         init_host_metadata(runtime),
     );
+    init_params.terminal_slash_commands = terminal_slash_commands;
     init_params.model_source = runtime
         .orchestrator
         .get_status_snapshot()
@@ -1012,25 +1053,16 @@ async fn run_stream_json_input_loop_inner(
         })
         .collect();
 
-    let (slash_commands, skills) = {
-        let reg = runtime.dispatcher.registry();
-        let reg_guard = reg.read().await;
-        let mut all_cmds: Vec<String> = reg_guard
-            .list_all()
-            .into_iter()
-            .map(|c| c.name.string_at("").unwrap_or_default().to_owned())
-            .collect();
-        all_cmds.sort();
-        let mut skill_names: Vec<String> = reg_guard
-            .list_all()
-            .into_iter()
-            .filter(|c| c.loaded_from.as_deref() == Some("skills"))
-            .map(|c| c.name.string_at("").unwrap_or_default().to_owned())
-            .collect();
-        skill_names.sort();
-        drop(reg_guard);
-        (all_cmds, skill_names)
-    };
+    let (slash_commands, terminal_slash_commands, skills) =
+        match init_command_projections(runtime).await {
+            Ok(projections) => projections,
+            Err(error) => {
+                let message = format!("Error: Failed to load command visibility settings: {error}");
+                runtime.record_execution_error(&message);
+                let _ = runtime.output.write_line(&message).await;
+                return exit_codes::RUNTIME_ERROR;
+            }
+        };
 
     let agents: Vec<String> = runtime
         .orchestrator
@@ -1080,6 +1112,7 @@ async fn run_stream_json_input_loop_inner(
         fast_mode_disabled_reason,
         init_host_metadata(runtime),
     );
+    init_params.terminal_slash_commands = terminal_slash_commands;
     init_params.model_source = runtime
         .orchestrator
         .get_status_snapshot()
@@ -2031,7 +2064,9 @@ fn run_slash_dispatch_future<'a>(
     let cancellation = runtime.turn_cancel();
     Box::pin(command_api::with_mod_command_context(
         context,
-        runtime.dispatcher.dispatch(input.clone(), cancellation),
+        runtime
+            .dispatcher
+            .dispatch_headless(input.clone(), cancellation),
     ))
 }
 
@@ -2415,6 +2450,10 @@ pub(super) async fn shutdown_tasks(runtime: &Runtime) {
 #[cfg(test)]
 #[path = "run/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "run/init_command_projection_test.rs"]
+mod init_command_projection_test;
 
 #[cfg(test)]
 #[path = "run/orphan_lifecycle_tests.rs"]

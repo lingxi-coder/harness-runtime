@@ -382,72 +382,6 @@ pub const USAGE_CREDITS_BNR_GATED: &[&str] = &["usage-credits"];
 /// this table makes the headless/bridge registry agree with it.
 pub const STATICALLY_DISABLED_COMMANDS: &[&str] = &["version"];
 
-/// **`terminalOriented:!0` commands** (SLASH-15) — the builtins claude-code
-/// 2.1.238 marks as belonging to the terminal host, so a thin/remote client
-/// knows to route them locally. NEW in 2.1.238: every 2.1.220 command object
-/// carries no `terminalOriented` key at all.
-///
-/// Verified per-object in the 2.1.238 oracle. `terminalOriented` occurs at
-/// **15** byte offsets there and at **0** in 2.1.220 (`grep -abo`; note
-/// `grep -c` on this binary counts LINES, not occurrences, so it under-reports
-/// — an earlier revision of this comment claimed "9 raw hits" on that basis):
-/// six are the command objects below, four are the two bundled-command
-/// normalizers (`terminalOriented:e.terminalOriented` @287816908 / @287821547,
-/// each written twice), three are the consumers quoted further down
-/// (@298685916, @307252016, @307252579), one is the bundled `doctor` SKILL
-/// (see the note at the end), and one is a snapshot copy (@102087824).
-///
-/// ```text
-/// @294987032 {type:"local-jsx",name:"color",…,terminalOriented:!0,…}
-/// @294987135 {type:"local",name:"color",terminalOriented:!0,supportsNonInteractive:!0,…}
-/// @296279356 {type:"local-jsx",name:"exit",aliases:["quit"],…,terminalOriented:!0,…}
-/// @296279442 {type:"local",name:"exit",terminalOriented:!0,supportsNonInteractive:!0,…}
-/// @296260416 {type:"local",name:"reload-plugins",…,terminalOriented:!0,thinClientDispatch:"control-request",…}
-/// @296309820 {type:"prompt",name:"statusline",…,terminalOriented:!0,disableNonInteractive:!0,…}
-/// ```
-///
-/// The flag is not purely internal: the stream-json `system`/`init` emitter
-/// (`Fin`, @298685916) derives a payload key from it —
-///
-/// ```text
-/// let n=e.commands.filter((i)=>i.userInvocable!==!1&&i.terminalOriented===!0).map((i)=>i.name);
-/// …slash_commands:…, ...n.length>0&&{terminal_slash_commands:n}, apiKeySource:…
-/// ```
-///
-/// — i.e. `terminal_slash_commands` is spread in directly AFTER `slash_commands`
-/// and only when the list is non-empty (`terminal_slash_commands` is absent
-/// from 2.1.220 entirely).
-///
-/// The bridge/SDK announcer is the mirror image — it SUBTRACTS the flagged
-/// entries from what it announces (@307252016 / @307252579):
-///
-/// ```text
-/// function _o(tt=l().mcp.commands){return Fi(tt).filter((wt)=>wt.terminalOriented!==!0)}
-/// …writeSdkMessages([LSs({…,commands:_o(Ho.mcp.commands),…,loadedSkills:Ct.filter((Ri)=>Ri.terminalOriented!==!0),…})])
-/// ```
-///
-/// NOTE 1 (CLOSED 2026-08-21): the emission half is wired. `apps/cli`'s
-/// `build_init_params` (`apps/cli/src/stream_json.rs`) derives
-/// `terminal_slash_commands` by running the advertised `slash_commands` list
-/// through [`is_terminal_oriented`], and `build_init_frame` spreads it into the
-/// `system`/`init` frame immediately after `slash_commands` and only when
-/// non-empty, matching `Fin` (@298685916). The mirror-image consumer — the
-/// bridge/SDK announcer's `_o()` SUBTRACTION (@307252579) — belongs to
-/// `apps/bridge-server`, whose announcer still does no filtering; that is the
-/// one remaining unconsumed use of this table.
-///
-/// NOTE 2: `/doctor` is a bundled prompt with `terminalOriented:!0` and alias
-/// `/checkup` in the 2.1.295 source. It is not a builtin row; the bundled
-/// command itself carries that source metadata.
-pub const TERMINAL_ORIENTED_COMMANDS: &[&str] = &["color", "exit", "reload-plugins", "statusline"];
-
-/// Returns `true` when `name` carries claude-code 2.1.238's
-/// `terminalOriented:!0` flag — see [`TERMINAL_ORIENTED_COMMANDS`].
-#[must_use]
-pub fn is_terminal_oriented(name: &str) -> bool {
-    TERMINAL_ORIENTED_COMMANDS.contains(&name)
-}
-
 /// `(command, aliases)` for the builtins that ship an `aliases:` array in
 /// claude-code (cp-03). The slash palette folds these into the fuzzy candidate
 /// set (so typing `/cost` finds `/usage`) and, when a row matched via a typed
@@ -973,27 +907,6 @@ mod tests {
         ] {
             assert_eq!(core_description(name), want, "/{name} description drift");
         }
-    }
-
-    #[test]
-    fn terminal_oriented_set_is_the_four_2_1_238_objects() {
-        // Byte-verified from the 2.1.238 command objects; 2.1.220 has the flag
-        // on NO object at all, so this whole table is 2.1.238 drift.
-        assert_eq!(
-            TERMINAL_ORIENTED_COMMANDS,
-            &["color", "exit", "reload-plugins", "statusline"]
-        );
-        let full: std::collections::HashSet<&str> = BUILTIN_COMMAND_NAMES.iter().copied().collect();
-        for name in TERMINAL_ORIENTED_COMMANDS {
-            assert!(full.contains(name), "'{name}' is not a real builtin");
-            assert!(is_terminal_oriented(name));
-            // The oracle's init filter is
-            // `userInvocable!==!1 && terminalOriented===!0`, so a hidden or
-            // disabled command could still qualify — but none of these four is
-            // filtered out of the palette, which is worth pinning.
-            assert!(!is_palette_hidden(name), "'{name}' unexpectedly hidden");
-        }
-        assert!(!is_terminal_oriented("help"));
     }
 
     #[test]

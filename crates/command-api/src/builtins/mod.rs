@@ -51,6 +51,7 @@ pub mod init_verifiers;
 pub mod insights;
 pub mod interactive_only;
 pub mod keybindings;
+pub mod list_agents;
 pub mod login;
 pub mod logout;
 pub mod mcp;
