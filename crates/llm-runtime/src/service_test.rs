@@ -5539,6 +5539,38 @@ mod tests {
         std::env::remove_var("LINGXI_DISABLE_ADAPTIVE_THINKING");
     }
 
+    #[tokio::test]
+    async fn side_query_explicit_thinking_budget_survives_automatic_policy() {
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::GeminiGenerateContent,
+            ProviderId::Gemini,
+            "https://generativelanguage.googleapis.com",
+        );
+        let request = adapter
+            .build_json_schema_request_with_thinking(
+                "model",
+                Some("p"),
+                None,
+                None,
+                vec![text_user_msg("hello")],
+                serde_json::json!({"type":"object","properties":{}}),
+                Some(8192),
+                Some(serde_json::json!(4096)),
+                Some(crate::model::thinking::ThinkingConfig::Adaptive),
+                None,
+                Some("permission_classifier"),
+            )
+            .unwrap();
+        assert!(!request.execution.automatic_thinking_budget);
+        let prepared = adapter.client.prepare(&request).await.unwrap();
+        let body = request_body_value(&prepared.provider_request.body_json);
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            4096
+        );
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 8192);
+    }
+
     #[test]
     fn build_request_adaptive_models_preserve_automatic_output_budget() {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
