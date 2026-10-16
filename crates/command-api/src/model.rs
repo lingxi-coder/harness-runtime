@@ -257,6 +257,10 @@ pub struct SlashCommand {
     /// Stable order of the selected Native command factory within its source group.
     #[serde(skip)]
     pub native_catalog_order: Option<usize>,
+    /// Native prompt discriminator used by descriptor projection. The
+    /// dispatcher continues to use `SlashCommandKind`.
+    #[serde(skip)]
+    pub native_slash_kind: Option<NativeSlashKind>,
     /// Native synced-skill reservation fact used when resolving a bare name.
     #[serde(skip)]
     pub bare_name_reserved: bool,
@@ -322,6 +326,7 @@ impl Default for SlashCommand {
             plugin_name: None,
             native_source: None,
             native_catalog_order: None,
+            native_slash_kind: None,
             bare_name_reserved: false,
             argument_names: Vec::new(),
             skill_root: None,
@@ -348,6 +353,14 @@ pub enum NativeCommandType {
     Local,
     /// An interactive renderer command, excluded by Native Headless filtering.
     LocalJsx,
+}
+
+/// Native prompt kind consumed by Native descriptor projection, independently
+/// of the Harness dispatch kind and command type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSlashKind {
+    /// The prompt launches a dynamic workflow through the Workflow tool.
+    Workflow,
 }
 
 impl SlashCommand {

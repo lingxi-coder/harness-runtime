@@ -3,7 +3,9 @@
 //! assembled non-interactive command pool, and this module applies only the
 //! user-invocable and skill-Off projection before producing wire DTOs.
 
-use command_api::{CommandRegistry, CommandSource, NativeCommandType, SlashCommand};
+use command_api::{
+    CommandRegistry, CommandSource, NativeCommandType, NativeSlashKind, SlashCommand,
+};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashSet;
 
@@ -22,11 +24,15 @@ pub(super) fn collect(
     registry: &CommandRegistry,
     visibility: &CommandVisibilitySnapshot,
 ) -> Vec<Utf16JsonProjection> {
-    let reserved_native_spellings = native_reserved_spellings(registry);
+    let entrypoint = std::env::var("CLAUDE_CODE_ENTRYPOINT").ok();
+    let reserved_native_spellings = native_reserved_spellings(registry, entrypoint.as_deref());
     let mut seen_names = HashSet::new();
     let mut projected = Vec::new();
 
     for command in registry.headless_init_commands() {
+        if !native_builtin_plugin_descriptor_visible(command, entrypoint.as_deref()) {
+            continue;
+        }
         let Some(raw_name_units) = command.name.string_units("") else {
             continue;
         };
@@ -164,6 +170,10 @@ fn native_description(command: &SlashCommand) -> Utf16JsonProjection {
         return command.description.clone();
     }
 
+    if command.native_slash_kind == Some(NativeSlashKind::Workflow) {
+        return append_text(&description_units, " (dynamic workflow)");
+    }
+
     if command.loaded_from.as_deref() == Some("syncedSkills") {
         return append_text(&description_units, " (claude.ai sync)");
     }
@@ -195,18 +205,29 @@ fn native_description(command: &SlashCommand) -> Utf16JsonProjection {
     }
 }
 
-fn native_reserved_spellings(registry: &CommandRegistry) -> HashSet<String> {
-    let mut reserved = HashSet::new();
-    // Native KHt includes source-bound MZo descriptors and bundled skills.
-    // The current registry exposes those as catalog-ordered rows and bundled
-    // rows; its plugin metadata does not distinguish Native Fwr builtin-plugin
-    // skills from installed plugins, so do not reserve arbitrary plugin names.
-    // The emitted pool above remains the current headless_init_commands
-    // projection.
+fn native_reserved_spellings(
+    registry: &CommandRegistry,
+    entrypoint: Option<&str>,
+) -> HashSet<String> {
+    let mut reserved = native_builtin_plugin_spellings(entrypoint);
     for command in registry.list_all() {
-        if command.native_catalog_order.is_none() && command.source != CommandSource::Bundled {
+        let is_mzo_or_q4_descriptor = command.native_catalog_order.is_some();
+        let is_bundled_skill = command.source == CommandSource::Bundled
+            && command
+                .native_source
+                .as_ref()
+                .and_then(|source| source.string_at(""))
+                == Some("built-in")
+            && command.native_slash_kind != Some(NativeSlashKind::Workflow);
+        if !(is_mzo_or_q4_descriptor || is_bundled_skill)
+            || !native_builtin_plugin_descriptor_visible(command, entrypoint)
+        {
             continue;
         }
+
+        // Native KCe consumes descriptor name, display name, and aliases.
+        // CommandRegistry's alias index can also contain unrelated host
+        // registrations, so it is not part of the Native reserved set.
         if let Some(name) = command.name.string_units("") {
             insert_normalized_name(&mut reserved, &name);
         }
@@ -217,13 +238,54 @@ fn native_reserved_spellings(registry: &CommandRegistry) -> HashSet<String> {
         {
             insert_normalized_name(&mut reserved, &name);
         }
-        for alias in registry.aliases_for(&command.name) {
+        for alias in &command.aliases {
             if let Some(alias) = alias.string_units("") {
                 insert_normalized_name(&mut reserved, &alias);
             }
         }
     }
     reserved
+}
+
+fn native_builtin_plugin_spellings(entrypoint: Option<&str>) -> HashSet<String> {
+    let mut reserved = HashSet::new();
+    let local_agent = entrypoint == Some("local-agent");
+    let remote = entrypoint.is_some_and(|value| value.starts_with("remote"));
+
+    // Native's builtin plugin initializer always loads plugin-authoring except
+    // for local-agent. Claude Test is loaded only when both gates allow it.
+    if !local_agent {
+        reserved.insert("plugin-authoring".to_owned());
+        if !remote {
+            reserved.extend([
+                "claude-test".to_owned(),
+                "claude-test-execute".to_owned(),
+                "claude-test-draft".to_owned(),
+            ]);
+        }
+    }
+    reserved
+}
+
+fn native_builtin_plugin_descriptor_visible(
+    command: &SlashCommand,
+    entrypoint: Option<&str>,
+) -> bool {
+    let is_plugin_authoring_name = command
+        .name
+        .string_units("")
+        .is_some_and(|units| units.iter().copied().eq("plugin-authoring".encode_utf16()));
+    let is_native_builtin_plugin_facade = command.native_catalog_order.is_none()
+        && command.source == CommandSource::Bundled
+        && command.loaded_from.as_deref() == Some("bundled")
+        && command
+            .native_source
+            .as_ref()
+            .and_then(|source| source.string_at(""))
+            == Some("built-in")
+        && is_plugin_authoring_name;
+
+    !(entrypoint == Some("local-agent") && is_native_builtin_plugin_facade)
 }
 
 fn insert_normalized_name(reserved: &mut HashSet<String>, units: &[u16]) {
@@ -240,4 +302,116 @@ fn append_text(source_units: &[u16], suffix: &str) -> Utf16JsonProjection {
 
 fn projection_from_units(units: Vec<u16>) -> Option<Utf16JsonProjection> {
     Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).ok()
+}
+
+#[cfg(test)]
+mod native_workflow_projection_tests {
+    use super::*;
+    use command_api::{CommandFrontmatter, SlashCommandKind};
+
+    #[test]
+    fn workflow_kind_changes_description_but_is_not_an_xan_wire_field() {
+        let command = SlashCommand {
+            name: "saved-review".into(),
+            description: "Run the saved review workflow".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
+            native_slash_kind: Some(NativeSlashKind::Workflow),
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter::default(),
+                prompt_fn: None,
+            },
+            ..SlashCommand::default()
+        };
+        let name = command.name.string_units("").expect("workflow name");
+        let projected = project_command(&command, &name, &HashSet::new())
+            .expect("workflow descriptor projects");
+        assert_eq!(
+            projected.string_units("/description"),
+            Some(
+                "Run the saved review workflow (dynamic workflow)"
+                    .encode_utf16()
+                    .collect()
+            )
+        );
+        assert_eq!(projected.string_units("/kind"), None);
+    }
+
+    #[test]
+    fn builtin_plugin_reservations_follow_both_entrypoint_gates() {
+        let ordinary = native_builtin_plugin_spellings(None);
+        assert!(ordinary.contains("plugin-authoring"));
+        assert!(ordinary.contains("claude-test"));
+        assert!(ordinary.contains("claude-test-execute"));
+        assert!(ordinary.contains("claude-test-draft"));
+
+        let remote = native_builtin_plugin_spellings(Some("remote_desktop"));
+        assert!(remote.contains("plugin-authoring"));
+        assert!(!remote.contains("claude-test"));
+
+        let local_agent = native_builtin_plugin_spellings(Some("local-agent"));
+        assert!(local_agent.is_empty());
+
+        let native_facade = SlashCommand {
+            name: "plugin-authoring".into(),
+            source: CommandSource::Bundled,
+            loaded_from: Some("bundled".into()),
+            native_source: Some("built-in".into()),
+            ..SlashCommand::default()
+        };
+        assert!(!native_builtin_plugin_descriptor_visible(
+            &native_facade,
+            Some("local-agent")
+        ));
+
+        let user_owned_same_name = SlashCommand {
+            name: "plugin-authoring".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::User),
+            loaded_from: Some("skills".into()),
+            ..SlashCommand::default()
+        };
+        assert!(native_builtin_plugin_descriptor_visible(
+            &user_owned_same_name,
+            Some("local-agent")
+        ));
+    }
+
+    #[test]
+    fn reserved_set_uses_native_sources_and_descriptor_aliases_only() {
+        let mut registry = CommandRegistry::new();
+        let mut native = SlashCommand {
+            name: "native-builtin".into(),
+            description: "Native source row".into(),
+            source: CommandSource::Builtin,
+            native_catalog_order: Some(7),
+            aliases: vec!["native-alias".into()],
+            ..SlashCommand::default()
+        };
+        native.user_facing_name = Some("Native Display".into());
+        registry.register_command(native);
+        registry.register_alias("host-only-alias".into(), "native-builtin".into());
+        registry.register_command(SlashCommand {
+            name: "lingxi-only-bundled".into(),
+            description: "Not in Native KCe input".into(),
+            source: CommandSource::Bundled,
+            ..SlashCommand::default()
+        });
+        registry.register_command(SlashCommand {
+            name: "deep-research".into(),
+            description: "Workflow producer descriptor".into(),
+            source: CommandSource::Bundled,
+            loaded_from: Some("bundled".into()),
+            native_source: Some("built-in".into()),
+            native_slash_kind: Some(NativeSlashKind::Workflow),
+            ..SlashCommand::default()
+        });
+
+        let reserved = native_reserved_spellings(&registry, None);
+        assert!(reserved.contains("native-builtin"));
+        assert!(reserved.contains("native display"));
+        assert!(reserved.contains("native-alias"));
+        assert!(!reserved.contains("host-only-alias"));
+        assert!(!reserved.contains("lingxi-only-bundled"));
+        assert!(!reserved.contains("deep-research"));
+    }
 }

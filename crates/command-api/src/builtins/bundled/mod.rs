@@ -224,6 +224,7 @@ fn register_deep_research_skill(reg: &mut CommandRegistry) {
         source: CommandSource::Bundled,
         native_source: Some("built-in".into()),
         native_type: Some(crate::model::NativeCommandType::Prompt),
+        native_slash_kind: Some(crate::model::NativeSlashKind::Workflow),
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter {
                 allowed_tools: Some(vec!["Workflow".into()]),
@@ -656,6 +657,12 @@ mod tests {
     fn the_bundled_skill_name_set_is_locked() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, true);
+        let deep_research = reg.resolve(&"deep-research".into()).expect("registered");
+        assert_eq!(
+            deep_research.native_slash_kind,
+            Some(crate::model::NativeSlashKind::Workflow),
+            "the fixed builtin launcher retains Native workflow metadata"
+        );
 
         // Enumerate what actually registered, so this catches an ADDITION as
         // well as a loss. Filtering a hardcoded list against the registry would
