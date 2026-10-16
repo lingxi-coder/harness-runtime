@@ -1083,6 +1083,17 @@ async fn dispatch(
                 .await
             {
                 SlashDispatchResult::RunAsTurn { prompt } => {
+                    if cancel.is_cancelled() {
+                        side.replay
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display: "Slash command was cancelled before entering the model."
+                                    .into(),
+                                is_error: true,
+                            })
+                            .await;
+                        return Ok(());
+                    }
                     {
                         let _order = side.replay.order.lock().await;
                         side.replay
@@ -1123,6 +1134,17 @@ async fn dispatch(
                     body,
                     hook_messages,
                 } => {
+                    if cancel.is_cancelled() {
+                        side.replay
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display: "Slash command was cancelled before entering the model."
+                                    .into(),
+                                is_error: true,
+                            })
+                            .await;
+                        return Ok(());
+                    }
                     {
                         let _order = side.replay.order.lock().await;
                         side.replay
@@ -1836,6 +1858,134 @@ mod tests {
                 .and_then(|running| running.id),
             Some(1)
         );
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slash_cancel_after_side_chat_ack_before_model_emits_correlated_terminal_result() {
+        use command_api::model::{
+            CommandFrontmatter, CommandSource, NativeCommandType, SlashCommand, SlashCommandKind,
+        };
+
+        let sink = Arc::new(Sink::default());
+        let manager = SideChatManager::new(parent(), Arc::new(Factory), sink.clone());
+        let id = manager
+            .create("create".into(), None, None, None)
+            .await
+            .unwrap();
+        let side = manager.side(&id).await.unwrap();
+        side.session
+            .dispatcher
+            .registry()
+            .write()
+            .await
+            .register_command(SlashCommand {
+                name: "review".into(),
+                description: "test prompt command".into(),
+                source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+                native_type: Some(NativeCommandType::Prompt),
+                kind: SlashCommandKind::Markdown {
+                    file_path: std::path::PathBuf::from("/tmp/review.md"),
+                    frontmatter: CommandFrontmatter::default(),
+                    prompt_template: "Review the attached image.".into(),
+                },
+                ..SlashCommand::default()
+            });
+
+        manager
+            .submit(
+                &id,
+                "slash-image".into(),
+                ClientCommand::RunSlashCommand {
+                    raw: "/review".into(),
+                    images: vec![client::protocol::commands::ImageRefDto {
+                        media_type: "image/png".into(),
+                        base64: "AQID".into(),
+                    }],
+                    turn_id: Some(501),
+                },
+            )
+            .await
+            .unwrap();
+
+        let cancel = side
+            .state
+            .lock()
+            .await
+            .running
+            .as_ref()
+            .expect("the admitted slash owns a running slot")
+            .cancel
+            .clone();
+        cancel.cancel();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if side.state.lock().await.running.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pre-model cancellation releases the Side Chat turn slot");
+
+        let events = sink.0.lock().await.clone();
+        let acknowledged = events
+            .iter()
+            .position(|event| {
+                matches!(event,
+                    ClientEvent::SideChatSubmitted { side_id, request_id }
+                        if side_id == &id && request_id == "slash-image"
+                )
+            })
+            .expect("the request is acknowledged before dispatch");
+        let nested = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                ClientEvent::SideChatEvent {
+                    side_id,
+                    event_json,
+                } if side_id == &id => serde_json::from_str::<ClientEvent>(event_json)
+                    .ok()
+                    .map(|inner| (index, inner)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let (terminal_index, terminal) = nested
+            .iter()
+            .find(|(_, event)| {
+                matches!(
+                    event,
+                    ClientEvent::SlashCommandResult {
+                        turn_id: Some(501),
+                        is_error: true,
+                        ..
+                    }
+                )
+            })
+            .expect("the canceled pre-model slash has a correlated terminal result");
+        assert!(
+            acknowledged < *terminal_index,
+            "the terminal result follows admission ack"
+        );
+        assert!(
+            !nested.iter().any(|(_, event)| matches!(
+                event,
+                ClientEvent::TurnStarted { .. }
+                    | ClientEvent::MessageComplete {
+                        message: Some(_),
+                        ..
+                    }
+            )),
+            "a cancelled request must not publish a model turn or its image row"
+        );
+        assert!(matches!(terminal,
+            ClientEvent::SlashCommandResult { display, .. }
+                if display.display() == "Slash command was cancelled before entering the model."
+        ));
+
         manager.shutdown().await.unwrap();
     }
 
