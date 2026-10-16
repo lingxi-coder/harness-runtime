@@ -27,6 +27,7 @@ task-store = { path = "../task-store" }
 tracing.workspace = true
 
 [dev-dependencies]
+core = { path = "../core", features = ["test-support"] }
 tool-api = { path = "../tool-api" }
 test-harness = { path = "../test-harness" }
 llm-runtime = { path = "../llm-runtime" }

@@ -2,9 +2,8 @@
 //!
 //! `/fusion` spawns a [`TaskType::LocalFusion`] row, runs
 //! [`lingxi_core::host::FusionExecutor`] on the engine runtime (never `tokio::spawn`
-//! — D17), spools a sanitized [`lingxi_core::host::FusionResult`], and publishes one
-//! `user_meta` fusion-result envelope through [`lingxi_core::host::FusionCompletionSink`].
-//! Sink failures must not rewrite the task's terminal status.
+//! — D17), and records a sanitized [`lingxi_core::host::FusionResult`] through the
+//! session-pinned terminal recorder. Recording failures do not rewrite computation status.
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -12,12 +11,11 @@ use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
 use lingxi_core::host::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionCompletionSink,
-    FusionError, FusionExecutor, FusionInheritance, FusionOrigin, FusionPreparedSummary,
-    FusionResult, FusionRunFacts, FusionRunId, FusionRunIdentity, FusionRunOutcome,
-    FusionRunRecorder, FusionRunRecorderFactory, FusionSlashPublicationTarget, FusionStatus,
-    FusionSubmission, FusionTerminalCapability, PreparedFusionRun, RuntimeSpawner,
-    SubagentInheritance, ToolInvoker,
+    BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionError, FusionExecutor,
+    FusionInheritance, FusionOrigin, FusionPreparedSummary, FusionResult, FusionRunFacts,
+    FusionRunId, FusionRunIdentity, FusionRunOutcome, FusionRunRecorderFactory,
+    FusionSlashPublicationTarget, FusionStatus, FusionSubmission, FusionTerminalCapability,
+    PreparedFusionRun, RuntimeSpawner, SubagentInheritance, ToolInvoker,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -108,8 +106,8 @@ async fn cancel_fusion_worker(rec: WorkerCancel) -> Result<(), TaskError> {
 }
 
 /// Terminal-outcome half of `spawn`'s worker future: write the spool body /
-/// error, push the egress+usage summary, flip the task to its terminal
-/// status, and (on success) publish the sanitized result envelope. Split out
+/// error, push the egress+usage summary, publish the recorder receipt, and flip
+/// the task to its terminal status. Split out
 /// of `spawn` purely to keep that function under the line-count lint — same
 /// ordering, same branches, same side effects.
 async fn finalize_fusion_outcome(
@@ -118,8 +116,6 @@ async fn finalize_fusion_outcome(
     worker_spool_path: &std::path::Path,
     worker_task_id: &str,
     status_sink: &Arc<dyn TaskStatusSink>,
-    sink: &Arc<dyn FusionCompletionSink>,
-    conversation_id: &str,
     // [Finding 14] The last `realized_output_tokens` seen on the progress
     // channel before the run ended in `Err` — `None` when nothing egressed
     // yet (a preflight refusal) or the orchestrator never reported it for
@@ -192,22 +188,12 @@ async fn finalize_fusion_outcome(
                     Some(usage_summary),
                 )
                 .await;
-            // Production prepared runs have already recorded the sealed
-            // terminal outcome before `activate()` returned. Only legacy
-            // callers without a capability use the old completion sink. Keep
-            // that adapter's historical ordering (task outcome first, then
-            // sink publication) so old hosts can observe a completed answer
-            // even when their best-effort UI sink fails. Typed production
-            // receipts are projected before the terminal row becomes visible;
-            // they never call the legacy sink or get published twice.
-            let legacy_sink = outcome.publication.status
-                == lingxi_core::host::FusionPublicationStatus::NotRequired;
-            let mut receipt = outcome.publication.clone();
-            if !legacy_sink {
-                status_sink
-                    .set_fusion_publication(worker_task_id, receipt.clone())
-                    .await;
-            }
+            // The session-pinned recorder has already written the terminal
+            // outcome before `activate()` returned. Publish its receipt to the
+            // task state before the terminal row becomes visible.
+            status_sink
+                .set_fusion_publication(worker_task_id, outcome.publication.clone())
+                .await;
             status_sink
                 .finish_fusion_terminal(
                     worker_task_id,
@@ -220,15 +206,8 @@ async fn finalize_fusion_outcome(
                     },
                 )
                 .await;
-            if legacy_sink {
-                receipt = sink.publish(conversation_id, result).await;
-                status_sink
-                    .set_fusion_publication(worker_task_id, receipt.clone())
-                    .await;
-            }
             // Publication is independent from computation: the terminal
-            // answer is retained even when the append fails, and the typed
-            // receipt written above is the only thing that decides readiness.
+            // answer remains visible even when durable recording fails.
         }
         Err(FusionError::Cancelled) => {
             // [Finding 14] Same ordering rule as the `Ok` arm above: write
@@ -368,8 +347,6 @@ async fn disclose_facts_or_partial_usage(
 /// `spawn` under the argument-count and line-count lints.
 struct FusionWorkerArgs {
     prepared: Option<PreparedFusionRun>,
-    conversation_id: String,
-    sink: Arc<dyn FusionCompletionSink>,
     status_sink: Arc<dyn TaskStatusSink>,
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
     output_manager: Arc<TaskOutputManager>,
@@ -391,8 +368,6 @@ struct FusionWorkerArgs {
 async fn run_fusion_worker(args: FusionWorkerArgs) {
     let FusionWorkerArgs {
         prepared,
-        conversation_id,
-        sink,
         status_sink,
         workers,
         output_manager,
@@ -458,7 +433,7 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
     // Natural completion and TaskStop race on this same worker-map lock.
     // The prepared control is the lifecycle authority. Once it reaches
     // Finalizing or Terminal, kill cannot remove the record from underneath
-    // the commit→completion-sink window.
+    // the commit→terminal-record window.
     let may_finalize = {
         let mut workers = workers.lock().await;
         workers.get_mut(&worker_task_id).is_some()
@@ -496,8 +471,6 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
         &worker_spool_path,
         &worker_task_id,
         &status_sink,
-        &sink,
-        &conversation_id,
         last_realized_output_tokens,
         last_egress_profiles,
     )
@@ -508,15 +481,13 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
 /// Handler for [`TaskType::LocalFusion`].
 pub struct LocalFusionHandler {
     executor: Arc<dyn FusionExecutor>,
-    sink: Arc<dyn FusionCompletionSink>,
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
     output_manager: Arc<TaskOutputManager>,
     status_sink: Arc<dyn TaskStatusSink>,
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
     pending_kill: Arc<StdMutex<Vec<String>>>,
-    terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
-    terminal_recorder_factory: Option<Arc<dyn FusionRunRecorderFactory>>,
+    terminal_recorder_factory: Arc<dyn FusionRunRecorderFactory>,
 }
 
 impl LocalFusionHandler {
@@ -524,22 +495,20 @@ impl LocalFusionHandler {
     #[must_use]
     pub fn new(
         executor: Arc<dyn FusionExecutor>,
-        sink: Arc<dyn FusionCompletionSink>,
         tool_invoker: Arc<dyn ToolInvoker>,
         budget: Arc<dyn BudgetEnforcerHandle>,
         output_manager: Arc<TaskOutputManager>,
+        terminal_recorder_factory: Arc<dyn FusionRunRecorderFactory>,
     ) -> Self {
         Self {
             executor,
-            sink,
             tool_invoker,
             budget,
             output_manager,
             status_sink: Arc::new(NoopStatusSink),
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(StdMutex::new(Vec::new())),
-            terminal_recorder: None,
-            terminal_recorder_factory: None,
+            terminal_recorder_factory,
         }
     }
 
@@ -547,24 +516,6 @@ impl LocalFusionHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
-        self
-    }
-
-    /// Attach the host-owned common terminal recorder. Preparation remains
-    /// pure; the capability is attached only after trusted identity creation.
-    #[must_use]
-    pub fn with_terminal_recorder(mut self, recorder: Arc<dyn FusionRunRecorder>) -> Self {
-        self.terminal_recorder = Some(recorder);
-        self
-    }
-
-    /// Attach a pure per-session recorder factory for hot session switches.
-    #[must_use]
-    pub fn with_terminal_recorder_factory(
-        mut self,
-        factory: Arc<dyn FusionRunRecorderFactory>,
-    ) -> Self {
-        self.terminal_recorder_factory = Some(factory);
         self
     }
 
@@ -634,12 +585,18 @@ impl Task for LocalFusionHandler {
         // orphaned output file behind. The task input is the only trusted
         // source for the originating session; request text is compatibility
         // data and never supplies identity.
-        let trusted_session = lingxi_core::types::SessionId::parse_prefixed(&conversation_id);
-        if trusted_session.is_none() {
-            return Err(TaskError::Internal(
-                "fusion task conversation_id must be a valid session id".into(),
-            ));
-        }
+        let trusted_session = lingxi_core::types::SessionId::parse_prefixed(&conversation_id)
+            .ok_or_else(|| {
+                TaskError::Internal("fusion task conversation_id must be a valid session id".into())
+            })?;
+        let terminal_recorder = self
+            .terminal_recorder_factory
+            .recorder_for(trusted_session)
+            .ok_or_else(|| {
+                TaskError::Internal(
+                    "fusion terminal recorder is unavailable for the trusted session".into(),
+                )
+            })?;
 
         let task_id = crate::id::generate_task_id(TaskType::LocalFusion);
         let spool_path = self
@@ -662,7 +619,7 @@ impl Task for LocalFusionHandler {
         // in which ledger this run bills.
         let identity = FusionRunIdentity::new(
             FusionRunId::generated(),
-            trusted_session,
+            Some(trusted_session),
             FusionOrigin::Slash,
             Some(task_id.clone()),
         );
@@ -691,23 +648,14 @@ impl Task for LocalFusionHandler {
                 PreparedFusionRun::failed(fallback_summary.clone(), control, error)
             }
         };
-        let recorder = if let Some(factory) = self.terminal_recorder_factory.as_ref() {
-            factory.recorder_for(trusted_session.expect("validated session identity"))
-        } else {
-            self.terminal_recorder.clone()
-        };
-        let prepared = if let Some(recorder) = recorder.as_ref() {
-            let capability = FusionTerminalCapability::new(recorder.clone());
-            let capability = trusted_session.map_or(capability.clone(), |session_id| {
-                capability.with_slash_target(FusionSlashPublicationTarget { session_id })
-            });
-            prepared.with_terminal_capability(capability)
-        } else {
-            prepared
-        };
+        let capability = FusionTerminalCapability::new(terminal_recorder).with_slash_target(
+            FusionSlashPublicationTarget {
+                session_id: trusted_session,
+            },
+        );
+        let prepared = prepared.with_terminal_capability(capability);
         let prepared_summary = prepared.summary().clone();
         let prepared_control = prepared.control();
-        let sink = self.sink.clone();
         let status_sink = self.status_sink.clone();
         let workers = self.workers.clone();
         let output_manager = self.output_manager.clone();
@@ -723,8 +671,6 @@ impl Task for LocalFusionHandler {
 
         let worker = Box::pin(run_fusion_worker(FusionWorkerArgs {
             prepared: Some(prepared),
-            conversation_id,
-            sink,
             status_sink,
             workers,
             output_manager,

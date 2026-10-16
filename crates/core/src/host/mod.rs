@@ -260,18 +260,18 @@ pub use filesystem::{
 };
 pub use fusion::{
     is_fusion_panel_type, normalize_dimensions, normalize_dimensions_for, panel_never_dispatched,
-    parse_fusion_model_ref, parse_fusion_models, prepared_from_oneshot, render_fusion_material,
-    truncate_at_char_boundary, truncate_tail, validate_panel_report, validate_verify_commands,
-    ClaimVerdict, DurableFusionOutboxRecord, DurableFusionTerminalRecord, EvidenceCheckCounts,
+    parse_fusion_model_ref, parse_fusion_models, render_fusion_material, truncate_at_char_boundary,
+    truncate_tail, validate_panel_report, validate_verify_commands, ClaimVerdict,
+    DurableFusionOutboxRecord, DurableFusionTerminalRecord, EvidenceCheckCounts,
     EvidenceCheckStatus, EvidenceKind, FusionActivation, FusionAgentSurface, FusionAnalysis,
     FusionAttemptSettlementStatus, FusionCompletionSink, FusionContradiction, FusionCostClass,
     FusionError, FusionExecutor, FusionImplementHost, FusionInheritance, FusionLatencyClass,
     FusionModelChoice, FusionModelHints, FusionModelRef, FusionModelRole, FusionOrigin,
     FusionPanelMode, FusionPreparedSummary, FusionPreset, FusionProgress, FusionPublicationReceipt,
-    FusionPublicationStatus, FusionRequest, FusionResult, FusionRunControl,
-    FusionRunFacts, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunOutcome,
-    FusionRunRecorder, FusionRunRecorderFactory, FusionSlashPublicationTarget, FusionStage,
-    FusionStatus, FusionStrategyMetadata, FusionSubmission, FusionTerminalCapability, FusionTiming,
+    FusionPublicationStatus, FusionRequest, FusionResult, FusionRunControl, FusionRunFacts,
+    FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunOutcome, FusionRunRecorder,
+    FusionRunRecorderFactory, FusionSlashPublicationTarget, FusionStage, FusionStatus,
+    FusionStrategyMetadata, FusionSubmission, FusionTerminalCapability, FusionTiming,
     FusionUniqueInsight, FusionUsage, ImplementConfirmation, MaterialClaim, MaterialEvidence,
     NoopFusionCompletionSink, PanelClaim, PanelEvidence, PanelMaterial, PanelOutcome, PanelPatch,
     PanelPosition, PanelReport, PanelRisk, PanelRunStatus, PanelVerification, PreparedFusionRun,
@@ -287,6 +287,13 @@ pub use fusion::{
     FUSION_PANEL_POOL_CAP, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
     FUSION_VERIFICATION_OUTPUT_BYTE_CAP,
 };
+
+/// Test-only adapters that exercise the current prepared-run contract.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use super::fusion::prepared_from_oneshot;
+}
+
 pub use handback::{
     BeginHandbackRun, HandbackAdmissionError, HandbackAdmissionOutcome, HandbackConsumptionAck,
     HandbackDisposition, HandbackEnvelope, HandbackInstruction, HandbackPeerOrigin,

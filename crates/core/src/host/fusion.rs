@@ -3762,7 +3762,7 @@ impl ImplementConfirmation {
     }
 }
 
-/// Build a prepared run around a single async body that produces the whole
+/// Build a test prepared run around a single async body that produces the whole
 /// result at once.
 ///
 /// Preparation for such an executor has nothing to resolve, so the body is
@@ -3772,9 +3772,10 @@ impl ImplementConfirmation {
 /// The prepared identity is authoritative, so a body that mints its own run id
 /// does not get to keep it.
 ///
-/// This exists for test doubles and other executors with no routing of their
-/// own. A production executor resolves a route and owns its own supervisor,
-/// and builds its [`PreparedFusionRun`] directly.
+/// This helper is available only to crate tests and the explicit `test-support`
+/// feature. Production executors resolve a route and own their supervisor,
+/// building their [`PreparedFusionRun`] directly.
+#[cfg(any(test, feature = "test-support"))]
 pub fn prepared_from_oneshot<F, Fut>(
     submission: FusionSubmission,
     effective_timeout_ms: Option<u64>,
@@ -3895,7 +3896,7 @@ pub trait FusionExecutor: Send + Sync + 'static {
     /// route and mints the run's control and facts without dispatching, and
     /// the returned handle is what actually starts work. A test double with
     /// nothing to prepare can build its handle with
-    /// [`prepared_from_oneshot`].
+    /// the test-support `prepared_from_oneshot` adapter.
     ///
     /// An analyst failure is carried as a completed
     /// [`FusionStatus::Unanalyzed`] outcome, not as an error.
@@ -5643,7 +5644,7 @@ RunningPanels{{completed:0,..}}"
             submission: crate::host::FusionSubmission,
         ) -> Result<crate::host::PreparedFusionRun, crate::host::FusionError> {
             let timeout = self.effective_timeout_ms();
-            crate::host::prepared_from_oneshot(
+            crate::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move {
@@ -5670,7 +5671,7 @@ RunningPanels{{completed:0,..}}"
                 submission: crate::host::FusionSubmission,
             ) -> Result<crate::host::PreparedFusionRun, crate::host::FusionError> {
                 let timeout = self.effective_timeout_ms();
-                crate::host::prepared_from_oneshot(
+                crate::host::test_support::prepared_from_oneshot(
                     submission,
                     timeout,
                     move |_request, _inherit, _progress| async move {

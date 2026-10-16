@@ -1331,7 +1331,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move {
@@ -1455,7 +1455,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move { Err(this.error.clone()) },
@@ -1500,7 +1500,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move { Err(this.error.clone()) },
@@ -1542,7 +1542,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(submission.identity.session_id);
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |request, _inherit, _progress| async move {
@@ -1710,7 +1710,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError>
         {
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, progress| async move {
@@ -1874,7 +1874,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             submission: lingxi_core::host::FusionSubmission,
         ) -> Result<lingxi_core::host::PreparedFusionRun, lingxi_core::host::FusionError> {
             let this = Arc::clone(&self);
-            lingxi_core::host::prepared_from_oneshot(
+            lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 None,
                 move |request, _inherit, _progress| async move {
@@ -3078,7 +3078,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError>
         {
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, progress| async move {
@@ -3143,7 +3143,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError>
         {
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, progress| async move {
@@ -3330,7 +3330,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move {
@@ -3591,7 +3591,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, inherit, progress| async move {
@@ -3853,7 +3853,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, progress| async move {

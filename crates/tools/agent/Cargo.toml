@@ -34,7 +34,7 @@ agent-test-support = []
 [dev-dependencies]
 boon = "0.6"
 tool-api = { path = "../../tool-api", features = ["test-support"] }
-core = { path = "../../core" }
+core = { path = "../../core", features = ["test-support"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

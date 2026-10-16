@@ -3821,21 +3821,18 @@ pub async fn build_with_credential_stack(
 
     // Fusion `/fusion` + Agent `subagent_type: "fusion"` share one orchestrator.
     // Register the LocalFusion handler before the registry is Arc-wrapped. The
-    // completion sink is bound after the orchestrator handle exists; the tool
-    // invoker is bound at (5.5a) once `tools` exists. `/fusion` is explicit
-    // per-run and works even when `fusion.enabled` is false.
-    let fusion_completion_sink = Arc::new(fusion_command::DeferredFusionCompletionSink::new());
+    // per-session recorder factory is resolved during each task preparation;
+    // the tool invoker is bound at (5.5a) once `tools` exists. `/fusion` is
+    // explicit per-run and works even when `fusion.enabled` is false.
     let fusion_invoker = Arc::new(DeferredToolInvoker::new());
     let fusion_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
     tasks::registry::register_fusion_handler_with_recorder_factory(
         &mut task_registry_inner,
         fusion_executor.clone(),
-        fusion_completion_sink.clone() as Arc<dyn lingxi_core::host::FusionCompletionSink>,
         fusion_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         fusion_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
-        Some(fusion_recorder.clone()),
-        Some(fusion_recorder_factory.clone()),
+        fusion_recorder_factory.clone(),
     );
 
     task_registry_inner.set_team_member_activity_handle(Arc::new(

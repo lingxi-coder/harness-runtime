@@ -8977,7 +8977,10 @@ async fn lifecycle_listener_drops_unowned_live_payloads_but_forwards_questions()
             id: "stale-tool".to_string(),
             tool: "Read".to_string(),
             input_json: "{}".to_string(),
-            header: None,
+            header: client::adapter::tool_display::lower_tool_header(
+                "Read",
+                &serde_json::json!({}),
+            ),
         })
         .await;
     listener
@@ -9152,7 +9155,12 @@ async fn lifecycle_listener_delivers_events_the_cancelled_journal_refuses() {
             tool: "Bash".to_string(),
             result_json: "{}".to_string(),
             is_error: false,
-            display: None,
+            display: client::adapter::tool_display::lower_tool_result_display(
+                "Bash",
+                None,
+                &serde_json::json!({}),
+                false,
+            ),
         })
         .await;
 
