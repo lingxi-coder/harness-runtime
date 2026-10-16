@@ -82,7 +82,8 @@ mod tests {
                 // `/commit` is omitted while `tengu_cinder_relay` defaults off.
                 let text = s.string_at("").unwrap();
                 assert!(
-                    text.lines().any(|line| line.starts_with("  /team-onboarding ")),
+                    text.lines()
+                        .any(|line| line.starts_with("  /team-onboarding ")),
                     "the source-visible Native team-onboarding command must appear"
                 );
                 assert_eq!(text.matches('\n').count(), 77);

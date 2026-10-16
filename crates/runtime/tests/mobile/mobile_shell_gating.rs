@@ -9,7 +9,7 @@ use harness_runtime::mobile::mobile_tool_registry;
 
 use mobile_linux_api::ProcessOutput;
 
-use tool_api::{MobileShellToolCtx, BuiltinToolContext};
+use tool_api::{BuiltinToolContext, MobileShellToolCtx};
 
 fn base_ctx() -> BuiltinToolContext {
     tool_api::test_support::shell_test_ctx(ProcessOutput {

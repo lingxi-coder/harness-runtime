@@ -1158,7 +1158,7 @@ async fn ordinary_batch_images_use_the_existing_turn_driver_and_final_hook_outpu
             vec![request],
         )
         .await;
-        crate::turn_loop::execute_one_turn_with_recovery_tracked(
+        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(
             &fixture.orch,
             None,
             &mut crate::turn_loop::RecoveryState::default(),
@@ -1166,8 +1166,7 @@ async fn ordinary_batch_images_use_the_existing_turn_driver_and_final_hook_outpu
             0,
         )
         .await
-        .unwrap()
-        .0;
+        .unwrap();
         let history = fixture.orch.session.lock().await.history.clone();
         let (text, blocks) = history
             .iter()

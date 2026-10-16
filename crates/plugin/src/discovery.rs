@@ -1246,13 +1246,9 @@ async fn discover_enabled_plugins_impl(
         if name.is_empty() {
             continue;
         }
-        let mut candidates = if let Some(exact) =
+        let mut candidates =
             exact_installed_paths(plugins_dir, entry_id, installed_records.as_ref())
-        {
-            exact
-        } else {
-            Vec::new()
-        };
+                .unwrap_or_default();
         // Resolve a recorded primary path first and consult the configured
         // seed cache only when that authoritative path is absent. A primary
         // directory without an install record is never inferred as installed.

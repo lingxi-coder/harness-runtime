@@ -6546,10 +6546,9 @@ mod malformed_and_thinking_only_tests {
     async fn thinking_only_retry_drops_the_rejected_attempt() {
         let orch = orch_with_responses(vec![thinking_only_response("end_turn")]);
         let mut state = RecoveryState::default();
-        execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
+        let _ = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step")
-            .0;
+            .expect("step");
         let h = history(&orch).await;
         assert!(
             !h.iter()

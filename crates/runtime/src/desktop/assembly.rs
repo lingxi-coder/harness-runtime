@@ -50,9 +50,9 @@ use super::{
     managed_mod_seats_from_raw_tiers, managed_only_sandbox_overrides, mcp_on_authorization_url,
     mcp_servers_inventory_payload, merge_agent_frontmatter_mcp_servers, merge_cli_flag_agents,
     new_desktop_mcp_transport, new_live_sandbox_runner_with_permission_gate, pane_teammate,
-    platform_in_enabled_list, plugin_dir_watch_enabled, policy_helpers,
-    register_desktop_tools_with_fusion_recorder, registry_skill_listing_provider_for_desktop,
-    resolve_bash_edit_diff, resolve_llm_stack_with_credentials, resolve_memory_feature_gates,
+    platform_in_enabled_list, plugin_dir_watch_enabled, policy_helpers, register_desktop_tools,
+    registry_skill_listing_provider_for_desktop, resolve_bash_edit_diff,
+    resolve_llm_stack_with_credentials, resolve_memory_feature_gates,
     resolve_workflow_session_enabled_from_effective,
     resolve_workflow_size_guideline_from_effective, ripgrep_override,
     sandbox_auto_allow_from_settings_tiers, sandbox_runtime_config_from_settings_tiers,
@@ -4944,7 +4944,7 @@ pub async fn build_with_credential_stack(
     };
     let insights_tool_context = Arc::new(tool_ctx.clone());
     let local_app_tool_ctx = cfg.local_apps.then(|| tool_ctx.clone());
-    let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools_with_fusion_recorder(
+    let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
@@ -4960,9 +4960,10 @@ pub async fn build_with_credential_stack(
         // the single writer of the live cwd Read/Glob/Grep + LSP read.
         Some(current_cwd_cell.clone()),
         worktree_state_persister,
-        Some(fusion_executor.clone()),
-        Some(fusion_recorder.clone()),
-        Some(fusion_recorder_factory.clone()),
+        Some(tool_agent::AgentFusionServices::new(
+            fusion_executor.clone(),
+            fusion_recorder_factory.clone(),
+        )),
     );
     if let Some(ctx) = visualization_tool_ctx {
         let store = crate::inline_visualization::shared_store(ctx.fs.clone(), &cfg.lingxi_home);

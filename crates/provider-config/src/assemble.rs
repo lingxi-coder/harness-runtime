@@ -2,8 +2,8 @@
 //! from Anthropic state + `settings.providers` + `settings.routing` (spec §5.3).
 
 use llm_runtime::{
-    parse_provider_profiles_lenient, AuthStrategy, ClientConfig, CredentialConfig,
-    ProviderId, ProviderParseOptions, ProviderProfile,
+    parse_provider_profiles_lenient, AuthStrategy, ClientConfig, CredentialConfig, ProviderId,
+    ProviderParseOptions, ProviderProfile,
 };
 
 use crate::parse_routing::parse_routing;

@@ -1492,9 +1492,9 @@ mod desktop_fusion_executor_boot_test;
 
 /// Assemble the desktop builtin tool set.
 ///
-/// `fusion` is the live Fusion orchestrator. The offline snapshot path passes
-/// `None` so the Agent listing stays inert and the locked tool-name snapshot
-/// is unchanged. Mobile never reaches this function.
+/// `fusion` is the complete executor/recorder-factory pair. The offline
+/// snapshot path passes `None` so the Agent listing stays inert and the locked
+/// tool-name snapshot is unchanged. Mobile never reaches this function.
 #[allow(clippy::too_many_arguments)]
 pub fn register_desktop_tools(
     reg: &mut ToolRegistry,
@@ -1511,50 +1511,7 @@ pub fn register_desktop_tools(
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
     live_cwd: Option<tool_api::LiveCwdCell>,
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
-    fusion: Option<Arc<dyn lingxi_core::host::FusionExecutor>>,
-) -> (
-    tool_cron::WakeupSchedulerCell,
-    std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
-    register_desktop_tools_with_fusion_recorder(
-        reg,
-        ctx,
-        coordinator,
-        ask_user_question_resolver,
-        advertise_ask_user_question,
-        computer_access_resolver,
-        cron_auth,
-        skill_loader,
-        cwd_changed_firer,
-        web_side_query,
-        live_cwd,
-        worktree_state_persister,
-        fusion,
-        None,
-        None,
-    )
-}
-
-/// Assemble the desktop tools with the optional host-owned Fusion recorder.
-#[allow(clippy::too_many_arguments)]
-pub fn register_desktop_tools_with_fusion_recorder(
-    reg: &mut ToolRegistry,
-    ctx: BuiltinToolContext,
-    coordinator: Option<CoordinatorWiring>,
-    ask_user_question_resolver: Option<
-        Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>,
-    >,
-    advertise_ask_user_question: bool,
-    computer_access_resolver: Option<Arc<dyn tool_computer_use::ComputerAccessResolver>>,
-    cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
-    skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
-    cwd_changed_firer: hooks::OptionalCwdChangedFirer,
-    web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
-    live_cwd: Option<tool_api::LiveCwdCell>,
-    worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
-    fusion: Option<Arc<dyn lingxi_core::host::FusionExecutor>>,
-    fusion_recorder: Option<Arc<dyn lingxi_core::host::FusionRunRecorder>>,
-    fusion_recorder_factory: Option<Arc<dyn lingxi_core::host::FusionRunRecorderFactory>>,
+    fusion: Option<tool_agent::AgentFusionServices>,
 ) -> (
     tool_cron::WakeupSchedulerCell,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1668,13 +1625,7 @@ pub fn register_desktop_tools_with_fusion_recorder(
     // ----- desktop-only tool crates ----------------------------------------
     // Fusion is injected here (not inside `tool_agent::register_all`) so mobile
     // and snapshot tests keep an inert Agent tool.
-    tool_agent::register_with_fusion_and_recorder_factory(
-        reg,
-        ctx.clone(),
-        fusion,
-        fusion_recorder.clone(),
-        fusion_recorder_factory,
-    );
+    tool_agent::register_with_fusion_services(reg, ctx.clone(), fusion);
     if let Some(CoordinatorWiring { team, spawn_seam }) = coordinator {
         for tool in coordinator::internal_tools::coordinator_internal_tools(
             team,

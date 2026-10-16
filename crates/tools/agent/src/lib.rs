@@ -17,7 +17,7 @@
     clippy::manual_let_else
 )]
 pub mod agent;
-pub use agent::AgentTool;
+pub use agent::{AgentFusionServices, AgentTool};
 
 pub mod classifier_handoff;
 
@@ -26,47 +26,20 @@ pub mod agent_test_support;
 
 /// Register the agent (subagent dispatch) tools against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
-    register_with_fusion(reg, ctx, None);
+    register_with_fusion_services(reg, ctx, None);
 }
 
-/// Register `AgentTool`, optionally injecting a Fusion executor.
-pub fn register_with_fusion(
+/// Register `AgentTool` with no Fusion capability or one complete current
+/// Fusion executor/recorder-factory pair.
+pub fn register_with_fusion_services(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
-    fusion: Option<std::sync::Arc<dyn lingxi_core::host::FusionExecutor>>,
-) {
-    register_with_fusion_and_recorder(reg, ctx, fusion, None);
-}
-
-/// Register `AgentTool` with an optional common Fusion terminal recorder.
-pub fn register_with_fusion_and_recorder(
-    reg: &mut tool_api::ToolRegistry,
-    ctx: tool_api::BuiltinToolContext,
-    fusion: Option<std::sync::Arc<dyn lingxi_core::host::FusionExecutor>>,
-    recorder: Option<std::sync::Arc<dyn lingxi_core::host::FusionRunRecorder>>,
-) {
-    register_with_fusion_and_recorder_factory(reg, ctx, fusion, recorder, None);
-}
-
-/// Register `AgentTool` with both a compatibility recorder and a pure
-/// per-session recorder factory.
-pub fn register_with_fusion_and_recorder_factory(
-    reg: &mut tool_api::ToolRegistry,
-    ctx: tool_api::BuiltinToolContext,
-    fusion: Option<std::sync::Arc<dyn lingxi_core::host::FusionExecutor>>,
-    recorder: Option<std::sync::Arc<dyn lingxi_core::host::FusionRunRecorder>>,
-    factory: Option<std::sync::Arc<dyn lingxi_core::host::FusionRunRecorderFactory>>,
+    fusion: Option<AgentFusionServices>,
 ) {
     use std::sync::Arc;
     let mut tool = AgentTool::new(ctx);
-    if let Some(executor) = fusion {
-        tool = tool.with_fusion(executor);
-    }
-    if let Some(recorder) = recorder {
-        tool = tool.with_terminal_recorder(recorder);
-    }
-    if let Some(factory) = factory {
-        tool = tool.with_terminal_recorder_factory(factory);
+    if let Some(services) = fusion {
+        tool = tool.with_fusion_services(services);
     }
     reg.register_builtin(Arc::new(tool));
 }

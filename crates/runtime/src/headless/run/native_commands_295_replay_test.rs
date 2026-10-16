@@ -1191,8 +1191,7 @@ async fn native_295_commands_fixture_replay_body() {
                 "The user's message starts with the slash command /__native_unknown_295__",
             )];
             assert_eq!(native_reminder.matches("and 28 more").count(), 1);
-            let expected_local_reminder =
-                native_reminder.replacen("and 28 more", "and 30 more", 1);
+            let expected_local_reminder = native_reminder.replacen("and 28 more", "and 30 more", 1);
             assert_eq!(
                 outbound_reminder,
                 expected_local_reminder,

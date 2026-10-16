@@ -82,7 +82,8 @@ async fn help_dispatch() {
             // (83 builtins minus 8 hidden commands, plus bundled `/doctor`).
             // The Native team-onboarding row is visible; hidden/disabled rows stay out.
             assert!(
-                text.lines().any(|line| line.starts_with("  /team-onboarding ")),
+                text.lines()
+                    .any(|line| line.starts_with("  /team-onboarding ")),
                 "the source-visible Native team-onboarding command must appear"
             );
             assert_eq!(text.matches('\n').count(), 77);
