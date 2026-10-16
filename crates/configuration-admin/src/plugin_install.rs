@@ -3381,7 +3381,7 @@ mod tests {
         let source = plugin::marketplace::MarketplacePluginExternalSource::GitSubdir {
             url: format!("file://{}", repository.display()),
             git_ref: None,
-            path: Some("nested/plugin".to_string()),
+            path: "nested/plugin".to_string(),
             sha: None,
         };
 
