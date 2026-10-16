@@ -2739,6 +2739,20 @@ pub(super) async fn build_mobile_inner_with_ask(
         cwd.clone(),
         device_skill_tools.clone(),
     )));
+    // `/list-agents` reads this mobile session's live task and name stores.
+    // Mobile is a local app-private host, so use its explicit local-default
+    // verdict; no process environment or remote feature service is consulted.
+    let list_agents_availability =
+        command_api::builtins::list_agents::ListAgentsCommandAvailability {
+            harbor_kite_enabled: Some(true),
+        };
+    let list_agents_provider: Arc<dyn command_api::builtins::list_agents::ListAgentsProvider> =
+        Arc::new(super::list_agents::MobileListAgentsProvider::new(
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+            subagent_spawner_arc.agent_name_registry(),
+            list_agents_availability,
+        ));
+    command_api::builtins::list_agents::register(&mut reg, list_agents_provider);
     *shared_command_registry.write().await = reg;
     shared_command_registry
         .write()
@@ -2916,6 +2930,8 @@ pub(super) async fn build_mobile_inner_with_ask(
         plugin_manager,
         #[cfg(test)]
         wired_agent_catalog: plugin_agent_catalog,
+        #[cfg(test)]
+        wired_agent_name_registry: subagent_spawner_arc.agent_name_registry(),
         #[cfg(test)]
         wired_subagent_agent_catalog_cell: subagent_agent_catalog_cell,
         #[cfg(test)]

@@ -61,6 +61,9 @@ pub mod insights;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod team_onboarding;
 
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod list_agents_support;
+
 #[cfg(feature = "desktop")]
 mod insights_bun_worker;
 

@@ -39,6 +39,7 @@ mod audio_realtime_owner;
 mod automation;
 mod configuration;
 mod linux_runtime;
+mod list_agents;
 mod provider_services;
 mod restoration;
 mod side_chat;
@@ -448,6 +449,11 @@ pub struct MobileRuntime {
     /// family (`TaskList`/`TaskOutput`/`TaskStop`), and the per-turn
     /// `<task-notification>` drain.
     pub(crate) task_registry: Arc<tasks::registry::TaskRegistry>,
+    /// The same live ordered name store consumed by the mobile `/list-agents`
+    /// provider. Retained only so host tests can seed the exact composed store.
+    #[cfg(test)]
+    pub(crate) wired_agent_name_registry:
+        Arc<dyn lingxi_core::host::agent_name_registry::AgentNameRegistry>,
     /// Durable workflow handoff store used to adopt interrupted runs as paused
     /// when their owning session is resumed after a process restart.
     pub(crate) workflow_checkpoints:
@@ -8876,6 +8882,10 @@ mod default_model_resolution_tests;
 #[cfg(test)]
 #[path = "host/tests/cron_automation_tests.rs"]
 mod cron_automation_tests;
+
+#[cfg(test)]
+#[path = "host/tests/list_agents_tests.rs"]
+mod list_agents_tests;
 
 #[cfg(test)]
 #[path = "host/tests/read_auto_allow_wiring_tests.rs"]

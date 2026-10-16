@@ -6,9 +6,12 @@
 //! successful snapshots retain the source warning that other local sessions
 //! may be missing.
 
+use crate::list_agents_support::{
+    local_subagent_rows, missing_task_fact, required_agent_string, reverse_agent_names,
+};
 use command_api::builtins::list_agents::{
-    ListAgentsCommandAvailability, ListAgentsProvider, LocalAgentRoster, LocalSubagentRow,
-    LocalTeammateRow, LocalTeammateSince, TeammateNameShadowing, TeammateTimeKind,
+    ListAgentsCommandAvailability, ListAgentsProvider, LocalAgentRoster, LocalTeammateRow,
+    LocalTeammateSince, TeammateNameShadowing, TeammateTimeKind,
 };
 use coordinator::{TeamRegistry, WorkerAgent};
 use lingxi_core::host::agent_name_registry::AgentNameRegistry;
@@ -17,7 +20,7 @@ use lingxi_core::host::task_registry::{
     FieldPresence, TaskListFilter, TaskRecord, TaskRegistryHandle,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,9 +29,7 @@ const HARBOR_KITE_ENV: &str = "CLAUDE_CODE_HARBOR_KITE";
 #[cfg(windows)]
 const HARBOR_KITE_WINDOWS_FLAG: &str = "tengu_harbor_kite_win";
 const HARBOR_KITE_FLAG: &str = "tengu_harbor_kite";
-const LOCAL_AGENT_TASK: &str = "local_agent";
 const IN_PROCESS_TEAMMATE_TASK: &str = "in_process_teammate";
-const MAIN_SESSION_AGENT_TYPE: &str = "main-session";
 const IN_PROCESS_PANE_MARKER: &str = "in-process";
 
 /// Supplies the runtime-owned local state consumed by `/list-agents`.
@@ -139,77 +140,6 @@ fn harbor_kite_enabled() -> bool {
     #[cfg(not(windows))]
     {
         telemetry::feature_flags::flag_bool(HARBOR_KITE_FLAG, true)
-    }
-}
-
-fn reverse_agent_names(
-    entries: &[(String, lingxi_core::types::AgentId)],
-) -> HashMap<String, String> {
-    let mut names_by_id = HashMap::with_capacity(entries.len());
-    for (name, agent_id) in entries {
-        // The source is an insertion-ordered Map. A later name for the same
-        // agent replaces the earlier reverse-map value without reordering the
-        // task rows.
-        names_by_id.insert(agent_id.as_uuid().to_string(), name.clone());
-    }
-    names_by_id
-}
-
-fn local_subagent_rows(
-    tasks: &[TaskRecord],
-    names_by_agent_id: &HashMap<String, String>,
-    team_worker_names: &HashSet<String>,
-) -> Result<Vec<LocalSubagentRow>, Utf16JsonProjection> {
-    let mut rows = Vec::new();
-
-    for task in tasks
-        .iter()
-        .filter(|task| task.task_type == LOCAL_AGENT_TASK)
-    {
-        let facts = task
-            .agent_facts
-            .as_ref()
-            .ok_or_else(|| missing_task_fact(&task.task_id, "agent_facts"))?;
-        let stable_id =
-            required_agent_string(&task.task_id, "stable_agent_id", &facts.stable_agent_id)?;
-        let agent_type = required_agent_string(&task.task_id, "agent_type", &facts.agent_type)?;
-        let started_at_ms = task
-            .started_at_ms
-            .ok_or_else(|| missing_task_fact(&task.task_id, "started_at_ms"))?;
-        if task.status.is_empty() {
-            return Err(missing_task_fact(&task.task_id, "status"));
-        }
-
-        if agent_type == MAIN_SESSION_AGENT_TYPE {
-            continue;
-        }
-
-        let source_name = names_by_agent_id.get(stable_id).cloned();
-        let name = source_name
-            .filter(|name| !team_worker_names.contains(name))
-            .map(Utf16JsonProjection::from);
-
-        rows.push(LocalSubagentRow {
-            name,
-            agent_type: agent_type.into(),
-            status: task.status.clone().into(),
-            started_at_ms,
-        });
-    }
-
-    Ok(rows)
-}
-
-fn required_agent_string<'a>(
-    task_id: &str,
-    field: &'static str,
-    presence: &'a FieldPresence<String>,
-) -> Result<&'a str, Utf16JsonProjection> {
-    match presence {
-        FieldPresence::Value(value) if !value.is_empty() => Ok(value),
-        FieldPresence::Value(_) | FieldPresence::Missing | FieldPresence::Null => {
-            Err(missing_task_fact(task_id, field))
-        }
     }
 }
 
@@ -459,10 +389,6 @@ fn system_time_ms(time: &SystemTime) -> Option<u64> {
     u64::try_from(millis).ok()
 }
 
-fn missing_task_fact(task_id: &str, fact: &str) -> Utf16JsonProjection {
-    roster_error(format!("task {task_id} is missing required {fact} fact"))
-}
-
 fn roster_error(message: impl Into<String>) -> Utf16JsonProjection {
     format!(
         "Could not read the current local agent roster: {}",
@@ -476,6 +402,7 @@ mod tests {
     use super::*;
     use lingxi_core::host::task_registry::AgentTaskFacts;
     use lingxi_core::types::AgentId;
+    use std::collections::HashMap;
     use std::time::Duration;
 
     fn local_agent(
@@ -486,7 +413,7 @@ mod tests {
     ) -> TaskRecord {
         TaskRecord {
             task_id: task_id.into(),
-            task_type: LOCAL_AGENT_TASK.into(),
+            task_type: "local_agent".into(),
             status: status.into(),
             started_at_ms: Some(1234),
             agent_facts: Some(AgentTaskFacts {
@@ -506,7 +433,7 @@ mod tests {
         let tasks = vec![
             local_agent("first", &first_id, "Explore", "running"),
             local_agent("team-shadow", &team_id, "Plan", "waiting"),
-            local_agent("main", &main_id, MAIN_SESSION_AGENT_TYPE, "running"),
+            local_agent("main", &main_id, "main-session", "running"),
         ];
         let names = reverse_agent_names(&[
             ("old-name".into(), first_id.clone()),
