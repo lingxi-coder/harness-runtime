@@ -155,6 +155,7 @@ fn model_list_and_changed_round_trip() {
 #[test]
 fn rich_model_details_round_trip_and_legacy_event_default() {
     let detail = ModelDetailsDto {
+        context_budget: None,
         reference: "deepseek/deepseek-flash".into(),
         provider_id: "deepseek".into(),
         provider_label: "DeepSeek".into(),
@@ -229,6 +230,7 @@ fn rich_model_details_round_trip_and_legacy_event_default() {
 #[test]
 fn provider_model_catalog_round_trips() {
     let detail = ModelDetailsDto {
+        context_budget: None,
         reference: "anthropic/claude-opus-4-8".into(),
         provider_id: "anthropic".into(),
         provider_label: "Anthropic".into(),

@@ -23,6 +23,127 @@ mod tests {
     use super::*;
     use lingxi_llm_client::providers::anthropic::system_prompt::PromptText;
 
+    #[tokio::test]
+    async fn context_policy_stops_oversized_custom_input_before_generation() {
+        let mut provider = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|p| p.profile_name == "openai-chat")
+            .unwrap();
+        provider.profile_name = "context-policy-test".into();
+        provider.provider_id = crate::ProviderId::Custom {
+            name: "context-policy-test".into(),
+        };
+        provider.base_url = "https://example.test".into();
+        provider.wire_profile = None;
+        provider.connection = Default::default();
+        provider.auth = crate::AuthStrategy::None;
+        provider.credential = crate::CredentialConfig::None;
+        provider.models.truncate(1);
+        let model = &mut provider.models[0];
+        model.request_model = "m".into();
+        model.display_model = "m".into();
+        model.billing_model = "m".into();
+        model.aliases.clear();
+        model.metadata = lingxi_core::host::ModelMetadata {
+            context_window_tokens: Some(1000000),
+            context: Some(lingxi_core::host::ContextMetadata {
+                application: Some(lingxi_core::host::ContextPolicy::Custom { input_tokens: 100 }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = crate::ModelRuntime::from_config(crate::ClientConfig {
+            providers: vec![provider],
+        })
+        .unwrap();
+        let transport = FakeTransport::always(ProviderResponse::json(
+            200,
+            serde_json::json!({"choices":[]}),
+        ));
+        let service = ApiService::new(
+            Arc::new(client),
+            transport.clone(),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        )
+        .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        let mut request = LlmRequest::new("m").with_user_text("x".repeat(1000));
+        request.profile = Some("context-policy-test".into());
+        let error = service
+            .execute_non_stream_request(request, NonStreamingRequestClass::Main, Default::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, LlmError::InvalidRequest { ref message } if message.contains("Application input budget exceeded"))
+        );
+        assert_eq!(transport.seen_count(), 0);
+    }
+
+    #[test]
+    fn output_recovery_grows_explicit_budget_without_crossing_route_limit() {
+        let mut provider = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|p| p.profile_name == "deepseek")
+            .unwrap();
+        provider.connection = Default::default();
+        provider.auth = crate::AuthStrategy::None;
+        provider.credential = crate::CredentialConfig::None;
+        provider.models.truncate(1);
+        let model = provider.models[0].request_model.clone();
+        provider.models[0].metadata.max_output_tokens = Some(16000);
+        provider.models[0].metadata.context_window_tokens = Some(1000000);
+        let client = crate::ModelRuntime::from_config(crate::ClientConfig {
+            providers: vec![provider],
+        })
+        .unwrap();
+        let service = ApiService::new(
+            Arc::new(client),
+            FakeTransport::always(ProviderResponse::json(200, serde_json::json!({}))),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        );
+        let mut usage = crate::ExecutionUsage::from_counts(lingxi_llm_client::protocol::Usage {
+            input_tokens: 1000,
+            output_tokens: 8000,
+            ..Default::default()
+        });
+        usage.provider_metadata = provider_payload(serde_json::json!({"llm_client": {
+            "executed_profile":"deepseek", "output_budget":{"source":"explicit", "value":8000}
+        }}));
+        assert_eq!(
+            service
+                .next_output_budget(&model, Some("deepseek"), &usage)
+                .unwrap(),
+            Some(16000)
+        );
+        usage.provider_metadata = provider_payload(serde_json::json!({"llm_client": {
+            "executed_profile":"deepseek", "output_budget":{"source":"explicit", "value":16000}
+        }}));
+        assert_eq!(
+            service
+                .next_output_budget(&model, Some("deepseek"), &usage)
+                .unwrap(),
+            None
+        );
+        usage.provider_metadata = provider_payload(serde_json::json!({"llm_client": {
+            "executed_profile":"another-route", "output_budget":{"source":"explicit", "value":8000}
+        }}));
+        assert_eq!(
+            service
+                .next_output_budget(&model, Some("deepseek"), &usage)
+                .unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn native_model_option_overrides_follow_gd_provider_gate() {
         assert!(!ApiService::native_model_option_overrides_allowed(

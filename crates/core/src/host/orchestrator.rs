@@ -1464,6 +1464,14 @@ pub enum ModelBillingMode {
 #[serde(rename_all = "camelCase")]
 #[allow(missing_docs)]
 pub struct ModelPricingTier {
+    #[serde(default)]
+    pub max_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub verified_at: Option<String>,
     /// Provider-published threshold in input/context tokens.
     pub context_threshold_tokens: u64,
     #[serde(default)]
@@ -1507,6 +1515,10 @@ pub struct ModelPricing {
 #[serde(rename_all = "camelCase")]
 #[allow(missing_docs)]
 pub struct ModelMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<super::ModelContextBudget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<super::ContextMetadata>,
     #[serde(default)]
     pub family: Option<String>,
     #[serde(default)]

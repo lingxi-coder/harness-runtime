@@ -2517,7 +2517,17 @@ impl ConversationOrchestrator {
                     .recovery
                     .max_output_tokens_recovery_count
                     .saturating_add(1);
-                loop_state.recovery.max_output_tokens_override = None;
+                loop_state.recovery.max_output_tokens_override =
+                    if let (Some(usage), Some(frozen)) = (
+                        pumped.usage.as_ref(),
+                        loop_state.recovery.last_generation.as_ref(),
+                    ) {
+                        self.api
+                            .next_output_budget(&frozen.model, frozen.profile.as_deref(), usage)
+                            .map_err(OrchestratorError::ApiCall)?
+                    } else {
+                        None
+                    };
                 loop_state.recovery.output_recovery_actions += 1;
                 Ok(StreamingIterationDisposition::Continue(
                     crate::turn_loop::NativeQueryTransition::InPlaceRetry,

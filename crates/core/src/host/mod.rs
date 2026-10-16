@@ -444,3 +444,8 @@ pub use tool_execution::{
 
 /// Host-owned Source JSON Schema validator service.
 pub mod json_schema_validator;
+
+mod context_policy;
+pub use context_policy::{
+    ContextMetadata, ContextPolicy, ContextRecommendation, ModelContextBudget,
+};

@@ -265,6 +265,17 @@ impl ModelRegistry {
                             })
                             .map(|source| source.billing_mode_on(&profile.pricing))
                     });
+                    let mut metadata =
+                        Self::effective_metadata(provider, model, source_billing_mode);
+                    if let Some(profile) = resolved_profile {
+                        if let Some(source) = profile.models.iter().find(|m| {
+                            m.request_model == model.request_model
+                                && m.display_model == model.display_model
+                                && m.billing_model == model.billing_model
+                        }) {
+                            crate::catalog::enrich_context_metadata(profile, source, &mut metadata);
+                        }
+                    }
                     ModelListing {
                         provider_id: provider.provider_id.clone(),
                         profile_name: provider.profile_name.clone(),
@@ -277,7 +288,7 @@ impl ModelRegistry {
                         aliases: model.aliases.clone(),
                         description: model.description.clone(),
                         capabilities: model.capabilities,
-                        metadata: Self::effective_metadata(provider, model, source_billing_mode),
+                        metadata,
                         reasoning: reasoning_control_spec(ReasoningTarget {
                             inference: &self
                                 .resolver

@@ -801,6 +801,20 @@ pub(super) fn process_visible_response<'a>(
                             }
                         }
                     }
+                    // Keep visible output and completed effects; grow only the
+                    // budget for the continuation, never replay this generation.
+                    state.max_output_tokens_override =
+                        if let Some(frozen) = state.last_generation.as_ref() {
+                            orch.api
+                                .next_output_budget(
+                                    &frozen.model,
+                                    frozen.profile.as_deref(),
+                                    &response.usage,
+                                )
+                                .map_err(OrchestratorError::ApiCall)?
+                        } else {
+                            None
+                        };
                     handle_max_output_tokens(
                         orch,
                         assistant_id,

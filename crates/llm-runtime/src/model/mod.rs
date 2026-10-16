@@ -23,3 +23,5 @@ pub mod thinking_binding_controls;
 pub mod thinking_signature;
 pub mod thinking_state;
 pub mod user_agent;
+
+pub(crate) mod context_admission;

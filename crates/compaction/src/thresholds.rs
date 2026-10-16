@@ -595,8 +595,22 @@ pub fn effective_context_window_size(model: &str, betas: &[String]) -> u64 {
 /// `floor(effective × pct/100)`, then `min`'d with the buffer-based threshold).
 #[must_use]
 pub fn auto_compact_threshold(model: &str, betas: &[String]) -> u64 {
-    let effective_context_window = effective_context_window_size(model, betas);
-    let autocompact_threshold = effective_context_window.saturating_sub(AUTOCOMPACT_BUFFER_TOKENS);
+    threshold_with_buffer(
+        effective_context_window_size(model, betas),
+        AUTOCOMPACT_BUFFER_TOKENS,
+    )
+}
+
+/// A route-specific input budget already accounts for shared output reservation.
+/// Bound the existing buffer for small models so an 8K model can still make progress.
+#[must_use]
+pub fn threshold_for_input_budget(effective_context_window: u64) -> u64 {
+    let buffer = AUTOCOMPACT_BUFFER_TOKENS.min(effective_context_window / 10);
+    threshold_with_buffer(effective_context_window, buffer)
+}
+
+fn threshold_with_buffer(effective_context_window: u64, buffer: u64) -> u64 {
+    let autocompact_threshold = effective_context_window.saturating_sub(buffer);
 
     if let Ok(raw) = std::env::var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE") {
         if let Some(parsed) = parse_float_prefix(&raw) {
@@ -1454,5 +1468,20 @@ mod tests {
             RAPID_REFILL_THRASHING_MESSAGE,
             "Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous compact, 3 times in a row. A file being read or a tool output is likely too large for the context window. Try reading in smaller chunks, or use /clear to start fresh."
         );
+    }
+}
+
+/// Local estimates guide compaction. They must not masquerade as exact provider
+/// counts and reject input. Provider overflow retains the existing recovery path.
+#[must_use]
+pub fn warning_for_input_budget(tokens: u64, budget: Option<u64>) -> TokenWarningState {
+    let threshold = budget.map(threshold_for_input_budget).unwrap_or(u64::MAX);
+    let buffer = WARNING_THRESHOLD_BUFFER_TOKENS.min(threshold / 10);
+    TokenWarningState {
+        percent_left: percent_left_of(threshold, tokens),
+        is_above_warning_threshold: budget.is_some() && tokens >= threshold.saturating_sub(buffer),
+        is_above_error_threshold: budget.is_some() && tokens >= threshold,
+        is_above_auto_compact_threshold: budget.is_some() && tokens >= threshold,
+        is_at_blocking_limit: false,
     }
 }

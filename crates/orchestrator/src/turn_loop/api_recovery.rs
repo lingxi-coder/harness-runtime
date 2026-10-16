@@ -177,7 +177,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // is `true` to mirror the always-on default of this port (no GrowthBook).
     let estimate = compaction::grouping::estimate_tokens_for_range(&history_snapshot);
     let active_betas = orch.api.active_betas();
-    let warning = compaction::calculate_token_warning_state(estimate, model, &active_betas, true);
+    let warning = orch.api.context_warning(estimate, model, profile);
 
     // SC-06: the one-shot unknown-model auto-compact notice (`Pk0`
     // @306646044). Upstream emits it from the REPL launcher (@306693668) as
@@ -192,13 +192,15 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // Landed on the warn log, which is the oracle's own non-interactive branch
     // verbatim; the port has no `cz`-equivalent console-notice channel for the
     // interactive branch.
-    if let Some(notice) = compaction::thresholds::unknown_model_window_notice_once(
-        model,
-        &active_betas,
-        None,
-        compaction::thresholds::is_auto_compact_enabled(true),
-    ) {
-        tracing::warn!("[autocompact] {notice}");
+    if matches!(orch.api.context_budget(model, profile), Ok(None)) {
+        if let Some(notice) = compaction::thresholds::unknown_model_window_notice_once(
+            model,
+            &active_betas,
+            None,
+            compaction::thresholds::is_auto_compact_enabled(true),
+        ) {
+            tracing::warn!("[autocompact] {notice}");
+        }
     }
 
     // Push the live context-pressure banner to the UI — the orchestrator-side
@@ -230,8 +232,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // emitted every turn — even when no warning banner shows — so the custom
     // statusline's `context_window.used_percentage` is always live. Reuses the
     // SAME `estimate` and active request betas as the banner/auto-compact gate.
-    let context_window =
-        compaction::thresholds::effective_context_window_size(model, &active_betas);
+    let context_window = orch.api.input_context_budget(model, profile).unwrap_or(0);
     let used_fraction = if context_window == 0 {
         0.0
     } else {

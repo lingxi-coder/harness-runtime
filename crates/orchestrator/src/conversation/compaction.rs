@@ -3552,13 +3552,14 @@ impl ConversationOrchestrator {
         // the (possibly networked) compaction call. The session's CURRENT model
         // rides along for the threshold resolution below.
         let pending_ingress_prompt_id = crate::request_context::pending_ingress_prompt_id();
-        let (snapshot, last_assistant_at, model) = {
+        let (snapshot, last_assistant_at, model, model_profile) = {
             let s = self.session.lock().await;
             let snapshot = s.model_context_history();
             (
                 snapshot,
                 s.message_timing.last_assistant_at,
                 s.model.clone(),
+                s.model_profile.clone(),
             )
         };
         let prompt_in_compaction_input = pending_ingress_prompt_id
@@ -3573,7 +3574,38 @@ impl ConversationOrchestrator {
         // move the gate with it. `refresh_autocompact_threshold` is a no-op for
         // fixed-threshold callers (tests, embedded hosts) — it returns their
         // configured value.
-        let threshold = compactor.refresh_autocompact_threshold(&model, &self.api.active_betas());
+        let threshold = match self.api.context_budget(&model, model_profile.as_deref()) {
+            Ok(Some(context)) => {
+                // Existing explicit settings remain authoritative within hard limits.
+                let configured = compaction::thresholds::resolve_auto_compact_window(
+                    &model,
+                    &self.api.active_betas(),
+                    None,
+                    true,
+                );
+                let budget = if matches!(
+                    configured.source,
+                    compaction::thresholds::AutoCompactWindowSource::Env
+                        | compaction::thresholds::AutoCompactWindowSource::Settings
+                ) {
+                    Some(
+                        context
+                            .hard_input_limit
+                            .map_or(configured.configured, |limit| {
+                                limit.min(configured.configured)
+                            }),
+                    )
+                } else {
+                    context.effective_input_budget
+                };
+                compactor.refresh_context_budget(budget)
+            }
+            Ok(None) => compactor.refresh_autocompact_threshold(&model, &self.api.active_betas()),
+            Err(error) => {
+                tracing::warn!(%error, "cannot resolve context budget before compaction");
+                return;
+            }
+        };
 
         // Threshold gate: under threshold ⇒ strict no-op. `snip_freed = 0`
         // because we have done no snip work yet at the call site.

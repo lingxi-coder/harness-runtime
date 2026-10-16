@@ -165,4 +165,6 @@
 /// the SetModel/NewSession model-selection fields. JSON remains string-shaped,
 /// while the generated native layouts change. Side Chat variants append after
 /// the protocol-25 frozen prefixes and preserve all existing native ordinals.
-pub const CLIENT_PROTOCOL_VERSION: &str = "25.0.0";
+/// Version 26 adds resolved context budgets and exact pricing intervals to
+/// model records. Generated native bindings must be rebuilt with the runtime.
+pub const CLIENT_PROTOCOL_VERSION: &str = "26.0.0";

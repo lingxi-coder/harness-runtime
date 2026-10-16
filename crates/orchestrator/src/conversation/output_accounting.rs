@@ -158,16 +158,23 @@ impl ConversationOrchestrator {
     /// This is the host-side source for the main-loop `session.measure` event;
     /// breakdown-only context estimates are deliberately not computed here.
     pub(crate) async fn mod_session_measure_snapshot(&self) -> ModSessionMeasureSnapshot {
-        let model = self.session.lock().await.model.clone();
-        let window = llm_runtime::model::context_window::context_window_for_model(
-            &model,
-            &self.api.active_betas(),
-        );
+        let (model, profile) = {
+            let s = self.session.lock().await;
+            (s.model.clone(), s.model_profile.clone())
+        };
+        let window = self
+            .api
+            .input_context_budget(&model, profile.as_deref())
+            .unwrap_or(0);
         let tokens = self
             .compaction_runtime
             .last_response_input_tokens
             .load(Ordering::Relaxed);
-        let mut context = serde_json::json!({"window":window});
+        let mut context = if window == 0 {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"window":window})
+        };
         if tokens > 0 && window > 0 {
             let percent = ((tokens as f64 / window as f64) * 100.0)
                 .round()
@@ -246,16 +253,23 @@ impl ConversationOrchestrator {
         let started_at = chrono::DateTime::<chrono::Utc>::from(started_at)
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-        let model = self.session.lock().await.model.clone();
-        let window = llm_runtime::model::context_window::context_window_for_model(
-            &model,
-            &self.api.active_betas(),
-        );
+        let (model, profile) = {
+            let s = self.session.lock().await;
+            (s.model.clone(), s.model_profile.clone())
+        };
+        let window = self
+            .api
+            .input_context_budget(&model, profile.as_deref())
+            .unwrap_or(0);
         let tokens = self
             .compaction_runtime
             .last_response_input_tokens
             .load(Ordering::Relaxed);
-        let mut context = serde_json::json!({"window":window});
+        let mut context = if window == 0 {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"window":window})
+        };
         if tokens > 0 && window > 0 {
             #[allow(clippy::cast_precision_loss)]
             let percent = ((tokens as f64 / window as f64) * 100.0)

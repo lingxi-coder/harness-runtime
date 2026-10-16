@@ -32,13 +32,12 @@ fn version_is_semver() {
     }
 }
 
-/// Major 25 moves ClientEvent::Error.message to the source-preserving string
-/// carrier. Side Chat additions append after the frozen ordinal prefix.
+/// Major 26 adds context policy and pricing interval fields to model records.
 ///
 /// This test is the deliberate second lock on the version: the structural guard
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_twenty_five_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "25.0.0");
+fn version_is_twenty_six_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "26.0.0");
 }

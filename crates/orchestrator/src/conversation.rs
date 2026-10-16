@@ -280,6 +280,51 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// Host-validated beta additions applied to provider requests. The
     /// orchestrator consumes these for the same context-window/compaction
     /// calculations; default clients have none.
+    /// None is reserved for hosts without model routing. Production returns a
+    /// route-specific snapshot even when its limits are unknown.
+    fn context_budget(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<Option<llm_runtime::ResolvedContext>, LlmError> {
+        Ok(None)
+    }
+
+    fn input_context_budget(&self, model: &str, profile: Option<&str>) -> Option<u64> {
+        match self.context_budget(model, profile) {
+            Ok(Some(context)) => context.effective_input_budget,
+            Ok(None) => Some(compaction::context_window::context_window_for_model(
+                model,
+                &self.active_betas(),
+            )),
+            Err(error) => {
+                tracing::warn!(%error, "context budget is unavailable");
+                None
+            }
+        }
+    }
+
+    fn context_warning(
+        &self,
+        tokens: u64,
+        model: &str,
+        profile: Option<&str>,
+    ) -> compaction::thresholds::TokenWarningState {
+        match self.context_budget(model, profile) {
+            Ok(Some(context)) => compaction::thresholds::warning_for_input_budget(
+                tokens,
+                context.effective_input_budget,
+            ),
+            Ok(None) => {
+                compaction::calculate_token_warning_state(tokens, model, &self.active_betas(), true)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "context pressure is unavailable");
+                compaction::thresholds::warning_for_input_budget(tokens, None)
+            }
+        }
+    }
+
     fn active_betas(&self) -> Vec<String> {
         Vec::new()
     }

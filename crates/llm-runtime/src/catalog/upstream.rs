@@ -79,18 +79,6 @@ pub fn builtin_presets() -> BuiltinCatalog {
                             rates.clone(),
                         );
                     }
-                    if let (Some(context_window), Some(max_output)) =
-                        (metadata.context_window_tokens, metadata.max_output_tokens)
-                    {
-                        if context_window > 0 {
-                            let limits = crate::model::model_limits::ModelLimits {
-                                context_window,
-                                max_output_tokens: max_output,
-                            };
-                            crate::model::model_limits::register(&model.request_model, limits);
-                            crate::model::model_limits::register(&model.display_model, limits);
-                        }
-                    }
                     let support = model.capability_support.unwrap_or_default();
                     let supported = |value| value == wire::CapabilitySupport::Supported;
                     ModelProfile {
@@ -223,4 +211,114 @@ fn billing_mode(mode: wire::BillingMode) -> lingxi_core::host::ModelBillingMode 
         wire::BillingMode::Free => lingxi_core::host::ModelBillingMode::Free,
         wire::BillingMode::Unknown => lingxi_core::host::ModelBillingMode::Unknown,
     }
+}
+
+/// Use the SDK selector for display as well as billing. Conditional prices are
+/// never flattened into a misleading single default rate.
+pub(crate) fn enrich_context_metadata(
+    profile: &wire::ProviderProfile,
+    model: &wire::ModelProfile,
+    metadata: &mut ModelMetadata,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs());
+    let context = lingxi_llm_client::CodecContext::for_model(
+        profile,
+        model,
+        lingxi_llm_client::RequestMode::Complete,
+    );
+    let output = lingxi_llm_client::client::resolve_output_budget(
+        context.profile(),
+        &model.request_model,
+        None,
+    )
+    .ok()
+    .and_then(|b| b.value);
+    let tier = model
+        .info
+        .features
+        .on_connection(&profile.info.features)
+        .default_service_tier
+        .unwrap_or_default();
+    let query = wire::PricingContext {
+        unix_seconds: now,
+        service_tier: Some(tier),
+        ..Default::default()
+    };
+    if let Ok(context) = lingxi_llm_client::client::context::resolve_context(
+        profile,
+        model,
+        &Default::default(),
+        output,
+        &query,
+    ) {
+        metadata.context_budget = Some(lingxi_core::host::ModelContextBudget {
+            policy: match context.policy {
+                wire::ContextPolicy::Auto => "auto",
+                wire::ContextPolicy::Long => "long",
+                wire::ContextPolicy::Custom { .. } => "custom",
+            }
+            .into(),
+            effective_input_budget: context.effective_input_budget,
+            hard_input_limit: context.hard_input_limit,
+            standard_price_input_tokens: context.standard_price_input_tokens,
+            recommendation_input_tokens: context.recommendation.as_ref().map(|r| r.input_tokens),
+            recommendation_source: context.recommendation.map(|r| r.source),
+        });
+    }
+    let Some(pricing) = metadata.pricing.as_mut() else {
+        return;
+    };
+    let Some(rates) = model
+        .pricing
+        .as_ref()
+        .filter(|p| p.currency.as_deref().unwrap_or("USD") == "USD")
+    else {
+        return;
+    };
+    if model.billing_mode_on(&profile.pricing) != wire::BillingMode::PerToken {
+        return;
+    }
+    let Ok(frozen) = lingxi_llm_client::FrozenPricing::capture(
+        profile,
+        &model.display_model,
+        &model.request_model,
+    ) else {
+        return;
+    };
+    pricing.tiers = rates
+        .rules
+        .iter()
+        .filter(|r| {
+            r.service_tier == tier
+                && r.submission == wire::Submission::Interactive
+                && (r.min_input_tokens.is_some() || r.max_input_tokens.is_some())
+        })
+        .filter_map(|rule| {
+            let quote = frozen
+                .quote(&wire::PricingContext {
+                    input_tokens: Some(rule.min_input_tokens.unwrap_or(1)),
+                    ..query.clone()
+                })
+                .ok()?;
+            if quote.rule.as_ref() != Some(rule) {
+                return None;
+            }
+            let rates = quote.rates?;
+            Some(lingxi_core::host::ModelPricingTier {
+                context_threshold_tokens: rule.min_input_tokens.unwrap_or(1),
+                max_input_tokens: rule.max_input_tokens,
+                service_tier: Some(format!("{:?}", tier).to_lowercase()),
+                source: quote.source,
+                verified_at: quote.verified_at,
+                input_per_million: rates.input_per_million,
+                output_per_million: rates.output_per_million,
+                cache_read_per_million: rates.cache_read_per_million,
+                cache_write_per_million: rates.cache_write_per_million,
+                reasoning_per_million: rates.reasoning_per_million,
+            })
+        })
+        .collect();
 }
