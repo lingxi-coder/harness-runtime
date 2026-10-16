@@ -2885,8 +2885,20 @@ impl ApiService {
         let effective_context = crate::model::context_window::is_claude_family(model).then(|| {
             crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas)
         });
-        Ok(lingxi_llm_client::client::recovery_output_budget(
+        let Some(selected) = connection.models.iter().find(|row| {
+            row.request_model == route.request_model
+                && row.display_model == route.display_model
+                && row.billing_model == route.pricing_model.billing_model
+        }) else {
+            return Ok(None);
+        };
+        let context = lingxi_llm_client::CodecContext::for_model(
             connection,
+            selected,
+            lingxi_llm_client::RequestMode::Complete,
+        );
+        Ok(lingxi_llm_client::client::recovery_output_budget(
+            context.profile(),
             &route.request_model,
             &usage.report,
             issued,
@@ -2957,12 +2969,24 @@ impl ApiService {
         use crate::model::thinking::{model_sends_temperature, session_thinking_active};
 
         let has_thinking = thinking.is_some_and(session_thinking_active);
+        req.execution.automatic_thinking_budget = matches!(
+            thinking,
+            Some(crate::model::thinking::ThinkingConfig::Adaptive)
+        );
         req.execution.side_thinking_disabled = matches!(
             thinking,
             Some(crate::model::thinking::ThinkingConfig::Disabled)
         );
         req.set_reasoning(thinking.and_then(|thinking| {
-            crate::model::thinking::reasoning_for_request(thinking, model, req.input.max_tokens)
+            crate::model::thinking::reasoning_for_request(
+                thinking,
+                model,
+                if req.execution.automatic_thinking_budget {
+                    None
+                } else {
+                    req.input.max_tokens
+                },
+            )
         }));
         req.input.temperature = temperature.or_else(|| {
             if thinking.is_some()
@@ -4911,6 +4935,8 @@ impl ApiService {
             .execution
             .native_thinking_state_snapshot
             .unwrap_or_else(|| self.thinking_state());
+        // Native Lsn normalization and its provenance are resolved separately.
+        request.execution.automatic_thinking_budget = false;
         let request_type_disabled = state.native_request_type_disabled();
         request.execution.native_thinking_request_type_disabled = request_type_disabled;
         // This is a standard Native Main request after the exact route fence;
@@ -11109,18 +11135,20 @@ impl ApiService {
                 req.execution.native_thinking_display = self.native_thinking_display.clone();
             }
             let has_thinking = session_thinking_active(thinking);
+            req.execution.automatic_thinking_budget =
+                matches!(thinking, crate::model::thinking::ThinkingConfig::Adaptive);
 
-            // The claude/non-claude branch, the env kill switches and the
-            // budget clamp live in `model::thinking::reasoning_for_request` —
-            // the SAME session-config resolution the compaction side-query
-            // path inherits (cc 2.1.198). Behavior is byte-identical to the
-            // previous inline block.
+            // SDK preparation binds automatic manual thinking to each
+            // attempt's selected route and effective output ceiling. Keep the
+            // logical request independent of the first connection's default.
             req.set_reasoning(crate::model::thinking::reasoning_for_request(
                 thinking,
                 model,
-                req.input.max_tokens.or_else(|| {
-                    lingxi_llm_client::client::claude_application_output_default(model)
-                }),
+                if req.execution.automatic_thinking_budget {
+                    None
+                } else {
+                    req.input.max_tokens
+                },
             ));
 
             // temperature:1 ONLY when thinking is disabled AND the model is in the

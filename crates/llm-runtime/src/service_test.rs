@@ -5590,14 +5590,14 @@ mod tests {
     }
 
     #[test]
-    fn build_request_non_adaptive_model_gets_fixed_budget() {
+    fn build_request_automatic_thinking_preserves_output_budget_intent() {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_thinking_env();
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport); // default Adaptive intent, but model disallows adaptive
 
-        // haiku-4-5 supports thinking but NOT adaptive → Enabled{upperLimit-1}.
-        // The 64k output ceiling also permits the model's 63_999 thinking cap.
+        // Preserve the original automatic manual budget. SDK preparation
+        // binds it to each selected attempt's actual output ceiling.
         let req = adapter
             .build_request(
                 "claude-haiku-4-5",
@@ -5617,13 +5617,33 @@ mod tests {
                 .thinking
                 .as_ref()
                 .and_then(|thinking| thinking.budget),
-            Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(31_999)),
-            "haiku-4-5 → fixed budget clamped to max_tokens-1"
+            Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(63_999)),
+            "preserve original thinking intent until SDK preparation"
         );
+        assert!(req.execution.automatic_thinking_budget);
         assert!(
             req.input.temperature.is_none(),
             "thinking on → no temperature"
         );
+
+        let mut side = req.clone();
+        side.input.max_tokens = Some(8192);
+        adapter.apply_side_query_thinking(
+            &mut side,
+            "claude-haiku-4-5",
+            Some(crate::model::thinking::ThinkingConfig::Adaptive),
+            None,
+        );
+        assert!(side.execution.automatic_thinking_budget);
+        assert_eq!(side.input.thinking, req.input.thinking);
+        assert_eq!(side.input.max_tokens, Some(8192));
+        adapter.apply_side_query_thinking(
+            &mut side,
+            "claude-haiku-4-5",
+            Some(crate::model::thinking::ThinkingConfig::Disabled),
+            None,
+        );
+        assert!(!side.execution.automatic_thinking_budget);
         clear_thinking_env();
     }
 
@@ -5641,8 +5661,8 @@ mod tests {
         clear_thinking_env();
         let model = "claude-sonnet-4-20250514";
 
-        // Default session config (Adaptive intent): the issued body carries the
-        // SAME thinking the shared main-loop builder computes for this model.
+        // The shared main-loop builder preserves automatic intent; the issued
+        // body fits that intent to this model's 32K application output budget.
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport.clone());
         let expected = match adapter
@@ -5670,7 +5690,8 @@ mod tests {
                 budget: Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(budget_tokens)),
                 ..
             }) => {
-                serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens, "display": "updates"})
+                assert_eq!(budget_tokens, 63_999, "original automatic intent");
+                serde_json::json!({"type": "enabled", "budget_tokens": 31_999, "display": "updates"})
             }
             None => serde_json::Value::Null,
             other => panic!("unexpected thinking config: {other:?}"),
@@ -5691,6 +5712,7 @@ mod tests {
             .await
             .expect("messages_create");
         let body = request_body_value(&transport.seen.lock().unwrap()[0].body_json);
+        assert_eq!(body["max_tokens"], 32_000);
         assert_eq!(
             body.get("thinking")
                 .cloned()
