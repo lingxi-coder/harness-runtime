@@ -1032,7 +1032,7 @@ impl StreamingTurnDriver<'_> {
         loop_state: &'call mut TurnLoopState,
         retry_scope: &'call ModelCallRetryScope,
     ) -> BoxFuture<'call, Result<OpenStreamingOutcome<'orch>, OrchestratorError>> {
-        Box::pin(Self::open_iteration_inner(
+        Box::pin(StreamingTurnDriver::<'orch>::open_iteration_inner(
             orch,
             prepared,
             system_prompt,
@@ -2069,7 +2069,7 @@ impl StreamingTurnDriver<'_> {
         user_cancel: &'call Option<CancellationToken>,
         loop_state: &'call mut TurnLoopState,
     ) -> BoxFuture<'call, Result<PumpStreamingOutcome<'orch>, OrchestratorError>> {
-        Box::pin(Self::pump_iteration_inner(
+        Box::pin(StreamingTurnDriver::<'orch>::pump_iteration_inner(
             orch,
             prepared,
             system_prompt,
