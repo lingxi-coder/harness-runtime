@@ -472,7 +472,7 @@ mod tests {
         parent
             .scope_at(10, async {
                 CAPTURE.with(|capture| {
-                    *capture.0.lock().unwrap().snapshot =
+                    capture.0.lock().unwrap().snapshot =
                         Some(inherit_request_anchor(snapshot.clone()))
                 });
                 child.scope(async {}).await;
