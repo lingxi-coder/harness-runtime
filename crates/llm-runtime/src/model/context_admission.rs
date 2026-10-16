@@ -18,12 +18,11 @@ pub(crate) fn check(
         .effective_input_budget
         .filter(|budget| context.hard_input_limit.is_none_or(|hard| *budget < hard));
     if let Some(budget) = soft.filter(|budget| count > *budget) {
-        let source = if exact.is_some() {
-            "provider-counted"
-        } else {
-            "estimated"
-        };
-        return Err(LlmError::InvalidRequest { message: format!("Application input budget exceeded: {source} {count} tokens, budget {budget}. Compact the conversation, select long context, or increase the custom input budget. The input was not truncated.") });
+        return Err(LlmError::InputBudgetExceeded {
+            input_tokens: count,
+            budget,
+            estimated: exact.is_none(),
+        });
     }
     Ok(())
 }
@@ -53,9 +52,17 @@ mod tests {
     fn soft_limit_is_inclusive_and_has_actionable_local_error() {
         assert!(check(&context(), 200000, None).is_ok());
         let error = check(&context(), 200001, None).unwrap_err();
-        assert!(
-            matches!(error,LlmError::InvalidRequest { ref message } if message.contains("estimated") && message.contains("not truncated"))
-        );
+        assert!(matches!(
+            error,
+            LlmError::InputBudgetExceeded {
+                input_tokens: 200001,
+                budget: 200000,
+                estimated: true
+            }
+        ));
+        assert!(error.to_string().contains("estimated"));
+        assert!(error.to_string().contains("not truncated"));
+        assert_eq!(error.context_recovery_token_gap(), Some(0));
     }
     #[test]
     fn only_verified_count_is_a_hard_overflow() {

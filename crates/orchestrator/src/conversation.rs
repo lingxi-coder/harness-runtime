@@ -913,6 +913,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
                 // with NO status set; the port decodes ContextOverflow from the
                 // message, so no `APIError` status is available → omit.
                 LlmError::ContextOverflow { .. } => (Some("invalid_request"), None),
+                LlmError::InputBudgetExceeded { .. } => (Some("invalid_request"), None),
                 // 413 request-too-large (`su({content:$Vi(),error:"invalid_request",
                 // errorDetails:`request_too_large: …`})`, 2.1.212) → the SAME
                 // `invalid_request` category as the context-window branch; the

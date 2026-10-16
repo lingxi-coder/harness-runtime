@@ -77,10 +77,138 @@ mod tests {
             .execute_non_stream_request(request, NonStreamingRequestClass::Main, Default::default())
             .await
             .unwrap_err();
-        assert!(
-            matches!(error, LlmError::InvalidRequest { ref message } if message.contains("Application input budget exceeded"))
-        );
+        assert!(matches!(
+            error,
+            LlmError::InputBudgetExceeded {
+                budget: 100,
+                estimated: true,
+                ..
+            }
+        ));
         assert_eq!(transport.seen_count(), 0);
+    }
+
+    fn context_policy_count_fixture(
+        first: FakeResponse,
+    ) -> (ApiService, Arc<FakeTransport>, LlmRequest) {
+        let mut provider = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|p| p.profile_name == "anthropic")
+            .unwrap();
+        provider.profile_name = "context-count-test".into();
+        provider.provider_id = crate::ProviderId::Custom {
+            name: "context-count-test".into(),
+        };
+        provider.base_url = "https://example.test".into();
+        provider.wire_profile = None;
+        provider.connection = Default::default();
+        provider.auth = crate::AuthStrategy::None;
+        provider.credential = crate::CredentialConfig::None;
+        provider.models.truncate(1);
+        let model = &mut provider.models[0];
+        model.request_model = "m".into();
+        model.display_model = "m".into();
+        model.billing_model = "m".into();
+        model.aliases.clear();
+        model.metadata = lingxi_core::host::ModelMetadata {
+            context_window_tokens: Some(8192),
+            max_output_tokens: Some(1024),
+            context: Some(lingxi_core::host::ContextMetadata {
+                shared_window: Some(true),
+                application: Some(lingxi_core::host::ContextPolicy::Long),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = crate::ModelRuntime::from_config(crate::ClientConfig {
+            providers: vec![provider],
+        })
+        .unwrap();
+        let transport = FakeTransport::sequence(vec![
+            first,
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let service = ApiService::new(
+            Arc::new(client),
+            transport.clone(),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        )
+        .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        let mut request = LlmRequest::new("m").with_user_text("x".repeat(22000));
+        request.profile = Some("context-count-test".into());
+        request.input.max_tokens = Some(512);
+        (service, transport, request)
+    }
+
+    #[tokio::test]
+    async fn context_policy_missing_count_endpoint_still_dispatches_generation() {
+        for status in [404, 405, 501] {
+            let (service, transport, request) = context_policy_count_fixture(FakeResponse::Ok(
+                ProviderResponse::json(
+                    status,
+                    serde_json::json!({"error":{"type":"not_found_error","message":"count_tokens endpoint is not implemented"}}),
+                ),
+            ));
+            service
+                .execute_non_stream_request(
+                    request,
+                    NonStreamingRequestClass::Main,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            let seen = transport.seen.lock().unwrap();
+            assert_eq!(seen.len(), 2, "HTTP {status}");
+            assert!(url::Url::parse(&seen[0].url)
+                .unwrap()
+                .path()
+                .ends_with("/messages/count_tokens"));
+            assert!(url::Url::parse(&seen[1].url)
+                .unwrap()
+                .path()
+                .ends_with("/messages"));
+        }
+    }
+
+    #[tokio::test]
+    async fn context_policy_count_failures_preserve_auth_and_transport_errors() {
+        for (status, kind) in [
+            (401, "authentication_error"),
+            (403, "permission_error"),
+            (429, "rate_limit_error"),
+            (500, "api_error"),
+        ] {
+            let (service, transport, request) =
+                context_policy_count_fixture(FakeResponse::Ok(ProviderResponse::json(
+                    status,
+                    serde_json::json!({"error":{"type":kind,"message":"count rejected"}}),
+                )));
+            let error = service.ensure_context_fit(&request).await.unwrap_err();
+            assert_eq!(error.http_status(), Some(status));
+            assert_eq!(transport.seen_count(), 1);
+        }
+        for error in [
+            LlmError::tls_cert("CERT_HAS_EXPIRED"),
+            LlmError::TransportTimeout {
+                message: "count timed out".into(),
+            },
+        ] {
+            let (service, transport, request) =
+                context_policy_count_fixture(FakeResponse::Err(error.clone()));
+            let actual = service.ensure_context_fit(&request).await.unwrap_err();
+            // FixtureTransport projects host errors through the SDK transport,
+            // which may enrich diagnostic text; their failure class must survive.
+            assert_eq!(
+                std::mem::discriminant(actual.classification_source()),
+                std::mem::discriminant(&error)
+            );
+            assert_eq!(transport.seen_count(), 1);
+        }
     }
 
     #[test]

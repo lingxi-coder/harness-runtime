@@ -6477,6 +6477,7 @@ impl ApiService {
             LlmError::RateLimited { .. } => "rate_limited",
             // "prompt_too_long" — api-client `PromptTooLong { .. } => "prompt_too_long"` (:1147)
             LlmError::ContextOverflow { .. } => "prompt_too_long",
+            LlmError::InputBudgetExceeded { .. } => "input_budget_exceeded",
             // "request_too_large" — 2.1.212 error classifier: a 413 whose message
             // lacks "context window" → `"request_too_large"` (distinct from the
             // context-window `"prompt_too_long"` above).
@@ -7339,6 +7340,7 @@ impl ApiService {
             // refresh call to the IdP failed locally, so inventing a 401 here
             // would put a status in the transcript that no server ever sent.
             LlmError::OAuthRefreshDead
+            | LlmError::InputBudgetExceeded { .. }
             | LlmError::Transport { .. }
             | LlmError::TransportTimeout { .. }
             | LlmError::TlsCert { .. }

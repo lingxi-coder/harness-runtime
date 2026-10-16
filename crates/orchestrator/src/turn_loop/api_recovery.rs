@@ -74,6 +74,15 @@ pub(crate) enum PtlCallOutcome {
     Cancelled,
 }
 
+fn context_recovery_exhausted(
+    input_budget_error: Option<LlmError>,
+) -> Result<PtlCallOutcome, OrchestratorError> {
+    match input_budget_error {
+        Some(error) => Err(error.into()),
+        None => Ok(PtlCallOutcome::PromptTooLong),
+    }
+}
+
 /// Wrap the batched `messages_create` with the 413 / prompt-too-long reactive
 /// recovery loop (In-Loop Compaction Batch 5, BATCHED path only).
 ///
@@ -325,10 +334,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
         .scope(crate::native_computer::call_model(orch, request)));
     orch.record_native_afk_beta_rejection_if_any();
 
-    // Map `LlmError::ContextOverflow` to the PTL recovery path.
-    // The `token_gap` field carries the actual-minus-limit count parsed from the
-    // provider error message by `llm_runtime`; the PTL truncator treats `0` as
-    // "unknown" and falls back to its 20% heuristic.
+    // An assembled request can cross its local soft budget before the
+    // history-only proactive estimate reaches the compaction threshold. Give
+    // that case the same summary-preserving rescue as provider overflow,
+    // without presenting its estimated count as an exact provider token gap.
+    let mut input_budget_error = None;
     let token_gap: u64 = match first {
         Ok(resp) => {
             if let Some(observation) = &mut output_observation {
@@ -340,16 +350,15 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 request_history,
             });
         }
-        Err(error)
+        Err(error) if error.context_recovery_token_gap().is_some() => {
+            let gap = error.context_recovery_token_gap().expect("context failure");
             if matches!(
                 error.classification_source(),
-                LlmError::ContextOverflow { .. }
-            ) =>
-        {
-            match error.classification_source() {
-                LlmError::ContextOverflow { token_gap } => *token_gap,
-                _ => unreachable!("the source was checked as a context overflow"),
+                LlmError::InputBudgetExceeded { .. }
+            ) {
+                input_budget_error = Some(error);
             }
+            gap
         }
         Err(other) => {
             // Context-hint error half (oracle `onRequestError`). A 422/424 is
@@ -575,11 +584,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
                             request_history,
                         });
                     }
-                    Err(error)
+                    Err(error) if error.context_recovery_token_gap().is_some() => {
                         if matches!(
                             error.classification_source(),
-                            LlmError::ContextOverflow { .. }
-                        ) => {}
+                            LlmError::InputBudgetExceeded { .. }
+                        ) {
+                            input_budget_error = Some(error);
+                        }
+                    }
                     Err(other) => return Err(other.into()),
                 }
             }
@@ -615,7 +627,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     "Compaction blocked by PreCompact hook: {detail}"
                 )))
                 .await;
-            return Ok(PtlCallOutcome::PromptTooLong);
+            return context_recovery_exhausted(input_budget_error);
         }
         // Cost preflight precedes any core call. The Mod may skip without
         // calling next(e); only the callback below starts the summarizer.
@@ -702,7 +714,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
             Ok(SessionCompactDecision::Skip { reason, .. }) => {
                 tracing::warn!(%reason, "Reactive compact skipped by session.compact Mod");
                 orch.output.emit_compaction_finished(Some(&reason)).await;
-                return Ok(PtlCallOutcome::PromptTooLong);
+                return context_recovery_exhausted(input_budget_error);
             }
             Err(error) => {
                 let error =
@@ -872,18 +884,21 @@ pub(crate) async fn call_api_with_ptl_recovery(
                             request_history,
                         });
                     }
-                    Err(error)
+                    Err(error) if error.context_recovery_token_gap().is_some() => {
                         if matches!(
                             error.classification_source(),
-                            LlmError::ContextOverflow { .. }
-                        ) => {}
+                            LlmError::InputBudgetExceeded { .. }
+                        ) {
+                            input_budget_error = Some(error);
+                        }
+                    }
                     Err(other) => return Err(other.into()),
                 }
             }
         }
     }
 
-    // Still over the limit after truncation + one reactive compact: surface the
-    // byte-exact prompt-too-long message and end the turn (no hard error).
-    Ok(PtlCallOutcome::PromptTooLong)
+    // Keep a local policy failure actionable if summarization cannot help;
+    // it is not evidence that the provider rejected the context.
+    context_recovery_exhausted(input_budget_error)
 }

@@ -45,7 +45,24 @@ pub async fn try_count_tokens_exact(
     transport: Arc<dyn Transport>,
     request: &LlmRequest,
 ) -> Result<Option<u64>, LlmError> {
-    client.count_tokens_exact(request, transport).await
+    match client.count_tokens_exact(request, transport).await {
+        // Compatible Messages endpoints may omit this auxiliary API. Only a
+        // concrete unsupported-endpoint response permits estimation; auth,
+        // permissions, rate limits, TLS and transport errors remain failures.
+        Err(error)
+            if matches!(error.http_status(), Some(404 | 405 | 501))
+                && matches!(
+                    error.classification_source(),
+                    LlmError::InvalidRequest { .. }
+                        | LlmError::ModelUnavailable
+                        | LlmError::ProviderInternal
+                        | LlmError::UnsupportedCapability { .. }
+                ) =>
+        {
+            Ok(None)
+        }
+        result => result,
+    }
 }
 
 /// Structured provider-visible approximation used when no exact endpoint is

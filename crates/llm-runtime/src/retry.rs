@@ -40,6 +40,7 @@ impl RetryPolicy {
             | LlmError::RequestDispatchRejected { .. }
             | LlmError::QuotaExceeded
             | LlmError::ContextOverflow { .. }
+            | LlmError::InputBudgetExceeded { .. }
             | LlmError::RequestTooLarge
             | LlmError::ModelUnavailable
             | LlmError::StreamInterrupted { .. }
