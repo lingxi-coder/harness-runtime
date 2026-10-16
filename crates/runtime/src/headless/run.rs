@@ -20,7 +20,6 @@ use crate::headless::stream_json_input::{
     emit_replay_ack_queued, ControlPlaneWriter, StdinControlFrame, StdinReaderStatus, StreamInput,
 };
 use crate::headless::HeadlessRuntime as Runtime;
-use command_api::format_description_with_source;
 use control::{
     dispatch_control_request, flag_settings_fast_mode_opt_in, model_capabilities,
     recover_orphaned_permission, resolve_fast_mode_disabled_reason, resolve_fast_mode_state,
@@ -45,6 +44,8 @@ use std::sync::Arc;
 use suggestions::{SdkPromptSuggestions, StreamFileSuggestionIndex};
 mod control;
 mod fusion;
+#[path = "run/initialize_commands.rs"]
+mod initialize_commands;
 mod lifecycle;
 mod result_holding;
 pub(super) mod suggestions;
@@ -120,6 +121,20 @@ async fn init_plugins(runtime: &Runtime) -> Vec<crate::headless::stream_json::St
             }
         })
         .collect()
+}
+
+async fn init_output_style(
+    orchestrator: &orchestrator::ConversationOrchestrator,
+) -> Utf16JsonProjection {
+    orchestrator
+        .active_output_style_setting()
+        .await
+        .filter(|style| {
+            style
+                .string_units("")
+                .is_some_and(|units| !units.is_empty())
+        })
+        .unwrap_or_else(|| "default".into())
 }
 
 async fn init_command_projections(
@@ -824,6 +839,7 @@ async fn run_stream_json_print_inner(
         init_host_metadata(runtime),
     );
     init_params.terminal_slash_commands = terminal_slash_commands;
+    init_params.output_style = init_output_style(&runtime.orchestrator).await;
     init_params.model_source = runtime
         .orchestrator
         .get_status_snapshot()
@@ -1113,6 +1129,7 @@ async fn run_stream_json_input_loop_inner(
         init_host_metadata(runtime),
     );
     init_params.terminal_slash_commands = terminal_slash_commands;
+    init_params.output_style = init_output_style(&runtime.orchestrator).await;
     init_params.model_source = runtime
         .orchestrator
         .get_status_snapshot()
@@ -1184,34 +1201,10 @@ async fn run_stream_json_input_loop_inner(
     // These require async access to runtime — must be collected here before the
     // move into the spawned ctrl-dispatcher task.
 
-    // Commands for the initialize response: user-invocable commands with
-    // name + source-annotated description + argument hint.
-    let init_commands: Vec<serde_json::Value> = {
-        let reg = runtime.dispatcher.registry();
-        let reg_guard = reg.read().await;
-        let mut cmds: Vec<serde_json::Value> = reg_guard
-            .list_all()
-            .into_iter()
-            .filter(|c| c.user_invocable != Some(false))
-            .map(|c| {
-                json!({
-                    "name": c.name.string_at("").unwrap_or_default(),
-                    "description": format_description_with_source(c),
-                    "argumentHint": c.argument_hint.as_ref()
-                        .and_then(|hint| hint.string_at(""))
-                        .unwrap_or("")
-                })
-            })
-            .collect();
-        // Sort deterministically by name.
-        cmds.sort_by(|a, b| {
-            a["name"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(b["name"].as_str().unwrap_or(""))
-        });
-        cmds
-    };
+    // Native Og invokes T5(getCommands()) for each initialize request.
+    // Retain current registry/settings sources instead of a startup snapshot.
+    let init_commands_registry = runtime.dispatcher.registry();
+    let init_command_visibility = runtime.command_visibility_snapshot_loader();
 
     // Agents for the initialize response.
     let init_agents: Vec<serde_json::Value> = runtime
@@ -1321,6 +1314,35 @@ async fn run_stream_json_input_loop_inner(
                 StdinControlFrame::Request(frame) => {
                     let request_id = frame.string_at("/request_id").unwrap_or("").to_owned();
                     let subtype = frame.string_at("/request/subtype").unwrap_or("").to_owned();
+                    let init_commands = if subtype == "initialize" {
+                        match init_command_visibility() {
+                            Ok(visibility) => {
+                                let registry = init_commands_registry.read().await;
+                                initialize_commands::collect(&registry, &visibility)
+                            }
+                            Err(error) => {
+                                let request_source = frame
+                                    .subprojection("/request_id")
+                                    .unwrap_or_else(|_| request_id.clone().into());
+                                if let Err(delivery_error) = ctrl_plane.reply_error_projected(
+                                    request_source,
+                                    format!("Failed to load command visibility settings: {error}")
+                                        .into(),
+                                ) {
+                                    ctrl_execution_errors
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .push(delivery_error.to_string());
+                                    ctrl_plane_busy.shutdown(&delivery_error.to_string()).await;
+                                    end_notify_ctrl.notify_one();
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    };
                     if let Err(error) = dispatch_control_request(
                         &subtype,
                         &request_id,

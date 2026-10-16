@@ -2405,6 +2405,10 @@ impl BuiltinCommandHandler for DesktopWorktreeCommandHandler {
         "Create, enter, inspect, or exit a worktree"
     }
 
+    fn supports_non_interactive(&self) -> bool {
+        true
+    }
+
     fn allowed_tools(&self) -> &'static [&'static str] {
         &[
             tool_worktree::worktree::ENTER_TOOL_NAME,
@@ -2692,6 +2696,18 @@ impl DesktopRuntime {
     ) -> Result<CommandVisibilitySnapshot, lingxi_core::settings::SettingsError> {
         (self.command_visibility_settings_loader)()
             .map(|settings| CommandVisibilitySnapshot { settings })
+    }
+
+    /// Retain the live settings source for command requests serviced by a
+    /// spawned control task after startup.
+    pub(crate) fn command_visibility_snapshot_loader(
+        &self,
+    ) -> impl Fn() -> Result<CommandVisibilitySnapshot, lingxi_core::settings::SettingsError>
+           + Send
+           + Sync
+           + 'static {
+        let loader = self.command_visibility_settings_loader.clone();
+        move || loader().map(|settings| CommandVisibilitySnapshot { settings })
     }
 
     /// Actual assembled SDK services and credential sources for native audio.

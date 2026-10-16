@@ -601,7 +601,7 @@ impl CommandRegistry {
     }
 
     /// Admission to the ordinary Native Headless command pool. This applies
-    /// the current factory/policy state before dispatch as well as discovery;
+    /// the current factory/policy state to the Native projection;
     /// hidden and manual-only rows are not excluded here.
     #[must_use]
     pub fn headless_command_admitted(&self, command: &SlashCommand) -> bool {
@@ -610,6 +610,20 @@ impl CommandRegistry {
             && (policy_prompt || native_factory_enabled(command))
             && self.native_headless_factory_available(command, false)
             && self.execution_allowed(command)
+    }
+
+    /// Admit current LingXi builtin extensions alongside the Native pool for
+    /// execution. An extension must explicitly support non-interactive calls;
+    /// it does not acquire a fabricated Native descriptor or alter that pool.
+    #[must_use]
+    pub fn headless_dispatch_admitted(&self, command: &SlashCommand) -> bool {
+        self.headless_command_admitted(command)
+            || (command.native_type.is_none()
+                && command.source == CommandSource::Builtin
+                && matches!(command.kind, SlashCommandKind::Builtin { .. })
+                && command.supports_non_interactive
+                && command.is_enabled
+                && self.execution_allowed(command))
     }
 
     /// Skill candidates from Native `Cke` before init's user-invocable name

@@ -95,7 +95,7 @@ pub(super) async fn dispatch_control_request(
     session_cwd: &Arc<tool_api::SessionCwd>,
     control_plane: &Arc<crate::headless::control_plane::StdioControlPlane>,
     end_notify: &Arc<tokio::sync::Notify>,
-    init_commands: &[serde_json::Value],
+    init_commands: &[Utf16JsonProjection],
     init_agents: &[serde_json::Value],
     init_models: &[serde_json::Value],
     init_account: &serde_json::Value,
@@ -136,8 +136,7 @@ pub(super) async fn dispatch_control_request(
                     .as_deref()
                     == Some("remote_cowork"),
             );
-            let mut payload = initialize_response_payload(
-                init_commands,
+            let mut payload = initialize_response_payload_scaffold(
                 init_agents,
                 init_models,
                 init_account,
@@ -160,6 +159,34 @@ pub(super) async fn dispatch_control_request(
                 ) {
                     payload["sdk_mcp_manifests_parked"] = statuses;
                 }
+            }
+            let mut payload = projection_from_value(&payload);
+            payload
+                .set_field("commands", projected_array(init_commands.to_vec()))
+                .expect("valid initialize command projections");
+            payload
+                .set_field("output_style", super::init_output_style(orchestrator).await)
+                .expect("valid active output style projection");
+            if let Some(styles) = orchestrator.output_styles().await {
+                let mut names = styles
+                    .styles
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>();
+                // Og uses Object.keys(r2(...)): canonical array-index names
+                // precede the other names, whose insertion order is retained.
+                names.sort_by_key(|name| {
+                    name.parse::<u32>()
+                        .ok()
+                        .filter(|index| *index != u32::MAX && index.to_string() == *name)
+                        .map_or((1, 0), |index| (0, index))
+                });
+                payload
+                    .set_field(
+                        "available_output_styles",
+                        projected_array(names.into_iter().map(Into::into).collect()),
+                    )
+                    .expect("valid output style names");
             }
             writer.reply_initialize(
                 payload,
@@ -1056,14 +1083,13 @@ pub(super) fn pure_control_response(
 ///   --output-format stream-json --verbose`): the `-p` handler replies with
 /// `{commands, agents, output_style, available_output_styles, models, account,
 /// pid}` where `output_style` is `"default"` and `available_output_styles` is
-/// the 4-item list `["default","Proactive","Explanatory","Learning"]`.
+/// the 2.1.295 builtin keys `["default","Proactive","Concise","Explanatory","Learning"]`.
 /// 2.1.220 (live re-capture) extends the tail with the remote-control gate
 /// booleans and `fast_mode_state` / `fast_mode_disabled_reason`.
 /// (NOTE: the separate REPL-bridge handler defaults these to `"normal"` /
 /// `["normal"]`, but that bridge is NOT the `-p --input-format stream-json`
-/// role this dispatcher models — the observable `-p` truth is the 4-item list.)
-pub(super) fn initialize_response_payload(
-    commands: &[serde_json::Value],
+/// role this dispatcher models — the current `-p` builtin list includes `Concise`.)
+fn initialize_response_payload_scaffold(
     agents: &[serde_json::Value],
     models: &[serde_json::Value],
     account: &serde_json::Value,
@@ -1077,10 +1103,10 @@ pub(super) fn initialize_response_payload(
     // no remote-control feature, an accepted divergence, so `false` is always
     // truthful), then `fast_mode_state` + optional `fast_mode_disabled_reason`.
     let mut payload = json!({
-        "commands": commands,
+        "commands": [],
         "agents": agents,
         "output_style": "default",
-        "available_output_styles": ["default", "Proactive", "Explanatory", "Learning"],
+        "available_output_styles": ["default", "Proactive", "Concise", "Explanatory", "Learning"],
         "models": models,
         "account": account,
         "pid": pid,
@@ -1508,7 +1534,7 @@ impl RequestReplyWriter<'_> {
     }
     fn reply_initialize(
         &self,
-        payload: Value,
+        payload: Utf16JsonProjection,
         permissions: Vec<Utf16JsonProjection>,
         dialogs: Vec<Utf16JsonProjection>,
     ) {
@@ -1517,7 +1543,7 @@ impl RequestReplyWriter<'_> {
             .set_field("request_id", self.request_id.clone())
             .expect("valid request identity");
         response
-            .set_field("response", projection_from_value(&payload))
+            .set_field("response", payload)
             .expect("valid initialize payload");
         response
             .set_field("pending_permission_requests", projected_array(permissions))
@@ -1602,6 +1628,33 @@ mod tests {
         assert_eq!(
             line,
             "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"\\ud800\",\"error\":\"unsupported\"}}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_reply_preserves_command_source_units_and_field_order() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writer = ControlPlaneWriter::new(Arc::new(tx));
+        let reply = RequestReplyWriter {
+            writer: &writer,
+            request_id: Utf16JsonProjection::parse(r#""\ud800""#).unwrap(),
+            delivery_error: std::sync::Mutex::new(None),
+        };
+        let payload = Utf16JsonProjection::parse(
+            r#"{"commands":[{"name":"raw-\ud800","description":"desc-\udfff","argumentHint":"","aliases":["alias-\ud800"]}],"pid":42}"#,
+        )
+        .unwrap();
+        reply.reply_initialize(payload, Vec::new(), Vec::new());
+        reply.finish().unwrap();
+        let Some(crate::headless::stream_json::OutboundMsg::Line(line)) = rx.recv().await else {
+            panic!("expected initialize reply");
+        };
+        assert_eq!(
+            line,
+            concat!(
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"\ud800","response":{"commands":[{"name":"raw-\ud800","description":"desc-\udfff","argumentHint":"","aliases":["alias-\ud800"]}],"pid":42},"pending_permission_requests":[],"pending_user_dialog_requests":[]}}"#,
+                "\n"
+            )
         );
     }
 
@@ -1791,12 +1844,12 @@ mod tests {
         // ORACLE 2.1.201 `-p`: output_style "default" + the 4-item list.
         // Locks the `-p` truth (NOT the REPL-bridge "normal"/["normal"]).
         // 2.1.220 re-capture appends the remote-control gates + fast-mode tail
-        // (covered exhaustively by `initialize_payload_tail_matches_2_1_220`).
-        let payload = initialize_response_payload(&[], &[], &[], &json!({}), 4242, "off", None);
+        // (covered exhaustively by `initialize_payload_tail_matches_2_1_295`).
+        let payload = initialize_response_payload_scaffold(&[], &[], &json!({}), 4242, "off", None);
         assert_eq!(payload["output_style"], "default");
         assert_eq!(
             payload["available_output_styles"],
-            json!(["default", "Proactive", "Explanatory", "Learning"])
+            json!(["default", "Proactive", "Concise", "Explanatory", "Learning"])
         );
         assert_eq!(payload["pid"], 4242);
         // Exact top-level key set (no fabricated keys).
@@ -1837,9 +1890,8 @@ mod tests {
     }
 
     #[test]
-    fn initialize_payload_tail_matches_2_1_220() {
-        let p = initialize_response_payload(
-            &[],
+    fn initialize_payload_tail_matches_2_1_295() {
+        let p = initialize_response_payload_scaffold(
             &[],
             &[],
             &json!({}),
@@ -1868,7 +1920,7 @@ mod tests {
         assert_eq!(p["fast_mode_state"], "off");
         assert_eq!(p["fast_mode_disabled_reason"], "sdk_opt_in_required");
 
-        let bare = initialize_response_payload(&[], &[], &[], &json!({}), 42, "off", None);
+        let bare = initialize_response_payload_scaffold(&[], &[], &json!({}), 42, "off", None);
         assert!(
             !bare
                 .as_object()

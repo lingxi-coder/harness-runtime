@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use command_api::builtins::{fusion_request_from_slash, parse_fusion_slash};
-use command_api::model::{BuiltinCommandHandler, CommandResult, NativeCommandType};
+use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use lingxi_core::host::{FusionExecutor, FusionRunId, FusionStatus, OrchestratorHandle};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -489,12 +489,6 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
         Some(FUSION_ARGUMENT_HINT)
     }
 
-    fn native_type(&self) -> Option<NativeCommandType> {
-        // `/fusion` is an explicit local host extension that supports the
-        // ordinary Headless slash route.
-        Some(NativeCommandType::Local)
-    }
-
     fn supports_non_interactive(&self) -> bool {
         true
     }
@@ -709,10 +703,11 @@ mod tests {
         let handler: Arc<dyn BuiltinCommandHandler> = command.clone();
         slash_registry.register_builtin_handler(handler);
         let fusion = slash_registry.resolve(&"fusion".into()).unwrap();
-        assert_eq!(fusion.native_type, Some(NativeCommandType::Local));
+        assert_eq!(fusion.native_type, None);
         assert!(fusion.supports_non_interactive);
-        assert!(slash_registry.headless_command_admitted(fusion));
-        assert!(slash_registry
+        assert!(slash_registry.headless_dispatch_admitted(fusion));
+        assert!(!slash_registry.headless_command_admitted(fusion));
+        assert!(!slash_registry
             .headless_init_commands()
             .iter()
             .any(|command| command.name.string_at("") == Some("fusion")));

@@ -1777,7 +1777,9 @@ impl ConversationOrchestrator {
     /// next prompt assembly reads it back. `Some("default")` is an explicit
     /// choice and must win over an inherited custom style — treating it as
     /// "unset" would make switching BACK to the default impossible.
-    pub(crate) async fn active_output_style_setting(
+    /// Current session-owned output-style value, preserving source UTF-16 for
+    /// protocol consumers as well as prompt assembly.
+    pub async fn active_output_style_setting(
         &self,
     ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         if let Some(refreshed) = self.prompt_runtime.live_output_style.lock().await.clone() {

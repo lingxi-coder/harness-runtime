@@ -3,6 +3,7 @@ use super::tests::fixture_runtime;
 use command_api::model::{
     CommandFrontmatter, CommandSource, NativeCommandType, SlashCommand, SlashCommandKind,
 };
+use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::SettingsScope;
 use std::path::PathBuf;
@@ -102,11 +103,14 @@ async fn assembled_init_projection_applies_off_and_preserves_native_pools_and_or
                 .expect("isolated surrogate prompt name"),
             false,
         ));
-        registry.register_command(prompt_skill(
+        let mut raw_visible = prompt_skill(
             Utf16JsonProjection::parse(r#""odd-\ud800-visible""#)
                 .expect("visible isolated surrogate prompt name"),
             false,
-        ));
+        );
+        raw_visible.description = Utf16JsonProjection::parse(r#""desc-\ud800""#).unwrap();
+        raw_visible.argument_hint = Some(Utf16JsonProjection::parse(r#""\udfff""#).unwrap());
+        registry.register_command(raw_visible);
         registry.register_command(prompt_skill("odd-�-skill".into(), false));
         registry.register_command(terminal_local("init-projection-terminal"));
 
@@ -216,6 +220,44 @@ async fn assembled_init_projection_applies_off_and_preserves_native_pools_and_or
     assert!(
         skill_units.contains(&raw_visible_units),
         "the pre-bge skill list preserves the raw UTF-16 spelling"
+    );
+
+    {
+        let visibility = runtime.command_visibility_snapshot().unwrap();
+        let registry = registry.read().await;
+        let descriptors = super::initialize_commands::collect(&registry, &visibility);
+        let raw = descriptors
+            .iter()
+            .find(|command| command.string_units("/name") == Some(raw_visible_units.clone()))
+            .expect("control initialize retains the source command name");
+        assert_eq!(
+            raw.string_units("/description"),
+            Some(
+                "desc-"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain(" (project)".encode_utf16())
+                    .collect()
+            )
+        );
+        assert_eq!(raw.string_units("/argumentHint"), Some(vec![0xdfff]));
+        assert!(raw.at_pointer("/builtin").is_none());
+        assert!(descriptors.iter().all(|command| {
+            command.string_units("/name") != Some(isolated_surrogate_skill_name())
+        }));
+    }
+
+    runtime
+        .orchestrator
+        .set_output_style("Concise")
+        .await
+        .unwrap();
+    assert_eq!(
+        super::init_output_style(&runtime.orchestrator)
+            .await
+            .string_at(""),
+        Some("Concise"),
+        "initialization reads the active style instead of a fixed default"
     );
 
     assert!(

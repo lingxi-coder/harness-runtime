@@ -183,6 +183,10 @@ impl BuiltinCommandHandler for ConnectHandler {
     fn description(&self) -> &str {
         CONNECT_DESCRIPTION
     }
+
+    fn supports_non_interactive(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +327,8 @@ mod tests {
         );
         assert_eq!(h.name(), "connect");
         assert_eq!(h.description(), CONNECT_DESCRIPTION);
+        assert!(h.supports_non_interactive());
+        assert_eq!(h.native_type(), None);
     }
 
     #[tokio::test]

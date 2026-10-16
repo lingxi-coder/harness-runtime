@@ -756,7 +756,7 @@ impl RegistrySlashDispatcher {
         let parsed = parse_slash_command(raw)?;
         let registry = self.registry.read().await;
         let (command, parsed) = resolve_command_invocation(&registry, parsed)?;
-        if registry.headless_command_admitted(&command) {
+        if registry.headless_dispatch_admitted(&command) {
             return None;
         }
         let name = parsed.name;
@@ -821,7 +821,7 @@ impl RegistrySlashDispatcher {
         };
 
         if self.dispatch_mode == SlashDispatchMode::Headless
-            && !reg.headless_command_admitted(&command)
+            && !reg.headless_dispatch_admitted(&command)
         {
             if let Some(gate) = self.permission_gate.as_ref() {
                 gate.set_command_input_denies(&[], false);
@@ -2225,6 +2225,59 @@ mod tests {
             },
             ..SlashCommand::default()
         }
+    }
+
+    struct OwnHeadlessHandler {
+        name: &'static str,
+        non_interactive: bool,
+    }
+
+    #[async_trait]
+    impl crate::model::BuiltinCommandHandler for OwnHeadlessHandler {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "LingXi command fixture"
+        }
+
+        fn supports_non_interactive(&self) -> bool {
+            self.non_interactive
+        }
+
+        async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
+            CommandResult::Done {
+                display: Some(self.name.into()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_own_commands_require_explicit_capability_without_native_catalog_rows() {
+        let mut registry = CommandRegistry::new();
+        for (name, non_interactive) in [("own-supported", true), ("own-interactive", false)] {
+            registry.register_builtin_handler(Arc::new(OwnHeadlessHandler {
+                name,
+                non_interactive,
+            }));
+        }
+        assert!(registry.headless_init_commands().is_empty());
+        assert_eq!(
+            registry.headless_command_catalog().available_command_count,
+            0
+        );
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+        assert!(matches!(
+            dispatcher.dispatch_headless("/own-supported".into(), CancellationToken::new()).await,
+            SlashDispatchResult::Handled { display } if display.string_at("") == Some("own-supported")
+        ));
+        assert!(matches!(
+            dispatcher
+                .dispatch_headless("/own-interactive".into(), CancellationToken::new())
+                .await,
+            SlashDispatchResult::Unknown { .. }
+        ));
     }
 
     #[tokio::test]

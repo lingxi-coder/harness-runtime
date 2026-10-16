@@ -44,6 +44,54 @@ const NATIVE_UNKNOWN_COMMAND_NAMES: &[&str] = &[
     "security-review",
 ];
 const NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT: usize = 41;
+// Native raw init fixture SHA-256 143238ef9dd790461f617295c12db131c12a810fbf11e87b894b0eb83645164d:
+// 46 rows, minus the four source-hidden descriptors (agents, heapdump,
+// __remote-workflow, workflow-launch-exec), with its two project Skills replaced
+// by this fixture's single graphify Skill. Preserve source order and membership,
+// so one missing local command cannot be concealed by an unrelated extra row.
+const NATIVE_AVAILABLE_COMMAND_NAMES: &[&str] = &[
+    "graphify",
+    "deep-research",
+    "dataviz",
+    "update-config",
+    "verify",
+    "debug",
+    "code-review",
+    "simplify",
+    "batch",
+    "fewer-permission-prompts",
+    "doctor",
+    "loop",
+    "claude-api",
+    "workflow-authoring",
+    "run",
+    "run-skill-generator",
+    "plugin-authoring",
+    "auto-mode-setup",
+    "autocompact",
+    "clear",
+    "color",
+    "compact",
+    "config",
+    "output-style",
+    "context",
+    "effort",
+    "fast",
+    "focus",
+    "init",
+    "mcp",
+    "model",
+    "reload-plugins",
+    "reload-skills",
+    "rename",
+    "security-review",
+    "usage",
+    "insights",
+    "recap",
+    "goal",
+    "list-agents",
+    "team-onboarding",
+];
 const NATIVE_UNKNOWN_ATTACHMENT_ORDER: &[&str] = &[
     "environment",
     "model",
@@ -1112,6 +1160,17 @@ async fn native_295_commands_fixture_replay_body() {
                 })
                 .collect::<Vec<_>>();
             let command_registry = runtime.inner.shared_command_registry.read().await;
+            let available_names = command_registry
+                .headless_init_commands()
+                .into_iter()
+                .filter(|command| !command.is_hidden)
+                .map(|command| command.name.string_at("").unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(available_names, NATIVE_AVAILABLE_COMMAND_NAMES);
+            assert_eq!(
+                available_names.len(),
+                current_catalog.available_command_count
+            );
             // `run_oneshot` has completed its shutdown boundary here. Shutdown
             // retires builtin handler objects but preserves the ordinary
             // command catalog, so assert only that these LingXi facade rows

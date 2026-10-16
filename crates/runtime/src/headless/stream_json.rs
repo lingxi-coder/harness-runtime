@@ -746,7 +746,7 @@ pub struct StreamJsonInitParams {
     /// Claude Code reference version reported by the runtime.
     pub claude_code_version: String,
     /// Active output style reported to the client.
-    pub output_style: String,
+    pub output_style: Utf16JsonProjection,
     /// Agent types available to the current session.
     pub agents: Vec<String>,
     /// Skills available to the current session.
@@ -3643,7 +3643,7 @@ fn build_init_frame_scaffold(session_id: &str, uuid: &str, p: &StreamJsonInitPar
     }
     o.insert("apiKeySource".into(), json!(p.api_key_source));
     o.insert("claude_code_version".into(), json!(p.claude_code_version));
-    o.insert("output_style".into(), json!(p.output_style));
+    o.insert("output_style".into(), json!(""));
     o.insert("agents".into(), json!(p.agents));
     o.insert("skills".into(), json!([]));
     o.insert("plugins".into(), json!(p.plugins));
@@ -3700,6 +3700,7 @@ fn build_init_projection(
         "/skills",
         Utf16JsonProjection::array(params.skills.clone())?,
     )?;
+    projection.replace_pointer_projection("/output_style", params.output_style.clone())?;
     if let Some(model_source) = &params.model_source {
         projection.replace_pointer_projection("/model", model_source.clone())?;
     }
@@ -3829,7 +3830,7 @@ pub fn build_init_params(
         terminal_slash_commands: Vec::new(),
         api_key_source,
         claude_code_version: super::CLAUDE_CODE_REFERENCE_VERSION.to_string(),
-        output_style: output_style.to_string(),
+        output_style: output_style.into(),
         agents,
         skills,
         plugins: plugins_json,
@@ -4927,6 +4928,7 @@ mod tests {
             StreamJsonInitHostMetadata::default(),
         );
         params.terminal_slash_commands = vec![name.clone()];
+        params.output_style = name.clone();
 
         let projected = build_init_projection("utf16-init", "uuid", &params)
             .expect("all projected init arrays are valid JSON");
@@ -4940,7 +4942,8 @@ mod tests {
             reparsed.string_units("/terminal_slash_commands/0"),
             Some(units.clone())
         );
-        assert_eq!(reparsed.string_units("/skills/0"), Some(units));
+        assert_eq!(reparsed.string_units("/skills/0"), Some(units.clone()));
+        assert_eq!(reparsed.string_units("/output_style"), Some(units));
     }
 
     #[tokio::test]

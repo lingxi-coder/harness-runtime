@@ -485,6 +485,10 @@ impl BuiltinCommandHandler for DesktopCronCommandHandler {
     fn argument_hint(&self) -> Option<&str> {
         Some("<schedule or action>")
     }
+
+    fn supports_non_interactive(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -579,6 +583,8 @@ mod tests {
         ));
         assert_eq!(handler.name(), "cron");
         assert_eq!(handler.argument_hint(), Some("<schedule or action>"));
+        assert!(handler.supports_non_interactive());
+        assert_eq!(handler.native_type(), None);
     }
 
     #[tokio::test]
