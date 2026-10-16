@@ -7733,7 +7733,8 @@ mod verbose_json_tests {
             params.claude_code_version,
             super::super::CLAUDE_CODE_REFERENCE_VERSION
         );
-        let frame = projected_init_value("session", "uuid", &params);
+        let projection = build_init_projection("session", "uuid", &params).unwrap();
+        let frame = projected_value(&projection);
         assert_eq!(frame["per_turn_effort_active"], true);
         assert_eq!(frame["view_mode"], "default");
         assert!(frame.get("memory_paths").is_none());

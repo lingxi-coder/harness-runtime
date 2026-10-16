@@ -756,6 +756,9 @@ mod tests {
                 u32::try_from((index + 1) * 2).unwrap()
             );
         }
+        drop(slash_registry);
+        let command = Arc::try_unwrap(command)
+            .unwrap_or_else(|_| panic!("the test registry must release its handler"));
         let disabled = command.with_durable_publication_available(false);
         for (raw, _) in invocations {
             let CommandResult::Done {
