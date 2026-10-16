@@ -625,9 +625,10 @@ impl SideChatManager {
             }
             _ => None,
         };
-        if let Some(raw) = raw {
-            validate_slash(&side.session.dispatcher, &raw).await?;
-        }
+        let native_prompt_slash = match raw {
+            Some(raw) => validate_slash(&side.session.dispatcher, &raw).await?,
+            None => false,
+        };
         let command = match command {
             ClientCommand::SendPrompt {
                 text,
@@ -655,7 +656,7 @@ impl SideChatManager {
         }
         if !turn {
             drop(state);
-            dispatch(&side, id, command, CancellationToken::new()).await?;
+            dispatch(&side, id, command, CancellationToken::new(), false).await?;
             side.state
                 .lock()
                 .await
@@ -713,7 +714,9 @@ impl SideChatManager {
                     ClientCommand::RunSlashCommand { turn_id, .. } => Some(*turn_id),
                     _ => None,
                 };
-                if let Err(error) = dispatch(&side, &side_id, command, cancel).await {
+                if let Err(error) =
+                    dispatch(&side, &side_id, command, cancel, native_prompt_slash).await
+                {
                     if let Some(turn_id) = slash_turn_id {
                         side.replay
                             .emit(ClientEvent::SlashCommandResult {
@@ -776,7 +779,7 @@ impl SideChatManager {
             });
             Ok(())
         } else {
-            dispatch(&side, id, command, cancel).await
+            dispatch(&side, id, command, cancel, false).await
         }
     }
     /// End is owned by the manager and awaits foreground cleanup. Closing
@@ -946,7 +949,7 @@ fn text_from_source(source: &Utf16JsonProjection) -> ClientTextDto {
 async fn validate_slash(
     dispatcher: &RegistrySlashDispatcher,
     raw: &Utf16JsonProjection,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if raw
         .string_units("")
         .is_none_or(|units| units.first().copied() != Some(b'/' as u16))
@@ -961,11 +964,22 @@ async fn validate_slash(
         .resolve(&parsed.name)
         .ok_or_else(|| "command is unavailable in side chat".to_string())?;
     if registry.execution_allowed(descriptor) {
-        Ok(())
+        Ok(descriptor.native_type == Some(command_api::model::NativeCommandType::Prompt))
     } else {
         Err("command is unavailable in side chat".into())
     }
 }
+
+async fn emit_cancelled_slash_result(side: &Side, turn_id: Option<u64>) {
+    side.replay
+        .emit(ClientEvent::SlashCommandResult {
+            turn_id,
+            display: "Slash command was cancelled before entering the model.".into(),
+            is_error: true,
+        })
+        .await;
+}
+
 fn allowed_command(command: &ClientCommand) -> bool {
     matches!(
         command,
@@ -989,6 +1003,7 @@ async fn dispatch(
     id: &str,
     command: ClientCommand,
     cancel: CancellationToken,
+    native_prompt_slash: bool,
 ) -> Result<(), String> {
     let orch = &side.session.orchestrator;
     match command {
@@ -1061,6 +1076,10 @@ async fn dispatch(
             images,
             turn_id,
         } => {
+            if cancel.is_cancelled() {
+                emit_cancelled_slash_result(side, turn_id).await;
+                return Ok(());
+            }
             let replay_images: Vec<client::protocol::message::MessageImageDto> = images
                 .iter()
                 .map(|image| client::protocol::message::MessageImageDto {
@@ -1076,22 +1095,19 @@ async fn dispatch(
                 })
                 .collect::<Vec<_>>();
             let raw_source = raw.clone().into_projection();
-            match side
+            let dispatch_result = side
                 .session
                 .dispatcher
                 .dispatch_with_cancel(raw_source.clone(), id.to_string(), cancel.clone())
-                .await
-            {
+                .await;
+            if native_prompt_slash && cancel.is_cancelled() {
+                emit_cancelled_slash_result(side, turn_id).await;
+                return Ok(());
+            }
+            match dispatch_result {
                 SlashDispatchResult::RunAsTurn { prompt } => {
                     if cancel.is_cancelled() {
-                        side.replay
-                            .emit(ClientEvent::SlashCommandResult {
-                                turn_id,
-                                display: "Slash command was cancelled before entering the model."
-                                    .into(),
-                                is_error: true,
-                            })
-                            .await;
+                        emit_cancelled_slash_result(side, turn_id).await;
                         return Ok(());
                     }
                     {
@@ -1135,14 +1151,7 @@ async fn dispatch(
                     hook_messages,
                 } => {
                     if cancel.is_cancelled() {
-                        side.replay
-                            .emit(ClientEvent::SlashCommandResult {
-                                turn_id,
-                                display: "Slash command was cancelled before entering the model."
-                                    .into(),
-                                is_error: true,
-                            })
-                            .await;
+                        emit_cancelled_slash_result(side, turn_id).await;
                         return Ok(());
                     }
                     {
@@ -1554,6 +1563,42 @@ mod tests {
             })
         }
     }
+
+    struct TestPromptHandler {
+        entered: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Option<Arc<Notify>>,
+    }
+
+    #[async_trait::async_trait]
+    impl command_api::model::BuiltinCommandHandler for TestPromptHandler {
+        async fn handle(
+            &self,
+            _args: &command_api::parser::ParsedSlashCommand,
+        ) -> command_api::model::CommandResult {
+            if let Some(entered) = self.entered.lock().await.take() {
+                let _ = entered.send(());
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            command_api::model::CommandResult::Done {
+                display: Some("test prompt handler completed".into()),
+            }
+        }
+
+        fn name(&self) -> &str {
+            "review"
+        }
+
+        fn description(&self) -> &str {
+            "test prompt command"
+        }
+
+        fn native_type(&self) -> Option<command_api::model::NativeCommandType> {
+            Some(command_api::model::NativeCommandType::Prompt)
+        }
+    }
+
     #[tokio::test]
     async fn end_and_expiry_release_engine_and_replay_but_failed_cleanup_retains_them() {
         let manager = SideChatManager::new(parent(), Arc::new(Factory), Arc::new(Sink::default()));
@@ -1989,6 +2034,115 @@ mod tests {
         manager.shutdown().await.unwrap();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn slash_cancel_during_prompt_dispatch_emits_terminal_before_user_row() {
+        let sink = Arc::new(Sink::default());
+        let manager = SideChatManager::new(parent(), Arc::new(Factory), sink.clone());
+        let id = manager
+            .create("create".into(), None, None, None)
+            .await
+            .unwrap();
+        let side = manager.side(&id).await.unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(Notify::new());
+        side.session
+            .dispatcher
+            .registry()
+            .write()
+            .await
+            .register_builtin_handler(Arc::new(TestPromptHandler {
+                entered: tokio::sync::Mutex::new(Some(entered_tx)),
+                release: Some(release.clone()),
+            }));
+
+        manager
+            .submit(
+                &id,
+                "cancel-during-dispatch".into(),
+                ClientCommand::RunSlashCommand {
+                    raw: "/review".into(),
+                    images: Vec::new(),
+                    turn_id: Some(502),
+                },
+            )
+            .await
+            .unwrap();
+        entered_rx
+            .await
+            .expect("the command dispatcher enters the blocked Native prompt handler");
+        side.state
+            .lock()
+            .await
+            .running
+            .as_ref()
+            .expect("the admitted slash retains its running slot")
+            .cancel
+            .cancel();
+        release.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if side.state.lock().await.running.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cancelled dispatch releases the Side Chat turn slot");
+
+        let events = sink.0.lock().await.clone();
+        let acknowledged = events
+            .iter()
+            .position(|event| {
+                matches!(event,
+                    ClientEvent::SideChatSubmitted { side_id, request_id }
+                        if side_id == &id && request_id == "cancel-during-dispatch"
+                )
+            })
+            .expect("the admitted request is acknowledged");
+        let nested = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                ClientEvent::SideChatEvent {
+                    side_id,
+                    event_json,
+                } if side_id == &id => serde_json::from_str::<ClientEvent>(event_json)
+                    .ok()
+                    .map(|inner| (index, inner)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let (terminal_index, terminal) = nested
+            .iter()
+            .find(|(_, event)| {
+                matches!(
+                    event,
+                    ClientEvent::SlashCommandResult {
+                        turn_id: Some(502),
+                        is_error: true,
+                        ..
+                    }
+                )
+            })
+            .expect("cancellation during dispatch has a correlated error result");
+        assert!(acknowledged < *terminal_index);
+        assert!(!nested.iter().any(|(_, event)| matches!(
+            event,
+            ClientEvent::TurnStarted { .. }
+                | ClientEvent::MessageComplete {
+                    message: Some(_),
+                    ..
+                }
+        )));
+        assert!(matches!(terminal,
+            ClientEvent::SlashCommandResult { display, .. }
+                if display.display() == "Slash command was cancelled before entering the model."
+        ));
+        manager.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn create_dedup_and_end_tombstone_never_resurrect() {
         let sink = Arc::new(Sink::default());
@@ -2250,19 +2404,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slash_prompt_with_images_is_admitted_and_replayed_with_its_attachment() {
+    async fn slash_prompt_with_images_replays_its_attachment_when_handled_successfully() {
         let sink = Arc::new(Sink::default());
         let manager = SideChatManager::new(parent(), Arc::new(Factory), sink.clone());
         let id = manager
             .create("create".into(), None, None, None)
             .await
             .unwrap();
+        let side = manager.side(&id).await.unwrap();
+        side.session
+            .dispatcher
+            .registry()
+            .write()
+            .await
+            .register_builtin_handler(Arc::new(TestPromptHandler {
+                entered: tokio::sync::Mutex::new(None),
+                release: None,
+            }));
         manager
             .submit(
                 &id,
                 "image-slash".into(),
                 ClientCommand::SendPrompt {
-                    text: "/model".into(),
+                    text: "/review".into(),
                     prompt_mode: None,
                     images: vec![client::protocol::commands::ImageRefDto {
                         media_type: "image/png".into(),
@@ -2295,6 +2459,24 @@ mod tests {
         assert_eq!(replayed.images.len(), 1);
         assert_eq!(replayed.images[0].media_type, "image/png");
         assert_eq!(replayed.images[0].url, "data:image/png;base64,AQID");
+        assert!(sink.0.lock().await.iter().any(|event| match event {
+            ClientEvent::SideChatEvent {
+                side_id,
+                event_json,
+            } if side_id == &id => {
+                serde_json::from_str::<ClientEvent>(event_json).is_ok_and(|inner| {
+                    matches!(
+                        inner,
+                        ClientEvent::SlashCommandResult {
+                            turn_id: Some(42),
+                            is_error: false,
+                            ..
+                        }
+                    )
+                })
+            }
+            _ => false,
+        }));
 
         manager.shutdown().await.unwrap();
     }
