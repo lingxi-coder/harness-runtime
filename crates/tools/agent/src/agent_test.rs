@@ -1734,7 +1734,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         .unwrap_err();
 
         assert!(matches!(error, ToolError::Internal(message)
-            if source_text(&message).contains("trusted origin session")));
+            if message.contains("trusted origin session")));
         assert!(
             fusion
                 .sessions

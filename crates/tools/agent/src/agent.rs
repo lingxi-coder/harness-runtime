@@ -29,7 +29,7 @@ use lingxi_core::host::fusion::{
     FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
     FusionOrigin, FusionPanelMode, FusionPreparedSummary, FusionPreset, FusionProgress,
     FusionRequest, FusionRunControl, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity,
-    FusionRunRecorder, FusionRunRecorderFactory, FusionStage, FusionStatus, FusionSubmission,
+    FusionRunRecorderFactory, FusionStage, FusionStatus, FusionSubmission,
     FusionTerminalCapability, PreparedFusionRun, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
 };
 use lingxi_core::host::subagent_spawn::{
